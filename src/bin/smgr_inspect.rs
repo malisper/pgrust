@@ -6,7 +6,7 @@
 //!
 //! Run with:  cargo run --bin smgr_inspect
 
-use pgrust::smgr::{
+use pgrust::storage::smgr::{
     ForkNumber, MdStorageManager, RelFileLocator, StorageManager, BLCKSZ,
 };
 use std::fs;

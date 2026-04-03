@@ -6,7 +6,7 @@
 //!
 //! Run with:  cargo run --bin smgr_demo
 
-use pgrust::smgr::{
+use pgrust::storage::smgr::{
     BlockNumber, ForkNumber, MdStorageManager, RelFileLocator, StorageManager, BLCKSZ,
 };
 use std::fs;
@@ -157,7 +157,7 @@ fn main() {
     // 10. max_combine
     // -----------------------------------------------------------------------
     header("10. max_combine");
-    use pgrust::smgr::{MAX_IO_COMBINE_LIMIT, RELSEG_SIZE};
+    use pgrust::storage::smgr::{MAX_IO_COMBINE_LIMIT, RELSEG_SIZE};
     let mc_mid = smgr.max_combine(rel, ForkNumber::Main, 0);
     let mc_edge = smgr.max_combine(rel, ForkNumber::Main, RELSEG_SIZE - 1);
     info(&format!("max_combine at block 0:               {} (expect {})", mc_mid, MAX_IO_COMBINE_LIMIT));
