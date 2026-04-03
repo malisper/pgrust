@@ -108,8 +108,7 @@ impl PageHeaderData {
             pd_lower: lower,
             pd_upper: special as u16,
             pd_special: special as u16,
-            pd_pagesize_version: ((page_size as u16) & 0xff00)
-                | u16::from(PG_PAGE_LAYOUT_VERSION),
+            pd_pagesize_version: ((page_size as u16) & 0xff00) | u16::from(PG_PAGE_LAYOUT_VERSION),
             pd_prune_xid: 0,
         }
     }
@@ -136,7 +135,10 @@ pub fn page_get_max_offset_number(page: &[u8; BLCKSZ]) -> Result<OffsetNumber, P
     if usize::from(header.pd_lower) < max_align(SIZE_OF_PAGE_HEADER_DATA) {
         return Err(PageError::CorruptHeader);
     }
-    Ok(((usize::from(header.pd_lower) - max_align(SIZE_OF_PAGE_HEADER_DATA)) / ITEM_ID_SIZE) as u16)
+    Ok(
+        ((usize::from(header.pd_lower) - max_align(SIZE_OF_PAGE_HEADER_DATA)) / ITEM_ID_SIZE)
+            as u16,
+    )
 }
 
 pub fn page_header(page: &[u8; BLCKSZ]) -> Result<PageHeaderData, PageError> {
@@ -186,7 +188,10 @@ pub fn page_get_item(page: &[u8; BLCKSZ], offset: OffsetNumber) -> Result<&[u8],
     Ok(&page[start..end])
 }
 
-pub fn page_get_item_id(page: &[u8; BLCKSZ], offset: OffsetNumber) -> Result<ItemIdData, PageError> {
+pub fn page_get_item_id(
+    page: &[u8; BLCKSZ],
+    offset: OffsetNumber,
+) -> Result<ItemIdData, PageError> {
     let max_offset = page_get_max_offset_number(page)?;
     if offset == 0 || offset > max_offset {
         return Err(PageError::InvalidOffsetNumber(offset));
@@ -195,10 +200,7 @@ pub fn page_get_item_id(page: &[u8; BLCKSZ], offset: OffsetNumber) -> Result<Ite
     ItemIdData::decode([page[idx], page[idx + 1], page[idx + 2], page[idx + 3]])
 }
 
-pub fn page_add_item(
-    page: &mut [u8; BLCKSZ],
-    item: &[u8],
-) -> Result<OffsetNumber, PageError> {
+pub fn page_add_item(page: &mut [u8; BLCKSZ], item: &[u8]) -> Result<OffsetNumber, PageError> {
     let mut header = page_header(page)?;
     let aligned_len = max_align(item.len());
     let required = aligned_len + ITEM_ID_SIZE;
@@ -236,9 +238,7 @@ fn write_item_id(
 ) {
     let idx = if offset == 0 {
         unreachable!()
-    } else if usize::from(old_lower) == max_align(SIZE_OF_PAGE_HEADER_DATA)
-        && offset == 1
-    {
+    } else if usize::from(old_lower) == max_align(SIZE_OF_PAGE_HEADER_DATA) && offset == 1 {
         max_align(SIZE_OF_PAGE_HEADER_DATA)
     } else {
         max_align(SIZE_OF_PAGE_HEADER_DATA) + (usize::from(offset) - 1) * ITEM_ID_SIZE
@@ -274,7 +274,10 @@ mod tests {
         let header = page_header(&page).unwrap();
         assert_eq!(header.page_size(), BLCKSZ);
         assert_eq!(header.page_layout_version(), PG_PAGE_LAYOUT_VERSION);
-        assert_eq!(usize::from(header.pd_lower), max_align(SIZE_OF_PAGE_HEADER_DATA));
+        assert_eq!(
+            usize::from(header.pd_lower),
+            max_align(SIZE_OF_PAGE_HEADER_DATA)
+        );
         assert_eq!(usize::from(header.pd_upper), BLCKSZ);
         assert_eq!(usize::from(header.pd_special), BLCKSZ);
         assert_eq!(page_get_max_offset_number(&page).unwrap(), 0);
@@ -290,7 +293,10 @@ mod tests {
         assert_eq!(off, 1);
 
         let header = page_header(&page).unwrap();
-        assert_eq!(usize::from(header.pd_lower), max_align(SIZE_OF_PAGE_HEADER_DATA) + ITEM_ID_SIZE);
+        assert_eq!(
+            usize::from(header.pd_lower),
+            max_align(SIZE_OF_PAGE_HEADER_DATA) + ITEM_ID_SIZE
+        );
         assert_eq!(page_get_item(&page, off).unwrap(), data.as_slice());
 
         let item_id = page_get_item_id(&page, off).unwrap();

@@ -140,39 +140,54 @@ impl ForkNumber {
 /// Errors that can be returned by storage manager operations.
 #[derive(Debug)]
 pub enum SmgrError {
-    RelationNotFound { rel: RelFileLocator, fork: ForkNumber },
+    RelationNotFound {
+        rel: RelFileLocator,
+        fork: ForkNumber,
+    },
     BlockOutOfRange {
         rel: RelFileLocator,
         fork: ForkNumber,
         block: BlockNumber,
     },
-    AlreadyExists { rel: RelFileLocator, fork: ForkNumber },
+    AlreadyExists {
+        rel: RelFileLocator,
+        fork: ForkNumber,
+    },
     ShortIo {
         expected: usize,
         actual: usize,
     },
-    BadBufferSize { size: usize },
+    BadBufferSize {
+        size: usize,
+    },
     Io(io::Error),
 }
 
 impl std::fmt::Display for SmgrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SmgrError::RelationNotFound { rel, fork } =>
-                write!(f, "relation {}/{}/{} fork {:?} not found",
-                    rel.spc_oid, rel.db_oid, rel.rel_number, fork),
-            SmgrError::BlockOutOfRange { rel, fork, block } =>
-                write!(f, "block {} out of range for {}/{}/{} fork {:?}",
-                    block, rel.spc_oid, rel.db_oid, rel.rel_number, fork),
-            SmgrError::AlreadyExists { rel, fork } =>
-                write!(f, "relation {}/{}/{} fork {:?} already exists",
-                    rel.spc_oid, rel.db_oid, rel.rel_number, fork),
-            SmgrError::ShortIo { expected, actual } =>
-                write!(f, "short I/O: expected {expected} bytes, got {actual}"),
-            SmgrError::BadBufferSize { size } =>
-                write!(f, "buffer must be exactly {BLCKSZ} bytes, got {size}"),
-            SmgrError::Io(e) =>
-                write!(f, "I/O error: {e}"),
+            SmgrError::RelationNotFound { rel, fork } => write!(
+                f,
+                "relation {}/{}/{} fork {:?} not found",
+                rel.spc_oid, rel.db_oid, rel.rel_number, fork
+            ),
+            SmgrError::BlockOutOfRange { rel, fork, block } => write!(
+                f,
+                "block {} out of range for {}/{}/{} fork {:?}",
+                block, rel.spc_oid, rel.db_oid, rel.rel_number, fork
+            ),
+            SmgrError::AlreadyExists { rel, fork } => write!(
+                f,
+                "relation {}/{}/{} fork {:?} already exists",
+                rel.spc_oid, rel.db_oid, rel.rel_number, fork
+            ),
+            SmgrError::ShortIo { expected, actual } => {
+                write!(f, "short I/O: expected {expected} bytes, got {actual}")
+            }
+            SmgrError::BadBufferSize { size } => {
+                write!(f, "buffer must be exactly {BLCKSZ} bytes, got {size}")
+            }
+            SmgrError::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
 }
@@ -196,20 +211,74 @@ impl From<io::Error> for SmgrError {
 pub trait StorageManager {
     fn open(&mut self, rel: RelFileLocator) -> Result<(), SmgrError>;
     fn close(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), SmgrError>;
-    fn create(&mut self, rel: RelFileLocator, fork: ForkNumber, is_redo: bool) -> Result<(), SmgrError>;
+    fn create(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        is_redo: bool,
+    ) -> Result<(), SmgrError>;
     fn exists(&mut self, rel: RelFileLocator, fork: ForkNumber) -> bool;
     fn unlink(&mut self, rel: RelFileLocator, fork: Option<ForkNumber>, is_redo: bool);
-    fn read_block(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber, buf: &mut [u8]) -> Result<(), SmgrError>;
-    fn write_block(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber, data: &[u8], skip_fsync: bool) -> Result<(), SmgrError>;
-    fn writeback(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber, nblocks: u32) -> Result<(), SmgrError>;
-    fn prefetch(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber, nblocks: u32) -> Result<(), SmgrError>;
+    fn read_block(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        buf: &mut [u8],
+    ) -> Result<(), SmgrError>;
+    fn write_block(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        data: &[u8],
+        skip_fsync: bool,
+    ) -> Result<(), SmgrError>;
+    fn writeback(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        nblocks: u32,
+    ) -> Result<(), SmgrError>;
+    fn prefetch(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        nblocks: u32,
+    ) -> Result<(), SmgrError>;
     fn max_combine(&self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber) -> u32;
     #[cfg(unix)]
-    fn fd(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber) -> Result<(i32, u64), SmgrError>;
-    fn extend(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber, data: &[u8], skip_fsync: bool) -> Result<(), SmgrError>;
-    fn zero_extend(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber, nblocks: u32, skip_fsync: bool) -> Result<(), SmgrError>;
+    fn fd(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+    ) -> Result<(i32, u64), SmgrError>;
+    fn extend(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        data: &[u8],
+        skip_fsync: bool,
+    ) -> Result<(), SmgrError>;
+    fn zero_extend(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+        nblocks: u32,
+        skip_fsync: bool,
+    ) -> Result<(), SmgrError>;
     fn nblocks(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<BlockNumber, SmgrError>;
-    fn truncate(&mut self, rel: RelFileLocator, fork: ForkNumber, nblocks: BlockNumber) -> Result<(), SmgrError>;
+    fn truncate(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        nblocks: BlockNumber,
+    ) -> Result<(), SmgrError>;
     fn immedsync(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), SmgrError>;
 }
 
@@ -221,7 +290,12 @@ pub trait StorageManager {
 ///
 /// Maps onto the same naming convention as PostgreSQL's `relpath()`:
 ///   `<base_dir>/<db_oid>/<rel_number>[<fork_suffix>][.<segno>]`
-pub(crate) fn segment_path(base_dir: &Path, rel: RelFileLocator, fork: ForkNumber, segno: u32) -> PathBuf {
+pub(crate) fn segment_path(
+    base_dir: &Path,
+    rel: RelFileLocator,
+    fork: ForkNumber,
+    segno: u32,
+) -> PathBuf {
     let db_dir = base_dir.join(rel.db_oid.to_string());
     let fork_suffix = fork.suffix();
 

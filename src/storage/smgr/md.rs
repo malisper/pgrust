@@ -86,7 +86,12 @@ impl MdStorageManager {
 
     /// Open (or retrieve from cache) a specific segment file.
     /// Rust analogue of `_mdfd_getseg()`.
-    fn get_seg(&mut self, rel: RelFileLocator, fork: ForkNumber, segno: u32) -> Result<&mut OpenSeg, SmgrError> {
+    fn get_seg(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        segno: u32,
+    ) -> Result<&mut OpenSeg, SmgrError> {
         let key = SegKey { rel, fork, segno };
 
         if !self.open_segs.contains_key(&key) {
@@ -109,7 +114,12 @@ impl MdStorageManager {
     }
 
     /// Open (or retrieve from cache) a segment, creating it if needed.
-    fn get_or_create_seg(&mut self, rel: RelFileLocator, fork: ForkNumber, segno: u32) -> Result<&mut OpenSeg, SmgrError> {
+    fn get_or_create_seg(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        segno: u32,
+    ) -> Result<&mut OpenSeg, SmgrError> {
         let key = SegKey { rel, fork, segno };
 
         if !self.open_segs.contains_key(&key) {
@@ -127,7 +137,11 @@ impl MdStorageManager {
     }
 
     /// Count total blocks across all segment files for a relation fork.
-    fn count_blocks(&self, rel: RelFileLocator, fork: ForkNumber) -> Result<BlockNumber, SmgrError> {
+    fn count_blocks(
+        &self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+    ) -> Result<BlockNumber, SmgrError> {
         let mut total: BlockNumber = 0;
 
         for segno in 0.. {
@@ -150,7 +164,12 @@ impl MdStorageManager {
 
     /// Deactivate segments beyond `start_segno` by truncating to 0 bytes.
     /// Mirrors Postgres md.c's behavior for mdtruncate.
-    fn deactivate_segments_from(&mut self, rel: RelFileLocator, fork: ForkNumber, start_segno: u32) {
+    fn deactivate_segments_from(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        start_segno: u32,
+    ) {
         for segno in start_segno.. {
             let path = self.seg_path(rel, fork, segno);
             if !path.exists() {
@@ -200,11 +219,17 @@ impl StorageManager for MdStorageManager {
     }
 
     fn close(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), SmgrError> {
-        self.open_segs.retain(|key, _| !(key.rel == rel && key.fork == fork));
+        self.open_segs
+            .retain(|key, _| !(key.rel == rel && key.fork == fork));
         Ok(())
     }
 
-    fn create(&mut self, rel: RelFileLocator, fork: ForkNumber, is_redo: bool) -> Result<(), SmgrError> {
+    fn create(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        is_redo: bool,
+    ) -> Result<(), SmgrError> {
         let dir = self.db_dir(rel);
         fs::create_dir_all(&dir)?;
 
@@ -228,7 +253,11 @@ impl StorageManager for MdStorageManager {
             Err(e) => return Err(SmgrError::Io(e)),
         };
 
-        let key = SegKey { rel, fork, segno: 0 };
+        let key = SegKey {
+            rel,
+            fork,
+            segno: 0,
+        };
         self.open_segs.insert(key, OpenSeg { file, segno: 0 });
 
         Ok(())
@@ -302,7 +331,10 @@ impl StorageManager for MdStorageManager {
 
         let n = seg.file.write(data)?;
         if n != BLCKSZ {
-            return Err(SmgrError::ShortIo { expected: BLCKSZ, actual: n });
+            return Err(SmgrError::ShortIo {
+                expected: BLCKSZ,
+                actual: n,
+            });
         }
 
         Ok(())
@@ -351,8 +383,8 @@ impl StorageManager for MdStorageManager {
             for segno in first_seg..=last_seg {
                 let seg_start_block = segno * RELSEG_SIZE;
                 let local_first = block.saturating_sub(seg_start_block);
-                let local_last = (block + nblocks - 1).min(seg_start_block + RELSEG_SIZE - 1)
-                    - seg_start_block;
+                let local_last =
+                    (block + nblocks - 1).min(seg_start_block + RELSEG_SIZE - 1) - seg_start_block;
                 let offset = local_first as i64 * BLCKSZ as i64;
                 let len = ((local_last - local_first + 1) as i64) * BLCKSZ as i64;
 
@@ -377,7 +409,12 @@ impl StorageManager for MdStorageManager {
     }
 
     #[cfg(unix)]
-    fn fd(&mut self, rel: RelFileLocator, fork: ForkNumber, block: BlockNumber) -> Result<(i32, u64), SmgrError> {
+    fn fd(
+        &mut self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: BlockNumber,
+    ) -> Result<(i32, u64), SmgrError> {
         let (segno, seg_offset) = seg_for_block(block);
         let byte_offset = seg_offset as u64 * BLCKSZ as u64;
         let seg = self.get_seg(rel, fork, segno)?;
@@ -403,7 +440,10 @@ impl StorageManager for MdStorageManager {
         seg.file.seek(SeekFrom::Start(byte_offset))?;
         let n = seg.file.write(data)?;
         if n != BLCKSZ {
-            return Err(SmgrError::ShortIo { expected: BLCKSZ, actual: n });
+            return Err(SmgrError::ShortIo {
+                expected: BLCKSZ,
+                actual: n,
+            });
         }
 
         Ok(())
@@ -443,17 +483,24 @@ impl StorageManager for MdStorageManager {
             (seg, blocks_in_seg as u64 * BLCKSZ as u64)
         };
 
-        let key = SegKey { rel, fork, segno: target_seg };
+        let key = SegKey {
+            rel,
+            fork,
+            segno: target_seg,
+        };
         self.open_segs.remove(&key);
 
         let path = self.seg_path(rel, fork, target_seg);
         if path.exists() {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)?;
+            let file = OpenOptions::new().read(true).write(true).open(&path)?;
             file.set_len(target_byte_len)?;
-            self.open_segs.insert(key, OpenSeg { file, segno: target_seg });
+            self.open_segs.insert(
+                key,
+                OpenSeg {
+                    file,
+                    segno: target_seg,
+                },
+            );
         }
 
         if self.in_recovery {
@@ -503,11 +550,17 @@ mod tests {
     }
 
     fn test_rel(n: u32) -> RelFileLocator {
-        RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: n }
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: n,
+        }
     }
 
     fn page_pattern(block: u32) -> Vec<u8> {
-        (0..BLCKSZ).map(|i| ((block as usize * 7 + i) % 251) as u8).collect()
+        (0..BLCKSZ)
+            .map(|i| ((block as usize * 7 + i) % 251) as u8)
+            .collect()
     }
 
     #[test]
@@ -569,7 +622,8 @@ mod tests {
 
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
-        smgr.zero_extend(rel, ForkNumber::Main, 0, 10, true).unwrap();
+        smgr.zero_extend(rel, ForkNumber::Main, 0, 10, true)
+            .unwrap();
 
         assert_eq!(smgr.nblocks(rel, ForkNumber::Main).unwrap(), 10);
 
@@ -609,10 +663,12 @@ mod tests {
         smgr.create(rel, ForkNumber::Main, false).unwrap();
 
         let original = page_pattern(1);
-        smgr.extend(rel, ForkNumber::Main, 0, &original, true).unwrap();
+        smgr.extend(rel, ForkNumber::Main, 0, &original, true)
+            .unwrap();
 
         let new_data = page_pattern(42);
-        smgr.write_block(rel, ForkNumber::Main, 0, &new_data, true).unwrap();
+        smgr.write_block(rel, ForkNumber::Main, 0, &new_data, true)
+            .unwrap();
 
         let mut buf = vec![0u8; BLCKSZ];
         smgr.read_block(rel, ForkNumber::Main, 0, &mut buf).unwrap();
@@ -644,8 +700,10 @@ mod tests {
         let main_data = page_pattern(10);
         let fsm_data = page_pattern(20);
 
-        smgr.extend(rel, ForkNumber::Main, 0, &main_data, true).unwrap();
-        smgr.extend(rel, ForkNumber::Fsm, 0, &fsm_data, true).unwrap();
+        smgr.extend(rel, ForkNumber::Main, 0, &main_data, true)
+            .unwrap();
+        smgr.extend(rel, ForkNumber::Fsm, 0, &fsm_data, true)
+            .unwrap();
 
         let mut buf = vec![0u8; BLCKSZ];
 
@@ -665,7 +723,8 @@ mod tests {
         smgr.create(rel, ForkNumber::Main, false).unwrap();
 
         for i in 0..10u32 {
-            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true).unwrap();
+            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true)
+                .unwrap();
         }
         assert_eq!(smgr.nblocks(rel, ForkNumber::Main).unwrap(), 10);
 
@@ -740,7 +799,8 @@ mod tests {
 
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
-        smgr.extend(rel, ForkNumber::Main, 0, &page_pattern(99), true).unwrap();
+        smgr.extend(rel, ForkNumber::Main, 0, &page_pattern(99), true)
+            .unwrap();
 
         smgr.close(rel, ForkNumber::Main).unwrap();
 
@@ -752,7 +812,11 @@ mod tests {
     #[test]
     fn test_path_construction() {
         let base = PathBuf::from("/pgdata/base");
-        let rel = RelFileLocator { spc_oid: 0, db_oid: 5, rel_number: 16384 };
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid: 5,
+            rel_number: 16384,
+        };
 
         assert_eq!(
             segment_path(&base, rel, ForkNumber::Main, 0),
@@ -810,10 +874,16 @@ mod tests {
         let smgr = MdStorageManager::new("/tmp");
         let rel = test_rel(0);
 
-        assert_eq!(smgr.max_combine(rel, ForkNumber::Main, 0), MAX_IO_COMBINE_LIMIT);
+        assert_eq!(
+            smgr.max_combine(rel, ForkNumber::Main, 0),
+            MAX_IO_COMBINE_LIMIT
+        );
         assert_eq!(smgr.max_combine(rel, ForkNumber::Main, RELSEG_SIZE - 1), 1);
         assert_eq!(smgr.max_combine(rel, ForkNumber::Main, RELSEG_SIZE - 2), 2);
-        assert_eq!(smgr.max_combine(rel, ForkNumber::Main, RELSEG_SIZE), MAX_IO_COMBINE_LIMIT);
+        assert_eq!(
+            smgr.max_combine(rel, ForkNumber::Main, RELSEG_SIZE),
+            MAX_IO_COMBINE_LIMIT
+        );
     }
 
     #[test]
@@ -895,7 +965,11 @@ mod tests {
         smgr.truncate(rel, ForkNumber::Main, 0).unwrap();
 
         let meta = fs::metadata(&seg1_path).unwrap();
-        assert_eq!(meta.len(), 0, "truncated segment should be 0 bytes (inactive), not removed");
+        assert_eq!(
+            meta.len(),
+            0,
+            "truncated segment should be 0 bytes (inactive), not removed"
+        );
     }
 
     #[test]
@@ -917,7 +991,10 @@ mod tests {
         drop(f);
 
         smgr.truncate(rel, ForkNumber::Main, 0).unwrap();
-        assert!(!seg1_path.exists(), "recovery truncate should remove excess segments");
+        assert!(
+            !seg1_path.exists(),
+            "recovery truncate should remove excess segments"
+        );
     }
 
     #[test]
@@ -927,17 +1004,25 @@ mod tests {
 
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
-        smgr.extend(rel, ForkNumber::Main, 0, &page_pattern(1), true).unwrap();
+        smgr.extend(rel, ForkNumber::Main, 0, &page_pattern(1), true)
+            .unwrap();
 
         let mut buf = vec![0u8; BLCKSZ];
         smgr.read_block(rel, ForkNumber::Main, 0, &mut buf).unwrap();
         assert!(!smgr.open_segs.is_empty(), "should have cached handles");
 
         smgr.release_all();
-        assert!(smgr.open_segs.is_empty(), "release_all should clear all handles");
+        assert!(
+            smgr.open_segs.is_empty(),
+            "release_all should clear all handles"
+        );
 
         smgr.read_block(rel, ForkNumber::Main, 0, &mut buf).unwrap();
-        assert_eq!(buf, page_pattern(1), "data should be intact after release_all");
+        assert_eq!(
+            buf,
+            page_pattern(1),
+            "data should be intact after release_all"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -952,19 +1037,25 @@ mod tests {
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
         for i in 0..5u32 {
-            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true).unwrap();
+            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true)
+                .unwrap();
         }
 
         drop(smgr);
 
         let mut smgr2 = MdStorageManager::new(&base);
 
-        assert_eq!(smgr2.nblocks(rel, ForkNumber::Main).unwrap(), 5,
-            "nblocks should survive crash");
+        assert_eq!(
+            smgr2.nblocks(rel, ForkNumber::Main).unwrap(),
+            5,
+            "nblocks should survive crash"
+        );
 
         let mut buf = vec![0u8; BLCKSZ];
         for i in 0..5u32 {
-            smgr2.read_block(rel, ForkNumber::Main, i, &mut buf).unwrap();
+            smgr2
+                .read_block(rel, ForkNumber::Main, i, &mut buf)
+                .unwrap();
             assert_eq!(buf, page_pattern(i), "block {} data wrong after crash", i);
         }
     }
@@ -977,7 +1068,8 @@ mod tests {
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
         for i in 0..3u32 {
-            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true).unwrap();
+            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true)
+                .unwrap();
         }
         drop(smgr);
 
@@ -991,18 +1083,25 @@ mod tests {
 
         let mut smgr2 = MdStorageManager::new(&base);
 
-        assert_eq!(smgr2.nblocks(rel, ForkNumber::Main).unwrap(), 3,
-            "nblocks should floor to complete blocks after torn write");
+        assert_eq!(
+            smgr2.nblocks(rel, ForkNumber::Main).unwrap(),
+            3,
+            "nblocks should floor to complete blocks after torn write"
+        );
 
         let mut buf = vec![0u8; BLCKSZ];
         for i in 0..3u32 {
-            smgr2.read_block(rel, ForkNumber::Main, i, &mut buf).unwrap();
+            smgr2
+                .read_block(rel, ForkNumber::Main, i, &mut buf)
+                .unwrap();
             assert_eq!(buf, page_pattern(i), "block {} wrong after torn write", i);
         }
 
         let err = smgr2.read_block(rel, ForkNumber::Main, 3, &mut buf);
-        assert!(matches!(err, Err(SmgrError::BlockOutOfRange { .. })),
-            "reading partial block should return BlockOutOfRange");
+        assert!(
+            matches!(err, Err(SmgrError::BlockOutOfRange { .. })),
+            "reading partial block should return BlockOutOfRange"
+        );
     }
 
     #[test]
@@ -1013,7 +1112,8 @@ mod tests {
         smgr.open(rel).unwrap();
         smgr.create(rel, ForkNumber::Main, false).unwrap();
         for i in 0..5u32 {
-            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true).unwrap();
+            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), true)
+                .unwrap();
         }
 
         let seg1_path = base.join("1").join("20002.1");
@@ -1021,10 +1121,7 @@ mod tests {
             let mut f = fs::File::create(&seg1_path).unwrap();
             f.write_all(&page_pattern(99).repeat(3)).unwrap();
         }
-        assert_eq!(
-            fs::metadata(&seg1_path).unwrap().len(),
-            3 * BLCKSZ as u64,
-        );
+        assert_eq!(fs::metadata(&seg1_path).unwrap().len(), 3 * BLCKSZ as u64,);
 
         smgr.truncate(rel, ForkNumber::Main, 3).unwrap();
         assert_eq!(fs::metadata(&seg1_path).unwrap().len(), 0);
@@ -1036,13 +1133,23 @@ mod tests {
         assert!(seg1_path.exists());
         assert_eq!(fs::metadata(&seg1_path).unwrap().len(), 0);
 
-        assert_eq!(smgr2.nblocks(rel, ForkNumber::Main).unwrap(), 3,
-            "inactive zero-length segment should not contribute to nblocks");
+        assert_eq!(
+            smgr2.nblocks(rel, ForkNumber::Main).unwrap(),
+            3,
+            "inactive zero-length segment should not contribute to nblocks"
+        );
 
         let mut buf = vec![0u8; BLCKSZ];
         for i in 0..3u32 {
-            smgr2.read_block(rel, ForkNumber::Main, i, &mut buf).unwrap();
-            assert_eq!(buf, page_pattern(i), "block {} wrong after crash+truncate", i);
+            smgr2
+                .read_block(rel, ForkNumber::Main, i, &mut buf)
+                .unwrap();
+            assert_eq!(
+                buf,
+                page_pattern(i),
+                "block {} wrong after crash+truncate",
+                i
+            );
         }
     }
 }
