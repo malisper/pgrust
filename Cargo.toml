@@ -9,4 +9,5 @@ path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
-
+pest = "2.7"
+pest_derive = "2.7"
