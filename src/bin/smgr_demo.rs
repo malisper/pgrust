@@ -7,7 +7,7 @@
 //! Run with:  cargo run --bin smgr_demo
 
 use pgrust::storage::smgr::{
-    BlockNumber, ForkNumber, MdStorageManager, RelFileLocator, StorageManager, BLCKSZ,
+    BLCKSZ, BlockNumber, ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -39,7 +39,13 @@ fn make_page(block: BlockNumber) -> Vec<u8> {
 
 fn check_page(label: &str, buf: &[u8], expected_block: BlockNumber) {
     let expected = make_page(expected_block);
-    assert_eq!(buf, expected.as_slice(), "{}: data mismatch for block {}", label, expected_block);
+    assert_eq!(
+        buf,
+        expected.as_slice(),
+        "{}: data mismatch for block {}",
+        label,
+        expected_block
+    );
     ok(&format!("{}: data matches expected pattern", label));
 }
 
@@ -57,25 +63,39 @@ fn main() {
     let mut smgr = MdStorageManager::new(&base_dir);
 
     // A simple relation: db=1, rel=1000, default tablespace.
-    let rel = RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 1000 };
+    let rel = RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: 1000,
+    };
 
     // -----------------------------------------------------------------------
     // 1. Create
     // -----------------------------------------------------------------------
     header("1. Create relation");
     smgr.open(rel).unwrap();
-    info(&format!("exists before create: {}", smgr.exists(rel, ForkNumber::Main)));
+    info(&format!(
+        "exists before create: {}",
+        smgr.exists(rel, ForkNumber::Main)
+    ));
     smgr.create(rel, ForkNumber::Main, false).unwrap();
     ok("created main fork");
-    info(&format!("exists after create:  {}", smgr.exists(rel, ForkNumber::Main)));
-    info(&format!("nblocks after create: {}", smgr.nblocks(rel, ForkNumber::Main).unwrap()));
+    info(&format!(
+        "exists after create:  {}",
+        smgr.exists(rel, ForkNumber::Main)
+    ));
+    info(&format!(
+        "nblocks after create: {}",
+        smgr.nblocks(rel, ForkNumber::Main).unwrap()
+    ));
 
     // -----------------------------------------------------------------------
     // 2. Extend — write 10 blocks
     // -----------------------------------------------------------------------
     header("2. Extend — write 10 blocks");
     for i in 0..10u32 {
-        smgr.extend(rel, ForkNumber::Main, i, &make_page(i), true).unwrap();
+        smgr.extend(rel, ForkNumber::Main, i, &make_page(i), true)
+            .unwrap();
     }
     let n = smgr.nblocks(rel, ForkNumber::Main).unwrap();
     ok(&format!("wrote 10 blocks; nblocks = {}", n));
@@ -96,7 +116,8 @@ fn main() {
     // -----------------------------------------------------------------------
     header("4. Overwrite block 5");
     let new_data = make_page(99); // use block-99's pattern as the new content
-    smgr.write_block(rel, ForkNumber::Main, 5, &new_data, true).unwrap();
+    smgr.write_block(rel, ForkNumber::Main, 5, &new_data, true)
+        .unwrap();
     smgr.read_block(rel, ForkNumber::Main, 5, &mut buf).unwrap();
     check_page("block 5 after overwrite", &buf, 99);
 
@@ -106,25 +127,33 @@ fn main() {
     header("5. Multiple forks — FSM fork");
     smgr.create(rel, ForkNumber::Fsm, false).unwrap();
     let fsm_data = make_page(42);
-    smgr.extend(rel, ForkNumber::Fsm, 0, &fsm_data, true).unwrap();
+    smgr.extend(rel, ForkNumber::Fsm, 0, &fsm_data, true)
+        .unwrap();
     smgr.read_block(rel, ForkNumber::Fsm, 0, &mut buf).unwrap();
     check_page("FSM block 0", &buf, 42);
-    ok(&format!("main nblocks={}, fsm nblocks={}",
+    ok(&format!(
+        "main nblocks={}, fsm nblocks={}",
         smgr.nblocks(rel, ForkNumber::Main).unwrap(),
-        smgr.nblocks(rel, ForkNumber::Fsm).unwrap()));
+        smgr.nblocks(rel, ForkNumber::Fsm).unwrap()
+    ));
 
     // -----------------------------------------------------------------------
     // 6. zero_extend — bulk-add 5 zero pages
     // -----------------------------------------------------------------------
     header("6. zero_extend — add 5 zero pages");
     let before = smgr.nblocks(rel, ForkNumber::Main).unwrap();
-    smgr.zero_extend(rel, ForkNumber::Main, before, 5, true).unwrap();
+    smgr.zero_extend(rel, ForkNumber::Main, before, 5, true)
+        .unwrap();
     let after = smgr.nblocks(rel, ForkNumber::Main).unwrap();
     ok(&format!("nblocks: {} → {}", before, after));
     assert_eq!(after, before + 5);
     for i in before..after {
         smgr.read_block(rel, ForkNumber::Main, i, &mut buf).unwrap();
-        assert!(buf.iter().all(|&b| b == 0), "zero_extend block {} not zero", i);
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "zero_extend block {} not zero",
+            i
+        );
     }
     ok("all 5 new blocks are zero");
 
@@ -160,8 +189,14 @@ fn main() {
     use pgrust::storage::smgr::{MAX_IO_COMBINE_LIMIT, RELSEG_SIZE};
     let mc_mid = smgr.max_combine(rel, ForkNumber::Main, 0);
     let mc_edge = smgr.max_combine(rel, ForkNumber::Main, RELSEG_SIZE - 1);
-    info(&format!("max_combine at block 0:               {} (expect {})", mc_mid, MAX_IO_COMBINE_LIMIT));
-    info(&format!("max_combine at block RELSEG_SIZE-1:   {} (expect 1)", mc_edge));
+    info(&format!(
+        "max_combine at block 0:               {} (expect {})",
+        mc_mid, MAX_IO_COMBINE_LIMIT
+    ));
+    info(&format!(
+        "max_combine at block RELSEG_SIZE-1:   {} (expect 1)",
+        mc_edge
+    ));
     assert_eq!(mc_mid, MAX_IO_COMBINE_LIMIT);
     assert_eq!(mc_edge, 1);
     ok("max_combine values correct");
@@ -217,8 +252,14 @@ fn main() {
     assert!(smgr.exists(rel, ForkNumber::Main));
     assert!(smgr.exists(rel, ForkNumber::Fsm));
     smgr.unlink(rel, None, false);
-    info(&format!("main exists after unlink: {}", smgr.exists(rel, ForkNumber::Main)));
-    info(&format!("fsm  exists after unlink: {}", smgr.exists(rel, ForkNumber::Fsm)));
+    info(&format!(
+        "main exists after unlink: {}",
+        smgr.exists(rel, ForkNumber::Main)
+    ));
+    info(&format!(
+        "fsm  exists after unlink: {}",
+        smgr.exists(rel, ForkNumber::Fsm)
+    ));
     assert!(!smgr.exists(rel, ForkNumber::Main));
     assert!(!smgr.exists(rel, ForkNumber::Fsm));
     ok("all forks removed");
@@ -230,7 +271,11 @@ fn main() {
     let recovery_dir = base_dir.join("recovery");
     fs::create_dir_all(&recovery_dir).unwrap();
     let mut rec_smgr = MdStorageManager::new_in_recovery(&recovery_dir);
-    let rec_rel = RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 2000 };
+    let rec_rel = RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: 2000,
+    };
     rec_smgr.open(rec_rel).unwrap();
     rec_smgr.create(rec_rel, ForkNumber::Main, false).unwrap();
     rec_smgr.create(rec_rel, ForkNumber::Main, true).unwrap(); // is_redo=true: must not error
@@ -242,5 +287,8 @@ fn main() {
     println!();
     println!("All checks passed.");
     println!("Files are in {:?} — inspect them if you like.", base_dir);
-    println!("Run `ls -la {:?}` to see segment files.", base_dir.join("1"));
+    println!(
+        "Run `ls -la {:?}` to see segment files.",
+        base_dir.join("1")
+    );
 }

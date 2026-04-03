@@ -12,9 +12,7 @@ use pgrust::access::heap::tuple::{
     HeapTuple, heap_page_add_tuple, heap_page_get_tuple, heap_page_init,
 };
 use pgrust::storage::page::page_get_max_offset_number;
-use pgrust::storage::smgr::{
-    ForkNumber, MdStorageManager, RelFileLocator, StorageManager, BLCKSZ,
-};
+use pgrust::storage::smgr::{BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use std::fs;
 use std::path::PathBuf;
 
@@ -78,7 +76,8 @@ fn main() {
     ok(&format!("page now holds {} tuple(s)", max_offset));
 
     header("Write block 0 to disk");
-    smgr.extend(rel(), ForkNumber::Main, 0, &page, true).unwrap();
+    smgr.extend(rel(), ForkNumber::Main, 0, &page, true)
+        .unwrap();
     smgr.immedsync(rel(), ForkNumber::Main).unwrap();
     ok("flushed heap page to disk");
 
@@ -86,7 +85,9 @@ fn main() {
     drop(smgr);
     let mut smgr2 = MdStorageManager::new(&base_dir);
     let mut disk_page = [0u8; BLCKSZ];
-    smgr2.read_block(rel(), ForkNumber::Main, 0, &mut disk_page).unwrap();
+    smgr2
+        .read_block(rel(), ForkNumber::Main, 0, &mut disk_page)
+        .unwrap();
     ok("read block 0 back from storage");
 
     header("Parse tuples from on-disk page");

@@ -7,17 +7,23 @@
 //!
 //! Run with:  cargo run --bin bufmgr_e2e
 
-use pgrust::{
-    BufferPool, BufferTag, ForkNumber, FlushResult, RelFileLocator,
-    RequestPageResult, SmgrStorageBackend, PAGE_SIZE,
-};
 use pgrust::storage::smgr::{MdStorageManager, StorageManager};
+use pgrust::{
+    BufferPool, BufferTag, FlushResult, ForkNumber, PAGE_SIZE, RelFileLocator, RequestPageResult,
+    SmgrStorageBackend,
+};
 use std::fs;
 use std::path::PathBuf;
 
-fn ok(msg: &str) { println!("  [ok] {}", msg); }
-fn info(msg: &str) { println!("       {}", msg); }
-fn header(title: &str) { println!("\n=== {} ===", title); }
+fn ok(msg: &str) {
+    println!("  [ok] {}", msg);
+}
+fn info(msg: &str) {
+    println!("       {}", msg);
+}
+fn header(title: &str) {
+    println!("\n=== {} ===", title);
+}
 
 fn base_dir() -> PathBuf {
     let p = std::env::temp_dir().join("pgrust_bufmgr_e2e");
@@ -27,11 +33,19 @@ fn base_dir() -> PathBuf {
 }
 
 fn rel() -> RelFileLocator {
-    RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 9000 }
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: 9000,
+    }
 }
 
 fn tag(block: u32) -> BufferTag {
-    BufferTag { rel: rel(), fork: ForkNumber::Main, block }
+    BufferTag {
+        rel: rel(),
+        fork: ForkNumber::Main,
+        block,
+    }
 }
 
 /// Read a block directly from disk using a fresh MdStorageManager,
@@ -39,7 +53,8 @@ fn tag(block: u32) -> BufferTag {
 fn read_from_disk(base: &PathBuf, block: u32) -> Vec<u8> {
     let mut smgr = MdStorageManager::new(base);
     let mut buf = vec![0u8; PAGE_SIZE];
-    smgr.read_block(rel(), ForkNumber::Main, block, &mut buf).unwrap();
+    smgr.read_block(rel(), ForkNumber::Main, block, &mut buf)
+        .unwrap();
     buf
 }
 
@@ -56,7 +71,14 @@ fn main() {
         smgr.open(rel()).unwrap();
         smgr.create(rel(), ForkNumber::Main, false).unwrap();
         for block in 0..4u32 {
-            smgr.extend(rel(), ForkNumber::Main, block, &[block as u8; PAGE_SIZE], true).unwrap();
+            smgr.extend(
+                rel(),
+                ForkNumber::Main,
+                block,
+                &[block as u8; PAGE_SIZE],
+                true,
+            )
+            .unwrap();
         }
         smgr.immedsync(rel(), ForkNumber::Main).unwrap();
     }
@@ -79,23 +101,38 @@ fn main() {
             let t = tag(block);
 
             // Cache miss → smgr reads from disk into the frame.
-            assert_eq!(pool.request_page(1, t), RequestPageResult::ReadIssued { buffer_id: block as usize });
+            assert_eq!(
+                pool.request_page(1, t),
+                RequestPageResult::ReadIssued {
+                    buffer_id: block as usize
+                }
+            );
             pool.complete_read(block as usize).unwrap();
 
             // Verify in-memory content matches what was on disk.
             let page_data = pool.read_page(block as usize).unwrap();
-            assert!(page_data.iter().all(|&b| b == block as u8),
-                "block {block}: expected byte {block:#04x} after read");
-            info(&format!("block {block}: read {:#04x} from disk into frame {block}", block));
+            assert!(
+                page_data.iter().all(|&b| b == block as u8),
+                "block {block}: expected byte {block:#04x} after read"
+            );
+            info(&format!(
+                "block {block}: read {:#04x} from disk into frame {block}",
+                block
+            ));
 
             // Overwrite: each block N gets the value N + 0x10.
             let new_byte = block as u8 + 0x10;
             pool.write_byte(block as usize, 0, new_byte).unwrap();
             assert!(pool.buffer_state(block as usize).unwrap().dirty);
-            info(&format!("block {block}: modified byte[0] → {new_byte:#04x} (dirty)"));
+            info(&format!(
+                "block {block}: modified byte[0] → {new_byte:#04x} (dirty)"
+            ));
 
             // Flush.
-            assert_eq!(pool.flush_buffer(block as usize).unwrap(), FlushResult::WriteIssued);
+            assert_eq!(
+                pool.flush_buffer(block as usize).unwrap(),
+                FlushResult::WriteIssued
+            );
             pool.complete_write(block as usize).unwrap();
             assert!(!pool.buffer_state(block as usize).unwrap().dirty);
             info(&format!("block {block}: flushed — frame is now clean"));
@@ -111,16 +148,22 @@ fn main() {
     for block in 0..4u32 {
         let data = read_from_disk(&base, block);
         let expected_byte0 = block as u8 + 0x10;
-        let original_byte  = block as u8;
+        let original_byte = block as u8;
 
-        assert_eq!(data[0], expected_byte0,
-            "block {block}: byte[0] should be {expected_byte0:#04x} on disk");
+        assert_eq!(
+            data[0], expected_byte0,
+            "block {block}: byte[0] should be {expected_byte0:#04x} on disk"
+        );
         // Bytes 1..PAGE_SIZE were not modified — still the original fill.
-        assert!(data[1..].iter().all(|&b| b == original_byte),
-            "block {block}: bytes[1..] should still be {original_byte:#04x}");
+        assert!(
+            data[1..].iter().all(|&b| b == original_byte),
+            "block {block}: bytes[1..] should still be {original_byte:#04x}"
+        );
 
-        ok(&format!("block {block}: byte[0]={:#04x} (modified) bytes[1..]={:#04x} (original) ✓",
-            data[0], data[1]));
+        ok(&format!(
+            "block {block}: byte[0]={:#04x} (modified) bytes[1..]={:#04x} (original) ✓",
+            data[0], data[1]
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -134,9 +177,15 @@ fn main() {
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 1);
 
         // Load block 0 into the single frame.
-        assert_eq!(pool.request_page(1, tag(0)), RequestPageResult::ReadIssued { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(1, tag(0)),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
         pool.complete_read(0).unwrap();
-        info(&format!("loaded block 0 into frame 0; byte[0]={:#04x}", pool.read_page(0).unwrap()[0]));
+        info(&format!(
+            "loaded block 0 into frame 0; byte[0]={:#04x}",
+            pool.read_page(0).unwrap()[0]
+        ));
 
         // Modify and flush block 0 so its new value is on disk.
         pool.write_byte(0, 0, 0xAA).unwrap();
@@ -146,15 +195,24 @@ fn main() {
         info("wrote 0xAA to block 0, flushed, unpinned");
 
         // Load block 1 — must evict block 0's frame.
-        assert_eq!(pool.request_page(1, tag(1)), RequestPageResult::ReadIssued { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(1, tag(1)),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
         pool.complete_read(0).unwrap();
-        info(&format!("loaded block 1 into frame 0 (block 0 evicted); byte[0]={:#04x}", pool.read_page(0).unwrap()[0]));
+        info(&format!(
+            "loaded block 1 into frame 0 (block 0 evicted); byte[0]={:#04x}",
+            pool.read_page(0).unwrap()[0]
+        ));
     }
 
     // Confirm block 0's final value (0xAA) is on disk.
     let data = read_from_disk(&base, 0);
     assert_eq!(data[0], 0xAA);
-    ok(&format!("block 0 on disk: byte[0]={:#04x} — eviction preserved the flush ✓", data[0]));
+    ok(&format!(
+        "block 0 on disk: byte[0]={:#04x} — eviction preserved the flush ✓",
+        data[0]
+    ));
 
     // -----------------------------------------------------------------------
     // Step 3: cache hit — no extra disk reads.
@@ -165,18 +223,27 @@ fn main() {
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
 
         // First access: miss.
-        assert_eq!(pool.request_page(1, tag(2)), RequestPageResult::ReadIssued { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(1, tag(2)),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
         pool.complete_read(0).unwrap();
         pool.unpin(1, 0).unwrap();
         info("first request for block 2: ReadIssued (cache miss, disk read)");
 
         // Second access: hit.
-        assert_eq!(pool.request_page(2, tag(2)), RequestPageResult::Hit { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(2, tag(2)),
+            RequestPageResult::Hit { buffer_id: 0 }
+        );
         info("second request for block 2: Hit (cache hit, no disk I/O)");
 
         ok("cache hit confirmed — buffer pool served page without going to disk");
     }
 
     println!("\nAll checks passed.");
-    println!("Files remain at {:?} for manual inspection.", base.join("1"));
+    println!(
+        "Files remain at {:?} for manual inspection.",
+        base.join("1")
+    );
 }

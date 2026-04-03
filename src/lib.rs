@@ -4,7 +4,7 @@ pub use storage::smgr;
 
 // Re-export the canonical type definitions from smgr so callers can use
 // them from the crate root without knowing which module owns them.
-pub use smgr::{ForkNumber, RelFileLocator, BLCKSZ};
+pub use smgr::{BLCKSZ, ForkNumber, RelFileLocator};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -522,11 +522,7 @@ impl<S: StorageBackend> BufferPool<S> {
     }
 
     // Replace the entire page image in a valid frame and mark it dirty.
-    pub fn write_page_image(
-        &mut self,
-        buffer_id: BufferId,
-        page: &Page,
-    ) -> Result<(), Error> {
+    pub fn write_page_image(&mut self, buffer_id: BufferId, page: &Page) -> Result<(), Error> {
         let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
         if !frame.valid {
             return Err(Error::InvalidBuffer);
@@ -876,7 +872,11 @@ mod tests {
     }
 
     fn smgr_rel(n: u32) -> RelFileLocator {
-        RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: n }
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: n,
+        }
     }
 
     fn smgr_tag(rel_number: u32, block: u32) -> BufferTag {
@@ -902,7 +902,8 @@ mod tests {
         for i in 0..nblocks {
             // Each block is filled with a recognizable byte: (rel_number + i) % 200
             let fill = ((rel_number + i) % 200) as u8;
-            smgr.extend(rel, ForkNumber::Main, i, &[fill; PAGE_SIZE], true).unwrap();
+            smgr.extend(rel, ForkNumber::Main, i, &[fill; PAGE_SIZE], true)
+                .unwrap();
         }
         smgr.immedsync(rel, ForkNumber::Main).unwrap();
         BufferPool::new(SmgrStorageBackend::new(smgr), capacity)
@@ -916,12 +917,17 @@ mod tests {
         let t = smgr_tag(1, 0);
         let fill = (1u32 % 200) as u8; // fill byte for block 0
 
-        assert_eq!(pool.request_page(1, t), RequestPageResult::ReadIssued { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(1, t),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
         pool.complete_read(0).unwrap();
 
         let page_data = pool.read_page(0).unwrap();
-        assert!(page_data.iter().all(|&b| b == fill),
-            "page read from disk should have fill byte {fill:#x}");
+        assert!(
+            page_data.iter().all(|&b| b == fill),
+            "page read from disk should have fill byte {fill:#x}"
+        );
     }
 
     /// Second request for the same page hits the cache, not disk.
@@ -931,11 +937,17 @@ mod tests {
         let mut pool = pool_with_relation(&base, 2, 1, 8);
         let t = smgr_tag(2, 0);
 
-        assert_eq!(pool.request_page(1, t), RequestPageResult::ReadIssued { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(1, t),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
         pool.complete_read(0).unwrap();
         pool.unpin(1, 0).unwrap();
 
-        assert_eq!(pool.request_page(2, t), RequestPageResult::Hit { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(2, t),
+            RequestPageResult::Hit { buffer_id: 0 }
+        );
     }
 
     /// A dirty page flushed via complete_write lands on disk and is readable
@@ -960,7 +972,9 @@ mod tests {
         // Read the file directly with a fresh smgr to verify the write landed.
         let mut smgr2 = MdStorageManager::new(&base);
         let mut buf = [0u8; PAGE_SIZE];
-        smgr2.read_block(smgr_rel(3), ForkNumber::Main, 0, &mut buf).unwrap();
+        smgr2
+            .read_block(smgr_rel(3), ForkNumber::Main, 0, &mut buf)
+            .unwrap();
         assert_eq!(buf[0], 0xFF, "flushed byte should be on disk");
         // Bytes 1..PAGE_SIZE should still be the original fill value.
         let fill = (3u32 % 200) as u8;
@@ -977,7 +991,10 @@ mod tests {
         // Fill both frames and leave them pinned.
         for block in 0..2u32 {
             let t = smgr_tag(4, block);
-            assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
+            assert!(matches!(
+                pool.request_page(1, t),
+                RequestPageResult::ReadIssued { .. }
+            ));
             pool.complete_read(block as usize).unwrap();
             // Do NOT unpin.
         }
@@ -999,7 +1016,10 @@ mod tests {
         let t1 = smgr_tag(5, 1);
 
         // Load block 0, modify it, flush it.
-        assert_eq!(pool.request_page(1, t0), RequestPageResult::ReadIssued { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(1, t0),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
         pool.complete_read(0).unwrap();
         pool.write_byte(0, 0, 0xAB).unwrap();
         pool.flush_buffer(0).unwrap();
@@ -1007,14 +1027,22 @@ mod tests {
         pool.unpin(1, 0).unwrap();
 
         // Load block 1 — forces eviction of block 0's frame.
-        assert_eq!(pool.request_page(1, t1), RequestPageResult::ReadIssued { buffer_id: 0 });
+        assert_eq!(
+            pool.request_page(1, t1),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
         pool.complete_read(0).unwrap();
 
         // Verify block 0 made it to disk.
         let mut smgr2 = MdStorageManager::new(&base);
         let mut buf = [0u8; PAGE_SIZE];
-        smgr2.read_block(smgr_rel(5), ForkNumber::Main, 0, &mut buf).unwrap();
-        assert_eq!(buf[0], 0xAB, "evicted dirty page should have been flushed to disk");
+        smgr2
+            .read_block(smgr_rel(5), ForkNumber::Main, 0, &mut buf)
+            .unwrap();
+        assert_eq!(
+            buf[0], 0xAB,
+            "evicted dirty page should have been flushed to disk"
+        );
     }
 
     /// Multiple blocks of the same relation are each read from their correct
@@ -1028,7 +1056,10 @@ mod tests {
         // Load all blocks.
         for block in 0..nblocks {
             let t = smgr_tag(6, block);
-            assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
+            assert!(matches!(
+                pool.request_page(1, t),
+                RequestPageResult::ReadIssued { .. }
+            ));
             pool.complete_read(block as usize).unwrap();
         }
 
@@ -1036,8 +1067,10 @@ mod tests {
         for block in 0..nblocks {
             let expected_fill = ((6 + block) % 200) as u8;
             let page_data = pool.read_page(block as usize).unwrap();
-            assert!(page_data.iter().all(|&b| b == expected_fill),
-                "block {block} has wrong fill byte (expected {expected_fill:#x})");
+            assert!(
+                page_data.iter().all(|&b| b == expected_fill),
+                "block {block} has wrong fill byte (expected {expected_fill:#x})"
+            );
         }
     }
 
@@ -1052,7 +1085,10 @@ mod tests {
         // Load and unpin both blocks.
         for block in 0..2u32 {
             let t = smgr_tag(7, block);
-            assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
+            assert!(matches!(
+                pool.request_page(1, t),
+                RequestPageResult::ReadIssued { .. }
+            ));
             pool.complete_read(block as usize).unwrap();
             pool.unpin(1, block as usize).unwrap();
         }
@@ -1062,6 +1098,9 @@ mod tests {
 
         // Re-requesting block 0 should be a miss (new ReadIssued), not a hit.
         let t = smgr_tag(7, 0);
-        assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
+        assert!(matches!(
+            pool.request_page(1, t),
+            RequestPageResult::ReadIssued { .. }
+        ));
     }
 }

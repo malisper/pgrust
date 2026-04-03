@@ -12,6 +12,29 @@ The current code is enough to exercise the dependency chain:
 
 It is not a realistic implementation of PostgreSQL heapam yet.
 
+## MVCC is only a first slice
+
+The current code now has a minimal MVCC model:
+
+- tuple versions carry `xmin` / `xmax`
+- updates create a new tuple version and chain the old version's `ctid`
+- deletes mark `xmax`
+- scans and fetches can be filtered through a snapshot
+
+That is enough to model version visibility for simple insert/update/delete
+flows, but it is still much simpler than PostgreSQL.
+
+What is still intentionally missing from MVCC:
+
+- no lock or conflict protocol around concurrent updates/deletes
+- no command-id visibility rules within a transaction
+- no rollback undo of physical tuple changes after abort
+- no vacuum or pruning to reclaim dead tuple space
+- no HOT updates or redirect/dead line-pointer states
+- no transaction status storage on disk
+- no WAL/recovery integration for version transitions
+- a very small in-memory transaction manager and snapshot model
+
 ## Current insert-page selection is intentionally simple
 
 The current `heap_insert()` algorithm in
@@ -48,15 +71,39 @@ that are not modeled here yet:
 - fillfactor and page-full heuristics
 - concurrency and locking behavior around page choice
 
+## Heap API shape is also simplified
+
+The current Rust heap API is intentionally smaller than PostgreSQL's heapam
+surface.
+
+Today we have direct helpers like:
+
+- `heap_insert(...)`
+- `heap_fetch(...)`
+- `heap_scan_begin(...)`
+- `heap_scan_next(...)`
+
+That is fine for now, but it is not the likely long-term API.
+
+PostgreSQL has additional concepts here that we will probably need in some
+form even if we do not copy its exact C API:
+
+- a scan descriptor/state object
+- scan direction
+- a slot-like abstraction for decoded rows
+- a snapshot / visibility boundary
+- clearer separation between physical tuple bytes and logical row values
+
+The goal should be to keep the PostgreSQL semantic boundaries while choosing
+a more Rust-native API shape, rather than copying heapam function signatures
+literally.
+
 ## Other missing heap features
 
-The current heap layer also does not implement:
+The current heap layer still does not implement:
 
-- typed attribute packing/unpacking
 - `TupleDesc`-driven layout
 - varlena / TOAST behavior
-- update/delete/HOT chains
-- visibility checks and snapshots
 - speculative insertion
 - vacuum/prune semantics
 - line-pointer reuse policies
