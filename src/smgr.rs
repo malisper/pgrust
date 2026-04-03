@@ -139,26 +139,44 @@ pub struct RelFileLocator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ForkNumber {
     /// The main data fork (heap pages, index pages, etc.). Fork 0.
-    Main = 0,
+    Main,
     /// Free Space Map fork. Fork 1.
-    Fsm = 1,
+    Fsm,
     /// Visibility Map fork. Fork 2.
-    VisibilityMap = 2,
+    VisibilityMap,
     /// Initialization fork for unlogged relations. Fork 3.
-    Init = 3,
+    Init,
+    /// Extension point for future or custom fork numbers beyond the four
+    /// standard forks. Not used by the current smgr implementation — passing
+    /// this to file-creating operations will panic.
+    Other(u8),
 }
 
 impl ForkNumber {
-    /// Returns the suffix appended to the base relation path for this fork.
+    /// Returns the canonical integer fork number used by PostgreSQL.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            ForkNumber::Main => 0,
+            ForkNumber::Fsm => 1,
+            ForkNumber::VisibilityMap => 2,
+            ForkNumber::Init => 3,
+            ForkNumber::Other(n) => n,
+        }
+    }
+}
+
+impl ForkNumber {
+    /// Returns the filename suffix for this fork.
     ///
     /// Main fork has no suffix (segment 0 is just the bare relation number).
-    /// Other forks append `_fsm`, `_vm`, or `_init`.
-    fn suffix(self) -> &'static str {
+    /// Other forks append `_fsm`, `_vm`, `_init`, or `_fork<N>`.
+    fn suffix(self) -> String {
         match self {
-            ForkNumber::Main => "",
-            ForkNumber::Fsm => "_fsm",
-            ForkNumber::VisibilityMap => "_vm",
-            ForkNumber::Init => "_init",
+            ForkNumber::Main => String::new(),
+            ForkNumber::Fsm => "_fsm".to_string(),
+            ForkNumber::VisibilityMap => "_vm".to_string(),
+            ForkNumber::Init => "_init".to_string(),
+            ForkNumber::Other(n) => format!("_fork{}", n),
         }
     }
 }
@@ -732,15 +750,12 @@ impl StorageManager for MdStorageManager {
     }
 
     fn unlink(&mut self, rel: RelFileLocator, fork: Option<ForkNumber>, _is_redo: bool) {
-        // If fork is None, remove all forks. Otherwise remove the specified one.
-        let forks: &[ForkNumber] = match fork {
-            Some(f) => match f {
-                ForkNumber::Main => &[ForkNumber::Main],
-                ForkNumber::Fsm => &[ForkNumber::Fsm],
-                ForkNumber::VisibilityMap => &[ForkNumber::VisibilityMap],
-                ForkNumber::Init => &[ForkNumber::Init],
-            },
-            None => &[
+        // If fork is None, remove all standard forks. Otherwise remove the
+        // specified one. We use a Vec because ForkNumber::Other(n) can't live
+        // in a static slice.
+        let forks: Vec<ForkNumber> = match fork {
+            Some(f) => vec![f],
+            None => vec![
                 ForkNumber::Main,
                 ForkNumber::Fsm,
                 ForkNumber::VisibilityMap,
@@ -748,7 +763,7 @@ impl StorageManager for MdStorageManager {
             ],
         };
 
-        for &f in forks {
+        for f in forks {
             self.remove_segments_from(rel, f, 0);
         }
     }
