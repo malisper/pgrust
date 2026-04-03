@@ -214,6 +214,13 @@ fn print_result(result: StatementResult) {
     }
 }
 
+fn render_exec_error(err: &ExecError) -> String {
+    match err {
+        ExecError::Parse(parse) => parse.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 fn redraw_line(prompt: &str, buffer: &str, cursor: usize) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
     write!(stdout, "\r{prompt}{buffer}\x1b[K").map_err(|e| e.to_string())?;
@@ -622,7 +629,7 @@ fn main() -> Result<(), String> {
         let sql = input.trim_end_matches(';').trim();
         match run_statement(sql, &mut pool, &mut txns, &mut catalog_store) {
             Ok(result) => print_result(result),
-            Err(err) => eprintln!("ERROR: {:?}", err),
+            Err(err) => eprintln!("ERROR: {}", render_exec_error(&err)),
         }
     }
 

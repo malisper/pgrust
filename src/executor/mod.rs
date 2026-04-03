@@ -14,6 +14,7 @@ use crate::parser::{
 };
 use crate::storage::smgr::StorageManager;
 use crate::{BufferPool, BufferUsageStats, ClientId, RelFileLocator, SmgrStorageBackend};
+use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,13 @@ pub struct TargetEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderByEntry {
+    pub expr: Expr,
+    pub descending: bool,
+    pub nulls_first: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Column(usize),
     Const(Value),
@@ -61,6 +69,9 @@ pub enum Expr {
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
     IsNull(Box<Expr>),
+    IsNotNull(Box<Expr>),
+    IsDistinctFrom(Box<Expr>, Box<Expr>),
+    IsNotDistinctFrom(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +89,15 @@ pub enum Plan {
     Filter {
         input: Box<Plan>,
         predicate: Expr,
+    },
+    OrderBy {
+        input: Box<Plan>,
+        items: Vec<OrderByEntry>,
+    },
+    Limit {
+        input: Box<Plan>,
+        limit: Option<usize>,
+        offset: usize,
     },
     Projection {
         input: Box<Plan>,
@@ -117,6 +137,8 @@ pub enum PlanState {
     SeqScan(SeqScanState),
     NestedLoopJoin(NestedLoopJoinState),
     Filter(FilterState),
+    OrderBy(OrderByState),
+    Limit(LimitState),
     Projection(ProjectionState),
 }
 
@@ -156,6 +178,25 @@ pub struct NestedLoopJoinState {
 pub struct ProjectionState {
     input: Box<PlanState>,
     targets: Vec<TargetEntry>,
+    stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct OrderByState {
+    input: Box<PlanState>,
+    items: Vec<OrderByEntry>,
+    rows: Option<Vec<TupleSlot>>,
+    next_index: usize,
+    stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct LimitState {
+    input: Box<PlanState>,
+    limit: Option<usize>,
+    offset: usize,
+    skipped: usize,
+    returned: usize,
     stats: NodeExecStats,
 }
 
@@ -304,6 +345,25 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::Filter { input, predicate } => PlanState::Filter(FilterState {
             input: Box::new(executor_start(*input)),
             predicate,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::OrderBy { input, items } => PlanState::OrderBy(OrderByState {
+            input: Box::new(executor_start(*input)),
+            items,
+            rows: None,
+            next_index: 0,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::Limit {
+            input,
+            limit,
+            offset,
+        } => PlanState::Limit(LimitState {
+            input: Box::new(executor_start(*input)),
+            limit,
+            offset,
+            skipped: 0,
+            returned: 0,
             stats: NodeExecStats::default(),
         }),
         Plan::Projection { input, targets } => PlanState::Projection(ProjectionState {
@@ -471,6 +531,8 @@ pub fn exec_next(
         PlanState::SeqScan(scan) => exec_seq_scan(scan, ctx),
         PlanState::NestedLoopJoin(join) => exec_nested_loop_join(join, ctx),
         PlanState::Filter(filter) => exec_filter(filter, ctx),
+        PlanState::OrderBy(order_by) => exec_order_by(order_by, ctx),
+        PlanState::Limit(limit) => exec_limit(limit, ctx),
         PlanState::Projection(projection) => exec_projection(projection, ctx),
     };
     let elapsed = started_at.elapsed();
@@ -591,6 +653,65 @@ fn exec_projection(
     Ok(Some(TupleSlot::virtual_row(names, values)))
 }
 
+fn exec_order_by(
+    state: &mut OrderByState,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<Option<TupleSlot>, ExecError> {
+    if state.rows.is_none() {
+        let mut rows = Vec::new();
+        while let Some(slot) = exec_next(&mut state.input, ctx)? {
+            rows.push(slot);
+        }
+
+        let mut keyed_rows = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            let mut keys = Vec::with_capacity(state.items.len());
+            for item in &state.items {
+                keys.push(eval_expr(&item.expr, &mut row)?);
+            }
+            keyed_rows.push((keys, row));
+        }
+
+        keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
+            compare_order_by_keys(&state.items, left_keys, right_keys)
+        });
+        state.rows = Some(keyed_rows.into_iter().map(|(_, row)| row).collect());
+    }
+
+    let rows = state.rows.as_ref().unwrap();
+    if state.next_index >= rows.len() {
+        return Ok(None);
+    }
+
+    let slot = rows[state.next_index].clone();
+    state.next_index += 1;
+    Ok(Some(slot))
+}
+
+fn exec_limit(
+    state: &mut LimitState,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<Option<TupleSlot>, ExecError> {
+    if let Some(limit) = state.limit {
+        if state.returned >= limit {
+            return Ok(None);
+        }
+    }
+
+    while state.skipped < state.offset {
+        if exec_next(&mut state.input, ctx)?.is_none() {
+            return Ok(None);
+        }
+        state.skipped += 1;
+    }
+
+    let next = exec_next(&mut state.input, ctx)?;
+    if next.is_some() {
+        state.returned += 1;
+    }
+    Ok(next)
+}
+
 fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecError> {
     let left = left;
     let right = right;
@@ -607,6 +728,8 @@ fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
         PlanState::SeqScan(scan) => &mut scan.stats,
         PlanState::NestedLoopJoin(join) => &mut join.stats,
         PlanState::Filter(filter) => &mut filter.stats,
+        PlanState::OrderBy(order_by) => &mut order_by.stats,
+        PlanState::Limit(limit) => &mut limit.stats,
         PlanState::Projection(projection) => &mut projection.stats,
     }
 }
@@ -617,6 +740,8 @@ fn node_stats(state: &PlanState) -> &NodeExecStats {
         PlanState::SeqScan(scan) => &scan.stats,
         PlanState::NestedLoopJoin(join) => &join.stats,
         PlanState::Filter(filter) => &filter.stats,
+        PlanState::OrderBy(order_by) => &order_by.stats,
+        PlanState::Limit(limit) => &limit.stats,
         PlanState::Projection(projection) => &projection.stats,
     }
 }
@@ -649,6 +774,8 @@ fn format_explain_lines(
             format_explain_lines(&join.right, indent + 1, analyze, lines);
         }
         PlanState::Filter(filter) => format_explain_lines(&filter.input, indent + 1, analyze, lines),
+        PlanState::OrderBy(order_by) => format_explain_lines(&order_by.input, indent + 1, analyze, lines),
+        PlanState::Limit(limit) => format_explain_lines(&limit.input, indent + 1, analyze, lines),
         PlanState::Projection(projection) => {
             format_explain_lines(&projection.input, indent + 1, analyze, lines)
         }
@@ -661,7 +788,49 @@ fn node_label(state: &PlanState) -> String {
         PlanState::SeqScan(scan) => format!("Seq Scan on rel {}", scan.rel.rel_number),
         PlanState::NestedLoopJoin(_) => "Nested Loop".into(),
         PlanState::Filter(_) => "Filter".into(),
+        PlanState::OrderBy(_) => "Sort".into(),
+        PlanState::Limit(_) => "Limit".into(),
         PlanState::Projection(_) => "Projection".into(),
+    }
+}
+
+fn compare_order_by_keys(
+    items: &[OrderByEntry],
+    left_keys: &[Value],
+    right_keys: &[Value],
+) -> Ordering {
+    for (item, (left_value, right_value)) in items.iter().zip(left_keys.iter().zip(right_keys.iter())) {
+        let ordering = compare_order_values(left_value, right_value, item.nulls_first, item.descending);
+        if ordering != Ordering::Equal {
+            return if item.descending && !matches!((left_value, right_value), (Value::Null, _) | (_, Value::Null)) {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_order_values(
+    left: &Value,
+    right: &Value,
+    nulls_first: Option<bool>,
+    descending: bool,
+) -> Ordering {
+    let nulls_first = nulls_first.unwrap_or(descending);
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => {
+            if nulls_first { Ordering::Less } else { Ordering::Greater }
+        }
+        (_, Value::Null) => {
+            if nulls_first { Ordering::Greater } else { Ordering::Less }
+        }
+        (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Text(a), Value::Text(b)) => a.cmp(b),
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        _ => Ordering::Equal,
     }
 }
 
@@ -704,6 +873,15 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
             other => Err(ExecError::NonBoolQual(other)),
         },
         Expr::IsNull(inner) => Ok(Value::Bool(matches!(eval_expr(inner, slot)?, Value::Null))),
+        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(eval_expr(inner, slot)?, Value::Null))),
+        Expr::IsDistinctFrom(left, right) => Ok(Value::Bool(values_are_distinct(
+            &eval_expr(left, slot)?,
+            &eval_expr(right, slot)?,
+        ))),
+        Expr::IsNotDistinctFrom(left, right) => Ok(Value::Bool(!values_are_distinct(
+            &eval_expr(left, slot)?,
+            &eval_expr(right, slot)?,
+        ))),
     }
 }
 
@@ -889,6 +1067,17 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
         (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(l == r)),
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
         _ => Err(ExecError::TypeMismatch { op, left, right }),
+    }
+}
+
+fn values_are_distinct(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Null, Value::Null) => false,
+        (Value::Null, _) | (_, Value::Null) => true,
+        (Value::Int32(l), Value::Int32(r)) => l != r,
+        (Value::Text(l), Value::Text(r)) => l != r,
+        (Value::Bool(l), Value::Bool(r)) => l != r,
+        _ => true,
     }
 }
 
@@ -1244,6 +1433,36 @@ mod tests {
             .unwrap(),
             Value::Null
         );
+        assert_eq!(
+            eval_expr(&Expr::IsNull(Box::new(Expr::Column(2))), &mut slot).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_expr(&Expr::IsNotNull(Box::new(Expr::Column(2))), &mut slot).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_expr(
+                &Expr::IsDistinctFrom(
+                    Box::new(Expr::Column(2)),
+                    Box::new(Expr::Const(Value::Null))
+                ),
+                &mut slot
+            )
+            .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            eval_expr(
+                &Expr::IsDistinctFrom(
+                    Box::new(Expr::Column(1)),
+                    Box::new(Expr::Const(Value::Null))
+                ),
+                &mut slot
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -1559,6 +1778,201 @@ mod tests {
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Text("bob".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn order_by_limit_offset_returns_expected_rows() {
+        let base = temp_dir("order_by_limit_offset");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let insert_xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (3, 'carol', 'c'), (2, 'bob', null)",
+        )
+        .unwrap();
+        txns.commit(insert_xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, name from people order by id desc limit 2 offset 1",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(2), Value::Text("bob".into())],
+                        vec![Value::Int32(1), Value::Text("alice".into())],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn explain_mentions_sort_and_limit_nodes() {
+        let base = temp_dir("explain_sort_limit");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "explain select name from people order by id desc limit 1 offset 2",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                let rendered = rows
+                    .into_iter()
+                    .map(|row| match &row[0] {
+                        Value::Text(text) => text.clone(),
+                        other => panic!("expected explain text row, got {:?}", other),
+                    })
+                    .collect::<Vec<_>>();
+                assert!(rendered.iter().any(|line| line.contains("Projection")));
+                assert!(rendered.iter().any(|line| line.contains("Limit")));
+                assert!(rendered.iter().any(|line| line.contains("Sort")));
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn order_by_nulls_first_and_last_work() {
+        let base = temp_dir("order_by_nulls");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let insert_xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
+        )
+        .unwrap();
+        txns.commit(insert_xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id from people order by note asc nulls first",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(2)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(3)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id from people order by note desc nulls last",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(3)],
+                        vec![Value::Int32(1)],
+                        vec![Value::Int32(2)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn null_predicates_work_in_where_clause() {
+        let base = temp_dir("null_predicates");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let insert_xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
+        )
+        .unwrap();
+        txns.commit(insert_xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is null",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is not null order by id",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is distinct from null order by id",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is not distinct from null",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }

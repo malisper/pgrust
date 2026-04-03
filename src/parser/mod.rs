@@ -6,6 +6,7 @@ use crate::executor::{ColumnDesc, Expr, Plan, RelationDesc, TargetEntry, Value};
 use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
+use std::fmt;
 
 #[derive(Parser)]
 #[grammar = "parser/sql.pest"]
@@ -32,6 +33,29 @@ pub enum ParseError {
     UnsupportedType(String),
 }
 
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::UnexpectedEof => write!(f, "unexpected end of input"),
+            ParseError::UnexpectedToken { actual, .. } => write!(f, "{actual}"),
+            ParseError::InvalidInteger(value) => write!(f, "invalid integer: {value}"),
+            ParseError::UnknownTable(name) => write!(f, "unknown table: {name}"),
+            ParseError::UnknownColumn(name) => write!(f, "unknown column: {name}"),
+            ParseError::EmptySelectList => write!(f, "SELECT requires a target list or FROM clause"),
+            ParseError::UnsupportedQualifiedName(name) => {
+                write!(f, "unsupported qualified name: {name}")
+            }
+            ParseError::InvalidInsertTargetCount { expected, actual } => write!(
+                f,
+                "INSERT has {actual} values but target list requires {expected}"
+            ),
+            ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
+            ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
+            ParseError::UnsupportedType(name) => write!(f, "unsupported type: {name}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     Explain(ExplainStatement),
@@ -56,6 +80,9 @@ pub struct SelectStatement {
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
+    pub order_by: Vec<OrderByItem>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +103,13 @@ pub enum FromItem {
 pub struct SelectItem {
     pub output_name: String,
     pub expr: SqlExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderByItem {
+    pub expr: SqlExpr,
+    pub descending: bool,
+    pub nulls_first: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +175,9 @@ pub enum SqlExpr {
     Or(Box<SqlExpr>, Box<SqlExpr>),
     Not(Box<SqlExpr>),
     IsNull(Box<SqlExpr>),
+    IsNotNull(Box<SqlExpr>),
+    IsDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
+    IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
 }
 
 #[derive(Debug, Clone)]
@@ -229,7 +266,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         )
     };
 
-    let plan = if let Some(predicate) = &stmt.where_clause {
+    let mut plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
             input: Box::new(base),
             predicate: bind_expr(predicate, &scope)?,
@@ -237,6 +274,31 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
     } else {
         base
     };
+
+    if !stmt.order_by.is_empty() {
+        plan = Plan::OrderBy {
+            input: Box::new(plan),
+            items: stmt
+                .order_by
+                .iter()
+                .map(|item| {
+                    Ok(crate::executor::OrderByEntry {
+                        expr: bind_expr(&item.expr, &scope)?,
+                        descending: item.descending,
+                        nulls_first: item.nulls_first,
+                    })
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?,
+        };
+    }
+
+    if stmt.limit.is_some() || stmt.offset.is_some() {
+        plan = Plan::Limit {
+            input: Box::new(plan),
+            limit: stmt.limit,
+            offset: stmt.offset.unwrap_or(0),
+        };
+    }
 
     Ok(Plan::Projection {
         input: Box::new(plan),
@@ -301,6 +363,15 @@ fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
         ),
         SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr(inner, scope)?)),
         SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr(inner, scope)?)),
+        SqlExpr::IsNotNull(inner) => Expr::IsNotNull(Box::new(bind_expr(inner, scope)?)),
+        SqlExpr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
+        ),
+        SqlExpr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
+        ),
     })
 }
 
@@ -641,11 +712,17 @@ fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
+    let mut order_by = Vec::new();
+    let mut limit = None;
+    let mut offset = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::select_list => targets = Some(build_select_list(part)?),
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::order_by_clause => order_by = build_order_by_clause(part)?,
+            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::offset_clause => offset = Some(build_offset_clause(part)?),
             _ => {}
         }
     }
@@ -653,7 +730,67 @@ fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
+        order_by,
+        limit,
+        offset,
     })
+}
+
+fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::order_by_item)
+        .map(build_order_by_item)
+        .collect()
+}
+
+fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> {
+    let mut expr = None;
+    let mut descending = false;
+    let mut nulls_first = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => expr = Some(build_expr(part)?),
+            Rule::kw_desc => descending = true,
+            Rule::kw_asc => descending = false,
+            Rule::nulls_ordering => {
+                for item in part.into_inner() {
+                    match item.as_rule() {
+                        Rule::kw_first => nulls_first = Some(true),
+                        Rule::kw_last => nulls_first = Some(false),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(OrderByItem {
+        expr: expr.ok_or(ParseError::UnexpectedEof)?,
+        descending,
+        nulls_first,
+    })
+}
+
+fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
+    build_usize_clause(pair, "LIMIT")
+}
+
+fn build_offset_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
+    build_usize_clause(pair, "OFFSET")
+}
+
+fn build_usize_clause(pair: Pair<'_, Rule>, expected: &'static str) -> Result<usize, ParseError> {
+    let integer = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::integer)
+        .ok_or(ParseError::UnexpectedEof)?;
+    integer
+        .as_str()
+        .parse::<usize>()
+        .map_err(|_| ParseError::UnexpectedToken {
+            expected,
+            actual: integer.as_str().into(),
+        })
 }
 
 fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
@@ -894,7 +1031,7 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             };
 
             match next.as_rule() {
-                Rule::is_null_suffix => Ok(SqlExpr::IsNull(Box::new(left))),
+                Rule::null_predicate_suffix => build_null_predicate(left, next),
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
@@ -926,6 +1063,43 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             actual: pair.as_str().into(),
         }),
     }
+}
+
+fn build_null_predicate(
+    left: SqlExpr,
+    pair: Pair<'_, Rule>,
+) -> Result<SqlExpr, ParseError> {
+    let pair = if pair.as_rule() == Rule::null_predicate_suffix {
+        pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?
+    } else {
+        pair
+    };
+    let raw = pair.as_str().to_ascii_lowercase();
+    if raw == "is null" {
+        return Ok(SqlExpr::IsNull(Box::new(left)));
+    }
+    if raw == "is not null" {
+        return Ok(SqlExpr::IsNotNull(Box::new(left)));
+    }
+
+    let mut right = None;
+    let mut saw_not = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr | Rule::add_expr | Rule::primary_expr | Rule::cmp_expr => {
+                right = Some(build_expr(part)?)
+            }
+            Rule::kw_not => saw_not = true,
+            _ => {}
+        }
+    }
+
+    let right = right.ok_or(ParseError::UnexpectedEof)?;
+    Ok(if saw_not {
+        SqlExpr::IsNotDistinctFrom(Box::new(left), Box::new(right))
+    } else {
+        SqlExpr::IsDistinctFrom(Box::new(left), Box::new(right))
+    })
 }
 
 fn fold_infix(
@@ -1037,6 +1211,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_null_predicates() {
+        let stmt = parse_select(
+            "select name from people where note is not null or note is distinct from null",
+        )
+        .unwrap();
+        assert!(matches!(stmt.where_clause, Some(SqlExpr::Or(_, _))));
+
+        let stmt =
+            parse_select("select name from people where note is not distinct from null").unwrap();
+        assert!(matches!(
+            stmt.where_clause,
+            Some(SqlExpr::IsNotDistinctFrom(_, _))
+        ));
+    }
+
+    #[test]
     fn parse_join_select() {
         let stmt = parse_select(
             "select people.name, pets.name from people join pets on people.id = pets.owner_id",
@@ -1090,6 +1280,25 @@ mod tests {
             Some(SqlExpr::Eq(left, _))
                 if matches!(*left, SqlExpr::Add(_, _))
         ));
+    }
+
+    #[test]
+    fn parse_select_with_order_limit_offset() {
+        let stmt =
+            parse_select("select name from people order by id desc limit 2 offset 1").unwrap();
+        assert_eq!(stmt.order_by.len(), 1);
+        assert!(stmt.order_by[0].descending);
+        assert_eq!(stmt.order_by[0].nulls_first, None);
+        assert_eq!(stmt.limit, Some(2));
+        assert_eq!(stmt.offset, Some(1));
+    }
+
+    #[test]
+    fn parse_select_with_explicit_nulls_ordering() {
+        let stmt = parse_select("select name from people order by note desc nulls last").unwrap();
+        assert_eq!(stmt.order_by.len(), 1);
+        assert!(stmt.order_by[0].descending);
+        assert_eq!(stmt.order_by[0].nulls_first, Some(false));
     }
 
     #[test]
@@ -1186,6 +1395,35 @@ mod tests {
                 assert_eq!(targets[1].name, "name");
                 assert_eq!(targets[2].name, "note");
                 assert!(matches!(*input, Plan::SeqScan { .. }));
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_wraps_order_by_and_limit() {
+        let stmt =
+            parse_select("select name from people where id > 0 order by id desc limit 2 offset 1")
+                .unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 1);
+                match *input {
+                    Plan::Limit { input, limit, offset } => {
+                        assert_eq!(limit, Some(2));
+                        assert_eq!(offset, 1);
+                        match *input {
+                            Plan::OrderBy { input, items } => {
+                                assert_eq!(items.len(), 1);
+                                assert!(items[0].descending);
+                                assert!(matches!(*input, Plan::Filter { .. }));
+                            }
+                            other => panic!("expected order by, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected limit, got {:?}", other),
+                }
             }
             other => panic!("expected projection, got {:?}", other),
         }
