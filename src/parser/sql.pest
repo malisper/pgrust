@@ -3,9 +3,10 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 statement = { SOI ~ stmt ~ EOI }
 stmt = _{ explain_stmt | select_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | insert_stmt | update_stmt | delete_stmt }
 
-explain_stmt = { kw_explain ~ ("(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
+explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
 explain_option = { kw_analyze | kw_buffers }
-select_stmt = { kw_select ~ select_list ~ kw_from ~ from_item ~ (kw_where ~ expr)? }
+select_stmt = { kw_select ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? }
+empty_select_list = { &kw_from }
 show_tables_stmt = { kw_show ~ kw_tables }
 insert_stmt = { kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_values ~ values_row ~ ("," ~ values_row)* }
 create_table_stmt = { kw_create ~ kw_table ~ identifier ~ "(" ~ column_def ~ ("," ~ column_def)* ~ ")" }
@@ -34,7 +35,9 @@ expr = { or_expr }
 or_expr = { and_expr ~ (kw_or ~ and_expr)* }
 and_expr = { not_expr ~ (kw_and ~ not_expr)* }
 not_expr = { kw_not ~ not_expr | cmp_expr }
-cmp_expr = { primary_expr ~ (is_null_suffix | comp_op ~ primary_expr)? }
+cmp_expr = { add_expr ~ (is_null_suffix | comp_op ~ add_expr)? }
+add_expr = { primary_expr ~ (add_op ~ primary_expr)* }
+add_op = { "+" }
 is_null_suffix = { kw_is ~ kw_null }
 comp_op = { "=" | "<" | ">" }
 primary_expr = { kw_null | kw_true | kw_false | identifier | integer | string_literal | "(" ~ expr ~ ")" }

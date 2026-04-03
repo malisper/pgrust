@@ -53,6 +53,7 @@ pub struct TargetEntry {
 pub enum Expr {
     Column(usize),
     Const(Value),
+    Add(Box<Expr>, Box<Expr>),
     Eq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
@@ -64,6 +65,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
+    Result,
     SeqScan {
         rel: RelFileLocator,
         desc: RelationDesc,
@@ -111,10 +113,17 @@ pub struct NodeExecStats {
 
 #[derive(Debug)]
 pub enum PlanState {
+    Result(ResultState),
     SeqScan(SeqScanState),
     NestedLoopJoin(NestedLoopJoinState),
     Filter(FilterState),
     Projection(ProjectionState),
+}
+
+#[derive(Debug)]
+pub struct ResultState {
+    emitted: bool,
+    stats: NodeExecStats,
 }
 
 #[derive(Debug)]
@@ -273,6 +282,10 @@ impl TupleSlot {
 
 pub fn executor_start(plan: Plan) -> PlanState {
     match plan {
+        Plan::Result => PlanState::Result(ResultState {
+            emitted: false,
+            stats: NodeExecStats::default(),
+        }),
         Plan::SeqScan { rel, desc } => PlanState::SeqScan(SeqScanState {
             rel,
             desc,
@@ -454,6 +467,7 @@ pub fn exec_next(
 ) -> Result<Option<TupleSlot>, ExecError> {
     let started_at = Instant::now();
     let result = match state {
+        PlanState::Result(result) => exec_result(result),
         PlanState::SeqScan(scan) => exec_seq_scan(scan, ctx),
         PlanState::NestedLoopJoin(join) => exec_nested_loop_join(join, ctx),
         PlanState::Filter(filter) => exec_filter(filter, ctx),
@@ -469,6 +483,15 @@ pub fn exec_next(
         }
     }
     result
+}
+
+fn exec_result(state: &mut ResultState) -> Result<Option<TupleSlot>, ExecError> {
+    if state.emitted {
+        Ok(None)
+    } else {
+        state.emitted = true;
+        Ok(Some(TupleSlot::virtual_row(Vec::new(), Vec::new())))
+    }
 }
 
 fn exec_seq_scan(
@@ -580,6 +603,7 @@ fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecErr
 
 fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
     match state {
+        PlanState::Result(result) => &mut result.stats,
         PlanState::SeqScan(scan) => &mut scan.stats,
         PlanState::NestedLoopJoin(join) => &mut join.stats,
         PlanState::Filter(filter) => &mut filter.stats,
@@ -589,6 +613,7 @@ fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
 
 fn node_stats(state: &PlanState) -> &NodeExecStats {
     match state {
+        PlanState::Result(result) => &result.stats,
         PlanState::SeqScan(scan) => &scan.stats,
         PlanState::NestedLoopJoin(join) => &join.stats,
         PlanState::Filter(filter) => &filter.stats,
@@ -617,6 +642,7 @@ fn format_explain_lines(
     }
 
     match state {
+        PlanState::Result(_) => {}
         PlanState::SeqScan(_) => {}
         PlanState::NestedLoopJoin(join) => {
             format_explain_lines(&join.left, indent + 1, analyze, lines);
@@ -631,6 +657,7 @@ fn format_explain_lines(
 
 fn node_label(state: &PlanState) -> String {
     match state {
+        PlanState::Result(_) => "Result".into(),
         PlanState::SeqScan(scan) => format!("Seq Scan on rel {}", scan.rel.rel_number),
         PlanState::NestedLoopJoin(_) => "Nested Loop".into(),
         PlanState::Filter(_) => "Filter".into(),
@@ -653,6 +680,7 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
             .cloned()
             .ok_or(ExecError::InvalidColumn(*index)),
         Expr::Const(value) => Ok(value.clone()),
+        Expr::Add(left, right) => add_values(eval_expr(left, slot)?, eval_expr(right, slot)?),
         Expr::Eq(left, right) => {
             compare_values("=", eval_expr(left, slot)?, eval_expr(right, slot)?)
         }
@@ -861,6 +889,20 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
         (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(l == r)),
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
         _ => Err(ExecError::TypeMismatch { op, left, right }),
+    }
+}
+
+fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l + r)),
+        _ => Err(ExecError::TypeMismatch {
+            op: "+",
+            left,
+            right,
+        }),
     }
 }
 
@@ -1566,6 +1608,44 @@ mod tests {
     }
 
     #[test]
+    fn select_without_from_returns_constant_row() {
+        let base = temp_dir("select_without_from");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["expr1".to_string()]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn select_from_people_returns_zero_column_rows() {
+        let base = temp_dir("select_from_people");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select from people").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert!(column_names.is_empty());
+                assert_eq!(rows, vec![vec![], vec![]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn explain_analyze_buffers_reports_runtime_and_buffers() {
         let base = temp_dir("explain_analyze_sql");
         let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -1686,6 +1766,43 @@ mod tests {
                         vec![Value::Text("bob".into()), Value::Text("Kitchen".into())],
                         vec![Value::Text("bob".into()), Value::Text("Mocha".into())],
                     ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cross_join_where_clause_can_use_addition() {
+        let base = temp_dir("cross_join_addition_sql");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let smgr = MdStorageManager::new(&base);
+        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+
+        let xid = txns.begin();
+        for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] {
+            let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
+            heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap();
+        }
+        for row in [pet_tuple(10, "Kitchen", 1), pet_tuple(11, "Mocha", 2)] {
+            let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap();
+            heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap();
+        }
+        txns.commit(xid).unwrap();
+
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select people.name, pets.name from people, pets where pets.owner_id + 1 = people.id",
+            catalog_with_pets(),
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())]]
                 );
             }
             other => panic!("expected query result, got {:?}", other),
