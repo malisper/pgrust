@@ -1,3 +1,4 @@
+pub mod access;
 pub mod storage;
 pub use storage::smgr;
 
@@ -516,6 +517,21 @@ impl<S: StorageBackend> BufferPool<S> {
             return Err(Error::InvalidBuffer);
         }
         frame.page[offset] = value;
+        frame.dirty = true;
+        Ok(())
+    }
+
+    // Replace the entire page image in a valid frame and mark it dirty.
+    pub fn write_page_image(
+        &mut self,
+        buffer_id: BufferId,
+        page: &Page,
+    ) -> Result<(), Error> {
+        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
+        if !frame.valid {
+            return Err(Error::InvalidBuffer);
+        }
+        frame.page = *page;
         frame.dirty = true;
         Ok(())
     }
