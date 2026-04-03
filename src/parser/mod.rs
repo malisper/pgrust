@@ -1,18 +1,7 @@
-use std::collections::BTreeMap;
-
-use crate::RelFileLocator;
+pub use crate::catalog::{Catalog, CatalogEntry};
+use crate::catalog::column_desc;
 use crate::executor::{Expr, Plan, RelationDesc, TargetEntry, Value};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogEntry {
-    pub rel: RelFileLocator,
-    pub desc: RelationDesc,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Catalog {
-    tables: BTreeMap<String, CatalogEntry>,
-}
+use crate::RelFileLocator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
@@ -30,11 +19,16 @@ pub enum ParseError {
         expected: usize,
         actual: usize,
     },
+    TableAlreadyExists(String),
+    TableDoesNotExist(String),
+    UnsupportedType(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     Select(SelectStatement),
+    CreateTable(CreateTableStatement),
+    DropTable(DropTableStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
@@ -57,7 +51,32 @@ pub struct SelectItem {
 pub struct InsertStatement {
     pub table_name: String,
     pub columns: Option<Vec<String>>,
-    pub values: Vec<SqlExpr>,
+    pub values: Vec<Vec<SqlExpr>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableStatement {
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTableStatement {
+    pub table_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDef {
+    pub name: String,
+    pub ty: SqlType,
+    pub nullable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlType {
+    Int4,
+    Text,
+    Bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,16 +111,6 @@ pub enum SqlExpr {
     IsNull(Box<SqlExpr>),
 }
 
-impl Catalog {
-    pub fn insert(&mut self, name: impl Into<String>, entry: CatalogEntry) {
-        self.tables.insert(name.into().to_ascii_lowercase(), entry);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&CatalogEntry> {
-        self.tables.get(&name.to_ascii_lowercase())
-    }
-}
-
 pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
     let tokens = tokenize(sql);
     let mut parser = Parser::new(tokens);
@@ -112,6 +121,46 @@ pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
     let tokens = tokenize(sql);
     let mut parser = Parser::new(tokens);
     parser.parse_statement()
+}
+
+pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
+    RelationDesc {
+        columns: stmt
+            .columns
+            .iter()
+            .map(|column| {
+                column_desc(
+                    column.name.clone(),
+                    match column.ty {
+                        SqlType::Int4 => crate::executor::ScalarType::Int32,
+                        SqlType::Text => crate::executor::ScalarType::Text,
+                        SqlType::Bool => crate::executor::ScalarType::Bool,
+                    },
+                    column.nullable,
+                )
+            })
+            .collect(),
+    }
+}
+
+pub fn bind_create_table(
+    stmt: &CreateTableStatement,
+    catalog: &mut Catalog,
+) -> Result<CatalogEntry, ParseError> {
+    catalog
+        .create_table(stmt.table_name.clone(), create_relation_desc(stmt))
+        .map_err(|err| match err {
+            crate::catalog::CatalogError::TableAlreadyExists(name) => {
+                ParseError::TableAlreadyExists(name)
+            }
+            crate::catalog::CatalogError::UnknownTable(name) => ParseError::TableDoesNotExist(name),
+            crate::catalog::CatalogError::UnknownType(name) => ParseError::UnsupportedType(name),
+            crate::catalog::CatalogError::Io(_)
+            | crate::catalog::CatalogError::Corrupt(_) => ParseError::UnexpectedToken {
+                expected: "valid catalog state",
+                actual: "catalog error".into(),
+            },
+        })
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
@@ -200,7 +249,7 @@ pub struct BoundInsertStatement {
     pub rel: RelFileLocator,
     pub desc: RelationDesc,
     pub target_indexes: Vec<usize>,
-    pub values: Vec<Expr>,
+    pub values: Vec<Vec<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,11 +290,13 @@ pub fn bind_insert(
         (0..entry.desc.columns.len()).collect()
     };
 
-    if target_indexes.len() != stmt.values.len() {
-        return Err(ParseError::InvalidInsertTargetCount {
-            expected: target_indexes.len(),
-            actual: stmt.values.len(),
-        });
+    for row in &stmt.values {
+        if target_indexes.len() != row.len() {
+            return Err(ParseError::InvalidInsertTargetCount {
+                expected: target_indexes.len(),
+                actual: row.len(),
+            });
+        }
     }
 
     Ok(BoundInsertStatement {
@@ -255,7 +306,11 @@ pub fn bind_insert(
         values: stmt
             .values
             .iter()
-            .map(|expr| bind_expr(expr, &entry.desc))
+            .map(|row| {
+                row.iter()
+                    .map(|expr| bind_expr(expr, &entry.desc))
+                    .collect::<Result<Vec<_>, _>>()
+            })
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
@@ -432,6 +487,12 @@ impl Parser {
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("select") => {
                 self.parse_select().map(Statement::Select)
             }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("create") => {
+                self.parse_create_table().map(Statement::CreateTable)
+            }
+            Some(Token::Word(word)) if word.eq_ignore_ascii_case("drop") => {
+                self.parse_drop_table().map(Statement::DropTable)
+            }
             Some(Token::Word(word)) if word.eq_ignore_ascii_case("insert") => {
                 self.parse_insert().map(Statement::Insert)
             }
@@ -487,15 +548,57 @@ impl Parser {
             None
         };
         self.expect_keyword("values")?;
-        self.expect_token(Token::LParen, "'('")?;
-        let values = self.parse_expr_list()?;
-        self.expect_token(Token::RParen, "')'")?;
+        let mut values = Vec::new();
+        loop {
+            self.expect_token(Token::LParen, "'('")?;
+            values.push(self.parse_expr_list()?);
+            self.expect_token(Token::RParen, "')'")?;
+            if !matches!(self.peek(), Some(Token::Comma)) {
+                break;
+            }
+            self.next();
+        }
         self.expect_end()?;
         Ok(InsertStatement {
             table_name,
             columns,
             values,
         })
+    }
+
+    fn parse_create_table(&mut self) -> Result<CreateTableStatement, ParseError> {
+        self.expect_keyword("create")?;
+        self.expect_keyword("table")?;
+        let table_name = self.expect_word()?;
+        self.expect_token(Token::LParen, "'('")?;
+        let mut columns = Vec::new();
+        loop {
+            let name = self.expect_word()?;
+            let ty = self.parse_type_name()?;
+            let nullable = if self.matches_keyword("not") {
+                self.expect_keyword("null")?;
+                false
+            } else {
+                self.matches_keyword("null");
+                true
+            };
+            columns.push(ColumnDef { name, ty, nullable });
+            if !matches!(self.peek(), Some(Token::Comma)) {
+                break;
+            }
+            self.next();
+        }
+        self.expect_token(Token::RParen, "')'")?;
+        self.expect_end()?;
+        Ok(CreateTableStatement { table_name, columns })
+    }
+
+    fn parse_drop_table(&mut self) -> Result<DropTableStatement, ParseError> {
+        self.expect_keyword("drop")?;
+        self.expect_keyword("table")?;
+        let table_name = self.expect_word()?;
+        self.expect_end()?;
+        Ok(DropTableStatement { table_name })
     }
 
     fn parse_update(&mut self) -> Result<UpdateStatement, ParseError> {
@@ -758,6 +861,15 @@ impl Parser {
         }
         token
     }
+
+    fn parse_type_name(&mut self) -> Result<SqlType, ParseError> {
+        match self.expect_word()?.to_ascii_lowercase().as_str() {
+            "int4" | "int" | "integer" => Ok(SqlType::Int4),
+            "text" => Ok(SqlType::Text),
+            "bool" | "boolean" => Ok(SqlType::Bool),
+            other => Err(ParseError::UnsupportedType(other.to_string())),
+        }
+    }
 }
 
 fn describe_token(token: &Token) -> String {
@@ -892,6 +1004,20 @@ mod tests {
         assert!(matches!(
             parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(),
             Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people"
+        ));
+        assert!(matches!(
+            parse_statement("insert into people (id, name) values (1, 'alice'), (2, 'bob')").unwrap(),
+            Statement::Insert(InsertStatement { table_name, values, .. })
+                if table_name == "people" && values.len() == 2
+        ));
+        assert!(matches!(
+            parse_statement("create table widgets (id int4 not null, name text)").unwrap(),
+            Statement::CreateTable(CreateTableStatement { table_name, columns })
+                if table_name == "widgets" && columns.len() == 2
+        ));
+        assert!(matches!(
+            parse_statement("drop table widgets").unwrap(),
+            Statement::DropTable(DropTableStatement { table_name }) if table_name == "widgets"
         ));
         assert!(matches!(
             parse_statement("update people set note = 'x' where id = 1").unwrap(),
