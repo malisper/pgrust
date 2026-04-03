@@ -1,7 +1,15 @@
 pub use crate::catalog::{Catalog, CatalogEntry};
+
+use crate::RelFileLocator;
 use crate::catalog::column_desc;
 use crate::executor::{Expr, Plan, RelationDesc, TargetEntry, Value};
-use crate::RelFileLocator;
+use pest::Parser as _;
+use pest::iterators::Pair;
+use pest_derive::Parser;
+
+#[derive(Parser)]
+#[grammar = "parser/sql.pest"]
+struct SqlParser;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
@@ -112,15 +120,20 @@ pub enum SqlExpr {
 }
 
 pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
-    let tokens = tokenize(sql);
-    let mut parser = Parser::new(tokens);
-    parser.parse_select()
+    let stmt = parse_statement(sql)?;
+    match stmt {
+        Statement::Select(stmt) => Ok(stmt),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "SELECT",
+            actual: format!("{other:?}"),
+        }),
+    }
 }
 
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
-    let tokens = tokenize(sql);
-    let mut parser = Parser::new(tokens);
-    parser.parse_statement()
+    SqlParser::parse(Rule::statement, sql)
+        .map_err(|e| map_pest_error("statement", e))
+        .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
 }
 
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
@@ -373,518 +386,289 @@ fn resolve_column(desc: &RelationDesc, name: &str) -> Result<usize, ParseError> 
         .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Token {
-    Word(String),
-    Integer(String),
-    StringLiteral(String),
-    Comma,
-    LParen,
-    RParen,
-    Eq,
-    Lt,
-    Gt,
-    Star,
+fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
+    use pest::error::ErrorVariant;
+
+    match err.variant {
+        ErrorVariant::ParsingError { .. } => ParseError::UnexpectedToken {
+            expected,
+            actual: err.to_string(),
+        },
+        ErrorVariant::CustomError { message } => ParseError::UnexpectedToken {
+            expected,
+            actual: message,
+        },
+    }
 }
 
-fn tokenize(sql: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
-    let mut chars = sql.chars().peekable();
+fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
+        Rule::create_table_stmt => Ok(Statement::CreateTable(build_create_table(inner)?)),
+        Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
+        Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
+        Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
+        Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "statement",
+            actual: inner.as_str().into(),
+        }),
+    }
+}
 
-    while let Some(ch) = chars.peek().copied() {
-        if ch.is_whitespace() {
-            chars.next();
-            continue;
+fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let mut targets = None;
+    let mut table_name = None;
+    let mut where_clause = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::select_list => targets = Some(build_select_list(part)?),
+            Rule::identifier => table_name = Some(build_identifier(part)),
+            Rule::expr => where_clause = Some(build_expr(part)?),
+            _ => {}
         }
+    }
+    Ok(SelectStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        targets: targets.ok_or(ParseError::EmptySelectList)?,
+        where_clause,
+    })
+}
 
-        match ch {
-            ',' => {
-                chars.next();
-                tokens.push(Token::Comma);
+fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
+    let mut table_name = None;
+    let mut columns = None;
+    let mut values = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::ident_list => {
+                columns = Some(part.into_inner().map(build_identifier).collect::<Vec<_>>())
             }
-            '(' => {
-                chars.next();
-                tokens.push(Token::LParen);
-            }
-            ')' => {
-                chars.next();
-                tokens.push(Token::RParen);
-            }
-            '=' => {
-                chars.next();
-                tokens.push(Token::Eq);
-            }
-            '<' => {
-                chars.next();
-                tokens.push(Token::Lt);
-            }
-            '>' => {
-                chars.next();
-                tokens.push(Token::Gt);
-            }
-            '*' => {
-                chars.next();
-                tokens.push(Token::Star);
-            }
-            '\'' => {
-                chars.next();
-                let mut value = String::new();
-                while let Some(next) = chars.next() {
-                    if next == '\'' {
-                        if chars.peek() == Some(&'\'') {
-                            chars.next();
-                            value.push('\'');
-                            continue;
-                        }
-                        break;
-                    }
-                    value.push(next);
-                }
-                tokens.push(Token::StringLiteral(value));
-            }
-            c if c.is_ascii_digit() => {
-                let mut value = String::new();
-                while let Some(next) = chars.peek().copied() {
-                    if next.is_ascii_digit() {
-                        value.push(next);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                tokens.push(Token::Integer(value));
-            }
-            _ => {
-                let mut value = String::new();
-                while let Some(next) = chars.peek().copied() {
-                    if next.is_ascii_alphanumeric() || next == '_' || next == '.' {
-                        value.push(next);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                tokens.push(Token::Word(value));
-            }
+            Rule::values_row => values.push(build_values_row(part)?),
+            _ => {}
         }
     }
 
-    tokens
+    Ok(InsertStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        columns,
+        values,
+    })
 }
 
-struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
-}
-
-impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
-    }
-
-    fn parse_statement(&mut self) -> Result<Statement, ParseError> {
-        match self.peek() {
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("select") => {
-                self.parse_select().map(Statement::Select)
-            }
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("create") => {
-                self.parse_create_table().map(Statement::CreateTable)
-            }
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("drop") => {
-                self.parse_drop_table().map(Statement::DropTable)
-            }
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("insert") => {
-                self.parse_insert().map(Statement::Insert)
-            }
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("update") => {
-                self.parse_update().map(Statement::Update)
-            }
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case("delete") => {
-                self.parse_delete().map(Statement::Delete)
-            }
-            Some(_) => Err(ParseError::UnexpectedToken {
-                expected: "statement",
-                actual: self.describe_current(),
-            }),
-            None => Err(ParseError::UnexpectedEof),
+fn build_create_table(pair: Pair<'_, Rule>) -> Result<CreateTableStatement, ParseError> {
+    let mut table_name = None;
+    let mut columns = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::column_def => columns.push(build_column_def(part)?),
+            _ => {}
         }
     }
+    Ok(CreateTableStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        columns,
+    })
+}
 
-    fn parse_select(&mut self) -> Result<SelectStatement, ParseError> {
-        self.expect_keyword("select")?;
-        let targets = self.parse_select_list()?;
-        self.expect_keyword("from")?;
-        let table_name = self.expect_word()?;
-        let where_clause = if self.matches_keyword("where") {
-            Some(self.parse_expr()?)
-        } else {
-            None
+fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseError> {
+    let table_name = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(DropTableStatement { table_name })
+}
+
+fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
+    let mut table_name = None;
+    let mut assignments = Vec::new();
+    let mut where_clause = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::assignment => assignments.push(build_assignment(part)?),
+            Rule::expr => where_clause = Some(build_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok(UpdateStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        assignments,
+        where_clause,
+    })
+}
+
+fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
+    let mut table_name = None;
+    let mut where_clause = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::expr => where_clause = Some(build_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok(DeleteStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        where_clause,
+    })
+}
+
+fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
+    let mut inner = pair.into_inner();
+    let first = inner.next().ok_or(ParseError::EmptySelectList)?;
+    if first.as_rule() == Rule::star {
+        return Ok(vec![SelectItem {
+            output_name: "*".into(),
+            expr: SqlExpr::Column("*".into()),
+        }]);
+    }
+
+    let mut items = Vec::new();
+    {
+        let expr = build_expr(first)?;
+        let output_name = match &expr {
+            SqlExpr::Column(name) => name.clone(),
+            _ => format!("expr{}", items.len() + 1),
         };
-
-        if self.peek().is_some() {
-            return Err(ParseError::UnexpectedToken {
-                expected: "end of query",
-                actual: self.describe_current(),
-            });
-        }
-
-        Ok(SelectStatement {
-            table_name,
-            targets,
-            where_clause,
-        })
+        items.push(SelectItem { output_name, expr });
     }
 
-    fn parse_insert(&mut self) -> Result<InsertStatement, ParseError> {
-        self.expect_keyword("insert")?;
-        self.expect_keyword("into")?;
-        let table_name = self.expect_word()?;
-        let columns = if matches!(self.peek(), Some(Token::LParen)) {
-            self.next();
-            let cols = self.parse_identifier_list()?;
-            self.expect_token(Token::RParen, "')'")?;
-            Some(cols)
-        } else {
-            None
+    for expr_pair in inner {
+        let expr = build_expr(expr_pair)?;
+        let output_name = match &expr {
+            SqlExpr::Column(name) => name.clone(),
+            _ => format!("expr{}", items.len() + 1),
         };
-        self.expect_keyword("values")?;
-        let mut values = Vec::new();
-        loop {
-            self.expect_token(Token::LParen, "'('")?;
-            values.push(self.parse_expr_list()?);
-            self.expect_token(Token::RParen, "')'")?;
-            if !matches!(self.peek(), Some(Token::Comma)) {
-                break;
-            }
-            self.next();
-        }
-        self.expect_end()?;
-        Ok(InsertStatement {
-            table_name,
-            columns,
-            values,
-        })
+        items.push(SelectItem { output_name, expr });
     }
 
-    fn parse_create_table(&mut self) -> Result<CreateTableStatement, ParseError> {
-        self.expect_keyword("create")?;
-        self.expect_keyword("table")?;
-        let table_name = self.expect_word()?;
-        self.expect_token(Token::LParen, "'('")?;
-        let mut columns = Vec::new();
-        loop {
-            let name = self.expect_word()?;
-            let ty = self.parse_type_name()?;
-            let nullable = if self.matches_keyword("not") {
-                self.expect_keyword("null")?;
-                false
+    Ok(items)
+}
+
+fn build_values_row(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
+    pair.into_inner()
+        .next()
+        .ok_or(ParseError::UnexpectedEof)?
+        .into_inner()
+        .map(build_expr)
+        .collect()
+}
+
+fn build_assignment(pair: Pair<'_, Rule>) -> Result<Assignment, ParseError> {
+    let mut inner = pair.into_inner();
+    Ok(Assignment {
+        column: build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?),
+        expr: build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
+    })
+}
+
+fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
+    let mut inner = pair.into_inner();
+    let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let nullable = match inner.next() {
+        Some(flag) => flag.as_rule() == Rule::nullable,
+        None => true,
+    };
+    Ok(ColumnDef { name, ty, nullable })
+}
+
+fn build_type(pair: Pair<'_, Rule>) -> SqlType {
+    match pair.as_str().to_ascii_lowercase().as_str() {
+        "int4" | "int" | "integer" => SqlType::Int4,
+        "text" => SqlType::Text,
+        "bool" | "boolean" => SqlType::Bool,
+        _ => unreachable!(),
+    }
+}
+
+fn build_identifier(pair: Pair<'_, Rule>) -> String {
+    pair.as_str().to_string()
+}
+
+fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    match pair.as_rule() {
+        Rule::expr | Rule::or_expr | Rule::and_expr => {
+            let mut inner = pair.into_inner();
+            let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            fold_infix(first, inner)
+        }
+        Rule::not_expr => {
+            let mut inner = pair.into_inner();
+            let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
+            if first.as_rule() == Rule::kw_not {
+                Ok(SqlExpr::Not(Box::new(build_expr(
+                    inner.next().ok_or(ParseError::UnexpectedEof)?,
+                )?)))
             } else {
-                self.matches_keyword("null");
-                true
+                build_expr(first)
+            }
+        }
+        Rule::cmp_expr => {
+            let mut inner = pair.into_inner();
+            let left = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let Some(next) = inner.next() else {
+                return Ok(left);
             };
-            columns.push(ColumnDef { name, ty, nullable });
-            if !matches!(self.peek(), Some(Token::Comma)) {
-                break;
-            }
-            self.next();
-        }
-        self.expect_token(Token::RParen, "')'")?;
-        self.expect_end()?;
-        Ok(CreateTableStatement { table_name, columns })
-    }
 
-    fn parse_drop_table(&mut self) -> Result<DropTableStatement, ParseError> {
-        self.expect_keyword("drop")?;
-        self.expect_keyword("table")?;
-        let table_name = self.expect_word()?;
-        self.expect_end()?;
-        Ok(DropTableStatement { table_name })
-    }
-
-    fn parse_update(&mut self) -> Result<UpdateStatement, ParseError> {
-        self.expect_keyword("update")?;
-        let table_name = self.expect_word()?;
-        self.expect_keyword("set")?;
-        let mut assignments = Vec::new();
-        loop {
-            let column = self.expect_word()?;
-            self.expect_token(Token::Eq, "'='")?;
-            let expr = self.parse_expr()?;
-            assignments.push(Assignment { column, expr });
-            if !matches!(self.peek(), Some(Token::Comma)) {
-                break;
-            }
-            self.next();
-        }
-        let where_clause = if self.matches_keyword("where") {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-        self.expect_end()?;
-        Ok(UpdateStatement {
-            table_name,
-            assignments,
-            where_clause,
-        })
-    }
-
-    fn parse_delete(&mut self) -> Result<DeleteStatement, ParseError> {
-        self.expect_keyword("delete")?;
-        self.expect_keyword("from")?;
-        let table_name = self.expect_word()?;
-        let where_clause = if self.matches_keyword("where") {
-            Some(self.parse_expr()?)
-        } else {
-            None
-        };
-        self.expect_end()?;
-        Ok(DeleteStatement {
-            table_name,
-            where_clause,
-        })
-    }
-
-    fn parse_select_list(&mut self) -> Result<Vec<SelectItem>, ParseError> {
-        if matches!(self.peek(), Some(Token::Star)) {
-            self.next();
-            return Ok(vec![SelectItem {
-                output_name: "*".into(),
-                expr: SqlExpr::Column("*".into()),
-            }]);
-        }
-
-        let mut items = Vec::new();
-        loop {
-            let expr = self.parse_expr()?;
-            let output_name = match &expr {
-                SqlExpr::Column(name) => name.clone(),
-                _ => format!("expr{}", items.len() + 1),
-            };
-            items.push(SelectItem { output_name, expr });
-            if !matches!(self.peek(), Some(Token::Comma)) {
-                break;
-            }
-            self.next();
-        }
-
-        if items.is_empty() {
-            return Err(ParseError::EmptySelectList);
-        }
-        Ok(items)
-    }
-
-    fn parse_identifier_list(&mut self) -> Result<Vec<String>, ParseError> {
-        let mut items = Vec::new();
-        loop {
-            items.push(self.expect_word()?);
-            if !matches!(self.peek(), Some(Token::Comma)) {
-                break;
-            }
-            self.next();
-        }
-        Ok(items)
-    }
-
-    fn parse_expr_list(&mut self) -> Result<Vec<SqlExpr>, ParseError> {
-        let mut items = Vec::new();
-        loop {
-            items.push(self.parse_expr()?);
-            if !matches!(self.peek(), Some(Token::Comma)) {
-                break;
-            }
-            self.next();
-        }
-        Ok(items)
-    }
-
-    fn parse_expr(&mut self) -> Result<SqlExpr, ParseError> {
-        self.parse_or()
-    }
-
-    fn parse_or(&mut self) -> Result<SqlExpr, ParseError> {
-        let mut expr = self.parse_and()?;
-        while self.matches_keyword("or") {
-            let right = self.parse_and()?;
-            expr = SqlExpr::Or(Box::new(expr), Box::new(right));
-        }
-        Ok(expr)
-    }
-
-    fn parse_and(&mut self) -> Result<SqlExpr, ParseError> {
-        let mut expr = self.parse_not()?;
-        while self.matches_keyword("and") {
-            let right = self.parse_not()?;
-            expr = SqlExpr::And(Box::new(expr), Box::new(right));
-        }
-        Ok(expr)
-    }
-
-    fn parse_not(&mut self) -> Result<SqlExpr, ParseError> {
-        if self.matches_keyword("not") {
-            return Ok(SqlExpr::Not(Box::new(self.parse_not()?)));
-        }
-        self.parse_cmp()
-    }
-
-    fn parse_cmp(&mut self) -> Result<SqlExpr, ParseError> {
-        let mut expr = self.parse_primary()?;
-
-        if self.matches_keyword("is") {
-            self.expect_keyword("null")?;
-            return Ok(SqlExpr::IsNull(Box::new(expr)));
-        }
-
-        if let Some(op) = self.match_comparison() {
-            let right = self.parse_primary()?;
-            expr = match op {
-                Token::Eq => SqlExpr::Eq(Box::new(expr), Box::new(right)),
-                Token::Lt => SqlExpr::Lt(Box::new(expr), Box::new(right)),
-                Token::Gt => SqlExpr::Gt(Box::new(expr), Box::new(right)),
-                _ => unreachable!(),
-            };
-        }
-
-        Ok(expr)
-    }
-
-    fn parse_primary(&mut self) -> Result<SqlExpr, ParseError> {
-        match self.next().ok_or(ParseError::UnexpectedEof)? {
-            Token::Word(word) => {
-                if word.eq_ignore_ascii_case("null") {
-                    Ok(SqlExpr::Const(Value::Null))
-                } else if word.eq_ignore_ascii_case("true") {
-                    Ok(SqlExpr::Const(Value::Bool(true)))
-                } else if word.eq_ignore_ascii_case("false") {
-                    Ok(SqlExpr::Const(Value::Bool(false)))
-                } else {
-                    Ok(SqlExpr::Column(word))
+            match next.as_rule() {
+                Rule::is_null_suffix => Ok(SqlExpr::IsNull(Box::new(left))),
+                Rule::comp_op => {
+                    let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+                    Ok(match next.as_str() {
+                        "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
+                        "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
+                        ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
+                        _ => unreachable!(),
+                    })
                 }
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "comparison",
+                    actual: next.as_str().into(),
+                }),
             }
-            Token::Integer(value) => value
-                .parse::<i32>()
-                .map(Value::Int32)
-                .map(SqlExpr::Const)
-                .map_err(|_| ParseError::InvalidInteger(value)),
-            Token::StringLiteral(value) => Ok(SqlExpr::Const(Value::Text(value))),
-            Token::LParen => {
-                let expr = self.parse_expr()?;
-                self.expect_token(Token::RParen, "')'")?;
-                Ok(expr)
-            }
-            other => Err(ParseError::UnexpectedToken {
-                expected: "expression",
-                actual: describe_token(&other),
-            }),
         }
-    }
-
-    fn match_comparison(&mut self) -> Option<Token> {
-        match self.peek() {
-            Some(Token::Eq) | Some(Token::Lt) | Some(Token::Gt) => self.next(),
-            _ => None,
-        }
-    }
-
-    fn matches_keyword(&mut self, expected: &str) -> bool {
-        match self.peek() {
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case(expected) => {
-                self.next();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn expect_keyword(&mut self, expected: &'static str) -> Result<(), ParseError> {
-        match self.next() {
-            Some(Token::Word(word)) if word.eq_ignore_ascii_case(expected) => Ok(()),
-            Some(token) => Err(ParseError::UnexpectedToken {
-                expected,
-                actual: describe_token(&token),
-            }),
-            None => Err(ParseError::UnexpectedEof),
-        }
-    }
-
-    fn expect_word(&mut self) -> Result<String, ParseError> {
-        match self.next() {
-            Some(Token::Word(word)) => Ok(word),
-            Some(token) => Err(ParseError::UnexpectedToken {
-                expected: "identifier",
-                actual: describe_token(&token),
-            }),
-            None => Err(ParseError::UnexpectedEof),
-        }
-    }
-
-    fn expect_token(
-        &mut self,
-        expected_token: Token,
-        expected: &'static str,
-    ) -> Result<(), ParseError> {
-        match self.next() {
-            Some(token) if token == expected_token => Ok(()),
-            Some(token) => Err(ParseError::UnexpectedToken {
-                expected,
-                actual: describe_token(&token),
-            }),
-            None => Err(ParseError::UnexpectedEof),
-        }
-    }
-
-    fn expect_end(&mut self) -> Result<(), ParseError> {
-        if self.peek().is_some() {
-            Err(ParseError::UnexpectedToken {
-                expected: "end of query",
-                actual: self.describe_current(),
-            })
-        } else {
-            Ok(())
-        }
-    }
-
-    fn describe_current(&self) -> String {
-        self.peek()
-            .map(|token| describe_token(&token))
-            .unwrap_or_else(|| "end of input".into())
-    }
-
-    fn peek(&self) -> Option<Token> {
-        self.tokens.get(self.pos).cloned()
-    }
-
-    fn next(&mut self) -> Option<Token> {
-        let token = self.tokens.get(self.pos).cloned();
-        if token.is_some() {
-            self.pos += 1;
-        }
-        token
-    }
-
-    fn parse_type_name(&mut self) -> Result<SqlType, ParseError> {
-        match self.expect_word()?.to_ascii_lowercase().as_str() {
-            "int4" | "int" | "integer" => Ok(SqlType::Int4),
-            "text" => Ok(SqlType::Text),
-            "bool" | "boolean" => Ok(SqlType::Bool),
-            other => Err(ParseError::UnsupportedType(other.to_string())),
-        }
+        Rule::primary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
+        Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
+        Rule::integer => pair
+            .as_str()
+            .parse::<i32>()
+            .map(|value| SqlExpr::Const(Value::Int32(value)))
+            .map_err(|_| ParseError::InvalidInteger(pair.as_str().into())),
+        Rule::string_literal => Ok(SqlExpr::Const(Value::Text(unescape_string(pair.as_str())))),
+        Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
+        Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
+        Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "expression",
+            actual: pair.as_str().into(),
+        }),
     }
 }
 
-fn describe_token(token: &Token) -> String {
-    match token {
-        Token::Word(word) => format!("identifier {:?}", word),
-        Token::Integer(value) => format!("integer {:?}", value),
-        Token::StringLiteral(value) => format!("string {:?}", value),
-        Token::Comma => ",".into(),
-        Token::LParen => "(".into(),
-        Token::RParen => ")".into(),
-        Token::Eq => "=".into(),
-        Token::Lt => "<".into(),
-        Token::Gt => ">".into(),
-        Token::Star => "*".into(),
+fn fold_infix(
+    first: SqlExpr,
+    mut tail: pest::iterators::Pairs<'_, Rule>,
+) -> Result<SqlExpr, ParseError> {
+    let mut expr = first;
+    while let Some(op) = tail.next() {
+        let rhs = build_expr(tail.next().ok_or(ParseError::UnexpectedEof)?)?;
+        expr = match op.as_rule() {
+            Rule::kw_or => SqlExpr::Or(Box::new(expr), Box::new(rhs)),
+            Rule::kw_and => SqlExpr::And(Box::new(expr), Box::new(rhs)),
+            _ => unreachable!(),
+        };
     }
+    Ok(expr)
+}
+
+fn unescape_string(raw: &str) -> String {
+    raw[1..raw.len() - 1].replace("''", "'")
 }
 
 #[cfg(test)]
@@ -944,6 +728,25 @@ mod tests {
             },
         );
         catalog
+    }
+
+    #[test]
+    fn pest_matches_basic_select_keyword() {
+        let mut pairs = SqlParser::parse(Rule::kw_select_atom, "select").unwrap();
+        assert_eq!(pairs.next().unwrap().as_str(), "select");
+    }
+
+    #[test]
+    fn pest_matches_minimal_select_statement() {
+        let mut pairs = SqlParser::parse(Rule::statement, "select id from people").unwrap();
+        let stmt = build_statement(pairs.next().unwrap()).unwrap();
+        match stmt {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.table_name, "people");
+                assert_eq!(stmt.targets.len(), 1);
+            }
+            other => panic!("expected select statement, got {other:?}"),
+        }
     }
 
     #[test]
