@@ -1,3 +1,5 @@
+pub mod smgr;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 // A "client" in this model is a deterministic stand-in for a PostgreSQL
