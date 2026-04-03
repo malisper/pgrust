@@ -1,5 +1,6 @@
 pub mod access;
 pub mod executor;
+pub mod parser;
 pub mod storage;
 pub use storage::smgr;
 

@@ -1,4 +1,4 @@
-use crate::access::heap::mvcc::{MvccError, Snapshot, TransactionId, TransactionManager};
+use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
 use crate::access::heap::tuple::{
     HeapTuple, ItemPointerData, TupleError, heap_page_add_tuple, heap_page_get_tuple,
     heap_page_init, heap_page_replace_tuple,
@@ -139,7 +139,7 @@ pub fn heap_insert(
     rel: RelFileLocator,
     tuple: &HeapTuple,
 ) -> Result<ItemPointerData, HeapError> {
-    heap_insert_version(pool, client_id, rel, tuple, 0)
+    heap_insert_version(pool, client_id, rel, tuple, 0, 0)
 }
 
 pub fn heap_insert_mvcc(
@@ -149,7 +149,18 @@ pub fn heap_insert_mvcc(
     xid: TransactionId,
     tuple: &HeapTuple,
 ) -> Result<ItemPointerData, HeapError> {
-    heap_insert_version(pool, client_id, rel, tuple, xid)
+    heap_insert_mvcc_with_cid(pool, client_id, rel, xid, 0, tuple)
+}
+
+pub fn heap_insert_mvcc_with_cid(
+    pool: &mut BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    xid: TransactionId,
+    cid: CommandId,
+    tuple: &HeapTuple,
+) -> Result<ItemPointerData, HeapError> {
+    heap_insert_version(pool, client_id, rel, tuple, xid, cid)
 }
 
 pub fn heap_fetch(
@@ -222,7 +233,20 @@ pub fn heap_update(
     tid: ItemPointerData,
     replacement: &HeapTuple,
 ) -> Result<ItemPointerData, HeapError> {
-    let snapshot = txns.snapshot(xid)?;
+    heap_update_with_cid(pool, client_id, rel, txns, xid, 0, tid, replacement)
+}
+
+pub fn heap_update_with_cid(
+    pool: &mut BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    txns: &TransactionManager,
+    xid: TransactionId,
+    cid: CommandId,
+    tid: ItemPointerData,
+    replacement: &HeapTuple,
+) -> Result<ItemPointerData, HeapError> {
+    let snapshot = txns.snapshot_for_command(xid, cid)?;
     let old = heap_fetch(pool, client_id, rel, tid)?;
     if !snapshot.tuple_visible(txns, &old) {
         return Err(HeapError::TupleNotVisible(tid));
@@ -231,7 +255,7 @@ pub fn heap_update(
         return Err(HeapError::TupleAlreadyModified(tid));
     }
 
-    let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid)?;
+    let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid, cid)?;
 
     let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let page = *pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
@@ -278,6 +302,7 @@ fn heap_insert_version(
     rel: RelFileLocator,
     tuple: &HeapTuple,
     xmin: TransactionId,
+    cid: CommandId,
 ) -> Result<ItemPointerData, HeapError> {
     ensure_relation_exists(pool, rel)?;
 
@@ -299,6 +324,7 @@ fn heap_insert_version(
         let mut stored = tuple.clone();
         stored.header.xmin = xmin;
         stored.header.xmax = 0;
+        stored.header.cid_or_xvac = cid;
 
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
