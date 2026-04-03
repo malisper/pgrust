@@ -1,9 +1,12 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ select_stmt | create_table_stmt | drop_table_stmt | insert_stmt | update_stmt | delete_stmt }
+stmt = _{ explain_stmt | select_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | insert_stmt | update_stmt | delete_stmt }
 
-select_stmt = { kw_select ~ select_list ~ kw_from ~ identifier ~ (kw_where ~ expr)? }
+explain_stmt = { kw_explain ~ ("(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
+explain_option = { kw_analyze | kw_buffers }
+select_stmt = { kw_select ~ select_list ~ kw_from ~ from_item ~ (kw_where ~ expr)? }
+show_tables_stmt = { kw_show ~ kw_tables }
 insert_stmt = { kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_values ~ values_row ~ ("," ~ values_row)* }
 create_table_stmt = { kw_create ~ kw_table ~ identifier ~ "(" ~ column_def ~ ("," ~ column_def)* ~ ")" }
 drop_table_stmt = { kw_drop ~ kw_table ~ identifier }
@@ -14,6 +17,10 @@ select_list = { star | expr ~ ("," ~ expr)* }
 values_row = { "(" ~ expr_list ~ ")" }
 expr_list = { expr ~ ("," ~ expr)* }
 ident_list = { identifier ~ ("," ~ identifier)* }
+from_item = { joined_from_item | cross_from_item | table_from_item }
+table_from_item = { identifier }
+cross_from_item = { identifier ~ "," ~ identifier }
+joined_from_item = { identifier ~ kw_join ~ identifier ~ kw_on ~ expr }
 
 column_def = { identifier ~ type_name ~ nullability? }
 nullability = { not_null | nullable }
@@ -40,7 +47,14 @@ string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
 star = { "*" }
 
 kw_select = _{ kw_select_atom }
+kw_show = _{ kw_show_atom }
+kw_tables = _{ kw_tables_atom }
+kw_explain = _{ kw_explain_atom }
+kw_analyze = { kw_analyze_atom }
+kw_buffers = { kw_buffers_atom }
 kw_from = _{ kw_from_atom }
+kw_join = _{ kw_join_atom }
+kw_on = _{ kw_on_atom }
 kw_where = _{ kw_where_atom }
 kw_insert = _{ kw_insert_atom }
 kw_into = _{ kw_into_atom }
@@ -67,7 +81,14 @@ kw_bool = { kw_bool_atom }
 kw_boolean = { kw_boolean_atom }
 
 kw_select_atom = @{ ^"select" ~ keyword_end }
+kw_show_atom = @{ ^"show" ~ keyword_end }
+kw_tables_atom = @{ ^"tables" ~ keyword_end }
+kw_explain_atom = @{ ^"explain" ~ keyword_end }
+kw_analyze_atom = @{ ^"analyze" ~ keyword_end }
+kw_buffers_atom = @{ ^"buffers" ~ keyword_end }
 kw_from_atom = @{ ^"from" ~ keyword_end }
+kw_join_atom = @{ ^"join" ~ keyword_end }
+kw_on_atom = @{ ^"on" ~ keyword_end }
 kw_where_atom = @{ ^"where" ~ keyword_end }
 kw_insert_atom = @{ ^"insert" ~ keyword_end }
 kw_into_atom = @{ ^"into" ~ keyword_end }
