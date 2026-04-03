@@ -103,14 +103,20 @@ fn values_to_string(desc: &[AttributeDesc], tuple: &HeapTuple) -> String {
     format!("id={} name={:?} status={:?}", id, name, status)
 }
 
-fn print_visible_rows(base_dir: &Path, desc: &[AttributeDesc], snapshot: Snapshot, label: &str) {
+fn print_visible_rows(
+    base_dir: &Path,
+    desc: &[AttributeDesc],
+    txns: &TransactionManager,
+    snapshot: Snapshot,
+    label: &str,
+) {
     let smgr = MdStorageManager::new(base_dir);
     let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
     let mut scan = heap_scan_begin_visible(&mut pool, rel(), snapshot).unwrap();
 
     println!("  visible rows for {}:", label);
     let mut saw_any = false;
-    while let Some((tid, tuple)) = heap_scan_next_visible(&mut pool, 99, &mut scan).unwrap() {
+    while let Some((tid, tuple)) = heap_scan_next_visible(&mut pool, 99, txns, &mut scan).unwrap() {
         saw_any = true;
         println!(
             "    ({},{}) {}",
@@ -260,6 +266,7 @@ fn main() {
     print_visible_rows(
         &base_dir,
         &desc,
+        &txns,
         txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         "outside snapshot before insert commit",
     );
@@ -273,6 +280,7 @@ fn main() {
     print_visible_rows(
         &base_dir,
         &desc,
+        &txns,
         txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         "outside snapshot after insert commit",
     );
@@ -303,6 +311,7 @@ fn main() {
     print_visible_rows(
         &base_dir,
         &desc,
+        &txns,
         txns.snapshot(concurrent_reader).unwrap(),
         "concurrent snapshot before update commit",
     );
@@ -320,6 +329,7 @@ fn main() {
     print_visible_rows(
         &base_dir,
         &desc,
+        &txns,
         txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         "outside snapshot after update commit",
     );
@@ -337,6 +347,7 @@ fn main() {
     print_visible_rows(
         &base_dir,
         &desc,
+        &txns,
         txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         "outside snapshot before delete commit",
     );
@@ -350,6 +361,7 @@ fn main() {
     print_visible_rows(
         &base_dir,
         &desc,
+        &txns,
         txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         "outside snapshot after delete commit",
     );

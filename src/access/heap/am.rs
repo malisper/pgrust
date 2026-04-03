@@ -122,10 +122,11 @@ pub fn heap_scan_begin_visible(
 pub fn heap_scan_next_visible(
     pool: &mut BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
+    txns: &TransactionManager,
     scan: &mut VisibleHeapScan,
 ) -> Result<Option<(ItemPointerData, HeapTuple)>, HeapError> {
     while let Some((tid, tuple)) = heap_scan_next(pool, client_id, &mut scan.scan)? {
-        if scan.snapshot.tuple_visible(&tuple) {
+        if scan.snapshot.tuple_visible(txns, &tuple) {
             return Ok(Some((tid, tuple)));
         }
     }
@@ -171,10 +172,11 @@ pub fn heap_fetch_visible(
     client_id: ClientId,
     rel: RelFileLocator,
     tid: ItemPointerData,
+    txns: &TransactionManager,
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
     let tuple = heap_fetch(pool, client_id, rel, tid)?;
-    if snapshot.tuple_visible(&tuple) {
+    if snapshot.tuple_visible(txns, &tuple) {
         Ok(Some(tuple))
     } else {
         Ok(None)
@@ -195,7 +197,7 @@ pub fn heap_delete(
     let mut new_page = page;
     let mut tuple = heap_page_get_tuple(&new_page, tid.offset_number)?;
 
-    if !snapshot.tuple_visible(&tuple) {
+    if !snapshot.tuple_visible(txns, &tuple) {
         pool.unpin(client_id, buffer_id)?;
         return Err(HeapError::TupleNotVisible(tid));
     }
@@ -222,7 +224,7 @@ pub fn heap_update(
 ) -> Result<ItemPointerData, HeapError> {
     let snapshot = txns.snapshot(xid)?;
     let old = heap_fetch(pool, client_id, rel, tid)?;
-    if !snapshot.tuple_visible(&old) {
+    if !snapshot.tuple_visible(txns, &old) {
         return Err(HeapError::TupleNotVisible(tid));
     }
     if old.header.xmax != 0 {
@@ -409,13 +411,16 @@ mod tests {
     fn visible_tuple_payloads(
         base: &std::path::Path,
         rel: RelFileLocator,
+        txns: &TransactionManager,
         snapshot: Snapshot,
     ) -> Vec<Vec<u8>> {
         let smgr = crate::storage::smgr::MdStorageManager::new(base);
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
         let mut scan = heap_scan_begin_visible(&mut pool, rel, snapshot).unwrap();
         let mut rows = Vec::new();
-        while let Some((_tid, tuple)) = heap_scan_next_visible(&mut pool, 1, &mut scan).unwrap() {
+        while let Some((_tid, tuple)) =
+            heap_scan_next_visible(&mut pool, 1, txns, &mut scan).unwrap()
+        {
             rows.push(tuple.data);
         }
         rows
@@ -554,13 +559,14 @@ mod tests {
 
         let other = txns.begin();
         let other_snapshot = txns.snapshot(other).unwrap();
-        let before_commit = heap_fetch_visible(&mut pool, 3, rel, tid, &other_snapshot).unwrap();
+        let before_commit =
+            heap_fetch_visible(&mut pool, 3, rel, tid, &txns, &other_snapshot).unwrap();
         assert!(before_commit.is_some());
 
         txns.commit(deleter).unwrap();
         let after_commit = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert!(
-            heap_fetch_visible(&mut pool, 4, rel, tid, &after_commit)
+            heap_fetch_visible(&mut pool, 4, rel, tid, &txns, &after_commit)
                 .unwrap()
                 .is_none()
         );
@@ -599,12 +605,13 @@ mod tests {
 
         let concurrent = txns.begin();
         let concurrent_snapshot = txns.snapshot(concurrent).unwrap();
-        let old_visible = heap_fetch_visible(&mut pool, 3, rel, old_tid, &concurrent_snapshot)
-            .unwrap()
-            .unwrap();
+        let old_visible =
+            heap_fetch_visible(&mut pool, 3, rel, old_tid, &txns, &concurrent_snapshot)
+                .unwrap()
+                .unwrap();
         assert_eq!(old_visible.data, b"old".to_vec());
         assert!(
-            heap_fetch_visible(&mut pool, 3, rel, new_tid, &concurrent_snapshot)
+            heap_fetch_visible(&mut pool, 3, rel, new_tid, &txns, &concurrent_snapshot)
                 .unwrap()
                 .is_none()
         );
@@ -612,13 +619,14 @@ mod tests {
         txns.commit(updater).unwrap();
         let committed_snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert!(
-            heap_fetch_visible(&mut pool, 4, rel, old_tid, &committed_snapshot)
+            heap_fetch_visible(&mut pool, 4, rel, old_tid, &txns, &committed_snapshot)
                 .unwrap()
                 .is_none()
         );
-        let new_visible = heap_fetch_visible(&mut pool, 4, rel, new_tid, &committed_snapshot)
-            .unwrap()
-            .unwrap();
+        let new_visible =
+            heap_fetch_visible(&mut pool, 4, rel, new_tid, &txns, &committed_snapshot)
+                .unwrap()
+                .unwrap();
         assert_eq!(new_visible.data, b"new".to_vec());
 
         let old_stored = heap_fetch(&mut pool, 5, rel, old_tid).unwrap();
@@ -661,7 +669,9 @@ mod tests {
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         let mut scan = heap_scan_begin_visible(&mut pool, rel, snapshot).unwrap();
         let mut rows = Vec::new();
-        while let Some((_tid, tuple)) = heap_scan_next_visible(&mut pool, 3, &mut scan).unwrap() {
+        while let Some((_tid, tuple)) =
+            heap_scan_next_visible(&mut pool, 3, &txns, &mut scan).unwrap()
+        {
             rows.push(tuple.data);
         }
 
@@ -690,7 +700,7 @@ mod tests {
 
         let committed_snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert_eq!(
-            visible_tuple_payloads(&base, rel, committed_snapshot.clone()),
+            visible_tuple_payloads(&base, rel, &txns, committed_snapshot.clone()),
             vec![b"old".to_vec()]
         );
 
@@ -718,6 +728,7 @@ mod tests {
             2,
             rel,
             original_tid,
+            &txns,
             &txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         )
         .unwrap();
@@ -730,7 +741,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            heap_scan_next_visible(&mut pool, 2, &mut writer_scan)
+            heap_scan_next_visible(&mut pool, 2, &txns, &mut writer_scan)
                 .unwrap()
                 .is_none()
         );
@@ -739,7 +750,12 @@ mod tests {
         // original committed tuple because the update and delete have not been
         // written out yet.
         assert_eq!(
-            visible_tuple_payloads(&base, rel, txns.snapshot(INVALID_TRANSACTION_ID).unwrap()),
+            visible_tuple_payloads(
+                &base,
+                rel,
+                &txns,
+                txns.snapshot(INVALID_TRANSACTION_ID).unwrap()
+            ),
             vec![b"old".to_vec()]
         );
 
@@ -747,7 +763,12 @@ mod tests {
         // state, so a fresh reader now sees the delete too.
         heap_flush(&mut pool, 1, rel, updated_tid.block_number).unwrap();
         assert_eq!(
-            visible_tuple_payloads(&base, rel, txns.snapshot(INVALID_TRANSACTION_ID).unwrap()),
+            visible_tuple_payloads(
+                &base,
+                rel,
+                &txns,
+                txns.snapshot(INVALID_TRANSACTION_ID).unwrap()
+            ),
             Vec::<Vec<u8>>::new()
         );
     }
@@ -781,7 +802,7 @@ mod tests {
 
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-        let visible = heap_fetch_visible(&mut pool, 2, rel, tid, &snapshot)
+        let visible = heap_fetch_visible(&mut pool, 2, rel, tid, &reopened_txns, &snapshot)
             .unwrap()
             .unwrap();
         assert_eq!(visible.data, b"row".to_vec());
@@ -797,7 +818,7 @@ mod tests {
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         assert!(
-            heap_fetch_visible(&mut pool, 3, rel, tid, &final_snapshot)
+            heap_fetch_visible(&mut pool, 3, rel, tid, &final_txns, &final_snapshot)
                 .unwrap()
                 .is_none()
         );
