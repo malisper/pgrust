@@ -1,4 +1,5 @@
-pub mod smgr;
+pub mod storage;
+pub use storage::smgr;
 
 // Re-export the canonical type definitions from smgr so callers can use
 // them from the crate root without knowing which module owns them.
@@ -200,7 +201,7 @@ impl StorageBackend for FakeStorage {
 // SmgrStorageBackend — real on-disk backend using MdStorageManager
 // ---------------------------------------------------------------------------
 
-use smgr::{MdStorageManager, SmgrError, StorageManager};
+use crate::storage::smgr::{MdStorageManager, SmgrError, StorageManager};
 
 /// Adapts `MdStorageManager` to the `StorageBackend` interface expected by
 /// `BufferPool`.

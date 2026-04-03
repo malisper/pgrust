@@ -11,7 +11,7 @@ use pgrust::{
     BufferPool, BufferTag, ForkNumber, FlushResult, RelFileLocator,
     RequestPageResult, SmgrStorageBackend, PAGE_SIZE,
 };
-use pgrust::smgr::{MdStorageManager, StorageManager};
+use pgrust::storage::smgr::{MdStorageManager, StorageManager};
 use std::fs;
 use std::path::PathBuf;
 
