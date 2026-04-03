@@ -1,6 +1,23 @@
 pub mod smgr;
 
+// Re-export the canonical type definitions from smgr so callers can use
+// them from the crate root without knowing which module owns them.
+pub use smgr::{ForkNumber, RelFileLocator, BLCKSZ};
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
+
+// ---------------------------------------------------------------------------
+// Page type
+// ---------------------------------------------------------------------------
+
+// A page is exactly one block: BLCKSZ bytes.
+// PAGE_SIZE is kept as an alias so existing code doesn't need updating.
+pub const PAGE_SIZE: usize = BLCKSZ;
+pub type Page = [u8; PAGE_SIZE];
+
+// ---------------------------------------------------------------------------
+// Buffer-manager identity types
+// ---------------------------------------------------------------------------
 
 // A "client" in this model is a deterministic stand-in for a PostgreSQL
 // backend/session. We use it only to track who holds pins.
@@ -8,32 +25,6 @@ pub type ClientId = u32;
 
 // Buffer IDs are stable frame indexes in the in-memory pool.
 pub type BufferId = usize;
-
-// PostgreSQL pages are normally BLCKSZ bytes. The default build value is 8192.
-// This model fixes that to 8KiB so the tests can reason in page units.
-pub const PAGE_SIZE: usize = 8192;
-pub type Page = [u8; PAGE_SIZE];
-
-// This mirrors PostgreSQL's RelFileLocator at the level we need for buffer
-// identity. We deliberately omit backend-local and temp-specific details in
-// this first-pass model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RelFileLocator {
-    pub spc_oid: u32,
-    pub db_oid: u32,
-    pub rel_number: u32,
-}
-
-// PostgreSQL relations can have multiple forks. Shared buffers are keyed by
-// relation + fork + block number, not just by relation/block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum ForkNumber {
-    Main,
-    Fsm,
-    VisibilityMap,
-    Init,
-    Other(u8),
-}
 
 // This is the logical page identity, equivalent to PostgreSQL's BufferTag.
 // In the real system this is used as the hash table key for the shared buffer
@@ -44,6 +35,10 @@ pub struct BufferTag {
     pub fork: ForkNumber,
     pub block: u32,
 }
+
+// ---------------------------------------------------------------------------
+// I/O state types
+// ---------------------------------------------------------------------------
 
 // The model only exposes two I/O kinds: page read and page write. PostgreSQL
 // has more nuance around AIO plumbing and writeback, but this is the minimal
@@ -120,15 +115,26 @@ pub enum Error {
     Storage(String),
 }
 
-// The storage manager boundary for this v1 rewrite.
+// ---------------------------------------------------------------------------
+// StorageBackend trait
+// ---------------------------------------------------------------------------
+
+// The storage manager boundary for the buffer pool.
 //
 // In PostgreSQL, bufmgr talks to smgr, and smgr dispatches to md.c for actual
-// filesystem I/O. Here we replace all of that with a small trait so the
-// buffer-manager behavior can be tested independently of the real filesystem.
+// filesystem I/O. Here we define a small trait so the buffer-manager behavior
+// can be tested with a fake backend and run for real with MdStorageManager.
+//
+// Both methods take `&mut self` because real storage backends (MdStorageManager)
+// need to lazily open file handles on reads, which requires mutable access.
 pub trait StorageBackend {
-    fn read_page(&self, tag: BufferTag) -> Result<Page, String>;
+    fn read_page(&mut self, tag: BufferTag) -> Result<Page, String>;
     fn write_page(&mut self, tag: BufferTag, page: &Page) -> Result<(), String>;
 }
+
+// ---------------------------------------------------------------------------
+// FakeStorage — deterministic in-memory backend for unit tests
+// ---------------------------------------------------------------------------
 
 // A deterministic in-memory fake for the storage layer.
 //
@@ -166,7 +172,7 @@ impl FakeStorage {
 }
 
 impl StorageBackend for FakeStorage {
-    fn read_page(&self, tag: BufferTag) -> Result<Page, String> {
+    fn read_page(&mut self, tag: BufferTag) -> Result<Page, String> {
         // This intentionally leaves read failures "sticky" for now. The tests
         // only need injected failures, not exact md.c retry semantics.
         if let Some(err) = self.fail_reads.get(&tag) {
@@ -189,6 +195,65 @@ impl StorageBackend for FakeStorage {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// SmgrStorageBackend — real on-disk backend using MdStorageManager
+// ---------------------------------------------------------------------------
+
+use smgr::{MdStorageManager, SmgrError, StorageManager};
+
+/// Adapts `MdStorageManager` to the `StorageBackend` interface expected by
+/// `BufferPool`.
+///
+/// This is the integration point: a `BufferPool<SmgrStorageBackend>` is a
+/// real shared-buffer pool backed by actual relation files on disk, matching
+/// the architecture of PostgreSQL's bufmgr → smgr → md.c stack.
+///
+/// ## Relation setup
+///
+/// The buffer pool does not create relation files — that is the responsibility
+/// of DDL operations (CREATE TABLE, etc.). Before requesting a page through
+/// the pool, the caller must have already called `smgr.create()` and written
+/// the initial blocks via `smgr.extend()`.
+pub struct SmgrStorageBackend {
+    pub smgr: MdStorageManager,
+}
+
+impl SmgrStorageBackend {
+    pub fn new(smgr: MdStorageManager) -> Self {
+        Self { smgr }
+    }
+}
+
+impl StorageBackend for SmgrStorageBackend {
+    /// Read a single page from disk into a `Page` buffer.
+    ///
+    /// Translates a `BufferTag` (rel + fork + block) into an `smgr.read_block`
+    /// call. Returns an error string if the block does not exist or an I/O
+    /// error occurs.
+    fn read_page(&mut self, tag: BufferTag) -> Result<Page, String> {
+        let mut buf = [0u8; PAGE_SIZE];
+        self.smgr
+            .read_block(tag.rel, tag.fork, tag.block, &mut buf)
+            .map_err(|e: SmgrError| e.to_string())?;
+        Ok(buf)
+    }
+
+    /// Write a single page to disk.
+    ///
+    /// Translates a `BufferTag` into an `smgr.write_block` call. The block
+    /// must already exist (i.e., the relation was previously extended to at
+    /// least `tag.block + 1` blocks).
+    fn write_page(&mut self, tag: BufferTag, page: &Page) -> Result<(), String> {
+        self.smgr
+            .write_block(tag.rel, tag.fork, tag.block, page, false)
+            .map_err(|e: SmgrError| e.to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BufferPool
+// ---------------------------------------------------------------------------
 
 // This is the model's equivalent of PostgreSQL's BufferDesc + page storage.
 // We store explicit fields instead of bit-packing flags, because the goal here
@@ -318,6 +383,13 @@ impl<S: StorageBackend> BufferPool<S> {
     // Inspect one frame's state.
     pub fn buffer_state(&self, buffer_id: BufferId) -> Option<BufferStateView> {
         self.frames.get(buffer_id).map(BufferFrame::state_view)
+    }
+
+    // Read a page directly from a buffer frame. Returns None if the frame
+    // is not valid (e.g., I/O has not completed yet).
+    pub fn read_page(&self, buffer_id: BufferId) -> Option<&Page> {
+        let frame = self.frames.get(buffer_id)?;
+        if frame.valid { Some(&frame.page) } else { None }
     }
 
     // Request a page on behalf of a client.
@@ -585,6 +657,10 @@ impl<S: StorageBackend> BufferPool<S> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,12 +687,10 @@ mod tests {
         [fill; PAGE_SIZE]
     }
 
+    // --- Existing buffer manager unit tests (use FakeStorage) ---
+
     #[test]
     fn miss_then_hit_after_successful_read() {
-        // This is the basic cache lifecycle:
-        // 1. first request misses and issues read I/O
-        // 2. read completes
-        // 3. later request hits the same frame
         let tag = tag(42, 0);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(7));
@@ -636,9 +710,6 @@ mod tests {
 
     #[test]
     fn concurrent_requests_share_one_canonical_buffer() {
-        // Two clients requesting the same page while the first read is still
-        // in progress should end up attached to the same frame, not two
-        // separate copies.
         let tag = tag(42, 1);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(9));
@@ -661,8 +732,6 @@ mod tests {
 
     #[test]
     fn flush_persists_data_and_clears_dirty() {
-        // A successful flush must persist data to storage and clear the dirty
-        // flag in the in-memory frame.
         let tag = tag(7, 0);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(1));
@@ -686,8 +755,6 @@ mod tests {
 
     #[test]
     fn write_failure_retains_dirty_state() {
-        // The key failure semantic we want is "dirty survives write failure".
-        // That gives callers a clear retry path.
         let tag = tag(8, 0);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(3));
@@ -717,8 +784,6 @@ mod tests {
 
     #[test]
     fn eviction_skips_pinned_buffers() {
-        // If one frame is still pinned, the eviction policy must recycle some
-        // other eligible frame instead.
         let mut storage = FakeStorage::default();
         let a = tag(1, 0);
         let b = tag(2, 0);
@@ -752,8 +817,6 @@ mod tests {
 
     #[test]
     fn invalidate_relation_rejects_pinned_buffers_and_then_removes_pages() {
-        // Relation invalidation is deliberately conservative: fail if any page
-        // of the relation is pinned, then succeed once all pins are released.
         let mut storage = FakeStorage::default();
         let a = tag(11, 0);
         let b = tag(11, 1);
@@ -780,5 +843,208 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(pool.buffer_state(0).unwrap().tag, None);
         assert_eq!(pool.buffer_state(1).unwrap().tag, None);
+    }
+
+    // --- Integration tests: BufferPool backed by real on-disk storage ---
+
+    use smgr::{MdStorageManager, StorageManager};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("pgrust_bufmgr_integ_{}", label));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn smgr_rel(n: u32) -> RelFileLocator {
+        RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: n }
+    }
+
+    fn smgr_tag(rel_number: u32, block: u32) -> BufferTag {
+        BufferTag {
+            rel: smgr_rel(rel_number),
+            fork: ForkNumber::Main,
+            block,
+        }
+    }
+
+    /// Helper: create a relation with `nblocks` pre-written pages via smgr,
+    /// then return a BufferPool backed by that smgr.
+    fn pool_with_relation(
+        base: &PathBuf,
+        rel_number: u32,
+        nblocks: u32,
+        capacity: usize,
+    ) -> BufferPool<SmgrStorageBackend> {
+        let mut smgr = MdStorageManager::new(base);
+        let rel = smgr_rel(rel_number);
+        smgr.open(rel).unwrap();
+        smgr.create(rel, ForkNumber::Main, false).unwrap();
+        for i in 0..nblocks {
+            // Each block is filled with a recognizable byte: (rel_number + i) % 200
+            let fill = ((rel_number + i) % 200) as u8;
+            smgr.extend(rel, ForkNumber::Main, i, &[fill; PAGE_SIZE], true).unwrap();
+        }
+        smgr.immedsync(rel, ForkNumber::Main).unwrap();
+        BufferPool::new(SmgrStorageBackend::new(smgr), capacity)
+    }
+
+    /// Pages written to disk before the pool was created are read correctly.
+    #[test]
+    fn integ_cache_miss_reads_from_disk() {
+        let base = temp_dir("miss_reads_disk");
+        let mut pool = pool_with_relation(&base, 1, 3, 8);
+        let t = smgr_tag(1, 0);
+        let fill = (1u32 % 200) as u8; // fill byte for block 0
+
+        assert_eq!(pool.request_page(1, t), RequestPageResult::ReadIssued { buffer_id: 0 });
+        pool.complete_read(0).unwrap();
+
+        let page_data = pool.read_page(0).unwrap();
+        assert!(page_data.iter().all(|&b| b == fill),
+            "page read from disk should have fill byte {fill:#x}");
+    }
+
+    /// Second request for the same page hits the cache, not disk.
+    #[test]
+    fn integ_second_request_is_cache_hit() {
+        let base = temp_dir("cache_hit");
+        let mut pool = pool_with_relation(&base, 2, 1, 8);
+        let t = smgr_tag(2, 0);
+
+        assert_eq!(pool.request_page(1, t), RequestPageResult::ReadIssued { buffer_id: 0 });
+        pool.complete_read(0).unwrap();
+        pool.unpin(1, 0).unwrap();
+
+        assert_eq!(pool.request_page(2, t), RequestPageResult::Hit { buffer_id: 0 });
+    }
+
+    /// A dirty page flushed via complete_write lands on disk and is readable
+    /// by a fresh storage manager after the pool is dropped.
+    #[test]
+    fn integ_dirty_page_flushed_to_disk() {
+        let base = temp_dir("flush_to_disk");
+        {
+            let mut pool = pool_with_relation(&base, 3, 1, 8);
+            let t = smgr_tag(3, 0);
+
+            pool.request_page(1, t);
+            pool.complete_read(0).unwrap();
+
+            // Overwrite byte 0 with 0xFF.
+            pool.write_byte(0, 0, 0xFF).unwrap();
+            assert_eq!(pool.flush_buffer(0).unwrap(), FlushResult::WriteIssued);
+            pool.complete_write(0).unwrap();
+            assert!(!pool.buffer_state(0).unwrap().dirty);
+        } // pool and smgr dropped here
+
+        // Read the file directly with a fresh smgr to verify the write landed.
+        let mut smgr2 = MdStorageManager::new(&base);
+        let mut buf = [0u8; PAGE_SIZE];
+        smgr2.read_block(smgr_rel(3), ForkNumber::Main, 0, &mut buf).unwrap();
+        assert_eq!(buf[0], 0xFF, "flushed byte should be on disk");
+        // Bytes 1..PAGE_SIZE should still be the original fill value.
+        let fill = (3u32 % 200) as u8;
+        assert!(buf[1..].iter().all(|&b| b == fill));
+    }
+
+    /// When the pool is full and all buffers are pinned, requesting a new page
+    /// returns AllBuffersPinned rather than silently evicting a pinned frame.
+    #[test]
+    fn integ_all_buffers_pinned_returns_error() {
+        let base = temp_dir("all_pinned");
+        let mut pool = pool_with_relation(&base, 4, 3, 2); // only 2 frames
+
+        // Fill both frames and leave them pinned.
+        for block in 0..2u32 {
+            let t = smgr_tag(4, block);
+            assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
+            pool.complete_read(block as usize).unwrap();
+            // Do NOT unpin.
+        }
+
+        // A third page can't be loaded — no frame available.
+        let t = smgr_tag(4, 2);
+        assert_eq!(pool.request_page(1, t), RequestPageResult::AllBuffersPinned);
+    }
+
+    /// Eviction flushes a dirty buffer to disk before reusing the frame.
+    /// After eviction, reading the old tag from disk returns the written data.
+    #[test]
+    fn integ_eviction_flushes_dirty_frame() {
+        let base = temp_dir("evict_flush");
+        // 1-frame pool forces eviction after first page.
+        let mut pool = pool_with_relation(&base, 5, 2, 1);
+
+        let t0 = smgr_tag(5, 0);
+        let t1 = smgr_tag(5, 1);
+
+        // Load block 0, modify it, flush it.
+        assert_eq!(pool.request_page(1, t0), RequestPageResult::ReadIssued { buffer_id: 0 });
+        pool.complete_read(0).unwrap();
+        pool.write_byte(0, 0, 0xAB).unwrap();
+        pool.flush_buffer(0).unwrap();
+        pool.complete_write(0).unwrap();
+        pool.unpin(1, 0).unwrap();
+
+        // Load block 1 — forces eviction of block 0's frame.
+        assert_eq!(pool.request_page(1, t1), RequestPageResult::ReadIssued { buffer_id: 0 });
+        pool.complete_read(0).unwrap();
+
+        // Verify block 0 made it to disk.
+        let mut smgr2 = MdStorageManager::new(&base);
+        let mut buf = [0u8; PAGE_SIZE];
+        smgr2.read_block(smgr_rel(5), ForkNumber::Main, 0, &mut buf).unwrap();
+        assert_eq!(buf[0], 0xAB, "evicted dirty page should have been flushed to disk");
+    }
+
+    /// Multiple blocks of the same relation are each read from their correct
+    /// on-disk location — no page aliasing between different blocks.
+    #[test]
+    fn integ_multiple_blocks_no_aliasing() {
+        let base = temp_dir("no_aliasing");
+        let nblocks = 5u32;
+        let mut pool = pool_with_relation(&base, 6, nblocks, 8);
+
+        // Load all blocks.
+        for block in 0..nblocks {
+            let t = smgr_tag(6, block);
+            assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
+            pool.complete_read(block as usize).unwrap();
+        }
+
+        // Each block should have its own fill byte.
+        for block in 0..nblocks {
+            let expected_fill = ((6 + block) % 200) as u8;
+            let page_data = pool.read_page(block as usize).unwrap();
+            assert!(page_data.iter().all(|&b| b == expected_fill),
+                "block {block} has wrong fill byte (expected {expected_fill:#x})");
+        }
+    }
+
+    /// Invalidating a relation after flushing it removes all its frames from
+    /// the pool. Subsequent requests issue fresh reads from disk.
+    #[test]
+    fn integ_invalidate_then_reread() {
+        let base = temp_dir("invalidate_reread");
+        let mut pool = pool_with_relation(&base, 7, 2, 8);
+        let rel = smgr_rel(7);
+
+        // Load and unpin both blocks.
+        for block in 0..2u32 {
+            let t = smgr_tag(7, block);
+            assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
+            pool.complete_read(block as usize).unwrap();
+            pool.unpin(1, block as usize).unwrap();
+        }
+
+        // Invalidate the relation.
+        assert_eq!(pool.invalidate_relation(rel).unwrap(), 2);
+
+        // Re-requesting block 0 should be a miss (new ReadIssued), not a hit.
+        let t = smgr_tag(7, 0);
+        assert!(matches!(pool.request_page(1, t), RequestPageResult::ReadIssued { .. }));
     }
 }
