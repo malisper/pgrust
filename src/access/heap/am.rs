@@ -406,6 +406,21 @@ mod tests {
         }
     }
 
+    fn visible_tuple_payloads(
+        base: &std::path::Path,
+        rel: RelFileLocator,
+        snapshot: Snapshot,
+    ) -> Vec<Vec<u8>> {
+        let smgr = crate::storage::smgr::MdStorageManager::new(base);
+        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+        let mut scan = heap_scan_begin_visible(&mut pool, rel, snapshot).unwrap();
+        let mut rows = Vec::new();
+        while let Some((_tid, tuple)) = heap_scan_next_visible(&mut pool, 1, &mut scan).unwrap() {
+            rows.push(tuple.data);
+        }
+        rows
+    }
+
     #[test]
     fn heap_insert_and_fetch_roundtrip() {
         let base = temp_dir("insert_fetch_roundtrip");
@@ -651,5 +666,140 @@ mod tests {
         }
 
         assert_eq!(rows, vec![b"second".to_vec()]);
+    }
+
+    #[test]
+    fn mvcc_changes_can_live_in_buffer_cache_until_late_flush() {
+        let base = temp_dir("mvcc_buffer_cache");
+        let rel = rel(5008);
+        let smgr = crate::storage::smgr::MdStorageManager::new(&base);
+        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let mut txns = TransactionManager::default();
+
+        let insert_xid = txns.begin();
+        let original_tid = heap_insert_mvcc(
+            &mut pool,
+            1,
+            rel,
+            insert_xid,
+            &HeapTuple::new_raw(1, b"old".to_vec()),
+        )
+        .unwrap();
+        txns.commit(insert_xid).unwrap();
+        heap_flush(&mut pool, 1, rel, original_tid.block_number).unwrap();
+
+        let committed_snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+        assert_eq!(
+            visible_tuple_payloads(&base, rel, committed_snapshot.clone()),
+            vec![b"old".to_vec()]
+        );
+
+        let update_xid = txns.begin();
+        let updated_tid = heap_update(
+            &mut pool,
+            1,
+            rel,
+            &txns,
+            update_xid,
+            original_tid,
+            &HeapTuple::new_raw(1, b"new".to_vec()),
+        )
+        .unwrap();
+        txns.commit(update_xid).unwrap();
+
+        let delete_xid = txns.begin();
+        heap_delete(&mut pool, 1, rel, &txns, delete_xid, updated_tid).unwrap();
+        txns.commit(delete_xid).unwrap();
+
+        // The writer's pool sees both committed changes immediately because it is
+        // reading the dirty page out of shared buffers, not reloading from disk.
+        let writer_view = heap_fetch_visible(
+            &mut pool,
+            2,
+            rel,
+            original_tid,
+            &txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        )
+        .unwrap();
+        assert!(writer_view.is_none());
+
+        let mut writer_scan = heap_scan_begin_visible(
+            &mut pool,
+            rel,
+            txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            heap_scan_next_visible(&mut pool, 2, &mut writer_scan)
+                .unwrap()
+                .is_none()
+        );
+
+        // A fresh pool still reads the last flushed disk image, which only has the
+        // original committed tuple because the update and delete have not been
+        // written out yet.
+        assert_eq!(
+            visible_tuple_payloads(&base, rel, txns.snapshot(INVALID_TRANSACTION_ID).unwrap()),
+            vec![b"old".to_vec()]
+        );
+
+        // Flushing the touched block makes disk catch up with the buffered MVCC
+        // state, so a fresh reader now sees the delete too.
+        heap_flush(&mut pool, 1, rel, updated_tid.block_number).unwrap();
+        assert_eq!(
+            visible_tuple_payloads(&base, rel, txns.snapshot(INVALID_TRANSACTION_ID).unwrap()),
+            Vec::<Vec<u8>>::new()
+        );
+    }
+
+    #[test]
+    fn durable_transaction_status_survives_restart_for_visibility() {
+        let base = temp_dir("durable_mvcc_visibility");
+        let rel = rel(5009);
+
+        let tid = {
+            let smgr = crate::storage::smgr::MdStorageManager::new(&base);
+            let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+            let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+            let xid = txns.begin();
+            let tid = heap_insert_mvcc(
+                &mut pool,
+                1,
+                rel,
+                xid,
+                &HeapTuple::new_raw(1, b"row".to_vec()),
+            )
+            .unwrap();
+            txns.commit(xid).unwrap();
+            heap_flush(&mut pool, 1, rel, tid.block_number).unwrap();
+            tid
+        };
+
+        let mut reopened_txns = TransactionManager::new_durable(&base).unwrap();
+        let snapshot = reopened_txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+
+        let smgr = crate::storage::smgr::MdStorageManager::new(&base);
+        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let visible = heap_fetch_visible(&mut pool, 2, rel, tid, &snapshot)
+            .unwrap()
+            .unwrap();
+        assert_eq!(visible.data, b"row".to_vec());
+
+        let deleting_xid = reopened_txns.begin();
+        heap_delete(&mut pool, 2, rel, &reopened_txns, deleting_xid, tid).unwrap();
+        reopened_txns.commit(deleting_xid).unwrap();
+        heap_flush(&mut pool, 2, rel, tid.block_number).unwrap();
+        drop(pool);
+
+        let final_txns = TransactionManager::new_durable(&base).unwrap();
+        let final_snapshot = final_txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+        let smgr = crate::storage::smgr::MdStorageManager::new(&base);
+        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        assert!(
+            heap_fetch_visible(&mut pool, 3, rel, tid, &final_snapshot)
+                .unwrap()
+                .is_none()
+        );
     }
 }

@@ -31,7 +31,14 @@ What is still intentionally missing from MVCC:
 - no rollback undo of physical tuple changes after abort
 - no vacuum or pruning to reclaim dead tuple space
 - no HOT updates or redirect/dead line-pointer states
-- no transaction status storage on disk
+- transaction status is now persisted to a small local status file, but it is
+  still much simpler than PostgreSQL's real `pg_xact` / CLOG machinery
+- each `begin`, `commit`, and `abort` currently rewrites the whole durable
+  status file instead of updating a compact paged/segmented status store
+- snapshots are still built by materializing `committed` and `in_progress`
+  sets in memory at snapshot creation time
+- there is still no crash-recovery pass that resolves leftover in-progress
+  transactions after restart
 - no WAL/recovery integration for version transitions
 - a very small in-memory transaction manager and snapshot model
 

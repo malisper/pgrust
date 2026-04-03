@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::access::heap::tuple::HeapTuple;
 
 pub type TransactionId = u32;
 pub const INVALID_TRANSACTION_ID: TransactionId = 0;
+const TXN_STATUS_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionStatus {
@@ -16,6 +19,8 @@ pub enum TransactionStatus {
 pub enum MvccError {
     UnknownTransactionId(TransactionId),
     TransactionNotInProgress(TransactionId),
+    Io(String),
+    CorruptStatusFile(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,13 +34,40 @@ pub struct Snapshot {
 pub struct TransactionManager {
     next_xid: TransactionId,
     statuses: BTreeMap<TransactionId, TransactionStatus>,
+    status_path: Option<PathBuf>,
 }
 
 impl TransactionManager {
+    pub fn new_durable(base_dir: impl Into<PathBuf>) -> Result<Self, MvccError> {
+        let path = Self::status_path(base_dir.into());
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| MvccError::Io(e.to_string()))?;
+        }
+
+        if path.exists() {
+            let (next_xid, statuses) = load_status_file(&path)?;
+            Ok(Self {
+                next_xid,
+                statuses,
+                status_path: Some(path),
+            })
+        } else {
+            let manager = Self {
+                next_xid: INVALID_TRANSACTION_ID,
+                statuses: BTreeMap::new(),
+                status_path: Some(path),
+            };
+            manager.persist()?;
+            Ok(manager)
+        }
+    }
+
     pub fn begin(&mut self) -> TransactionId {
         self.next_xid += 1;
         let xid = self.next_xid;
         self.statuses.insert(xid, TransactionStatus::InProgress);
+        self.persist()
+            .expect("persisting transaction status must succeed");
         xid
     }
 
@@ -43,6 +75,7 @@ impl TransactionManager {
         match self.statuses.get_mut(&xid) {
             Some(status @ TransactionStatus::InProgress) => {
                 *status = TransactionStatus::Committed;
+                self.persist()?;
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -54,6 +87,7 @@ impl TransactionManager {
         match self.statuses.get_mut(&xid) {
             Some(status @ TransactionStatus::InProgress) => {
                 *status = TransactionStatus::Aborted;
+                self.persist()?;
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -91,6 +125,31 @@ impl TransactionManager {
             committed,
             in_progress,
         })
+    }
+
+    fn status_path(base_dir: PathBuf) -> PathBuf {
+        base_dir.join("pg_xact").join("status")
+    }
+
+    fn persist(&self) -> Result<(), MvccError> {
+        let Some(path) = &self.status_path else {
+            return Ok(());
+        };
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&TXN_STATUS_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&self.next_xid.to_le_bytes());
+        bytes.extend_from_slice(&(self.statuses.len() as u32).to_le_bytes());
+        for (&xid, &status) in &self.statuses {
+            bytes.extend_from_slice(&xid.to_le_bytes());
+            bytes.push(match status {
+                TransactionStatus::InProgress => 0,
+                TransactionStatus::Committed => 1,
+                TransactionStatus::Aborted => 2,
+            });
+        }
+
+        fs::write(path, bytes).map_err(|e| MvccError::Io(e.to_string()))
     }
 }
 
@@ -132,10 +191,69 @@ impl Snapshot {
     }
 }
 
+fn load_status_file(
+    path: &Path,
+) -> Result<(TransactionId, BTreeMap<TransactionId, TransactionStatus>), MvccError> {
+    let bytes = fs::read(path).map_err(|e| MvccError::Io(e.to_string()))?;
+    if bytes.len() < 12 {
+        return Err(MvccError::CorruptStatusFile("header too short"));
+    }
+
+    let version = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    if version != TXN_STATUS_FORMAT_VERSION {
+        return Err(MvccError::CorruptStatusFile("unknown format version"));
+    }
+
+    let next_xid = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let expected_len = 12 + count * 5;
+    if bytes.len() != expected_len {
+        return Err(MvccError::CorruptStatusFile(
+            "entry count does not match file length",
+        ));
+    }
+
+    let mut statuses = BTreeMap::new();
+    let mut offset = 12;
+    for _ in 0..count {
+        let xid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let status = match bytes[offset + 4] {
+            0 => TransactionStatus::InProgress,
+            1 => TransactionStatus::Committed,
+            2 => TransactionStatus::Aborted,
+            _ => {
+                return Err(MvccError::CorruptStatusFile(
+                    "invalid transaction status byte",
+                ));
+            }
+        };
+        statuses.insert(xid, status);
+        offset += 5;
+    }
+
+    Ok((next_xid, statuses))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::access::heap::tuple::HeapTuple;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "pgrust_mvcc_{}_{}_{}",
+            label,
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
 
     #[test]
     fn snapshot_hides_in_progress_inserts_from_other_transactions() {
@@ -165,5 +283,33 @@ mod tests {
 
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert!(!snapshot.tuple_visible(&tuple));
+    }
+
+    #[test]
+    fn durable_status_survives_reopen() {
+        let base = temp_dir("durable_reopen");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let committed = txns.begin();
+        txns.commit(committed).unwrap();
+        let aborted = txns.begin();
+        txns.abort(aborted).unwrap();
+        let in_progress = txns.begin();
+        drop(txns);
+
+        let reopened = TransactionManager::new_durable(&base).unwrap();
+        assert_eq!(
+            reopened.status(committed),
+            Some(TransactionStatus::Committed)
+        );
+        assert_eq!(reopened.status(aborted), Some(TransactionStatus::Aborted));
+        assert_eq!(
+            reopened.status(in_progress),
+            Some(TransactionStatus::InProgress)
+        );
+
+        let snapshot = reopened.snapshot(INVALID_TRANSACTION_ID).unwrap();
+        assert!(snapshot.transaction_visible(committed));
+        assert!(!snapshot.transaction_visible(aborted));
+        assert!(snapshot.transaction_in_progress(in_progress));
     }
 }
