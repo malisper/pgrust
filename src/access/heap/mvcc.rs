@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::access::heap::tuple::HeapTuple;
 
 pub type TransactionId = u32;
+pub type CommandId = u32;
 pub const INVALID_TRANSACTION_ID: TransactionId = 0;
 const TXN_STATUS_FORMAT_VERSION: u32 = 1;
 
@@ -26,6 +27,7 @@ pub enum MvccError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub current_xid: TransactionId,
+    pub current_cid: CommandId,
     pub xmin: TransactionId,
     pub xmax: TransactionId,
     in_progress: BTreeSet<TransactionId>,
@@ -101,6 +103,14 @@ impl TransactionManager {
     }
 
     pub fn snapshot(&self, current_xid: TransactionId) -> Result<Snapshot, MvccError> {
+        self.snapshot_for_command(current_xid, CommandId::MAX)
+    }
+
+    pub fn snapshot_for_command(
+        &self,
+        current_xid: TransactionId,
+        current_cid: CommandId,
+    ) -> Result<Snapshot, MvccError> {
         if current_xid != INVALID_TRANSACTION_ID && !self.statuses.contains_key(&current_xid) {
             return Err(MvccError::UnknownTransactionId(current_xid));
         }
@@ -128,6 +138,7 @@ impl TransactionManager {
 
         Ok(Snapshot {
             current_xid,
+            current_cid,
             xmin,
             xmax,
             in_progress,
@@ -164,6 +175,7 @@ impl Snapshot {
     pub fn bootstrap() -> Self {
         Self {
             current_xid: INVALID_TRANSACTION_ID,
+            current_cid: CommandId::MAX,
             xmin: 1,
             xmax: 1,
             in_progress: BTreeSet::new(),
@@ -184,7 +196,7 @@ impl Snapshot {
             return true;
         }
         if xmin == self.current_xid {
-            return true;
+            return tuple.header.cid_or_xvac < self.current_cid;
         }
         if xmin >= self.xmax {
             return false;

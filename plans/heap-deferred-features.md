@@ -125,6 +125,46 @@ The current heap layer still does not implement:
 - multi-page scan/access APIs
 - WAL/recovery semantics for heap/MVCC are still incomplete
 
+## SQL / Executor Front Door Is Still Very Small
+
+The project now has a minimal parser, executor, and REPL, but that SQL layer
+is still intentionally tiny compared to PostgreSQL.
+
+What is implemented today:
+
+- single-table `SELECT`
+- `INSERT`, `UPDATE`, and `DELETE`
+- simple `WHERE` expressions
+- `SELECT *` expansion for a single table
+- a demo REPL with one hard-coded relation schema
+
+What is still intentionally missing:
+
+- no `CREATE TABLE`, `ALTER TABLE`, or `DROP TABLE`
+- no real catalog storage or schema persistence
+- no parser/planner support for joins
+- no `ORDER BY`
+- no `LIMIT` / `OFFSET`
+- no aggregates
+- no grouping / `GROUP BY` / `HAVING`
+- no subqueries
+- no `INSERT ... SELECT`
+- no multi-row `INSERT ... VALUES (...), (...)`
+- no `RETURNING`
+- no aliases
+- no qualified names like `table.col`
+- no `table.*`
+- no mixed target expansion like `SELECT *, id`
+- no planner cost model or plan selection
+- no DML plan nodes yet; write statements are still executed through direct
+  statement dispatch instead of a PostgreSQL-like planned modify-table path
+- no tuple-slot / junk-column machinery for a more PostgreSQL-like modify
+  executor
+- no statement-level locking or concurrency behavior beyond the current heap
+  MVCC model
+- the REPL is only a convenience binary with one seeded `people` table; it is
+  not a general SQL shell
+
 ## Recommendation
 
 Do not treat the current page-selection logic as the long-term design.
