@@ -2,7 +2,7 @@ pub use crate::catalog::{Catalog, CatalogEntry};
 
 use crate::RelFileLocator;
 use crate::catalog::column_desc;
-use crate::executor::{Expr, Plan, RelationDesc, TargetEntry, Value};
+use crate::executor::{ColumnDesc, Expr, Plan, RelationDesc, TargetEntry, Value};
 use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
@@ -34,7 +34,9 @@ pub enum ParseError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
+    Explain(ExplainStatement),
     Select(SelectStatement),
+    ShowTables,
     CreateTable(CreateTableStatement),
     DropTable(DropTableStatement),
     Insert(InsertStatement),
@@ -43,10 +45,31 @@ pub enum Statement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainStatement {
+    pub analyze: bool,
+    pub buffers: bool,
+    pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectStatement {
-    pub table_name: String,
+    pub from: FromItem,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FromItem {
+    Table(String),
+    InnerJoin {
+        left_table: String,
+        right_table: String,
+        on: SqlExpr,
+    },
+    CrossJoin {
+        left_table: String,
+        right_table: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +142,18 @@ pub enum SqlExpr {
     IsNull(Box<SqlExpr>),
 }
 
+#[derive(Debug, Clone)]
+struct BoundScope {
+    desc: RelationDesc,
+    columns: Vec<ScopeColumn>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopeColumn {
+    output_name: String,
+    qualified_name: String,
+}
+
 pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
     let stmt = parse_statement(sql)?;
     match stmt {
@@ -177,19 +212,12 @@ pub fn bind_create_table(
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
-    let entry = catalog
-        .get(&stmt.table_name)
-        .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
-
-    let base = Plan::SeqScan {
-        rel: entry.rel,
-        desc: entry.desc.clone(),
-    };
+    let (base, scope) = bind_from_item(&stmt.from, catalog)?;
 
     let plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
             input: Box::new(base),
-            predicate: bind_expr(predicate, &entry.desc)?,
+            predicate: bind_expr(predicate, &scope)?,
         }
     } else {
         base
@@ -197,21 +225,21 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
 
     Ok(Plan::Projection {
         input: Box::new(plan),
-        targets: bind_select_targets(&stmt.targets, &entry.desc)?,
+        targets: bind_select_targets(&stmt.targets, &scope)?,
     })
 }
 
 fn bind_select_targets(
     targets: &[SelectItem],
-    desc: &RelationDesc,
+    scope: &BoundScope,
 ) -> Result<Vec<TargetEntry>, ParseError> {
     if targets.len() == 1 && matches!(targets[0].expr, SqlExpr::Column(ref name) if name == "*") {
-        return Ok(desc
+        return Ok(scope
             .columns
             .iter()
             .enumerate()
             .map(|(index, column)| TargetEntry {
-                name: column.name.clone(),
+                name: column.output_name.clone(),
                 expr: Expr::Column(index),
             })
             .collect());
@@ -222,38 +250,38 @@ fn bind_select_targets(
         .map(|item| {
             Ok(TargetEntry {
                 name: item.output_name.clone(),
-                expr: bind_expr(&item.expr, desc)?,
+                expr: bind_expr(&item.expr, scope)?,
             })
         })
         .collect()
 }
 
-fn bind_expr(expr: &SqlExpr, desc: &RelationDesc) -> Result<Expr, ParseError> {
+fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
     Ok(match expr {
-        SqlExpr::Column(name) => Expr::Column(resolve_column(desc, name)?),
+        SqlExpr::Column(name) => Expr::Column(resolve_column(scope, name)?),
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::Eq(left, right) => Expr::Eq(
-            Box::new(bind_expr(left, desc)?),
-            Box::new(bind_expr(right, desc)?),
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
         ),
         SqlExpr::Lt(left, right) => Expr::Lt(
-            Box::new(bind_expr(left, desc)?),
-            Box::new(bind_expr(right, desc)?),
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
         ),
         SqlExpr::Gt(left, right) => Expr::Gt(
-            Box::new(bind_expr(left, desc)?),
-            Box::new(bind_expr(right, desc)?),
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
         ),
         SqlExpr::And(left, right) => Expr::And(
-            Box::new(bind_expr(left, desc)?),
-            Box::new(bind_expr(right, desc)?),
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
         ),
         SqlExpr::Or(left, right) => Expr::Or(
-            Box::new(bind_expr(left, desc)?),
-            Box::new(bind_expr(right, desc)?),
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
         ),
-        SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr(inner, desc)?)),
-        SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr(inner, desc)?)),
+        SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr(inner, scope)?)),
+        SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr(inner, scope)?)),
     })
 }
 
@@ -293,11 +321,12 @@ pub fn bind_insert(
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+    let scope = scope_for_relation(&stmt.table_name, &entry.desc, false);
 
     let target_indexes = if let Some(columns) = &stmt.columns {
         columns
             .iter()
-            .map(|column| resolve_column(&entry.desc, column))
+            .map(|column| resolve_column(&scope, column))
             .collect::<Result<Vec<_>, _>>()?
     } else {
         (0..entry.desc.columns.len()).collect()
@@ -321,7 +350,7 @@ pub fn bind_insert(
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|expr| bind_expr(expr, &entry.desc))
+                    .map(|expr| bind_expr(expr, &scope))
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -335,6 +364,7 @@ pub fn bind_update(
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+    let scope = scope_for_relation(&stmt.table_name, &entry.desc, false);
 
     Ok(BoundUpdateStatement {
         rel: entry.rel,
@@ -344,15 +374,15 @@ pub fn bind_update(
             .iter()
             .map(|assignment| {
                 Ok(BoundAssignment {
-                    column_index: resolve_column(&entry.desc, &assignment.column)?,
-                    expr: bind_expr(&assignment.expr, &entry.desc)?,
+                    column_index: resolve_column(&scope, &assignment.column)?,
+                    expr: bind_expr(&assignment.expr, &scope)?,
                 })
             })
             .collect::<Result<Vec<_>, ParseError>>()?,
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr(expr, &entry.desc))
+            .map(|expr| bind_expr(expr, &scope))
             .transpose()?,
     })
 }
@@ -364,6 +394,7 @@ pub fn bind_delete(
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+    let scope = scope_for_relation(&stmt.table_name, &entry.desc, false);
 
     Ok(BoundDeleteStatement {
         rel: entry.rel,
@@ -371,19 +402,164 @@ pub fn bind_delete(
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr(expr, &entry.desc))
+            .map(|expr| bind_expr(expr, &scope))
             .transpose()?,
     })
 }
 
-fn resolve_column(desc: &RelationDesc, name: &str) -> Result<usize, ParseError> {
-    if name.contains('.') {
-        return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
+fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
+    if name == "*" {
+        return Err(ParseError::UnexpectedToken {
+            expected: "named column",
+            actual: "*".into(),
+        });
     }
-    desc.columns
+    if name.contains('.') {
+        return scope
+            .columns
+            .iter()
+            .position(|column| column.qualified_name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| ParseError::UnknownColumn(name.to_string()));
+    }
+
+    let mut matches = scope
+        .columns
         .iter()
-        .position(|column| column.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))
+        .enumerate()
+        .filter(|(_, column)| {
+            column
+                .qualified_name
+                .rsplit('.')
+                .next()
+                .unwrap_or(&column.qualified_name)
+                .eq_ignore_ascii_case(name)
+        });
+    let first = matches
+        .next()
+        .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
+    if matches.next().is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "unambiguous column reference",
+            actual: name.to_string(),
+        });
+    }
+    Ok(first.0)
+}
+
+fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScope), ParseError> {
+    match stmt {
+        FromItem::Table(name) => {
+            let entry = catalog
+                .get(name)
+                .ok_or_else(|| ParseError::UnknownTable(name.clone()))?;
+            let desc = entry.desc.clone();
+            Ok((
+                Plan::SeqScan {
+                    rel: entry.rel,
+                    desc: desc.clone(),
+                },
+                scope_for_relation(name, &desc, false),
+            ))
+        }
+        FromItem::InnerJoin {
+            left_table,
+            right_table,
+            on,
+        } => {
+            let left_entry = catalog
+                .get(left_table)
+                .ok_or_else(|| ParseError::UnknownTable(left_table.clone()))?;
+            let right_entry = catalog
+                .get(right_table)
+                .ok_or_else(|| ParseError::UnknownTable(right_table.clone()))?;
+            let left_scope = scope_for_relation(left_table, &left_entry.desc, true);
+            let right_scope = scope_for_relation(right_table, &right_entry.desc, true);
+            let scope = combine_scopes(&left_scope, &right_scope);
+            let on = bind_expr(on, &scope)?;
+            Ok((
+                Plan::NestedLoopJoin {
+                    left: Box::new(Plan::SeqScan {
+                        rel: left_entry.rel,
+                        desc: left_entry.desc.clone(),
+                    }),
+                    right: Box::new(Plan::SeqScan {
+                        rel: right_entry.rel,
+                        desc: right_entry.desc.clone(),
+                    }),
+                    on,
+                },
+                scope,
+            ))
+        }
+        FromItem::CrossJoin {
+            left_table,
+            right_table,
+        } => {
+            let left_entry = catalog
+                .get(left_table)
+                .ok_or_else(|| ParseError::UnknownTable(left_table.clone()))?;
+            let right_entry = catalog
+                .get(right_table)
+                .ok_or_else(|| ParseError::UnknownTable(right_table.clone()))?;
+            let left_scope = scope_for_relation(left_table, &left_entry.desc, true);
+            let right_scope = scope_for_relation(right_table, &right_entry.desc, true);
+            let scope = combine_scopes(&left_scope, &right_scope);
+            Ok((
+                Plan::NestedLoopJoin {
+                    left: Box::new(Plan::SeqScan {
+                        rel: left_entry.rel,
+                        desc: left_entry.desc.clone(),
+                    }),
+                    right: Box::new(Plan::SeqScan {
+                        rel: right_entry.rel,
+                        desc: right_entry.desc.clone(),
+                    }),
+                    on: Expr::Const(Value::Bool(true)),
+                },
+                scope,
+            ))
+        }
+    }
+}
+
+fn scope_for_relation(table_name: &str, desc: &RelationDesc, qualify_output: bool) -> BoundScope {
+    BoundScope {
+        desc: RelationDesc {
+            columns: desc
+                .columns
+                .iter()
+                .map(|column| ColumnDesc {
+                    name: if qualify_output {
+                        format!("{table_name}.{}", column.name)
+                    } else {
+                        column.name.clone()
+                    },
+                    storage: column.storage.clone(),
+                    ty: column.ty,
+                })
+                .collect(),
+        },
+        columns: desc
+            .columns
+            .iter()
+            .map(|column| ScopeColumn {
+                output_name: if qualify_output {
+                    format!("{table_name}.{}", column.name)
+                } else {
+                    column.name.clone()
+                },
+                qualified_name: format!("{table_name}.{}", column.name),
+            })
+            .collect(),
+    }
+}
+
+fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScope {
+    let mut desc = left.desc.clone();
+    desc.columns.extend(right.desc.columns.clone());
+    let mut columns = left.columns.clone();
+    columns.extend(right.columns.clone());
+    BoundScope { desc, columns }
 }
 
 fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
@@ -404,7 +580,9 @@ fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> Pars
 fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
+        Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
+        Rule::show_tables_stmt => Ok(Statement::ShowTables),
         Rule::create_table_stmt => Ok(Statement::CreateTable(build_create_table(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
@@ -417,23 +595,102 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     }
 }
 
+fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
+    let mut analyze = false;
+    let mut buffers = false;
+    let mut statement = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::explain_option => match part.into_inner().next().ok_or(ParseError::UnexpectedEof)? {
+                opt if opt.as_rule() == Rule::kw_analyze => analyze = true,
+                opt if opt.as_rule() == Rule::kw_buffers => buffers = true,
+                _ => {}
+            },
+            Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
+            _ => {}
+        }
+    }
+    Ok(ExplainStatement {
+        analyze,
+        buffers,
+        statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
+    })
+}
+
 fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
     let mut targets = None;
-    let mut table_name = None;
+    let mut from = None;
     let mut where_clause = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::select_list => targets = Some(build_select_list(part)?),
-            Rule::identifier => table_name = Some(build_identifier(part)),
+            Rule::from_item => from = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
             _ => {}
         }
     }
     Ok(SelectStatement {
-        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        from: from.ok_or(ParseError::UnexpectedEof)?,
         targets: targets.ok_or(ParseError::EmptySelectList)?,
         where_clause,
     })
+}
+
+fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
+    let raw = pair.as_str().to_string();
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::table_from_item => Ok(FromItem::Table(
+            inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?,
+        )),
+        Rule::cross_from_item => {
+            let identifiers = inner
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .collect::<Vec<_>>();
+            match identifiers.as_slice() {
+                [left_table, right_table] => Ok(FromItem::CrossJoin {
+                    left_table: left_table.clone(),
+                    right_table: right_table.clone(),
+                }),
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "cross join from clause",
+                    actual: raw,
+                }),
+            }
+        }
+        Rule::joined_from_item => {
+            let mut identifiers = Vec::new();
+            let mut on = None;
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::identifier => identifiers.push(build_identifier(part)),
+                    Rule::expr => on = Some(build_expr(part)?),
+                    _ => {}
+                }
+            }
+            match identifiers.as_slice() {
+                [left_table, right_table] => Ok(FromItem::InnerJoin {
+                    left_table: left_table.clone(),
+                    right_table: right_table.clone(),
+                    on: on.ok_or(ParseError::UnexpectedEof)?,
+                }),
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "joined from clause",
+                    actual: raw,
+                }),
+            }
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "from clause",
+            actual: raw,
+        }),
+    }
 }
 
 fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
@@ -742,7 +999,7 @@ mod tests {
         let stmt = build_statement(pairs.next().unwrap()).unwrap();
         match stmt {
             Statement::Select(stmt) => {
-                assert_eq!(stmt.table_name, "people");
+                assert_eq!(stmt.from, FromItem::Table("people".into()));
                 assert_eq!(stmt.targets.len(), 1);
             }
             other => panic!("expected select statement, got {other:?}"),
@@ -753,9 +1010,40 @@ mod tests {
     fn parse_select_with_where() {
         let stmt =
             parse_select("select name, note from people where id > 1 and note is null").unwrap();
-        assert_eq!(stmt.table_name, "people");
+        assert_eq!(stmt.from, FromItem::Table("people".into()));
         assert_eq!(stmt.targets.len(), 2);
         assert!(matches!(stmt.where_clause, Some(SqlExpr::And(_, _))));
+    }
+
+    #[test]
+    fn parse_join_select() {
+        let stmt = parse_select(
+            "select people.name, pets.name from people join pets on people.id = pets.owner_id",
+        )
+        .unwrap();
+        assert_eq!(
+            stmt.from,
+            FromItem::InnerJoin {
+                left_table: "people".into(),
+                right_table: "pets".into(),
+                on: SqlExpr::Eq(
+                    Box::new(SqlExpr::Column("people.id".into())),
+                    Box::new(SqlExpr::Column("pets.owner_id".into()))
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cross_join_select() {
+        let stmt = parse_select("select people.name, pets.name from people, pets").unwrap();
+        assert_eq!(
+            stmt.from,
+            FromItem::CrossJoin {
+                left_table: "people".into(),
+                right_table: "pets".into(),
+            }
+        );
     }
 
     #[test]
@@ -771,6 +1059,61 @@ mod tests {
                         assert!(matches!(*input, Plan::SeqScan { .. }));
                     }
                     other => panic!("expected filter, got {:?}", other),
+                }
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_join_plan_resolves_qualified_columns() {
+        let mut catalog = catalog();
+        catalog.insert(
+            "pets",
+            CatalogEntry {
+                rel: RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15001,
+                },
+                desc: RelationDesc {
+                    columns: vec![
+                        ColumnDesc {
+                            name: "id".into(),
+                            storage: AttributeDesc {
+                                name: "id".into(),
+                                attlen: 4,
+                                attalign: AttributeAlign::Int,
+                                nullable: false,
+                            },
+                            ty: ScalarType::Int32,
+                        },
+                        ColumnDesc {
+                            name: "owner_id".into(),
+                            storage: AttributeDesc {
+                                name: "owner_id".into(),
+                                attlen: 4,
+                                attalign: AttributeAlign::Int,
+                                nullable: false,
+                            },
+                            ty: ScalarType::Int32,
+                        },
+                    ],
+                },
+            },
+        );
+
+        let stmt = parse_select(
+            "select people.name, pets.id from people join pets on people.id = pets.owner_id",
+        )
+        .unwrap();
+        let plan = build_plan(&stmt, &catalog).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 2);
+                match *input {
+                    Plan::NestedLoopJoin { on, .. } => assert!(matches!(on, Expr::Eq(_, _))),
+                    other => panic!("expected join, got {:?}", other),
                 }
             }
             other => panic!("expected projection, got {:?}", other),
@@ -805,6 +1148,14 @@ mod tests {
     #[test]
     fn parse_insert_update_delete() {
         assert!(matches!(
+            parse_statement("explain select name from people").unwrap(),
+            Statement::Explain(ExplainStatement { analyze: false, buffers: false, .. })
+        ));
+        assert!(matches!(
+            parse_statement("explain (analyze, buffers) select name from people").unwrap(),
+            Statement::Explain(ExplainStatement { analyze: true, buffers: true, .. })
+        ));
+        assert!(matches!(
             parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(),
             Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people"
         ));
@@ -829,6 +1180,10 @@ mod tests {
         assert!(matches!(
             parse_statement("delete from people where note is null").unwrap(),
             Statement::Delete(DeleteStatement { table_name, .. }) if table_name == "people"
+        ));
+        assert!(matches!(
+            parse_statement("show tables").unwrap(),
+            Statement::ShowTables
         ));
     }
 }

@@ -9,11 +9,12 @@ use crate::access::heap::tuple::{
 };
 use crate::parser::{
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, DropTableStatement,
-    ParseError, Statement, bind_create_table, bind_delete, bind_insert, bind_update, build_plan,
-    parse_statement,
+    ExplainStatement, ParseError, Statement, bind_create_table, bind_delete, bind_insert,
+    bind_update, build_plan, parse_statement,
 };
 use crate::storage::smgr::StorageManager;
-use crate::{BufferPool, ClientId, RelFileLocator, SmgrStorageBackend};
+use crate::{BufferPool, BufferUsageStats, ClientId, RelFileLocator, SmgrStorageBackend};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalarType {
@@ -67,6 +68,11 @@ pub enum Plan {
         rel: RelFileLocator,
         desc: RelationDesc,
     },
+    NestedLoopJoin {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        on: Expr,
+    },
     Filter {
         input: Box<Plan>,
         predicate: Expr,
@@ -96,9 +102,17 @@ enum SlotSource {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct NodeExecStats {
+    pub loops: u64,
+    pub rows: u64,
+    pub total_time: Duration,
+}
+
 #[derive(Debug)]
 pub enum PlanState {
     SeqScan(SeqScanState),
+    NestedLoopJoin(NestedLoopJoinState),
     Filter(FilterState),
     Projection(ProjectionState),
 }
@@ -108,18 +122,32 @@ pub struct SeqScanState {
     rel: RelFileLocator,
     desc: RelationDesc,
     scan: Option<VisibleHeapScan>,
+    stats: NodeExecStats,
 }
 
 #[derive(Debug)]
 pub struct FilterState {
     input: Box<PlanState>,
     predicate: Expr,
+    stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct NestedLoopJoinState {
+    left: Box<PlanState>,
+    right: Box<PlanState>,
+    on: Expr,
+    right_rows: Option<Vec<TupleSlot>>,
+    current_left: Option<TupleSlot>,
+    right_index: usize,
+    stats: NodeExecStats,
 }
 
 #[derive(Debug)]
 pub struct ProjectionState {
     input: Box<PlanState>,
     targets: Vec<TargetEntry>,
+    stats: NodeExecStats,
 }
 
 pub struct ExecutorContext<'a> {
@@ -249,14 +277,26 @@ pub fn executor_start(plan: Plan) -> PlanState {
             rel,
             desc,
             scan: None,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::NestedLoopJoin { left, right, on } => PlanState::NestedLoopJoin(NestedLoopJoinState {
+            left: Box::new(executor_start(*left)),
+            right: Box::new(executor_start(*right)),
+            on,
+            right_rows: None,
+            current_left: None,
+            right_index: 0,
+            stats: NodeExecStats::default(),
         }),
         Plan::Filter { input, predicate } => PlanState::Filter(FilterState {
             input: Box::new(executor_start(*input)),
             predicate,
+            stats: NodeExecStats::default(),
         }),
         Plan::Projection { input, targets } => PlanState::Projection(ProjectionState {
             input: Box::new(executor_start(*input)),
             targets,
+            stats: NodeExecStats::default(),
         }),
     }
 }
@@ -274,19 +314,31 @@ pub fn execute_plan(
     plan: Plan,
     ctx: &mut ExecutorContext<'_>,
 ) -> Result<StatementResult, ExecError> {
+    Ok(execute_plan_internal(plan, ctx)?.0)
+}
+
+fn execute_plan_internal(
+    plan: Plan,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<(StatementResult, PlanState, Duration), ExecError> {
     let mut state = executor_start(plan);
     let mut rows = Vec::new();
     let mut column_names = None;
+    let started_at = Instant::now();
     while let Some(slot) = exec_next(&mut state, ctx)? {
         if column_names.is_none() {
             column_names = Some(slot.column_names().to_vec());
         }
         rows.push(slot.into_values()?);
     }
-    Ok(StatementResult::Query {
-        column_names: column_names.unwrap_or_default(),
-        rows,
-    })
+    Ok((
+        StatementResult::Query {
+            column_names: column_names.unwrap_or_default(),
+            rows,
+        },
+        state,
+        started_at.elapsed(),
+    ))
 }
 
 pub fn execute_sql(
@@ -308,7 +360,9 @@ pub fn execute_statement(
     let cid = ctx.next_command_id;
     ctx.snapshot = ctx.txns.snapshot_for_command(xid, cid)?;
     let result = match stmt {
+        Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::ShowTables => execute_show_tables(catalog),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
         Statement::Insert(stmt) => execute_insert(bind_insert(&stmt, catalog)?, ctx, xid, cid),
@@ -317,6 +371,53 @@ pub fn execute_statement(
     };
     ctx.next_command_id = ctx.next_command_id.saturating_add(1);
     result
+}
+
+fn execute_explain(
+    stmt: ExplainStatement,
+    catalog: &mut Catalog,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<StatementResult, ExecError> {
+    let Statement::Select(select) = *stmt.statement else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "SELECT statement after EXPLAIN",
+            actual: "non-select statement".into(),
+        }));
+    };
+
+    let plan = build_plan(&select, catalog)?;
+    let mut lines = Vec::new();
+    if stmt.analyze {
+        ctx.pool.reset_usage_stats();
+        let (result, state, elapsed) = execute_plan_internal(plan, ctx)?;
+        format_explain_lines(&state, 0, true, &mut lines);
+        lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
+        if stmt.buffers {
+            let stats = ctx.pool.usage_stats();
+            lines.push(format_buffer_usage(stats));
+        }
+        if let StatementResult::Query { rows, .. } = result {
+            lines.push(format!("Result Rows: {}", rows.len()));
+        }
+    } else {
+        let state = executor_start(plan);
+        format_explain_lines(&state, 0, false, &mut lines);
+    }
+
+    Ok(StatementResult::Query {
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines.into_iter().map(|line| vec![Value::Text(line)]).collect(),
+    })
+}
+
+fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
+    Ok(StatementResult::Query {
+        column_names: vec!["table_name".into()],
+        rows: catalog
+            .table_names()
+            .map(|name| vec![Value::Text(name.to_string())])
+            .collect(),
+    })
 }
 
 fn execute_create_table(
@@ -351,11 +452,23 @@ pub fn exec_next(
     state: &mut PlanState,
     ctx: &mut ExecutorContext<'_>,
 ) -> Result<Option<TupleSlot>, ExecError> {
-    match state {
+    let started_at = Instant::now();
+    let result = match state {
         PlanState::SeqScan(scan) => exec_seq_scan(scan, ctx),
+        PlanState::NestedLoopJoin(join) => exec_nested_loop_join(join, ctx),
         PlanState::Filter(filter) => exec_filter(filter, ctx),
         PlanState::Projection(projection) => exec_projection(projection, ctx),
+    };
+    let elapsed = started_at.elapsed();
+    if let Ok(slot) = &result {
+        let stats = node_stats_mut(state);
+        stats.loops += 1;
+        stats.total_time += elapsed;
+        if slot.is_some() {
+            stats.rows += 1;
+        }
     }
+    result
 }
 
 fn exec_seq_scan(
@@ -399,6 +512,44 @@ fn exec_filter(
     }
 }
 
+fn exec_nested_loop_join(
+    state: &mut NestedLoopJoinState,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<Option<TupleSlot>, ExecError> {
+    if state.right_rows.is_none() {
+        let mut rows = Vec::new();
+        while let Some(slot) = exec_next(&mut state.right, ctx)? {
+            rows.push(slot);
+        }
+        state.right_rows = Some(rows);
+    }
+
+    let right_rows = state.right_rows.as_ref().unwrap();
+    loop {
+        if state.current_left.is_none() {
+            state.current_left = exec_next(&mut state.left, ctx)?;
+            state.right_index = 0;
+        }
+
+        let Some(left_slot) = state.current_left.as_ref() else {
+            return Ok(None);
+        };
+
+        while state.right_index < right_rows.len() {
+            let joined = combine_slots(left_slot.clone(), right_rows[state.right_index].clone())?;
+            state.right_index += 1;
+            let mut eval_slot = joined.clone();
+            match eval_expr(&state.on, &mut eval_slot)? {
+                Value::Bool(true) => return Ok(Some(joined)),
+                Value::Bool(false) | Value::Null => {}
+                other => return Err(ExecError::NonBoolQual(other)),
+            }
+        }
+
+        state.current_left = None;
+    }
+}
+
 fn exec_projection(
     state: &mut ProjectionState,
     ctx: &mut ExecutorContext<'_>,
@@ -415,6 +566,83 @@ fn exec_projection(
     }
 
     Ok(Some(TupleSlot::virtual_row(names, values)))
+}
+
+fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecError> {
+    let left = left;
+    let right = right;
+    let mut names = left.column_names().to_vec();
+    names.extend_from_slice(right.column_names());
+    let mut values = left.into_values()?;
+    values.extend(right.into_values()?);
+    Ok(TupleSlot::virtual_row(names, values))
+}
+
+fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
+    match state {
+        PlanState::SeqScan(scan) => &mut scan.stats,
+        PlanState::NestedLoopJoin(join) => &mut join.stats,
+        PlanState::Filter(filter) => &mut filter.stats,
+        PlanState::Projection(projection) => &mut projection.stats,
+    }
+}
+
+fn node_stats(state: &PlanState) -> &NodeExecStats {
+    match state {
+        PlanState::SeqScan(scan) => &scan.stats,
+        PlanState::NestedLoopJoin(join) => &join.stats,
+        PlanState::Filter(filter) => &filter.stats,
+        PlanState::Projection(projection) => &projection.stats,
+    }
+}
+
+fn format_explain_lines(
+    state: &PlanState,
+    indent: usize,
+    analyze: bool,
+    lines: &mut Vec<String>,
+) {
+    let prefix = "  ".repeat(indent);
+    let label = node_label(state);
+    if analyze {
+        let stats = node_stats(state);
+        lines.push(format!(
+            "{prefix}{label} (actual rows={} loops={} time={:.3} ms)",
+            stats.rows,
+            stats.loops,
+            stats.total_time.as_secs_f64() * 1000.0
+        ));
+    } else {
+        lines.push(format!("{prefix}{label}"));
+    }
+
+    match state {
+        PlanState::SeqScan(_) => {}
+        PlanState::NestedLoopJoin(join) => {
+            format_explain_lines(&join.left, indent + 1, analyze, lines);
+            format_explain_lines(&join.right, indent + 1, analyze, lines);
+        }
+        PlanState::Filter(filter) => format_explain_lines(&filter.input, indent + 1, analyze, lines),
+        PlanState::Projection(projection) => {
+            format_explain_lines(&projection.input, indent + 1, analyze, lines)
+        }
+    }
+}
+
+fn node_label(state: &PlanState) -> String {
+    match state {
+        PlanState::SeqScan(scan) => format!("Seq Scan on rel {}", scan.rel.rel_number),
+        PlanState::NestedLoopJoin(_) => "Nested Loop".into(),
+        PlanState::Filter(_) => "Filter".into(),
+        PlanState::Projection(_) => "Projection".into(),
+    }
+}
+
+fn format_buffer_usage(stats: BufferUsageStats) -> String {
+    format!(
+        "Buffers: shared hit={} read={} written={}",
+        stats.shared_hit, stats.shared_read, stats.shared_written
+    )
 }
 
 pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
@@ -747,6 +975,14 @@ mod tests {
         }
     }
 
+    fn pets_rel() -> RelFileLocator {
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: 14001,
+        }
+    }
+
     fn relation_desc() -> RelationDesc {
         RelationDesc {
             columns: vec![
@@ -796,6 +1032,55 @@ mod tests {
         catalog
     }
 
+    fn pets_relation_desc() -> RelationDesc {
+        RelationDesc {
+            columns: vec![
+                ColumnDesc {
+                    name: "id".into(),
+                    storage: AttributeDesc {
+                        name: "id".into(),
+                        attlen: 4,
+                        attalign: AttributeAlign::Int,
+                        nullable: false,
+                    },
+                    ty: ScalarType::Int32,
+                },
+                ColumnDesc {
+                    name: "name".into(),
+                    storage: AttributeDesc {
+                        name: "name".into(),
+                        attlen: -1,
+                        attalign: AttributeAlign::Int,
+                        nullable: false,
+                    },
+                    ty: ScalarType::Text,
+                },
+                ColumnDesc {
+                    name: "owner_id".into(),
+                    storage: AttributeDesc {
+                        name: "owner_id".into(),
+                        attlen: 4,
+                        attalign: AttributeAlign::Int,
+                        nullable: false,
+                    },
+                    ty: ScalarType::Int32,
+                },
+            ],
+        }
+    }
+
+    fn catalog_with_pets() -> Catalog {
+        let mut catalog = catalog();
+        catalog.insert(
+            "pets",
+            CatalogEntry {
+                rel: pets_rel(),
+                desc: pets_relation_desc(),
+            },
+        );
+        catalog
+    }
+
     fn tuple(id: i32, name: &str, note: Option<&str>) -> HeapTuple {
         let desc = relation_desc().attribute_descs();
         HeapTuple::from_values(
@@ -807,6 +1092,19 @@ mod tests {
                     Some(note) => TupleValue::Bytes(note.as_bytes().to_vec()),
                     None => TupleValue::Null,
                 },
+            ],
+        )
+        .unwrap()
+    }
+
+    fn pet_tuple(id: i32, name: &str, owner_id: i32) -> HeapTuple {
+        let desc = pets_relation_desc().attribute_descs();
+        HeapTuple::from_values(
+            &desc,
+            &[
+                TupleValue::Bytes(id.to_le_bytes().to_vec()),
+                TupleValue::Bytes(name.as_bytes().to_vec()),
+                TupleValue::Bytes(owner_id.to_le_bytes().to_vec()),
             ],
         )
         .unwrap()
@@ -841,6 +1139,16 @@ mod tests {
         xid: TransactionId,
         sql: &str,
     ) -> Result<StatementResult, ExecError> {
+        run_sql_with_catalog(base, txns, xid, sql, catalog())
+    }
+
+    fn run_sql_with_catalog(
+        base: &PathBuf,
+        txns: &TransactionManager,
+        xid: TransactionId,
+        sql: &str,
+        mut catalog: Catalog,
+    ) -> Result<StatementResult, ExecError> {
         let smgr = MdStorageManager::new(base);
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let mut ctx = ExecutorContext {
@@ -850,7 +1158,6 @@ mod tests {
             client_id: 77,
             next_command_id: 0,
         };
-        let mut catalog = catalog();
         execute_sql(sql, &mut catalog, &mut ctx, xid)
     }
 
@@ -1210,6 +1517,176 @@ mod tests {
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Text("bob".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn show_tables_lists_catalog_tables() {
+        let base = temp_dir("show_tables");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "show tables").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["table_name".to_string()]);
+                assert_eq!(rows, vec![vec![Value::Text("people".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn explain_returns_plan_lines() {
+        let base = temp_dir("explain_sql");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "explain select name from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["QUERY PLAN".to_string()]);
+                let rendered = rows
+                    .into_iter()
+                    .map(|row| match &row[0] {
+                        Value::Text(text) => text.clone(),
+                        other => panic!("expected text explain line, got {:?}", other),
+                    })
+                    .collect::<Vec<_>>();
+                assert!(rendered.iter().any(|line| line.contains("Projection")));
+                assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn explain_analyze_buffers_reports_runtime_and_buffers() {
+        let base = temp_dir("explain_analyze_sql");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "explain (analyze, buffers) select name from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                let rendered = rows
+                    .into_iter()
+                    .map(|row| match &row[0] {
+                        Value::Text(text) => text.clone(),
+                        other => panic!("expected text explain line, got {:?}", other),
+                    })
+                    .collect::<Vec<_>>();
+                assert!(rendered.iter().any(|line| line.contains("actual rows=")));
+                assert!(rendered.iter().any(|line| line.contains("Execution Time:")));
+                assert!(rendered.iter().any(|line| line.contains("Buffers: shared")));
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn inner_join_returns_matching_rows() {
+        let base = temp_dir("join_sql");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let smgr = MdStorageManager::new(&base);
+        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+
+        let xid = txns.begin();
+        let people = [
+            tuple(1, "alice", Some("alpha")),
+            tuple(2, "bob", None),
+            tuple(3, "carol", Some("storage")),
+        ];
+        let pets = [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)];
+        for row in people {
+            let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
+            heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap();
+        }
+        for row in pets {
+            let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap();
+            heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap();
+        }
+        txns.commit(xid).unwrap();
+
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select people.name, pets.name from people join pets on people.id = pets.owner_id",
+            catalog_with_pets(),
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Text("bob".into()), Value::Text("Kitchen".into())],
+                        vec![Value::Text("carol".into()), Value::Text("Mocha".into())]
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cross_join_returns_cartesian_product() {
+        let base = temp_dir("cross_join_sql");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let smgr = MdStorageManager::new(&base);
+        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+
+        let xid = txns.begin();
+        for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] {
+            let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
+            heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap();
+        }
+        for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] {
+            let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap();
+            heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap();
+        }
+        txns.commit(xid).unwrap();
+
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select people.name, pets.name from people, pets",
+            catalog_with_pets(),
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Text("alice".into()), Value::Text("Kitchen".into())],
+                        vec![Value::Text("alice".into()), Value::Text("Mocha".into())],
+                        vec![Value::Text("bob".into()), Value::Text("Kitchen".into())],
+                        vec![Value::Text("bob".into()), Value::Text("Mocha".into())],
+                    ]
+                );
             }
             other => panic!("expected query result, got {:?}", other),
         }

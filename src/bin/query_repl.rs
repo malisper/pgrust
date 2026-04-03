@@ -355,6 +355,21 @@ fn run_statement(
     let needs_catalog_persist = matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
 
     let result = match stmt {
+        Statement::Explain(stmt) => {
+            let mut ctx = ExecutorContext {
+                pool,
+                txns,
+                snapshot: txns.snapshot(INVALID_TRANSACTION_ID)?,
+                client_id: 21,
+                next_command_id: 0,
+            };
+            execute_statement(
+                Statement::Explain(stmt),
+                catalog_store.catalog_mut(),
+                &mut ctx,
+                INVALID_TRANSACTION_ID,
+            )
+        }
         Statement::Select(stmt) => {
             let mut ctx = ExecutorContext {
                 pool,
@@ -365,6 +380,21 @@ fn run_statement(
             };
             execute_statement(
                 Statement::Select(stmt),
+                catalog_store.catalog_mut(),
+                &mut ctx,
+                INVALID_TRANSACTION_ID,
+            )
+        }
+        Statement::ShowTables => {
+            let mut ctx = ExecutorContext {
+                pool,
+                txns,
+                snapshot: txns.snapshot(INVALID_TRANSACTION_ID)?,
+                client_id: 21,
+                next_command_id: 0,
+            };
+            execute_statement(
+                Statement::ShowTables,
                 catalog_store.catalog_mut(),
                 &mut ctx,
                 INVALID_TRANSACTION_ID,

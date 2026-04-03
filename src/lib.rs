@@ -106,6 +106,13 @@ pub struct BufferStateView {
     pub usage_count: u8,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BufferUsageStats {
+    pub shared_hit: u64,
+    pub shared_read: u64,
+    pub shared_written: u64,
+}
+
 // These are model-level errors. They are not meant to replicate PostgreSQL's
 // exact error messages; they exist so tests can assert precondition failures
 // and illegal state transitions.
@@ -350,6 +357,7 @@ pub struct BufferPool<S: StorageBackend> {
     free_list: VecDeque<BufferId>,
     next_victim: usize,
     max_usage_count: u8,
+    usage_stats: BufferUsageStats,
 }
 
 impl<S: StorageBackend> BufferPool<S> {
@@ -367,6 +375,7 @@ impl<S: StorageBackend> BufferPool<S> {
             free_list,
             next_victim: 0,
             max_usage_count: 5,
+            usage_stats: BufferUsageStats::default(),
         }
     }
 
@@ -383,6 +392,14 @@ impl<S: StorageBackend> BufferPool<S> {
     // Mutable access is used by tests to inject failures or seed pages.
     pub fn storage_mut(&mut self) -> &mut S {
         &mut self.storage
+    }
+
+    pub fn usage_stats(&self) -> BufferUsageStats {
+        self.usage_stats
+    }
+
+    pub fn reset_usage_stats(&mut self) {
+        self.usage_stats = BufferUsageStats::default();
     }
 
     // Inspect one frame's state.
@@ -421,6 +438,7 @@ impl<S: StorageBackend> BufferPool<S> {
             // it is not yet usable. In PostgreSQL this corresponds to cases
             // like an in-progress read.
             if frame.valid {
+                self.usage_stats.shared_hit += 1;
                 RequestPageResult::Hit { buffer_id }
             } else {
                 RequestPageResult::WaitingOnRead { buffer_id }
@@ -484,6 +502,7 @@ impl<S: StorageBackend> BufferPool<S> {
         frame.valid = true;
         frame.io_in_progress = false;
         frame.io_error = false;
+        self.usage_stats.shared_read += 1;
         Ok(())
     }
 
@@ -564,6 +583,7 @@ impl<S: StorageBackend> BufferPool<S> {
         frame.dirty = false;
         frame.io_in_progress = false;
         frame.io_error = false;
+        self.usage_stats.shared_written += 1;
         Ok(())
     }
 
