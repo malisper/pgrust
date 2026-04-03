@@ -26,7 +26,8 @@ pub enum MvccError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub current_xid: TransactionId,
-    committed: BTreeSet<TransactionId>,
+    pub xmin: TransactionId,
+    pub xmax: TransactionId,
     in_progress: BTreeSet<TransactionId>,
 }
 
@@ -104,13 +105,10 @@ impl TransactionManager {
             return Err(MvccError::UnknownTransactionId(current_xid));
         }
 
-        let mut committed = BTreeSet::new();
         let mut in_progress = BTreeSet::new();
         for (&xid, &status) in &self.statuses {
             match status {
-                TransactionStatus::Committed => {
-                    committed.insert(xid);
-                }
+                TransactionStatus::Committed => {}
                 TransactionStatus::InProgress => {
                     if xid != current_xid {
                         in_progress.insert(xid);
@@ -120,9 +118,18 @@ impl TransactionManager {
             }
         }
 
+        let xmax = self.next_xid.saturating_add(1).max(1);
+        let xmin = in_progress
+            .iter()
+            .copied()
+            .chain((current_xid != INVALID_TRANSACTION_ID).then_some(current_xid))
+            .min()
+            .unwrap_or(xmax);
+
         Ok(Snapshot {
             current_xid,
-            committed,
+            xmin,
+            xmax,
             in_progress,
         })
     }
@@ -157,23 +164,39 @@ impl Snapshot {
     pub fn bootstrap() -> Self {
         Self {
             current_xid: INVALID_TRANSACTION_ID,
-            committed: BTreeSet::new(),
+            xmin: 1,
+            xmax: 1,
             in_progress: BTreeSet::new(),
         }
     }
 
-    pub fn transaction_visible(&self, xid: TransactionId) -> bool {
-        xid == INVALID_TRANSACTION_ID || xid == self.current_xid || self.committed.contains(&xid)
+    pub fn transaction_active_in_snapshot(&self, xid: TransactionId) -> bool {
+        xid != INVALID_TRANSACTION_ID
+            && xid != self.current_xid
+            && xid >= self.xmin
+            && xid < self.xmax
+            && self.in_progress.contains(&xid)
     }
 
-    pub fn transaction_in_progress(&self, xid: TransactionId) -> bool {
-        xid != INVALID_TRANSACTION_ID && xid != self.current_xid && self.in_progress.contains(&xid)
-    }
-
-    pub fn tuple_visible(&self, tuple: &HeapTuple) -> bool {
+    pub fn tuple_visible(&self, txns: &TransactionManager, tuple: &HeapTuple) -> bool {
         let xmin = tuple.header.xmin;
-        if !self.transaction_visible(xmin) {
+        if xmin == INVALID_TRANSACTION_ID {
+            return true;
+        }
+        if xmin == self.current_xid {
+            return true;
+        }
+        if xmin >= self.xmax {
             return false;
+        }
+        if self.transaction_active_in_snapshot(xmin) {
+            return false;
+        }
+        match txns.status(xmin) {
+            Some(TransactionStatus::Committed) => {}
+            Some(TransactionStatus::Aborted) | Some(TransactionStatus::InProgress) | None => {
+                return false;
+            }
         }
 
         let xmax = tuple.header.xmax;
@@ -183,11 +206,16 @@ impl Snapshot {
         if xmax == self.current_xid {
             return false;
         }
-        if self.transaction_in_progress(xmax) {
+        if xmax >= self.xmax {
             return true;
         }
-
-        !self.transaction_visible(xmax)
+        if self.transaction_active_in_snapshot(xmax) {
+            return true;
+        }
+        match txns.status(xmax) {
+            Some(TransactionStatus::Committed) => false,
+            Some(TransactionStatus::Aborted) | Some(TransactionStatus::InProgress) | None => true,
+        }
     }
 }
 
@@ -265,7 +293,7 @@ mod tests {
         tuple.header.xmin = writer;
 
         let snapshot = txns.snapshot(reader).unwrap();
-        assert!(!snapshot.tuple_visible(&tuple));
+        assert!(!snapshot.tuple_visible(&txns, &tuple));
     }
 
     #[test]
@@ -282,7 +310,7 @@ mod tests {
         tuple.header.xmax = deleter;
 
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
-        assert!(!snapshot.tuple_visible(&tuple));
+        assert!(!snapshot.tuple_visible(&txns, &tuple));
     }
 
     #[test]
@@ -308,8 +336,29 @@ mod tests {
         );
 
         let snapshot = reopened.snapshot(INVALID_TRANSACTION_ID).unwrap();
-        assert!(snapshot.transaction_visible(committed));
-        assert!(!snapshot.transaction_visible(aborted));
-        assert!(snapshot.transaction_in_progress(in_progress));
+        assert!(snapshot.xmin <= in_progress);
+        assert!(snapshot.xmax > in_progress);
+        assert!(snapshot.transaction_active_in_snapshot(in_progress));
+
+        let mut committed_tuple = HeapTuple::new_raw(1, b"committed".to_vec());
+        committed_tuple.header.xmin = committed;
+        assert!(snapshot.tuple_visible(&reopened, &committed_tuple));
+
+        let mut aborted_tuple = HeapTuple::new_raw(1, b"aborted".to_vec());
+        aborted_tuple.header.xmin = aborted;
+        assert!(!snapshot.tuple_visible(&reopened, &aborted_tuple));
+    }
+
+    #[test]
+    fn snapshot_uses_xmax_boundary_for_future_xids() {
+        let mut txns = TransactionManager::default();
+        let committed = txns.begin();
+        txns.commit(committed).unwrap();
+        let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+
+        let mut tuple = HeapTuple::new_raw(1, b"future".to_vec());
+        tuple.header.xmin = snapshot.xmax;
+
+        assert!(!snapshot.tuple_visible(&txns, &tuple));
     }
 }

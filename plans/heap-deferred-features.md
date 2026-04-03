@@ -37,8 +37,16 @@ What is still intentionally missing from MVCC:
   status file instead of updating a compact paged/segmented status store
 - snapshots are still built by materializing `committed` and `in_progress`
   sets in memory at snapshot creation time
+- there is no PostgreSQL-style xid horizon / snapshot-min-snapshot-max logic
+  yet; visibility still depends on those fully materialized in-memory sets
+- xid wraparound is not handled yet; xid comparisons currently rely on plain
+  `u32` ordering with no epoch/wraparound-safe comparison logic
 - there is still no crash-recovery pass that resolves leftover in-progress
   transactions after restart
+- there is no separate PostgreSQL-style `ProcArray` / active-transaction
+  registry yet; snapshot building still leans on the transaction-status map
+- there is still no serious multithreaded/concurrent transaction model around
+  snapshot building or xid ownership
 - no WAL/recovery integration for version transitions
 - a very small in-memory transaction manager and snapshot model
 
@@ -115,6 +123,7 @@ The current heap layer still does not implement:
 - vacuum/prune semantics
 - line-pointer reuse policies
 - multi-page scan/access APIs
+- WAL/recovery semantics for heap/MVCC are still incomplete
 
 ## Recommendation
 
