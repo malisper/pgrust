@@ -59,6 +59,40 @@ struct ReplHistory {
     cursor: Option<usize>,
 }
 
+fn history_path(base_dir: &std::path::Path) -> PathBuf {
+    base_dir.join("repl_history")
+}
+
+fn load_history(path: &std::path::Path) -> Result<ReplHistory, String> {
+    if !path.exists() {
+        return Ok(ReplHistory::default());
+    }
+
+    let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    Ok(ReplHistory {
+        entries: contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        cursor: None,
+    })
+}
+
+fn append_history(path: &std::path::Path, line: &str) -> Result<(), String> {
+    if line.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    writeln!(file, "{line}").map_err(|e| e.to_string())
+}
+
 fn desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
@@ -136,7 +170,7 @@ fn print_result(result: StatementResult) {
         }
         StatementResult::Query { column_names, rows } => {
             if column_names.is_empty() {
-                println!("EMPTY RESULT");
+                println!("({} rows)", rows.len());
                 return;
             }
 
@@ -234,6 +268,14 @@ fn read_repl_line(prompt: &str, history: &mut ReplHistory) -> Result<Option<Stri
                     stdout.flush().map_err(|e| e.to_string())?;
                     return Ok(None);
                 }
+            }
+            1 => {
+                cursor = 0;
+                redraw_line(prompt, &buffer, cursor)?;
+            }
+            5 => {
+                cursor = buffer.len();
+                redraw_line(prompt, &buffer, cursor)?;
             }
             8 | 127 => {
                 if cursor > 0 {
@@ -555,7 +597,8 @@ fn main() -> Result<(), String> {
     );
     println!("COMMANDS: .help, .exit");
 
-    let mut history = ReplHistory::default();
+    let history_path = history_path(&base_dir);
+    let mut history = load_history(&history_path)?;
     loop {
         let Some(line) = read_repl_line("pgrust> ", &mut history)? else {
             break;
@@ -565,6 +608,7 @@ fn main() -> Result<(), String> {
         if input.is_empty() {
             continue;
         }
+        append_history(&history_path, input)?;
         if input.eq_ignore_ascii_case(".exit") || input.eq_ignore_ascii_case(".quit") {
             break;
         }

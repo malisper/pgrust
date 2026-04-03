@@ -53,7 +53,7 @@ pub struct ExplainStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectStatement {
-    pub from: FromItem,
+    pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
 }
@@ -133,6 +133,7 @@ pub struct Assignment {
 pub enum SqlExpr {
     Column(String),
     Const(Value),
+    Add(Box<SqlExpr>, Box<SqlExpr>),
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),
     Gt(Box<SqlExpr>, Box<SqlExpr>),
@@ -212,7 +213,21 @@ pub fn bind_create_table(
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
-    let (base, scope) = bind_from_item(&stmt.from, catalog)?;
+    if stmt.targets.is_empty() && stmt.from.is_none() {
+        return Err(ParseError::EmptySelectList);
+    }
+
+    let (base, scope) = if let Some(from) = &stmt.from {
+        bind_from_item(from, catalog)?
+    } else {
+        (
+            Plan::Result,
+            BoundScope {
+                desc: RelationDesc { columns: Vec::new() },
+                columns: Vec::new(),
+            },
+        )
+    };
 
     let plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
@@ -260,6 +275,10 @@ fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
     Ok(match expr {
         SqlExpr::Column(name) => Expr::Column(resolve_column(scope, name)?),
         SqlExpr::Const(value) => Expr::Const(value.clone()),
+        SqlExpr::Add(left, right) => Expr::Add(
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
+        ),
         SqlExpr::Eq(left, right) => Expr::Eq(
             Box::new(bind_expr(left, scope)?),
             Box::new(bind_expr(right, scope)?),
@@ -601,6 +620,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut statement = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::kw_analyze => analyze = true,
             Rule::explain_option => match part.into_inner().next().ok_or(ParseError::UnexpectedEof)? {
                 opt if opt.as_rule() == Rule::kw_analyze => analyze = true,
                 opt if opt.as_rule() == Rule::kw_buffers => buffers = true,
@@ -630,8 +650,8 @@ fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
         }
     }
     Ok(SelectStatement {
-        from: from.ok_or(ParseError::UnexpectedEof)?,
-        targets: targets.ok_or(ParseError::EmptySelectList)?,
+        from,
+        targets: targets.unwrap_or_default(),
         where_clause,
     })
 }
@@ -850,7 +870,7 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
 
 fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     match pair.as_rule() {
-        Rule::expr | Rule::or_expr | Rule::and_expr => {
+        Rule::expr | Rule::or_expr | Rule::and_expr | Rule::add_expr => {
             let mut inner = pair.into_inner();
             let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             fold_infix(first, inner)
@@ -918,6 +938,7 @@ fn fold_infix(
         expr = match op.as_rule() {
             Rule::kw_or => SqlExpr::Or(Box::new(expr), Box::new(rhs)),
             Rule::kw_and => SqlExpr::And(Box::new(expr), Box::new(rhs)),
+            Rule::add_op => SqlExpr::Add(Box::new(expr), Box::new(rhs)),
             _ => unreachable!(),
         };
     }
@@ -999,7 +1020,7 @@ mod tests {
         let stmt = build_statement(pairs.next().unwrap()).unwrap();
         match stmt {
             Statement::Select(stmt) => {
-                assert_eq!(stmt.from, FromItem::Table("people".into()));
+                assert_eq!(stmt.from, Some(FromItem::Table("people".into())));
                 assert_eq!(stmt.targets.len(), 1);
             }
             other => panic!("expected select statement, got {other:?}"),
@@ -1010,7 +1031,7 @@ mod tests {
     fn parse_select_with_where() {
         let stmt =
             parse_select("select name, note from people where id > 1 and note is null").unwrap();
-        assert_eq!(stmt.from, FromItem::Table("people".into()));
+        assert_eq!(stmt.from, Some(FromItem::Table("people".into())));
         assert_eq!(stmt.targets.len(), 2);
         assert!(matches!(stmt.where_clause, Some(SqlExpr::And(_, _))));
     }
@@ -1023,14 +1044,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             stmt.from,
-            FromItem::InnerJoin {
+            Some(FromItem::InnerJoin {
                 left_table: "people".into(),
                 right_table: "pets".into(),
                 on: SqlExpr::Eq(
                     Box::new(SqlExpr::Column("people.id".into())),
                     Box::new(SqlExpr::Column("pets.owner_id".into()))
                 ),
-            }
+            })
         );
     }
 
@@ -1039,11 +1060,36 @@ mod tests {
         let stmt = parse_select("select people.name, pets.name from people, pets").unwrap();
         assert_eq!(
             stmt.from,
-            FromItem::CrossJoin {
+            Some(FromItem::CrossJoin {
                 left_table: "people".into(),
                 right_table: "pets".into(),
-            }
+            })
         );
+    }
+
+    #[test]
+    fn parse_select_without_from() {
+        let stmt = parse_select("select 1").unwrap();
+        assert_eq!(stmt.from, None);
+        assert_eq!(stmt.targets.len(), 1);
+    }
+
+    #[test]
+    fn parse_select_without_targets_but_with_from() {
+        let stmt = parse_select("select from people").unwrap();
+        assert_eq!(stmt.from, Some(FromItem::Table("people".into())));
+        assert!(stmt.targets.is_empty());
+    }
+
+    #[test]
+    fn parse_addition_in_where_clause() {
+        let stmt =
+            parse_select("select * from people, pets where pets.owner_id + 1 = people.id").unwrap();
+        assert!(matches!(
+            stmt.where_clause,
+            Some(SqlExpr::Eq(left, _))
+                if matches!(*left, SqlExpr::Add(_, _))
+        ));
     }
 
     #[test]
@@ -1150,6 +1196,10 @@ mod tests {
         assert!(matches!(
             parse_statement("explain select name from people").unwrap(),
             Statement::Explain(ExplainStatement { analyze: false, buffers: false, .. })
+        ));
+        assert!(matches!(
+            parse_statement("explain analyze select name from people").unwrap(),
+            Statement::Explain(ExplainStatement { analyze: true, buffers: false, .. })
         ));
         assert!(matches!(
             parse_statement("explain (analyze, buffers) select name from people").unwrap(),
