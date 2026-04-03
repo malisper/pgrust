@@ -1,0 +1,11 @@
+[package]
+name = "pgrust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "pgrust"
+path = "src/lib.rs"
+
+[dependencies]
+
