@@ -136,7 +136,7 @@ fn main() -> Result<(), ExecError> {
         next_command_id: 0,
     };
 
-    match execute_sql(&sql, &catalog, &mut ctx, INVALID_TRANSACTION_ID)? {
+    match execute_sql(&sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)? {
         StatementResult::Query { column_names, rows } => {
             println!("=== Output Rows ===");
             for row in rows {

@@ -140,6 +140,9 @@ What is implemented today:
 
 What is still intentionally missing:
 
+- no PostgreSQL-style `pg_catalog` relations yet; catalog metadata is still a
+  much simpler persisted file representation rather than heap-backed system
+  catalogs
 - no `CREATE TABLE`, `ALTER TABLE`, or `DROP TABLE`
 - no real catalog storage or schema persistence
 - no parser/planner support for joins

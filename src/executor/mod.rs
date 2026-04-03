@@ -3,13 +3,16 @@ use crate::access::heap::am::{
     heap_scan_begin_visible, heap_scan_next_visible, heap_update_with_cid,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
+use crate::catalog::Catalog;
 use crate::access::heap::tuple::{
     AttributeDesc, HeapTuple, ItemPointerData, TupleError, TupleValue,
 };
 use crate::parser::{
-    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, Catalog, ParseError,
-    Statement, bind_delete, bind_insert, bind_update, build_plan, parse_statement,
+    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, DropTableStatement,
+    ParseError, Statement, bind_create_table, bind_delete, bind_insert, bind_update, build_plan,
+    parse_statement,
 };
+use crate::storage::smgr::StorageManager;
 use crate::{BufferPool, ClientId, RelFileLocator, SmgrStorageBackend};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,7 +291,7 @@ pub fn execute_plan(
 
 pub fn execute_sql(
     sql: &str,
-    catalog: &Catalog,
+    catalog: &mut Catalog,
     ctx: &mut ExecutorContext<'_>,
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
@@ -298,7 +301,7 @@ pub fn execute_sql(
 
 pub fn execute_statement(
     stmt: Statement,
-    catalog: &Catalog,
+    catalog: &mut Catalog,
     ctx: &mut ExecutorContext<'_>,
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
@@ -306,12 +309,42 @@ pub fn execute_statement(
     ctx.snapshot = ctx.txns.snapshot_for_command(xid, cid)?;
     let result = match stmt {
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
+        Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
         Statement::Insert(stmt) => execute_insert(bind_insert(&stmt, catalog)?, ctx, xid, cid),
         Statement::Update(stmt) => execute_update(bind_update(&stmt, catalog)?, ctx, xid, cid),
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, ctx, xid),
     };
     ctx.next_command_id = ctx.next_command_id.saturating_add(1);
     result
+}
+
+fn execute_create_table(
+    stmt: crate::parser::CreateTableStatement,
+    catalog: &mut Catalog,
+) -> Result<StatementResult, ExecError> {
+    let _entry = bind_create_table(&stmt, catalog)?;
+    Ok(StatementResult::AffectedRows(0))
+}
+
+fn execute_drop_table(
+    stmt: DropTableStatement,
+    catalog: &mut Catalog,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<StatementResult, ExecError> {
+    let entry = catalog
+        .drop_table(&stmt.table_name)
+        .map_err(|err| match err {
+            crate::catalog::CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
+            other => ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "droppable table",
+                actual: format!("{other:?}"),
+            }),
+        })?;
+
+    let _ = ctx.pool.invalidate_relation(entry.rel);
+    ctx.pool.storage_mut().smgr.unlink(entry.rel, None, false);
+    Ok(StatementResult::AffectedRows(0))
 }
 
 pub fn exec_next(
@@ -424,20 +457,27 @@ fn execute_insert(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
-    let mut slot = TupleSlot::virtual_row(
-        stmt.desc.columns.iter().map(|c| c.name.clone()).collect(),
-        vec![Value::Null; stmt.desc.columns.len()],
-    );
+    let column_names: Vec<String> = stmt.desc.columns.iter().map(|c| c.name.clone()).collect();
+    let mut touched_blocks = std::collections::BTreeSet::new();
 
-    let mut values = vec![Value::Null; stmt.desc.columns.len()];
-    for (column_index, expr) in stmt.target_indexes.iter().zip(stmt.values.iter()) {
-        values[*column_index] = eval_expr(expr, &mut slot)?;
+    for row in &stmt.values {
+        let mut slot =
+            TupleSlot::virtual_row(column_names.clone(), vec![Value::Null; stmt.desc.columns.len()]);
+        let mut values = vec![Value::Null; stmt.desc.columns.len()];
+        for (column_index, expr) in stmt.target_indexes.iter().zip(row.iter()) {
+            values[*column_index] = eval_expr(expr, &mut slot)?;
+        }
+
+        let tuple = tuple_from_values(&stmt.desc, &values)?;
+        let tid = heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, stmt.rel, xid, cid, &tuple)?;
+        touched_blocks.insert(tid.block_number);
     }
 
-    let tuple = tuple_from_values(&stmt.desc, &values)?;
-    let tid = heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, stmt.rel, xid, cid, &tuple)?;
-    heap_flush(ctx.pool, ctx.client_id, stmt.rel, tid.block_number)?;
-    Ok(StatementResult::AffectedRows(1))
+    for block_number in touched_blocks {
+        heap_flush(ctx.pool, ctx.client_id, stmt.rel, block_number)?;
+    }
+
+    Ok(StatementResult::AffectedRows(stmt.values.len()))
 }
 
 fn execute_update(
@@ -810,7 +850,8 @@ mod tests {
             client_id: 77,
             next_command_id: 0,
         };
-        execute_sql(sql, &catalog(), &mut ctx, xid)
+        let mut catalog = catalog();
+        execute_sql(sql, &mut catalog, &mut ctx, xid)
     }
 
     #[test]
@@ -1032,6 +1073,49 @@ mod tests {
                         Value::Text("alice".into()),
                         Value::Text("alpha".into())
                     ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn insert_sql_inserts_multiple_rows() {
+        let base = temp_dir("insert_multi_sql");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        assert_eq!(
+            run_sql(
+                &base,
+                &txns,
+                xid,
+                "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)",
+            )
+            .unwrap(),
+            StatementResult::AffectedRows(2)
+        );
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, name, note from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![
+                            Value::Int32(1),
+                            Value::Text("alice".into()),
+                            Value::Text("alpha".into())
+                        ],
+                        vec![Value::Int32(2), Value::Text("bob".into()), Value::Null]
+                    ]
                 );
             }
             other => panic!("expected query result, got {:?}", other),
