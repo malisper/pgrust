@@ -246,7 +246,7 @@ pub fn heap_delete(
 
     tuple.header.xmax = xid;
     heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
-    pool.write_page_image(buffer_id, &new_page)?;
+    pool.write_page_image(buffer_id, xid, &new_page)?;
     drop(_content_lock);
     pool.unpin(client_id, buffer_id)?;
     Ok(())
@@ -284,7 +284,7 @@ pub fn heap_delete_with_waiter(
         if xmax == 0 {
             tuple.header.xmax = xid;
             heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
-            pool.write_page_image(buffer_id, &new_page)?;
+            pool.write_page_image(buffer_id, xid, &new_page)?;
             drop(_content_lock);
             pool.unpin(client_id, buffer_id)?;
             return Ok(());
@@ -318,7 +318,7 @@ pub fn heap_delete_with_waiter(
                 }
                 recheck.header.xmax = xid;
                 heap_page_replace_tuple(&mut new_page, tid.offset_number, &recheck)?;
-                pool.write_page_image(buffer_id, &new_page)?;
+                pool.write_page_image(buffer_id, xid, &new_page)?;
                 drop(_content_lock);
                 pool.unpin(client_id, buffer_id)?;
                 return Ok(());
@@ -374,7 +374,7 @@ pub fn heap_update_with_cid(
     old_version.header.xmax = xid;
     old_version.header.ctid = new_tid;
     heap_page_replace_tuple(&mut new_page, tid.offset_number, &old_version)?;
-    pool.write_page_image(buffer_id, &new_page)?;
+    pool.write_page_image(buffer_id, xid, &new_page)?;
     drop(_content_lock);
     pool.unpin(client_id, buffer_id)?;
 
@@ -408,7 +408,7 @@ fn try_claim_tuple(
         let mut modified = tuple;
         modified.header.xmax = xid;
         heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
-        pool.write_page_image(buffer_id, &new_page)?;
+        pool.write_page_image(buffer_id, xid, &new_page)?;
         drop(_content_lock);
         pool.unpin(client_id, buffer_id)?;
         return Ok((ClaimResult::Claimed, target_tid));
@@ -445,7 +445,7 @@ fn try_claim_tuple(
             let mut modified = tuple;
             modified.header.xmax = xid;
             heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
-            pool.write_page_image(buffer_id, &new_page)?;
+            pool.write_page_image(buffer_id, xid, &new_page)?;
             drop(_content_lock);
             pool.unpin(client_id, buffer_id)?;
             Ok((ClaimResult::Claimed, target_tid))
@@ -492,7 +492,7 @@ pub fn heap_update_with_waiter(
                     tid.offset_number,
                     &old_version,
                 )?;
-                pool.write_page_image(buffer_id, &new_page)?;
+                pool.write_page_image(buffer_id, xid, &new_page)?;
                 drop(_content_lock);
                 pool.unpin(client_id, buffer_id)?;
 
@@ -577,7 +577,7 @@ fn heap_insert_version(
 
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
-                pool.write_page_image(buffer_id, &new_page)?;
+                pool.write_page_image(buffer_id, xmin, &new_page)?;
                 drop(_content_lock);
                 pool.unpin(client_id, buffer_id)?;
                 return Ok(ItemPointerData {

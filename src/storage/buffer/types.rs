@@ -69,4 +69,5 @@ pub enum Error {
     InvalidBuffer,
     NotDirty,
     Storage(String),
+    Wal(String),
 }

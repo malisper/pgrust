@@ -5,7 +5,12 @@ use crate::storage::smgr::{MdStorageManager, SmgrError, StorageManager};
 
 pub trait StorageBackend {
     fn read_page(&mut self, tag: BufferTag) -> Result<Page, String>;
-    fn write_page(&mut self, tag: BufferTag, page: &Page) -> Result<(), String>;
+    /// Write a page to stable storage.
+    ///
+    /// `skip_fsync`: when `true`, the write may be left in the OS page cache
+    /// without an explicit fsync. Safe only when WAL is durable for this page
+    /// — the WAL can be replayed to recover the page after a crash.
+    fn write_page(&mut self, tag: BufferTag, page: &Page, skip_fsync: bool) -> Result<(), String>;
 }
 
 #[derive(Debug, Default, Clone)]
@@ -41,7 +46,7 @@ impl StorageBackend for FakeStorage {
         Ok(self.pages.get(&tag).copied().unwrap_or([0; PAGE_SIZE]))
     }
 
-    fn write_page(&mut self, tag: BufferTag, page: &Page) -> Result<(), String> {
+    fn write_page(&mut self, tag: BufferTag, page: &Page, _skip_fsync: bool) -> Result<(), String> {
         if let Some(err) = self.fail_writes.remove(&tag) {
             return Err(err);
         }
@@ -71,9 +76,9 @@ impl StorageBackend for SmgrStorageBackend {
         Ok(buf)
     }
 
-    fn write_page(&mut self, tag: BufferTag, page: &Page) -> Result<(), String> {
+    fn write_page(&mut self, tag: BufferTag, page: &Page, skip_fsync: bool) -> Result<(), String> {
         self.smgr
-            .write_block(tag.rel, tag.fork, tag.block, page, false)
+            .write_block(tag.rel, tag.fork, tag.block, page, skip_fsync)
             .map_err(|e: SmgrError| e.to_string())
     }
 }

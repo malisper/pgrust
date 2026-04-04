@@ -50,16 +50,16 @@ RELSEG_SIZE - block % RELSEG_SIZE)`.
 
 ---
 
-## 4. ~~Deferred fsync (`smgr_registersync`)~~ — **Implemented as immedsync**
+## 4. ~~Deferred fsync (`smgr_registersync`)~~ — **Partially implemented**
 
 **What it is:** Instead of fsyncing immediately on every write, PostgreSQL
 accumulates "dirty segment" registrations and flushes them all at checkpoint
 time via a sync queue (`sync.c`). This amortises fsync cost across many writes.
 
-**Status:** `write_block` and `extend` always call `file.sync_data()`,
-ignoring `skip_fsync`. Without WAL there is no crash-recovery path, so
-honouring `skip_fsync=true` would silently risk data loss. The parameter is
-accepted for API compatibility but has no effect until WAL is implemented.
+**Status (as of WAL implementation):** `write_block` and `extend` now respect
+the `skip_fsync` flag. When WAL is present, data pages are written without
+fsync (`skip_fsync=true`) — the WAL provides crash durability. `BufferPool`
+flushes WAL at commit, which is the only required fsync per transaction.
 
 **Still not implemented:** Checkpoint-level batched sync (`smgr_registersync` /
 `sync.c` queue). To add: maintain a `BTreeSet<SegKey>` of pending-sync
