@@ -176,6 +176,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_unary_minus_in_expression() {
+        let stmt =
+            parse_statement("update pgbench_accounts set abalance = abalance + -1822 where aid = 82711")
+                .unwrap();
+        match stmt {
+            Statement::Update(UpdateStatement { assignments, .. }) => {
+                assert!(matches!(
+                    &assignments[0].expr,
+                    SqlExpr::Add(_, right) if matches!(**right, SqlExpr::Negate(_))
+                ));
+            }
+            other => panic!("expected update, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn parse_select_with_order_limit_offset() {
         let stmt =
             parse_select("select name from people order by id desc limit 2 offset 1").unwrap();
@@ -285,7 +301,13 @@ mod tests {
         assert!(matches!(parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(), Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people"));
         assert!(matches!(parse_statement("insert into people (id, name) values (1, 'alice'), (2, 'bob')").unwrap(), Statement::Insert(InsertStatement { table_name, values, .. }) if table_name == "people" && values.len() == 2));
         assert!(matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "widgets" && columns.len() == 2));
-        assert!(matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { table_name }) if table_name == "widgets"));
+        assert!(matches!(parse_statement("create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "pgbench_history" && columns.len() == 6));
+        assert!(matches!(parse_statement("create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "pgbench_tellers" && columns.len() == 4));
+        assert!(matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names }) if table_names == vec!["widgets"]));
+        assert!(matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"]));
+        assert!(matches!(parse_statement("truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"]));
+        assert!(matches!(parse_statement("truncate pgbench_history").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_history"]));
+        assert!(matches!(parse_statement("vacuum pgbench_branches").unwrap(), Statement::Vacuum(VacuumStatement { table_names }) if table_names == vec!["pgbench_branches"]));
         assert!(matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, .. }) if table_name == "people"));
         assert!(matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, .. }) if table_name == "people"));
         assert!(matches!(parse_statement("show tables").unwrap(), Statement::ShowTables));
@@ -340,5 +362,18 @@ mod tests {
         assert_eq!(stmt.targets.len(), 1);
         assert!(matches!(stmt.targets[0].expr, SqlExpr::Random));
         assert_eq!(stmt.targets[0].output_name, "random");
+    }
+
+    #[test]
+    fn parse_current_timestamp() {
+        let stmt =
+            parse_statement("insert into pgbench_history (mtime) values (current_timestamp)")
+                .unwrap();
+        match stmt {
+            Statement::Insert(InsertStatement { values, .. }) => {
+                assert!(matches!(values[0][0], SqlExpr::CurrentTimestamp));
+            }
+            other => panic!("expected insert, got {:?}", other),
+        }
     }
 }

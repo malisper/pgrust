@@ -310,6 +310,8 @@ pub fn execute_statement(
         Statement::ShowTables => execute_show_tables(catalog),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
+        Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx),
+        Statement::Vacuum(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Insert(stmt) => execute_insert(bind_insert(&stmt, catalog)?, ctx, xid, cid),
         Statement::Update(stmt) => execute_update(bind_update(&stmt, catalog)?, ctx, xid, cid),
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, ctx, xid),

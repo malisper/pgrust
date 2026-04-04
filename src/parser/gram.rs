@@ -45,6 +45,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::show_tables_stmt => Ok(Statement::ShowTables),
         Rule::create_table_stmt => Ok(Statement::CreateTable(build_create_table(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
+        Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
+        Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
@@ -282,12 +284,43 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<CreateTableStatement, Pars
 }
 
 fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseError> {
-    let table_name = pair
+    let mut if_exists = false;
+    let mut table_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => {
+                table_names.extend(part.into_inner().map(build_identifier));
+            }
+            Rule::identifier => table_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if table_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropTableStatement {
+        if_exists,
+        table_names,
+    })
+}
+
+fn build_truncate_table(pair: Pair<'_, Rule>) -> Result<TruncateTableStatement, ParseError> {
+    let table_names = pair
         .into_inner()
-        .find(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier)
+        .find(|part| part.as_rule() == Rule::ident_list)
+        .map(|part| part.into_inner().map(build_identifier).collect::<Vec<_>>())
         .ok_or(ParseError::UnexpectedEof)?;
-    Ok(DropTableStatement { table_name })
+    Ok(TruncateTableStatement { table_names })
+}
+
+fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
+    let table_names = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::ident_list)
+        .map(|part| part.into_inner().map(build_identifier).collect::<Vec<_>>())
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(VacuumStatement { table_names })
 }
 
 fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
@@ -393,6 +426,8 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         "int4" | "int" | "integer" => SqlType::Int4,
         "text" => SqlType::Text,
         "bool" | "boolean" => SqlType::Bool,
+        "timestamp" => SqlType::Timestamp,
+        ty if ty.starts_with("char(") => SqlType::Char,
         _ => unreachable!(),
     }
 }
@@ -408,6 +443,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             fold_infix(first, inner)
         }
+        Rule::unary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
+        Rule::negated_expr => Ok(SqlExpr::Negate(Box::new(build_expr(
+            pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
+        )?))),
         Rule::not_expr => {
             let mut inner = pair.into_inner();
             let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
@@ -456,6 +495,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
+        Rule::kw_current_timestamp => Ok(SqlExpr::CurrentTimestamp),
         _ => Err(ParseError::UnexpectedToken {
             expected: "expression",
             actual: pair.as_str().into(),

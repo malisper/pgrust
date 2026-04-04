@@ -404,7 +404,8 @@ fn run_statement(
     catalog_store: &mut DurableCatalog,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
-    let needs_catalog_persist = matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
+    let needs_catalog_persist =
+        matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
 
     let result = match stmt {
         Statement::Explain(stmt) => {
@@ -477,6 +478,36 @@ fn run_statement(
             };
             execute_statement(
                 Statement::DropTable(stmt),
+                catalog_store.catalog_mut(),
+                &mut ctx,
+                INVALID_TRANSACTION_ID,
+            )
+        }
+        Statement::TruncateTable(stmt) => {
+            let mut ctx = ExecutorContext {
+                pool,
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                client_id: 21,
+                next_command_id: 0,
+            };
+            execute_statement(
+                Statement::TruncateTable(stmt),
+                catalog_store.catalog_mut(),
+                &mut ctx,
+                INVALID_TRANSACTION_ID,
+            )
+        }
+        Statement::Vacuum(stmt) => {
+            let mut ctx = ExecutorContext {
+                pool,
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                client_id: 21,
+                next_command_id: 0,
+            };
+            execute_statement(
+                Statement::Vacuum(stmt),
                 catalog_store.catalog_mut(),
                 &mut ctx,
                 INVALID_TRANSACTION_ID,

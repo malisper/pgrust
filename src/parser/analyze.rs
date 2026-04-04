@@ -27,7 +27,9 @@ pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
                     column.name.clone(),
                     match column.ty {
                         SqlType::Int4 => crate::executor::ScalarType::Int32,
-                        SqlType::Text => crate::executor::ScalarType::Text,
+                        SqlType::Text | SqlType::Timestamp | SqlType::Char => {
+                            crate::executor::ScalarType::Text
+                        }
                         SqlType::Bool => crate::executor::ScalarType::Bool,
                     },
                     column.nullable,
@@ -273,6 +275,7 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
             Box::new(bind_expr(left, scope)?),
             Box::new(bind_expr(right, scope)?),
         ),
+        SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr(inner, scope)?)),
         SqlExpr::Eq(left, right) => Expr::Eq(
             Box::new(bind_expr(left, scope)?),
             Box::new(bind_expr(right, scope)?),
@@ -311,6 +314,7 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
             })
         }
         SqlExpr::Random => Expr::Random,
+        SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
 }
 
@@ -551,11 +555,11 @@ fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScope {
 fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::AggCall { .. } => true,
-        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random => false,
+        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => false,
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
-        SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
+        SqlExpr::Negate(inner) | SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
     }
 }
 
@@ -569,11 +573,11 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>)>) {
             let entry = (*func, arg.as_deref().cloned());
             if !aggs.contains(&entry) { aggs.push(entry); }
         }
-        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random => {}
+        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => {}
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => { collect_aggs(l, aggs); collect_aggs(r, aggs); }
-        SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
+        SqlExpr::Negate(inner) | SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
     }
 }
 
@@ -617,6 +621,7 @@ fn bind_agg_output_expr(
         }
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
         SqlExpr::Add(l, r) => Ok(Expr::Add(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
+        SqlExpr::Negate(inner) => Ok(Expr::Negate(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Gt(l, r) => Ok(Expr::Gt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
@@ -628,5 +633,6 @@ fn bind_agg_output_expr(
         SqlExpr::IsDistinctFrom(l, r) => Ok(Expr::IsDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::IsNotDistinctFrom(l, r) => Ok(Expr::IsNotDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Random => Ok(Expr::Random),
+        SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
     }
 }
