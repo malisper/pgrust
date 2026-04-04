@@ -184,4 +184,5 @@ pub enum SqlExpr {
         func: AggFunc,
         arg: Option<Box<SqlExpr>>,
     },
+    Random,
 }

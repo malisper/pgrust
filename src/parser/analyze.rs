@@ -310,6 +310,7 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
                 actual: "aggregate function".into(),
             })
         }
+        SqlExpr::Random => Expr::Random,
     })
 }
 
@@ -550,7 +551,7 @@ fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScope {
 fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::AggCall { .. } => true,
-        SqlExpr::Column(_) | SqlExpr::Const(_) => false,
+        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random => false,
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
@@ -568,7 +569,7 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>)>) {
             let entry = (*func, arg.as_deref().cloned());
             if !aggs.contains(&entry) { aggs.push(entry); }
         }
-        SqlExpr::Column(_) | SqlExpr::Const(_) => {}
+        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random => {}
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => { collect_aggs(l, aggs); collect_aggs(r, aggs); }
@@ -626,5 +627,6 @@ fn bind_agg_output_expr(
         SqlExpr::IsNotNull(inner) => Ok(Expr::IsNotNull(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::IsDistinctFrom(l, r) => Ok(Expr::IsDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::IsNotDistinctFrom(l, r) => Ok(Expr::IsNotDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
+        SqlExpr::Random => Ok(Expr::Random),
     }
 }

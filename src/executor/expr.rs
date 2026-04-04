@@ -3,6 +3,8 @@ use std::cmp::Ordering;
 use super::nodes::*;
 use super::ExecError;
 
+extern crate rand;
+
 pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
     match expr {
         Expr::Column(index) => slot
@@ -44,6 +46,7 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
             &eval_expr(left, slot)?,
             &eval_expr(right, slot)?,
         ))),
+        Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
     }
 }
 
@@ -81,6 +84,7 @@ pub(crate) fn compare_order_values(
             if nulls_first { Ordering::Greater } else { Ordering::Less }
         }
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
         (Value::Text(a), Value::Text(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         _ => Ordering::Equal,
@@ -224,6 +228,7 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
     }
     match (&left, &right) {
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(l.to_bits() == r.to_bits())),
         (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(l == r)),
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
         _ => Err(ExecError::TypeMismatch { op, left, right }),
@@ -235,6 +240,7 @@ fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Null, Value::Null) => false,
         (Value::Null, _) | (_, Value::Null) => true,
         (Value::Int32(l), Value::Int32(r)) => l != r,
+        (Value::Float64(l), Value::Float64(r)) => l.to_bits() != r.to_bits(),
         (Value::Text(l), Value::Text(r)) => l != r,
         (Value::Bool(l), Value::Bool(r)) => l != r,
         _ => true,
@@ -264,6 +270,11 @@ where
     }
     match (&left, &right) {
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(cmp(*l, *r))),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
+            "<" => l < r,
+            ">" => l > r,
+            _ => unreachable!(),
+        })),
         (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(match op {
             "<" => l < r,
             ">" => l > r,

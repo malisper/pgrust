@@ -355,6 +355,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     match expr {
         SqlExpr::Column(name) => name.clone(),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
+        SqlExpr::Random => "random".to_string(),
         _ => format!("expr{}", index + 1),
     }
 }
@@ -444,6 +445,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         }
         Rule::primary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
         Rule::agg_call => build_agg_call(pair),
+        Rule::func_call => Ok(SqlExpr::Random),
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::integer => pair
             .as_str()
