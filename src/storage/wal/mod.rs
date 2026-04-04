@@ -37,7 +37,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// WAL buffer size — accumulate this many bytes before flushing to kernel.
 /// Matches ~8 full-page WAL records.
@@ -97,6 +99,9 @@ struct WalWriterInner {
     /// Byte offset immediately after the last inserted record.
     /// Zero if no records have been written yet.
     insert_lsn: Lsn,
+    /// Byte offset up to which BufWriter has been flushed to the kernel
+    /// (but not necessarily fsynced). Updated by the background writer.
+    written_lsn: Lsn,
     /// Byte offset up to which the WAL file has been fsynced.
     flushed_lsn: Lsn,
     /// Pages that have had a full page image written since WAL open.
@@ -104,8 +109,14 @@ struct WalWriterInner {
     pages_with_image: HashSet<BufferTag>,
 }
 
+/// Threshold of unbuffered WAL data that triggers an early wake of the
+/// background writer (matches PG's walwriter behavior).
+const BG_FLUSH_THRESHOLD: u64 = 1024 * 1024; // 1 MB
+
 pub struct WalWriter {
     inner: Mutex<WalWriterInner>,
+    /// Signalled when insert_lsn - written_lsn >= BG_FLUSH_THRESHOLD.
+    bg_wake: std::sync::Condvar,
 }
 
 impl Drop for WalWriter {
@@ -139,9 +150,11 @@ impl WalWriter {
             inner: Mutex::new(WalWriterInner {
                 file: BufWriter::with_capacity(WAL_BUF_SIZE, file),
                 insert_lsn: size,
+                written_lsn: size,
                 flushed_lsn: size,
                 pages_with_image: HashSet::new(),
             }),
+            bg_wake: std::sync::Condvar::new(),
         })
     }
 
@@ -157,6 +170,7 @@ impl WalWriter {
         let mut guard = self.inner.lock().unwrap();
         let lsn = Self::write_fpi(&mut guard, xid, tag, page)?;
         guard.pages_with_image.insert(tag);
+        self.maybe_wake_bg(&guard);
         Ok(lsn)
     }
 
@@ -180,6 +194,7 @@ impl WalWriter {
             // First write to this page — write full page image.
             let lsn = Self::write_fpi(&mut guard, xid, tag, page)?;
             guard.pages_with_image.insert(tag);
+            self.maybe_wake_bg(&guard);
             return Ok(lsn);
         }
 
@@ -219,6 +234,7 @@ impl WalWriter {
 
         guard.file.write_all(&record)?;
         guard.insert_lsn = lsn;
+        self.maybe_wake_bg(&guard);
 
         Ok(lsn)
     }
@@ -345,11 +361,45 @@ impl WalWriter {
         guard: &mut std::sync::MutexGuard<'_, WalWriterInner>,
     ) -> Result<Lsn, WalError> {
         if guard.flushed_lsn < guard.insert_lsn {
-            guard.file.flush()?;
+            // Only flush BufWriter if the background writer hasn't already
+            // pushed everything to the kernel.
+            if guard.written_lsn < guard.insert_lsn {
+                guard.file.flush()?;
+                guard.written_lsn = guard.insert_lsn;
+            }
             guard.file.get_ref().sync_data()?;
             guard.flushed_lsn = guard.insert_lsn;
         }
         Ok(guard.flushed_lsn)
+    }
+
+    /// Flush the BufWriter to the kernel (no fsync). Called by the background
+    /// writer thread. This is cheap — just a write() syscall if there's
+    /// buffered data.
+    pub fn bg_flush(&self) -> Result<Lsn, WalError> {
+        let mut guard = self.inner.lock().unwrap();
+        if guard.written_lsn < guard.insert_lsn {
+            guard.file.flush()?;
+            guard.written_lsn = guard.insert_lsn;
+        }
+        Ok(guard.written_lsn)
+    }
+
+    /// Sleep until either `interval` elapses or enough WAL has accumulated.
+    /// Called by the background writer between flushes.
+    pub fn bg_wait(&self, interval: Duration) {
+        let guard = self.inner.lock().unwrap();
+        if guard.insert_lsn - guard.written_lsn >= BG_FLUSH_THRESHOLD {
+            return; // Already above threshold, flush immediately.
+        }
+        let _ = self.bg_wake.wait_timeout(guard, interval);
+    }
+
+    /// Notify the background writer if enough WAL has accumulated.
+    fn maybe_wake_bg(&self, guard: &std::sync::MutexGuard<'_, WalWriterInner>) {
+        if guard.insert_lsn - guard.written_lsn >= BG_FLUSH_THRESHOLD {
+            self.bg_wake.notify_one();
+        }
     }
 
     /// The LSN of the last inserted (but not necessarily flushed) record.
@@ -360,6 +410,45 @@ impl WalWriter {
     /// The LSN up to which records are durably on disk.
     pub fn flushed_lsn(&self) -> Lsn {
         self.inner.lock().unwrap().flushed_lsn
+    }
+}
+
+/// Background WAL writer that periodically flushes the BufWriter to the
+/// kernel. This means that at commit time, only an `fdatasync` is needed
+/// (the data is already in kernel buffers).
+pub struct WalBgWriter {
+    shutdown: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl WalBgWriter {
+    /// Start a background writer that flushes the WAL BufWriter every `interval`
+    /// or when 1MB of WAL has accumulated, whichever comes first.
+    pub fn start(wal: Arc<WalWriter>, interval: Duration) -> Self {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_flag = Arc::clone(&shutdown);
+        let handle = std::thread::Builder::new()
+            .name("wal-bg-writer".into())
+            .spawn(move || {
+                while !shutdown_flag.load(Ordering::Relaxed) {
+                    wal.bg_wait(interval);
+                    let _ = wal.bg_flush();
+                }
+            })
+            .expect("failed to spawn WAL background writer thread");
+        WalBgWriter {
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for WalBgWriter {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
     }
 }
 
