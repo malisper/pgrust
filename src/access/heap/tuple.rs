@@ -8,6 +8,16 @@ pub const HEAP_HASVARWIDTH: u16 = 0x0002;
 pub const HEAP_NATTS_MASK: u16 = 0x07ff;
 pub const SIZEOF_HEAP_TUPLE_HEADER: usize = 23;
 
+// Hint bits in infomask — set lazily on first visibility check to avoid
+// repeated transaction status lookups.
+pub const HEAP_XMIN_COMMITTED: u16 = 0x0100;
+pub const HEAP_XMIN_INVALID: u16 = 0x0200;
+pub const HEAP_XMAX_COMMITTED: u16 = 0x0400;
+pub const HEAP_XMAX_INVALID: u16 = 0x0800;
+
+/// Byte offset of the infomask field within a heap tuple header.
+pub const INFOMASK_OFFSET: usize = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeAlign {
     Char,

@@ -160,26 +160,51 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
     scan: &mut VisibleHeapScan,
     mut process: impl FnMut(ItemPointerData, &[u8]) -> Result<T, E>,
 ) -> Result<Option<T>, E> {
+    use crate::access::heap::tuple::INFOMASK_OFFSET;
+
     while scan.scan.current_block < scan.scan.nblocks {
         let block = scan.scan.current_block;
         let buffer_id = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
 
-        // Borrow the page in-place to avoid copying 8KB.
+        // The frame mutex is always exclusive (not a RwLock), so &mut Page
+        // costs the same as &Page. Use with_page_set_hints to set hint bits
+        // inline during the scan — matching PostgreSQL's approach.
         let _content_lock = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
-        let found = pool.with_page(buffer_id, |page| -> Result<Option<T>, E> {
-            let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+        let found = pool.with_page_set_hints(buffer_id, |page| -> (Result<Option<T>, E>, bool) {
+            let mut any_hints_written = false;
+            let max_offset = match page_get_max_offset_number(page) {
+                Ok(n) => n,
+                Err(e) => return (Err(E::from(HeapError::Tuple(TupleError::from(e)))), false),
+            };
 
             while scan.scan.current_offset <= max_offset {
                 let off = scan.scan.current_offset;
                 scan.scan.current_offset += 1;
 
-                let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                let item_id = match page_get_item_id(page, off) {
+                    Ok(id) => id,
+                    Err(e) => return (Err(E::from(HeapError::Tuple(TupleError::from(e)))), any_hints_written),
+                };
                 if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
                     continue;
                 }
 
-                let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
-                if !scan.snapshot.tuple_bytes_visible(txns, tuple_bytes) {
+                let tuple_bytes = match page_get_item(page, off) {
+                    Ok(b) => b,
+                    Err(e) => return (Err(E::from(HeapError::Tuple(TupleError::from(e)))), any_hints_written),
+                };
+                let (visible, hints) = scan.snapshot.tuple_bytes_visible_with_hints(txns, tuple_bytes);
+                let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
+
+                if !visible {
+                    // tuple_bytes borrow ends here — safe to write hints.
+                    if hints != 0 {
+                        let current = u16::from_le_bytes([page[hint_off], page[hint_off + 1]]);
+                        let updated = (current | hints).to_le_bytes();
+                        page[hint_off] = updated[0];
+                        page[hint_off + 1] = updated[1];
+                        any_hints_written = true;
+                    }
                     continue;
                 }
 
@@ -187,11 +212,22 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
                     block_number: block,
                     offset_number: off,
                 };
-                return Ok(Some(process(tid, tuple_bytes)?));
+                // process() consumes tuple_bytes borrow — safe to write hints after.
+                let result = match process(tid, tuple_bytes) {
+                    Ok(r) => r,
+                    Err(e) => return (Err(e), any_hints_written),
+                };
+                if hints != 0 {
+                    let current = u16::from_le_bytes([page[hint_off], page[hint_off + 1]]);
+                    let updated = (current | hints).to_le_bytes();
+                    page[hint_off] = updated[0];
+                    page[hint_off + 1] = updated[1];
+                    any_hints_written = true;
+                }
+                return (Ok(Some(result)), any_hints_written);
             }
-            Ok(None)
+            (Ok(None), any_hints_written)
         }).ok_or_else(|| E::from(HeapError::Buffer(Error::InvalidBuffer)))?;
-        drop(_content_lock);
 
         pool.unpin(client_id, buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
 
@@ -301,6 +337,8 @@ pub fn heap_delete(
     }
 
     tuple.header.xmax = xid;
+    // Clear HEAP_XMAX_INVALID — xmax is now a real transaction.
+    tuple.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
     heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
     pool.write_page_image(buffer_id, xid, &new_page)?;
     drop(_content_lock);
@@ -339,6 +377,7 @@ pub fn heap_delete_with_waiter(
         let xmax = tuple.header.xmax;
         if xmax == 0 {
             tuple.header.xmax = xid;
+            tuple.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
             pool.write_page_image(buffer_id, xid, &new_page)?;
             drop(_content_lock);
@@ -373,6 +412,7 @@ pub fn heap_delete_with_waiter(
                     continue;
                 }
                 recheck.header.xmax = xid;
+                recheck.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
                 heap_page_replace_tuple(&mut new_page, tid.offset_number, &recheck)?;
                 pool.write_page_image(buffer_id, xid, &new_page)?;
                 drop(_content_lock);
@@ -429,6 +469,8 @@ pub fn heap_update_with_cid(
     let mut old_version = heap_page_get_tuple(&new_page, tid.offset_number)?;
     old_version.header.xmax = xid;
     old_version.header.ctid = new_tid;
+    // Clear HEAP_XMAX_INVALID — xmax is now a real transaction, not invalid.
+    old_version.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
     heap_page_replace_tuple(&mut new_page, tid.offset_number, &old_version)?;
     pool.write_page_image(buffer_id, xid, &new_page)?;
     drop(_content_lock);
@@ -463,6 +505,7 @@ fn try_claim_tuple(
         let mut new_page = page;
         let mut modified = tuple;
         modified.header.xmax = xid;
+        modified.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
         heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
         pool.write_page_image(buffer_id, xid, &new_page)?;
         drop(_content_lock);
@@ -500,6 +543,7 @@ fn try_claim_tuple(
             let mut new_page = page;
             let mut modified = tuple;
             modified.header.xmax = xid;
+            modified.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
             pool.write_page_image(buffer_id, xid, &new_page)?;
             drop(_content_lock);
@@ -543,6 +587,7 @@ pub fn heap_update_with_waiter(
                 let mut old_version =
                     heap_page_get_tuple(&new_page, tid.offset_number)?;
                 old_version.header.ctid = new_tid;
+                // xmax was already set by try_claim_tuple, and HEAP_XMAX_INVALID cleared there.
                 heap_page_replace_tuple(
                     &mut new_page,
                     tid.offset_number,
@@ -630,6 +675,7 @@ fn heap_insert_version(
         stored.header.xmin = xmin;
         stored.header.xmax = 0;
         stored.header.cid_or_xvac = cid;
+        stored.header.infomask |= crate::access::heap::tuple::HEAP_XMAX_INVALID;
 
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
