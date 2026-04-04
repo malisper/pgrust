@@ -20,17 +20,26 @@ fn main() -> Result<(), String> {
     session.execute(&db, "create table insertbench (id int not null, payload text not null)")
         .map_err(|e| format!("{e:?}"))?;
 
-    // Single-transaction insert (one fsync at commit)
-    session.execute(&db, "begin").map_err(|e| format!("{e:?}"))?;
     let started = Instant::now();
-    for i in 0..args.row_count {
-        session.execute(
-            &db,
-            &format!("insert into insertbench (id, payload) values ({i}, 'row-{i}')"),
-        )
-        .map_err(|e| format!("{e:?}"))?;
+    if args.autocommit {
+        for i in 0..args.row_count {
+            db.execute(
+                1,
+                &format!("insert into insertbench (id, payload) values ({i}, 'row-{i}')"),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        }
+    } else {
+        session.execute(&db, "begin").map_err(|e| format!("{e:?}"))?;
+        for i in 0..args.row_count {
+            session.execute(
+                &db,
+                &format!("insert into insertbench (id, payload) values ({i}, 'row-{i}')"),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        }
+        session.execute(&db, "commit").map_err(|e| format!("{e:?}"))?;
     }
-    session.execute(&db, "commit").map_err(|e| format!("{e:?}"))?;
     let elapsed = started.elapsed();
 
     println!("engine: pgrust-direct");
@@ -53,6 +62,7 @@ struct Args {
     base_dir: PathBuf,
     row_count: usize,
     pool_size: usize,
+    autocommit: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -60,12 +70,17 @@ fn parse_args() -> Result<Args, String> {
         base_dir: std::env::temp_dir().join("pgrust_insert_bench"),
         row_count: 100_000,
         pool_size: 16384,
+        autocommit: false,
     };
 
     let raw = std::env::args().skip(1).collect::<Vec<_>>();
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
+            "--autocommit" => {
+                args.autocommit = true;
+                i += 1;
+            }
             "--dir" => {
                 args.base_dir = PathBuf::from(take_value(&raw, &mut i, "--dir")?);
             }
