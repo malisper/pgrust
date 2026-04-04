@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use parking_lot::RwLock;
 
 use crate::access::heap::am::{
@@ -36,7 +38,7 @@ pub(crate) fn execute_explain(
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
-        let (result, state, elapsed) = execute_plan_internal(plan, ctx)?;
+        let (result, state, elapsed) = execute_plan_internal(plan, ctx, true)?;
         format_explain_lines(&state, 0, true, &mut lines);
         lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
         if stmt.buffers {
@@ -135,7 +137,7 @@ pub fn execute_insert(
             let column_names: Vec<String> =
                 stmt.desc.columns.iter().map(|c| c.name.clone()).collect();
             let mut slot =
-                TupleSlot::virtual_row(column_names, vec![Value::Null; stmt.desc.columns.len()]);
+                TupleSlot::virtual_row(column_names.into(), vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
             for (column_index, expr) in stmt.target_indexes.iter().zip(row.iter()) {
                 values[*column_index] = eval_expr(expr, &mut slot)?;
@@ -194,13 +196,16 @@ pub fn execute_update_with_waiter(
         let txns_guard = ctx.txns.read();
         heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
     } {
-        let mut slot = TupleSlot::from_heap_tuple(stmt.desc.clone(), tid, tuple);
+        let desc = Rc::new(stmt.desc.clone());
+        let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
+        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, Rc::clone(&col_names), tid, tuple);
         if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
             continue;
         }
         let original_values = slot.into_values()?;
         let mut eval_slot = TupleSlot::virtual_row(
-            stmt.desc.columns.iter().map(|c| c.name.clone()).collect(),
+            col_names,
             original_values.clone(),
         );
         let mut values = original_values;
@@ -233,8 +238,13 @@ pub fn execute_update_with_waiter(
                 }
                 Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
                     let new_tuple = heap_fetch(ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                    let desc = Rc::new(stmt.desc.clone());
+                    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+                    let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
                     let mut new_slot = TupleSlot::from_heap_tuple(
-                        stmt.desc.clone(),
+                        desc,
+                        attr_descs,
+                        Rc::clone(&col_names),
                         new_ctid,
                         new_tuple,
                     );
@@ -243,7 +253,7 @@ pub fn execute_update_with_waiter(
                     }
                     let new_values_base = new_slot.into_values()?;
                     let mut eval_slot = TupleSlot::virtual_row(
-                        stmt.desc.columns.iter().map(|c| c.name.clone()).collect(),
+                        col_names,
                         new_values_base.clone(),
                     );
                     let mut new_values = new_values_base;
@@ -286,7 +296,10 @@ pub fn execute_delete_with_waiter(
         let txns_guard = ctx.txns.read();
         heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
     } {
-        let mut slot = TupleSlot::from_heap_tuple(stmt.desc.clone(), tid, tuple);
+        let desc = Rc::new(stmt.desc.clone());
+        let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
+        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, col_names, tid, tuple);
         if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
             continue;
         }

@@ -917,6 +917,7 @@ mod tests {
         for h in handles {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                #[cfg(feature = "deadlock_detection")]
                 log_deadlocks();
                 panic!("test timed out after {timeout:?} — likely deadlock");
             }
@@ -937,6 +938,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "deadlock_detection")]
     fn log_deadlocks() {
         let deadlocks = parking_lot::deadlock::check_deadlock();
         if deadlocks.is_empty() {

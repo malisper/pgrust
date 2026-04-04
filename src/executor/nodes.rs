@@ -1,6 +1,7 @@
 use crate::access::heap::am::VisibleHeapScan;
 use crate::access::heap::tuple::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::RelFileLocator;
+use std::rc::Rc;
 use std::time::Duration;
 
 use super::expr::decode_value;
@@ -154,14 +155,15 @@ pub enum Plan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TupleSlot {
-    pub(crate) column_names: Vec<String>,
+    pub(crate) column_names: Rc<[String]>,
     pub(crate) source: SlotSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SlotSource {
     Physical {
-        desc: RelationDesc,
+        desc: Rc<RelationDesc>,
+        attr_descs: Rc<[AttributeDesc]>,
         tid: ItemPointerData,
         tuple: HeapTuple,
         materialized: Option<Vec<Value>>,
@@ -199,7 +201,9 @@ pub struct ResultState {
 #[derive(Debug)]
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
-    pub(crate) desc: RelationDesc,
+    pub(crate) desc: Rc<RelationDesc>,
+    pub(crate) attr_descs: Rc<[AttributeDesc]>,
+    pub(crate) column_names: Rc<[String]>,
     pub(crate) scan: Option<VisibleHeapScan>,
     pub(crate) stats: NodeExecStats,
 }
@@ -261,11 +265,18 @@ pub struct AggregateState {
 }
 
 impl TupleSlot {
-    pub fn from_heap_tuple(desc: RelationDesc, tid: ItemPointerData, tuple: HeapTuple) -> Self {
+    pub fn from_heap_tuple(
+        desc: Rc<RelationDesc>,
+        attr_descs: Rc<[AttributeDesc]>,
+        column_names: Rc<[String]>,
+        tid: ItemPointerData,
+        tuple: HeapTuple,
+    ) -> Self {
         Self {
-            column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+            column_names,
             source: SlotSource::Physical {
                 desc,
+                attr_descs,
                 tid,
                 tuple,
                 materialized: None,
@@ -273,14 +284,14 @@ impl TupleSlot {
         }
     }
 
-    pub fn virtual_row(column_names: Vec<String>, values: Vec<Value>) -> Self {
+    pub fn virtual_row(column_names: Rc<[String]>, values: Vec<Value>) -> Self {
         Self {
             column_names,
             source: SlotSource::Virtual { values },
         }
     }
 
-    pub fn column_names(&self) -> &[String] {
+    pub fn column_names(&self) -> &Rc<[String]> {
         &self.column_names
     }
 
@@ -296,13 +307,13 @@ impl TupleSlot {
             SlotSource::Virtual { values } => Ok(values.as_slice()),
             SlotSource::Physical {
                 desc,
+                attr_descs,
                 tuple,
                 materialized,
                 ..
             } => {
                 if materialized.is_none() {
-                    let attr_descs = desc.attribute_descs();
-                    let raw = tuple.deform(&attr_descs)?;
+                    let raw = tuple.deform(attr_descs)?;
                     let mut values = Vec::with_capacity(desc.columns.len());
                     for (column, datum) in desc.columns.iter().zip(raw.into_iter()) {
                         values.push(decode_value(column, datum)?);
@@ -315,6 +326,12 @@ impl TupleSlot {
     }
 
     pub fn into_values(mut self) -> Result<Vec<Value>, super::ExecError> {
-        Ok(self.values()?.to_vec())
+        // Materialize if needed
+        self.values()?;
+        match self.source {
+            SlotSource::Virtual { values } => Ok(values),
+            SlotSource::Physical { materialized: Some(values), .. } => Ok(values),
+            SlotSource::Physical { materialized: None, .. } => unreachable!("values() just materialized"),
+        }
     }
 }
