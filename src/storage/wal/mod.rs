@@ -35,9 +35,13 @@
 //! ```
 
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// WAL buffer size — accumulate this many bytes before flushing to kernel.
+/// Matches ~8 full-page WAL records.
+const WAL_BUF_SIZE: usize = 64 * 1024;
 
 use crate::storage::buffer::{BufferTag, PAGE_SIZE};
 
@@ -75,7 +79,7 @@ impl From<std::io::Error> for WalError {
 }
 
 struct WalWriterInner {
-    file: File,
+    file: BufWriter<File>,
     /// Byte offset immediately after the last inserted record.
     /// Zero if no records have been written yet.
     insert_lsn: Lsn,
@@ -85,6 +89,15 @@ struct WalWriterInner {
 
 pub struct WalWriter {
     inner: Mutex<WalWriterInner>,
+}
+
+impl Drop for WalWriter {
+    fn drop(&mut self) {
+        // Flush the BufWriter so all buffered records reach the file.
+        let mut guard = self.inner.lock().unwrap();
+        let _ = guard.file.flush();
+        let _ = guard.file.get_ref().sync_all();
+    }
 }
 
 impl WalWriter {
@@ -107,7 +120,7 @@ impl WalWriter {
         file.seek(SeekFrom::End(0))?;
         Ok(WalWriter {
             inner: Mutex::new(WalWriterInner {
-                file,
+                file: BufWriter::with_capacity(WAL_BUF_SIZE, file),
                 insert_lsn: size,
                 flushed_lsn: size,
             }),
@@ -164,7 +177,9 @@ impl WalWriter {
     pub fn flush(&self) -> Result<Lsn, WalError> {
         let mut guard = self.inner.lock().unwrap();
         if guard.flushed_lsn < guard.insert_lsn {
-            guard.file.sync_data()?;
+            // Flush BufWriter to kernel, then fsync to disk.
+            guard.file.flush()?;
+            guard.file.get_ref().sync_data()?;
             guard.flushed_lsn = guard.insert_lsn;
         }
         Ok(guard.flushed_lsn)
@@ -231,6 +246,7 @@ mod tests {
 
         wal.write_record(1, test_tag(0), &page).unwrap();
         wal.write_record(2, test_tag(1), &page).unwrap();
+        wal.flush().unwrap(); // flush BufWriter so file size reflects writes
 
         let file_len = fs::metadata(dir.join("wal.log")).unwrap().len();
         assert_eq!(file_len, wal.insert_lsn());
@@ -282,6 +298,7 @@ mod tests {
         page[PAGE_SIZE - 1] = 0x99;
 
         let lsn = wal.write_record(xid, tag, &page).unwrap();
+        wal.flush().unwrap(); // flush BufWriter so file contents are readable
 
         let mut raw = Vec::new();
         fs::File::open(dir.join("wal.log"))
@@ -339,7 +356,9 @@ mod tests {
 
         let lsn1 = {
             let wal = WalWriter::new(&dir).unwrap();
-            wal.write_record(1, test_tag(0), &page).unwrap()
+            let lsn = wal.write_record(1, test_tag(0), &page).unwrap();
+            wal.flush().unwrap(); // ensure data is on disk before reopen
+            lsn
         };
 
         // Reopen — insert_lsn should pick up from where we left off.
@@ -349,6 +368,7 @@ mod tests {
         let lsn2 = wal2.write_record(2, test_tag(1), &page).unwrap();
         assert_eq!(lsn2, 2 * WAL_RECORD_LEN as Lsn);
 
+        wal2.flush().unwrap(); // flush BufWriter before checking file size
         let file_len = fs::metadata(dir.join("wal.log")).unwrap().len();
         assert_eq!(file_len, lsn2);
     }
