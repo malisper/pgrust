@@ -155,6 +155,48 @@ Re-profiled with 5000 iterations for better sample quality. Top costs:
    `transaction_active_in_snapshot()` in the fast path, matching PostgreSQL's
    `XidInMVCCSnapshot()` behavior.
 
+## Round 6: 0.94ms → 0.65ms
+
+Refactored buffer pool to match PostgreSQL's locking architecture.
+
+### 17. Atomic BufferState replacing Mutex
+- Replaced `Mutex<BufferFrameInner>` with `AtomicU32` for metadata
+  (pin_count, usage_count, valid, dirty, io_in_progress, io_error)
+- All hot-path metadata operations are now lock-free
+- Combined pin + usage_count bump into single CAS (matching PG's PinBuffer)
+
+### 18. RwLock<Page> content lock
+- Page data protected by `RwLock<Page>` instead of Mutex
+- Multiple concurrent readers can scan the same page simultaneously
+- Write paths use `lock_buffer_exclusive` for atomic read-modify-write
+
+### 19. Unsafe hint bit writes under shared lock
+- Hint bits written via unsafe pointer through the shared content lock
+- Matches PostgreSQL's SetHintBits — idempotent OR under shared lock
+- Dirty flag set atomically via `BufferState::set_dirty()`
+- Removed `with_page_set_hints` method entirely
+
+### 20. Removed pins_by_client
+- Removed per-frame `Mutex<FxHashMap<ClientId, usize>>` from hot path
+- Pin/unpin is now just an atomic increment/decrement
+- Matches PostgreSQL: shared descriptor only has atomic refcount,
+  per-backend tracking is local (PrivateRefCount)
+
+### 21. Keep buffer pinned across same-page tuples
+- `heap_scan_next_visible_raw` now keeps the buffer pinned when
+  returning a tuple — only unpins when advancing to the next block
+- Content lock is still released per-tuple (doesn't block writers)
+- Saves per-tuple pin/unpin overhead (~10k atomic ops per scan)
+
+### 22. PinnedBuffer RAII guard
+- Added RAII guard that auto-unpins on drop
+- Prevents pin leaks when functions return early via `?`
+- All write-path functions converted to use guards
+
+### Attempted: Pre-allocating rows Vec (no improvement)
+- Tried `Vec::with_capacity(10_000)` for the result rows
+- No measurable difference — mimalloc's amortized growth is already fast
+
 ## Final Result
 
 | Stage | avg_ms_per_scan | rows_per_sec |
@@ -164,9 +206,10 @@ Re-profiled with 5000 iterations for better sample quality. Top costs:
 | After Round 2 | 2.5 | 3,957,228 |
 | After Round 3 | 2.16 | 4,620,976 |
 | After Round 4 | 1.26 | 8,160,353 |
-| After Round 5 | **0.94** | **~10,600,000** |
+| After Round 5 | 0.94 | ~10,600,000 |
+| After Round 6 | **0.65** | **~15,400,000** |
 
-**8.8x overall speedup.**
+**12.7x overall speedup.**
 
 ## Key Lessons
 
@@ -181,3 +224,7 @@ Re-profiled with 5000 iterations for better sample quality. Top costs:
 9. **Eliminate unnecessary plan nodes.** `select *` going through Projection cloned every value for no reason. Detecting identity projections at plan time was a 19% win.
 10. **Hint bits skip lookups, not snapshot checks.** Following PostgreSQL: hint bits avoid the `txns.status()` BTreeMap lookup but still check `transaction_active_in_snapshot()`. Skipping the snapshot check causes correctness bugs with concurrent transactions.
 11. **Match the real database's approach.** Reading PostgreSQL's `HeapTupleSatisfiesMVCC` directly revealed that INSERT sets `HEAP_XMAX_INVALID` and UPDATE/DELETE clears it. Getting hint bits right requires matching this protocol exactly.
+12. **Atomic state beats Mutex for metadata.** Packing pin_count + usage_count + flags into an AtomicU32 eliminates all locking on the hot path. Combined CAS for pin+usage matches PostgreSQL's approach.
+13. **Remove shared per-client tracking.** PostgreSQL tracks pins per-backend locally, not in a shared map. Our `pins_by_client` Mutex was unnecessary contention on every pin/unpin.
+14. **Keep pins across same-page tuples.** Unpinning and re-pinning the same buffer between tuples on the same page wastes atomic operations. Keep the pin, release only the content lock.
+15. **RAII guards prevent resource leaks.** Manual unpin calls scattered across error paths are fragile. PinnedBuffer guards make pin safety automatic.
