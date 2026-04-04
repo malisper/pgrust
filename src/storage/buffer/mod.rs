@@ -5,11 +5,12 @@ pub use types::*;
 pub use backend::*;
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, RwLock};
 
 use crate::storage::smgr::RelFileLocator;
 
-#[derive(Debug, Clone)]
-struct BufferFrame {
+struct BufferFrameInner {
     tag: Option<BufferTag>,
     page: Page,
     valid: bool,
@@ -21,7 +22,7 @@ struct BufferFrame {
     pins_by_client: HashMap<ClientId, usize>,
 }
 
-impl Default for BufferFrame {
+impl Default for BufferFrameInner {
     fn default() -> Self {
         Self {
             tag: None,
@@ -37,7 +38,7 @@ impl Default for BufferFrame {
     }
 }
 
-impl BufferFrame {
+impl BufferFrameInner {
     fn state_view(&self) -> BufferStateView {
         BufferStateView {
             tag: self.tag,
@@ -60,7 +61,6 @@ impl BufferFrame {
             .pins_by_client
             .get_mut(&client_id)
             .ok_or(Error::BufferPinned)?;
-
         *entry -= 1;
         if *entry == 0 {
             self.pins_by_client.remove(&client_id);
@@ -70,31 +70,53 @@ impl BufferFrame {
     }
 }
 
-pub struct BufferPool<S: StorageBackend> {
-    storage: S,
-    frames: Vec<BufferFrame>,
-    lookup: HashMap<BufferTag, BufferId>,
-    free_list: VecDeque<BufferId>,
-    next_victim: usize,
-    max_usage_count: u8,
-    usage_stats: BufferUsageStats,
+struct BufferFrame {
+    inner: Mutex<BufferFrameInner>,
+    io_complete: Condvar,
 }
 
-impl<S: StorageBackend> BufferPool<S> {
+struct StrategyState {
+    free_list: VecDeque<BufferId>,
+    next_victim: usize,
+}
+
+pub struct BufferPool<S: StorageBackend + Send> {
+    storage: Mutex<S>,
+    frames: Vec<BufferFrame>,
+    lookup: RwLock<HashMap<BufferTag, BufferId>>,
+    strategy: Mutex<StrategyState>,
+    max_usage_count: u8,
+    stats_hit: AtomicU64,
+    stats_read: AtomicU64,
+    stats_written: AtomicU64,
+}
+
+impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn new(storage: S, capacity: usize) -> Self {
         let mut free_list = VecDeque::with_capacity(capacity);
         for id in 0..capacity {
             free_list.push_back(id);
         }
 
+        let frames = (0..capacity)
+            .map(|_| BufferFrame {
+                inner: Mutex::new(BufferFrameInner::default()),
+                io_complete: Condvar::new(),
+            })
+            .collect();
+
         Self {
-            storage,
-            frames: vec![BufferFrame::default(); capacity],
-            lookup: HashMap::new(),
-            free_list,
-            next_victim: 0,
+            storage: Mutex::new(storage),
+            frames,
+            lookup: RwLock::new(HashMap::new()),
+            strategy: Mutex::new(StrategyState {
+                free_list,
+                next_victim: 0,
+            }),
             max_usage_count: 5,
-            usage_stats: BufferUsageStats::default(),
+            stats_hit: AtomicU64::new(0),
+            stats_read: AtomicU64::new(0),
+            stats_written: AtomicU64::new(0),
         }
     }
 
@@ -102,220 +124,367 @@ impl<S: StorageBackend> BufferPool<S> {
         self.frames.len()
     }
 
-    pub fn storage(&self) -> &S {
-        &self.storage
+    pub fn with_storage<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&S) -> R,
+    {
+        let storage = self.storage.lock().unwrap();
+        f(&storage)
     }
 
-    pub fn storage_mut(&mut self) -> &mut S {
-        &mut self.storage
+    pub fn with_storage_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut S) -> R,
+    {
+        let mut storage = self.storage.lock().unwrap();
+        f(&mut storage)
     }
 
     pub fn usage_stats(&self) -> BufferUsageStats {
-        self.usage_stats
+        BufferUsageStats {
+            shared_hit: self.stats_hit.load(Ordering::Relaxed),
+            shared_read: self.stats_read.load(Ordering::Relaxed),
+            shared_written: self.stats_written.load(Ordering::Relaxed),
+        }
     }
 
-    pub fn reset_usage_stats(&mut self) {
-        self.usage_stats = BufferUsageStats::default();
+    pub fn reset_usage_stats(&self) {
+        self.stats_hit.store(0, Ordering::Relaxed);
+        self.stats_read.store(0, Ordering::Relaxed);
+        self.stats_written.store(0, Ordering::Relaxed);
     }
 
     pub fn buffer_state(&self, buffer_id: BufferId) -> Option<BufferStateView> {
-        self.frames.get(buffer_id).map(BufferFrame::state_view)
-    }
-
-    pub fn read_page(&self, buffer_id: BufferId) -> Option<&Page> {
         let frame = self.frames.get(buffer_id)?;
-        if frame.valid { Some(&frame.page) } else { None }
+        let inner = frame.inner.lock().unwrap();
+        Some(inner.state_view())
     }
 
-    pub fn request_page(&mut self, client_id: ClientId, tag: BufferTag) -> RequestPageResult {
-        if let Some(&buffer_id) = self.lookup.get(&tag) {
-            let frame = &mut self.frames[buffer_id];
-            frame.pin(client_id);
-            if frame.usage_count < self.max_usage_count {
-                frame.usage_count += 1;
-            }
-
-            if frame.valid {
-                self.usage_stats.shared_hit += 1;
-                RequestPageResult::Hit { buffer_id }
-            } else {
-                RequestPageResult::WaitingOnRead { buffer_id }
-            }
+    /// Returns a copy of the page in the given buffer frame.
+    pub fn read_page(&self, buffer_id: BufferId) -> Option<Page> {
+        let frame = self.frames.get(buffer_id)?;
+        let inner = frame.inner.lock().unwrap();
+        if inner.valid {
+            Some(inner.page)
         } else {
-            let Some(buffer_id) = self.allocate_victim() else {
-                return RequestPageResult::AllBuffersPinned;
-            };
-
-            let frame = &mut self.frames[buffer_id];
-            if let Some(old_tag) = frame.tag.take() {
-                self.lookup.remove(&old_tag);
-            }
-
-            frame.tag = Some(tag);
-            frame.page = [0; PAGE_SIZE];
-            frame.valid = false;
-            frame.dirty = false;
-            frame.io_in_progress = true;
-            frame.io_error = false;
-            frame.usage_count = 1;
-            frame.pin_count = 0;
-            frame.pins_by_client.clear();
-            frame.pin(client_id);
-
-            self.lookup.insert(tag, buffer_id);
-            RequestPageResult::ReadIssued { buffer_id }
+            None
         }
+    }
+
+    pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> RequestPageResult {
+        // Fast path: check if the tag is already in the lookup table.
+        {
+            let lookup = self.lookup.read().unwrap();
+            if let Some(&buffer_id) = lookup.get(&tag) {
+                let frame = &self.frames[buffer_id];
+                let mut inner = frame.inner.lock().unwrap();
+                inner.pin(client_id);
+                if inner.usage_count < self.max_usage_count {
+                    inner.usage_count += 1;
+                }
+                if inner.valid {
+                    self.stats_hit.fetch_add(1, Ordering::Relaxed);
+                    return RequestPageResult::Hit { buffer_id };
+                } else {
+                    return RequestPageResult::WaitingOnRead { buffer_id };
+                }
+            }
+        }
+
+        // Slow path: allocate a victim and install the new tag.
+        let mut strategy = self.strategy.lock().unwrap();
+
+        let Some(buffer_id) = self.allocate_victim(&mut strategy) else {
+            return RequestPageResult::AllBuffersPinned;
+        };
+
+        let frame = &self.frames[buffer_id];
+        let mut inner = frame.inner.lock().unwrap();
+        let mut lookup = self.lookup.write().unwrap();
+
+        // Re-check: another thread may have inserted this tag while we waited.
+        if let Some(&existing_id) = lookup.get(&tag) {
+            drop(inner);
+            strategy.free_list.push_back(buffer_id);
+            drop(lookup);
+            drop(strategy);
+
+            let existing_frame = &self.frames[existing_id];
+            let mut existing_inner = existing_frame.inner.lock().unwrap();
+            existing_inner.pin(client_id);
+            if existing_inner.usage_count < self.max_usage_count {
+                existing_inner.usage_count += 1;
+            }
+            if existing_inner.valid {
+                self.stats_hit.fetch_add(1, Ordering::Relaxed);
+                return RequestPageResult::Hit {
+                    buffer_id: existing_id,
+                };
+            } else {
+                return RequestPageResult::WaitingOnRead {
+                    buffer_id: existing_id,
+                };
+            }
+        }
+
+        if let Some(old_tag) = inner.tag.take() {
+            lookup.remove(&old_tag);
+        }
+
+        inner.tag = Some(tag);
+        inner.page = [0; PAGE_SIZE];
+        inner.valid = false;
+        inner.dirty = false;
+        inner.io_in_progress = true;
+        inner.io_error = false;
+        inner.usage_count = 1;
+        inner.pin_count = 0;
+        inner.pins_by_client.clear();
+        inner.pin(client_id);
+
+        lookup.insert(tag, buffer_id);
+
+        RequestPageResult::ReadIssued { buffer_id }
     }
 
     pub fn pending_io(&self, buffer_id: BufferId) -> Option<PendingIo> {
         let frame = self.frames.get(buffer_id)?;
-        if !frame.io_in_progress {
+        let inner = frame.inner.lock().unwrap();
+        if !inner.io_in_progress {
             return None;
         }
         Some(PendingIo {
             buffer_id,
-            op: if frame.valid { IoOp::Write } else { IoOp::Read },
-            tag: frame.tag?,
+            op: if inner.valid { IoOp::Write } else { IoOp::Read },
+            tag: inner.tag?,
         })
     }
 
-    pub fn complete_read(&mut self, buffer_id: BufferId) -> Result<(), Error> {
-        let tag = self.require_pending(buffer_id, IoOp::Read)?;
-        let page = self.storage.read_page(tag).map_err(Error::Storage)?;
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        frame.page = page;
-        frame.valid = true;
-        frame.io_in_progress = false;
-        frame.io_error = false;
-        self.usage_stats.shared_read += 1;
+    pub fn complete_read(&self, buffer_id: BufferId) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+
+        let tag = {
+            let inner = frame.inner.lock().unwrap();
+            if !inner.io_in_progress {
+                return Err(Error::NoIoInProgress);
+            }
+            if inner.valid {
+                return Err(Error::WrongIoOp);
+            }
+            inner.tag.ok_or(Error::UnknownBuffer)?
+        };
+
+        let page = {
+            let mut storage = self.storage.lock().unwrap();
+            storage.read_page(tag).map_err(Error::Storage)?
+        };
+
+        {
+            let mut inner = frame.inner.lock().unwrap();
+            inner.page = page;
+            inner.valid = true;
+            inner.io_in_progress = false;
+            inner.io_error = false;
+        }
+
+        frame.io_complete.notify_all();
+        self.stats_read.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn fail_read(&mut self, buffer_id: BufferId) -> Result<(), Error> {
-        let _ = self.require_pending(buffer_id, IoOp::Read)?;
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        frame.valid = false;
-        frame.io_in_progress = false;
-        frame.io_error = true;
+    pub fn fail_read(&self, buffer_id: BufferId) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        {
+            let inner = frame.inner.lock().unwrap();
+            if !inner.io_in_progress {
+                return Err(Error::NoIoInProgress);
+            }
+            if inner.valid {
+                return Err(Error::WrongIoOp);
+            }
+        }
+
+        {
+            let mut inner = frame.inner.lock().unwrap();
+            inner.valid = false;
+            inner.io_in_progress = false;
+            inner.io_error = true;
+        }
+
+        frame.io_complete.notify_all();
         Ok(())
     }
 
-    pub fn mark_dirty(&mut self, buffer_id: BufferId) -> Result<(), Error> {
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        if !frame.valid {
+    pub fn mark_dirty(&self, buffer_id: BufferId) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        let mut inner = frame.inner.lock().unwrap();
+        if !inner.valid {
             return Err(Error::InvalidBuffer);
         }
-        frame.dirty = true;
+        inner.dirty = true;
         Ok(())
     }
 
     pub fn write_byte(
-        &mut self,
+        &self,
         buffer_id: BufferId,
         offset: usize,
         value: u8,
     ) -> Result<(), Error> {
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        if !frame.valid {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        let mut inner = frame.inner.lock().unwrap();
+        if !inner.valid {
             return Err(Error::InvalidBuffer);
         }
-        frame.page[offset] = value;
-        frame.dirty = true;
+        inner.page[offset] = value;
+        inner.dirty = true;
         Ok(())
     }
 
-    pub fn write_page_image(&mut self, buffer_id: BufferId, page: &Page) -> Result<(), Error> {
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        if !frame.valid {
+    pub fn write_page_image(&self, buffer_id: BufferId, page: &Page) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        let mut inner = frame.inner.lock().unwrap();
+        if !inner.valid {
             return Err(Error::InvalidBuffer);
         }
-        frame.page = *page;
-        frame.dirty = true;
+        inner.page = *page;
+        inner.dirty = true;
         Ok(())
     }
 
-    pub fn flush_buffer(&mut self, buffer_id: BufferId) -> Result<FlushResult, Error> {
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        if frame.io_in_progress {
+    pub fn flush_buffer(&self, buffer_id: BufferId) -> Result<FlushResult, Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        let mut inner = frame.inner.lock().unwrap();
+        if inner.io_in_progress {
             return Ok(FlushResult::InProgress);
         }
-        if !frame.valid {
+        if !inner.valid {
             return Ok(FlushResult::Invalid);
         }
-        if !frame.dirty {
+        if !inner.dirty {
             return Ok(FlushResult::AlreadyClean);
         }
-        frame.io_in_progress = true;
-        frame.io_error = false;
+        inner.io_in_progress = true;
+        inner.io_error = false;
         Ok(FlushResult::WriteIssued)
     }
 
-    pub fn complete_write(&mut self, buffer_id: BufferId) -> Result<(), Error> {
-        let tag = self.require_pending(buffer_id, IoOp::Write)?;
-        let page = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?.page;
-        self.storage
-            .write_page(tag, &page)
-            .map_err(Error::Storage)?;
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        frame.dirty = false;
-        frame.io_in_progress = false;
-        frame.io_error = false;
-        self.usage_stats.shared_written += 1;
+    pub fn complete_write(&self, buffer_id: BufferId) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+
+        let (tag, page) = {
+            let inner = frame.inner.lock().unwrap();
+            if !inner.io_in_progress {
+                return Err(Error::NoIoInProgress);
+            }
+            if !inner.valid {
+                return Err(Error::WrongIoOp);
+            }
+            let tag = inner.tag.ok_or(Error::UnknownBuffer)?;
+            (tag, inner.page)
+        };
+
+        {
+            let mut storage = self.storage.lock().unwrap();
+            storage.write_page(tag, &page).map_err(Error::Storage)?;
+        }
+
+        {
+            let mut inner = frame.inner.lock().unwrap();
+            inner.dirty = false;
+            inner.io_in_progress = false;
+            inner.io_error = false;
+        }
+
+        frame.io_complete.notify_all();
+        self.stats_written.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn fail_write(&mut self, buffer_id: BufferId) -> Result<(), Error> {
-        let _ = self.require_pending(buffer_id, IoOp::Write)?;
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        frame.io_in_progress = false;
-        frame.io_error = true;
-        frame.dirty = true;
+    pub fn fail_write(&self, buffer_id: BufferId) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        {
+            let inner = frame.inner.lock().unwrap();
+            if !inner.io_in_progress {
+                return Err(Error::NoIoInProgress);
+            }
+            if !inner.valid {
+                return Err(Error::WrongIoOp);
+            }
+        }
+
+        {
+            let mut inner = frame.inner.lock().unwrap();
+            inner.io_in_progress = false;
+            inner.io_error = true;
+            inner.dirty = true;
+        }
+
+        frame.io_complete.notify_all();
         Ok(())
     }
 
-    pub fn unpin(&mut self, client_id: ClientId, buffer_id: BufferId) -> Result<(), Error> {
-        let frame = self.frames.get_mut(buffer_id).ok_or(Error::UnknownBuffer)?;
-        frame.unpin(client_id)
+    pub fn unpin(&self, client_id: ClientId, buffer_id: BufferId) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        let mut inner = frame.inner.lock().unwrap();
+        inner.unpin(client_id)
     }
 
-    pub fn invalidate_relation(&mut self, rel: RelFileLocator) -> Result<usize, Error> {
-        let mut removed = 0;
+    /// Wait until I/O completes on the given buffer.
+    pub fn wait_for_io(&self, buffer_id: BufferId) -> Result<(), Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        let mut inner = frame.inner.lock().unwrap();
+        while inner.io_in_progress {
+            inner = frame.io_complete.wait(inner).unwrap();
+        }
+        if inner.io_error {
+            Err(Error::InvalidBuffer)
+        } else {
+            Ok(())
+        }
+    }
 
-        for buffer_id in 0..self.frames.len() {
-            let frame = &self.frames[buffer_id];
-            if !matches!(frame.tag, Some(tag) if tag.rel == rel) {
+    pub fn invalidate_relation(&self, rel: RelFileLocator) -> Result<usize, Error> {
+        let mut lookup = self.lookup.write().unwrap();
+        let mut strategy = self.strategy.lock().unwrap();
+
+        // First pass: verify no frames are pinned or have I/O in progress.
+        for frame in &self.frames {
+            let inner = frame.inner.lock().unwrap();
+            if !matches!(inner.tag, Some(tag) if tag.rel == rel) {
                 continue;
             }
-            if frame.pin_count > 0 {
+            if inner.pin_count > 0 {
                 return Err(Error::BufferPinned);
             }
-            if frame.io_in_progress {
+            if inner.io_in_progress {
                 return Err(Error::NoIoInProgress);
             }
         }
 
-        for buffer_id in 0..self.frames.len() {
-            let frame = &mut self.frames[buffer_id];
-            let Some(tag) = frame.tag else {
-                continue;
-            };
+        // Second pass: clear matching frames.
+        let mut removed = 0;
+        for (buffer_id, frame) in self.frames.iter().enumerate() {
+            let mut inner = frame.inner.lock().unwrap();
+            let Some(tag) = inner.tag else { continue };
             if tag.rel != rel {
                 continue;
             }
 
-            self.lookup.remove(&tag);
-            *frame = BufferFrame::default();
-            self.free_list.push_back(buffer_id);
+            lookup.remove(&tag);
+            *inner = BufferFrameInner::default();
+            strategy.free_list.push_back(buffer_id);
             removed += 1;
         }
 
         Ok(removed)
     }
 
-    fn allocate_victim(&mut self) -> Option<BufferId> {
-        while let Some(buffer_id) = self.free_list.pop_front() {
+    fn allocate_victim(&self, strategy: &mut StrategyState) -> Option<BufferId> {
+        while let Some(buffer_id) = strategy.free_list.pop_front() {
             let frame = &self.frames[buffer_id];
-            if frame.pin_count == 0 && !frame.io_in_progress {
+            let inner = frame.inner.lock().unwrap();
+            if inner.pin_count == 0 && !inner.io_in_progress {
                 return Some(buffer_id);
             }
         }
@@ -327,30 +496,23 @@ impl<S: StorageBackend> BufferPool<S> {
 
         let mut scanned = 0usize;
         while scanned < capacity * (self.max_usage_count as usize + 1) {
-            let buffer_id = self.next_victim;
-            self.next_victim = (self.next_victim + 1) % capacity;
+            let buffer_id = strategy.next_victim;
+            strategy.next_victim = (strategy.next_victim + 1) % capacity;
             scanned += 1;
 
-            let frame = &mut self.frames[buffer_id];
-            if frame.pin_count > 0 || frame.io_in_progress {
+            let frame = &self.frames[buffer_id];
+            let mut inner = frame.inner.lock().unwrap();
+            if inner.pin_count > 0 || inner.io_in_progress {
                 continue;
             }
-            if frame.usage_count > 0 {
-                frame.usage_count -= 1;
+            if inner.usage_count > 0 {
+                inner.usage_count -= 1;
                 continue;
             }
             return Some(buffer_id);
         }
 
         None
-    }
-
-    fn require_pending(&self, buffer_id: BufferId, op: IoOp) -> Result<BufferTag, Error> {
-        let pending = self.pending_io(buffer_id).ok_or(Error::NoIoInProgress)?;
-        if pending.op != op {
-            return Err(Error::WrongIoOp);
-        }
-        Ok(pending.tag)
     }
 }
 
@@ -386,7 +548,7 @@ mod tests {
         let tag = tag(42, 0);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(7));
-        let mut pool = BufferPool::new(storage, 2);
+        let pool = BufferPool::new(storage, 2);
 
         let first = pool.request_page(1, tag);
         assert_eq!(first, RequestPageResult::ReadIssued { buffer_id: 0 });
@@ -405,7 +567,7 @@ mod tests {
         let tag = tag(42, 1);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(9));
-        let mut pool = BufferPool::new(storage, 2);
+        let pool = BufferPool::new(storage, 2);
 
         assert_eq!(
             pool.request_page(1, tag),
@@ -427,7 +589,7 @@ mod tests {
         let tag = tag(7, 0);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(1));
-        let mut pool = BufferPool::new(storage, 1);
+        let pool = BufferPool::new(storage, 1);
 
         assert_eq!(
             pool.request_page(1, tag),
@@ -442,7 +604,7 @@ mod tests {
         let state = pool.buffer_state(0).unwrap();
         assert!(state.valid);
         assert!(!state.dirty);
-        assert_eq!(pool.storage().get_page(tag).unwrap()[0], 99);
+        assert_eq!(pool.with_storage(|s| s.get_page(tag).unwrap()[0]), 99);
     }
 
     #[test]
@@ -450,7 +612,7 @@ mod tests {
         let tag = tag(8, 0);
         let mut storage = FakeStorage::default();
         storage.put_page(tag, page(3));
-        let mut pool = BufferPool::new(storage, 1);
+        let pool = BufferPool::new(storage, 1);
 
         assert_eq!(
             pool.request_page(1, tag),
@@ -458,7 +620,7 @@ mod tests {
         );
         pool.complete_read(0).unwrap();
         pool.write_byte(0, 0, 44).unwrap();
-        pool.storage_mut().fail_next_write(tag, "boom");
+        pool.with_storage_mut(|s| s.fail_next_write(tag, "boom"));
 
         assert_eq!(pool.flush_buffer(0).unwrap(), FlushResult::WriteIssued);
         let err = pool.complete_write(0).unwrap_err();
@@ -483,7 +645,7 @@ mod tests {
         storage.put_page(a, page(1));
         storage.put_page(b, page(2));
         storage.put_page(c, page(3));
-        let mut pool = BufferPool::new(storage, 2);
+        let pool = BufferPool::new(storage, 2);
 
         assert_eq!(
             pool.request_page(1, a),
@@ -514,7 +676,7 @@ mod tests {
         let b = tag(11, 1);
         storage.put_page(a, page(1));
         storage.put_page(b, page(2));
-        let mut pool = BufferPool::new(storage, 2);
+        let pool = BufferPool::new(storage, 2);
 
         assert_eq!(
             pool.request_page(1, a),
@@ -582,7 +744,7 @@ mod tests {
     #[test]
     fn integ_cache_miss_reads_from_disk() {
         let base = temp_dir("miss_reads_disk");
-        let mut pool = pool_with_relation(&base, 1, 3, 8);
+        let pool = pool_with_relation(&base, 1, 3, 8);
         let t = smgr_tag(1, 0);
         let fill = (1u32 % 200) as u8;
 
@@ -602,7 +764,7 @@ mod tests {
     #[test]
     fn integ_second_request_is_cache_hit() {
         let base = temp_dir("cache_hit");
-        let mut pool = pool_with_relation(&base, 2, 1, 8);
+        let pool = pool_with_relation(&base, 2, 1, 8);
         let t = smgr_tag(2, 0);
 
         assert_eq!(
@@ -622,7 +784,7 @@ mod tests {
     fn integ_dirty_page_flushed_to_disk() {
         let base = temp_dir("flush_to_disk");
         {
-            let mut pool = pool_with_relation(&base, 3, 1, 8);
+            let pool = pool_with_relation(&base, 3, 1, 8);
             let t = smgr_tag(3, 0);
 
             pool.request_page(1, t);
@@ -647,7 +809,7 @@ mod tests {
     #[test]
     fn integ_all_buffers_pinned_returns_error() {
         let base = temp_dir("all_pinned");
-        let mut pool = pool_with_relation(&base, 4, 3, 2);
+        let pool = pool_with_relation(&base, 4, 3, 2);
 
         for block in 0..2u32 {
             let t = smgr_tag(4, block);
@@ -665,7 +827,7 @@ mod tests {
     #[test]
     fn integ_eviction_flushes_dirty_frame() {
         let base = temp_dir("evict_flush");
-        let mut pool = pool_with_relation(&base, 5, 2, 1);
+        let pool = pool_with_relation(&base, 5, 2, 1);
 
         let t0 = smgr_tag(5, 0);
         let t1 = smgr_tag(5, 1);
@@ -701,7 +863,7 @@ mod tests {
     fn integ_multiple_blocks_no_aliasing() {
         let base = temp_dir("no_aliasing");
         let nblocks = 5u32;
-        let mut pool = pool_with_relation(&base, 6, nblocks, 8);
+        let pool = pool_with_relation(&base, 6, nblocks, 8);
 
         for block in 0..nblocks {
             let t = smgr_tag(6, block);
@@ -725,7 +887,7 @@ mod tests {
     #[test]
     fn integ_invalidate_then_reread() {
         let base = temp_dir("invalidate_reread");
-        let mut pool = pool_with_relation(&base, 7, 2, 8);
+        let pool = pool_with_relation(&base, 7, 2, 8);
         let rel = smgr_rel(7);
 
         for block in 0..2u32 {

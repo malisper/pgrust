@@ -98,12 +98,12 @@ fn main() {
 
     let touched_blocks = {
         let smgr = MdStorageManager::new(&base_dir);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let mut touched = BTreeSet::new();
 
         for row in &rows {
             let tuple = HeapTuple::from_values(&desc, row).unwrap();
-            let tid = heap_insert(&mut pool, 1, rel(), &tuple).unwrap();
+            let tid = heap_insert(&pool, 1, rel(), &tuple).unwrap();
             touched.insert(tid.block_number);
             info(&format!(
                 "inserted row at ({},{})",
@@ -112,7 +112,7 @@ fn main() {
         }
 
         for block in &touched {
-            heap_flush(&mut pool, 1, rel(), *block).unwrap();
+            heap_flush(&pool, 1, rel(), *block).unwrap();
             info(&format!("flushed block {}", block));
         }
 
@@ -122,11 +122,11 @@ fn main() {
 
     header("Scan");
     let smgr = MdStorageManager::new(&base_dir);
-    let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-    let mut scan = heap_scan_begin(&mut pool, rel()).unwrap();
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+    let mut scan = heap_scan_begin(&pool, rel()).unwrap();
     let mut scanned = Vec::new();
 
-    while let Some((tid, tuple)) = heap_scan_next(&mut pool, 2, &mut scan).unwrap() {
+    while let Some((tid, tuple)) = heap_scan_next(&pool, 2, &mut scan).unwrap() {
         let vals = tuple.deform(&desc).unwrap();
         let id = i32::from_le_bytes(vals[0].clone().unwrap().try_into().unwrap());
         let name = String::from_utf8(vals[1].clone().unwrap()).unwrap();

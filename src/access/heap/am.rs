@@ -57,10 +57,10 @@ pub struct VisibleHeapScan {
 }
 
 pub fn heap_scan_begin(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
 ) -> Result<HeapScan, HeapError> {
-    let nblocks = pool.storage_mut().smgr.nblocks(rel, ForkNumber::Main)?;
+    let nblocks = pool.with_storage_mut(|s| s.smgr.nblocks(rel, ForkNumber::Main))?;
     Ok(HeapScan {
         rel,
         nblocks,
@@ -70,14 +70,14 @@ pub fn heap_scan_begin(
 }
 
 pub fn heap_scan_next(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     scan: &mut HeapScan,
 ) -> Result<Option<(ItemPointerData, HeapTuple)>, HeapError> {
     while scan.current_block < scan.nblocks {
         let block = scan.current_block;
         let buffer_id = pin_existing_block(pool, client_id, scan.rel, block)?;
-        let page = *pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
+        let page = pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
         let max_offset = page_get_max_offset_number(&page).map_err(TupleError::from)?;
 
         while scan.current_offset <= max_offset {
@@ -109,7 +109,7 @@ pub fn heap_scan_next(
 }
 
 pub fn heap_scan_begin_visible(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
     snapshot: Snapshot,
 ) -> Result<VisibleHeapScan, HeapError> {
@@ -120,7 +120,7 @@ pub fn heap_scan_begin_visible(
 }
 
 pub fn heap_scan_next_visible(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     txns: &TransactionManager,
     scan: &mut VisibleHeapScan,
@@ -134,7 +134,7 @@ pub fn heap_scan_next_visible(
 }
 
 pub fn heap_insert(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     tuple: &HeapTuple,
@@ -143,7 +143,7 @@ pub fn heap_insert(
 }
 
 pub fn heap_insert_mvcc(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     xid: TransactionId,
@@ -153,7 +153,7 @@ pub fn heap_insert_mvcc(
 }
 
 pub fn heap_insert_mvcc_with_cid(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     xid: TransactionId,
@@ -164,22 +164,20 @@ pub fn heap_insert_mvcc_with_cid(
 }
 
 pub fn heap_fetch(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     tid: ItemPointerData,
 ) -> Result<HeapTuple, HeapError> {
     let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
-    let tuple = heap_page_get_tuple(
-        pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?,
-        tid.offset_number,
-    )?;
+    let page = pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
+    let tuple = heap_page_get_tuple(&page, tid.offset_number)?;
     pool.unpin(client_id, buffer_id)?;
     Ok(tuple)
 }
 
 pub fn heap_fetch_visible(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     tid: ItemPointerData,
@@ -195,7 +193,7 @@ pub fn heap_fetch_visible(
 }
 
 pub fn heap_delete(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     txns: &TransactionManager,
@@ -204,7 +202,7 @@ pub fn heap_delete(
 ) -> Result<(), HeapError> {
     let snapshot = txns.snapshot(xid)?;
     let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
-    let page = *pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
+    let page = pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
     let mut new_page = page;
     let mut tuple = heap_page_get_tuple(&new_page, tid.offset_number)?;
 
@@ -225,7 +223,7 @@ pub fn heap_delete(
 }
 
 pub fn heap_update(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     txns: &TransactionManager,
@@ -237,7 +235,7 @@ pub fn heap_update(
 }
 
 pub fn heap_update_with_cid(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     txns: &TransactionManager,
@@ -258,7 +256,7 @@ pub fn heap_update_with_cid(
     let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid, cid)?;
 
     let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
-    let page = *pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
+    let page = pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
     let mut new_page = page;
     let mut old_version = heap_page_get_tuple(&new_page, tid.offset_number)?;
     old_version.header.xmax = xid;
@@ -271,7 +269,7 @@ pub fn heap_update_with_cid(
 }
 
 pub fn heap_flush(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     block_number: u32,
@@ -284,11 +282,11 @@ pub fn heap_flush(
 }
 
 fn ensure_relation_exists(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
 ) -> Result<(), HeapError> {
-    pool.storage_mut().smgr.open(rel)?;
-    match pool.storage_mut().smgr.create(rel, ForkNumber::Main, false) {
+    pool.with_storage_mut(|s| s.smgr.open(rel))?;
+    match pool.with_storage_mut(|s| s.smgr.create(rel, ForkNumber::Main, false)) {
         Ok(()) => {}
         Err(SmgrError::AlreadyExists { .. }) => {}
         Err(e) => return Err(e.into()),
@@ -297,7 +295,7 @@ fn ensure_relation_exists(
 }
 
 fn heap_insert_version(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     tuple: &HeapTuple,
@@ -307,7 +305,7 @@ fn heap_insert_version(
     ensure_relation_exists(pool, rel)?;
 
     loop {
-        let nblocks = pool.storage_mut().smgr.nblocks(rel, ForkNumber::Main)?;
+        let nblocks = pool.with_storage_mut(|s| s.smgr.nblocks(rel, ForkNumber::Main))?;
         // This insert path still uses a deliberately simple placement policy:
         // try the tail page, and if it cannot fit the tuple, extend the relation
         // with one brand-new heap page and retry there.
@@ -319,7 +317,7 @@ fn heap_insert_version(
         };
 
         let buffer_id = pin_existing_block(pool, client_id, rel, target_block)?;
-        let page = *pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
+        let page = pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
         let mut new_page = page;
         let mut stored = tuple.clone();
         stored.header.xmin = xmin;
@@ -348,32 +346,28 @@ fn heap_insert_version(
 }
 
 fn bootstrap_first_page(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
 ) -> Result<(), HeapError> {
     let mut page = [0u8; crate::BLCKSZ];
     heap_page_init(&mut page);
-    pool.storage_mut()
-        .smgr
-        .extend(rel, ForkNumber::Main, 0, &page, true)?;
+    pool.with_storage_mut(|s| s.smgr.extend(rel, ForkNumber::Main, 0, &page, true))?;
     Ok(())
 }
 
 fn append_empty_heap_page(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
     block_number: u32,
 ) -> Result<(), HeapError> {
     let mut page = [0u8; crate::BLCKSZ];
     heap_page_init(&mut page);
-    pool.storage_mut()
-        .smgr
-        .extend(rel, ForkNumber::Main, block_number, &page, true)?;
+    pool.with_storage_mut(|s| s.smgr.extend(rel, ForkNumber::Main, block_number, &page, true))?;
     Ok(())
 }
 
 fn pin_existing_block(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     block_number: u32,
@@ -441,11 +435,11 @@ mod tests {
         snapshot: Snapshot,
     ) -> Vec<Vec<u8>> {
         let smgr = crate::storage::smgr::MdStorageManager::new(base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
-        let mut scan = heap_scan_begin_visible(&mut pool, rel, snapshot).unwrap();
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+        let mut scan = heap_scan_begin_visible(&pool, rel, snapshot).unwrap();
         let mut rows = Vec::new();
         while let Some((_tid, tuple)) =
-            heap_scan_next_visible(&mut pool, 1, txns, &mut scan).unwrap()
+            heap_scan_next_visible(&pool, 1, txns, &mut scan).unwrap()
         {
             rows.push(tuple.data);
         }
@@ -456,11 +450,11 @@ mod tests {
     fn heap_insert_and_fetch_roundtrip() {
         let base = temp_dir("insert_fetch_roundtrip");
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
         let tuple = HeapTuple::new_raw(2, b"hello|heap".to_vec());
 
-        let tid = heap_insert(&mut pool, 1, rel(5000), &tuple).unwrap();
-        let fetched = heap_fetch(&mut pool, 2, rel(5000), tid).unwrap();
+        let tid = heap_insert(&pool, 1, rel(5000), &tuple).unwrap();
+        let fetched = heap_fetch(&pool, 2, rel(5000), tid).unwrap();
 
         assert_eq!(fetched.data, tuple.data);
         assert_eq!(fetched.header.ctid, tid);
@@ -472,16 +466,16 @@ mod tests {
         let rel = rel(5001);
         let tid = {
             let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-            let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+            let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
             let tuple = HeapTuple::new_raw(2, b"persisted-tuple".to_vec());
-            let tid = heap_insert(&mut pool, 1, rel, &tuple).unwrap();
-            heap_flush(&mut pool, 1, rel, tid.block_number).unwrap();
+            let tid = heap_insert(&pool, 1, rel, &tuple).unwrap();
+            heap_flush(&pool, 1, rel, tid.block_number).unwrap();
             tid
         };
 
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
-        let fetched = heap_fetch(&mut pool, 2, rel, tid).unwrap();
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+        let fetched = heap_fetch(&pool, 2, rel, tid).unwrap();
         assert_eq!(fetched.data, b"persisted-tuple".to_vec());
     }
 
@@ -489,13 +483,13 @@ mod tests {
     fn heap_insert_spills_to_new_page_when_full() {
         let base = temp_dir("spill_to_new_page");
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let rel = rel(5002);
 
         let large = HeapTuple::new_raw(1, vec![0xAB; 7000]);
-        let first = heap_insert(&mut pool, 1, rel, &large).unwrap();
-        let second = heap_insert(&mut pool, 1, rel, &large).unwrap();
-        let third = heap_insert(&mut pool, 1, rel, &large).unwrap();
+        let first = heap_insert(&pool, 1, rel, &large).unwrap();
+        let second = heap_insert(&pool, 1, rel, &large).unwrap();
+        let third = heap_insert(&pool, 1, rel, &large).unwrap();
 
         assert_eq!(first.block_number, 0);
         assert!(second.block_number > first.block_number);
@@ -506,19 +500,19 @@ mod tests {
     fn heap_scan_returns_inserted_tuples_in_physical_order() {
         let base = temp_dir("scan_physical_order");
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let rel = rel(5003);
 
         let large = HeapTuple::new_raw(1, vec![0xAA; 7000]);
         let small = HeapTuple::new_raw(1, b"tail".to_vec());
 
-        let t1 = heap_insert(&mut pool, 1, rel, &large).unwrap();
-        let t2 = heap_insert(&mut pool, 1, rel, &large).unwrap();
-        let t3 = heap_insert(&mut pool, 1, rel, &small).unwrap();
+        let t1 = heap_insert(&pool, 1, rel, &large).unwrap();
+        let t2 = heap_insert(&pool, 1, rel, &large).unwrap();
+        let t3 = heap_insert(&pool, 1, rel, &small).unwrap();
 
-        let mut scan = heap_scan_begin(&mut pool, rel).unwrap();
+        let mut scan = heap_scan_begin(&pool, rel).unwrap();
         let mut seen = Vec::new();
-        while let Some((tid, tuple)) = heap_scan_next(&mut pool, 2, &mut scan).unwrap() {
+        while let Some((tid, tuple)) = heap_scan_next(&pool, 2, &mut scan).unwrap() {
             seen.push((tid, tuple.data));
         }
 
@@ -553,12 +547,12 @@ mod tests {
         smgr.extend(rel, ForkNumber::Main, 0, &page, true).unwrap();
 
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
-        let mut scan = heap_scan_begin(&mut pool, rel).unwrap();
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+        let mut scan = heap_scan_begin(&pool, rel).unwrap();
 
-        let first = heap_scan_next(&mut pool, 1, &mut scan).unwrap().unwrap();
+        let first = heap_scan_next(&pool, 1, &mut scan).unwrap().unwrap();
         assert_eq!(first.1.data, b"first".to_vec());
-        assert!(heap_scan_next(&mut pool, 1, &mut scan).unwrap().is_none());
+        assert!(heap_scan_next(&pool, 1, &mut scan).unwrap().is_none());
     }
 
     #[test]
@@ -566,12 +560,12 @@ mod tests {
         let base = temp_dir("mvcc_delete");
         let rel = rel(5005);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let mut txns = TransactionManager::default();
 
         let inserter = txns.begin();
         let tid = heap_insert_mvcc(
-            &mut pool,
+            &pool,
             1,
             rel,
             inserter,
@@ -581,18 +575,18 @@ mod tests {
         txns.commit(inserter).unwrap();
 
         let deleter = txns.begin();
-        heap_delete(&mut pool, 2, rel, &txns, deleter, tid).unwrap();
+        heap_delete(&pool, 2, rel, &txns, deleter, tid).unwrap();
 
         let other = txns.begin();
         let other_snapshot = txns.snapshot(other).unwrap();
         let before_commit =
-            heap_fetch_visible(&mut pool, 3, rel, tid, &txns, &other_snapshot).unwrap();
+            heap_fetch_visible(&pool, 3, rel, tid, &txns, &other_snapshot).unwrap();
         assert!(before_commit.is_some());
 
         txns.commit(deleter).unwrap();
         let after_commit = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert!(
-            heap_fetch_visible(&mut pool, 4, rel, tid, &txns, &after_commit)
+            heap_fetch_visible(&pool, 4, rel, tid, &txns, &after_commit)
                 .unwrap()
                 .is_none()
         );
@@ -603,12 +597,12 @@ mod tests {
         let base = temp_dir("mvcc_update");
         let rel = rel(5006);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let mut txns = TransactionManager::default();
 
         let inserter = txns.begin();
         let old_tid = heap_insert_mvcc(
-            &mut pool,
+            &pool,
             1,
             rel,
             inserter,
@@ -619,7 +613,7 @@ mod tests {
 
         let updater = txns.begin();
         let new_tid = heap_update(
-            &mut pool,
+            &pool,
             2,
             rel,
             &txns,
@@ -632,12 +626,12 @@ mod tests {
         let concurrent = txns.begin();
         let concurrent_snapshot = txns.snapshot(concurrent).unwrap();
         let old_visible =
-            heap_fetch_visible(&mut pool, 3, rel, old_tid, &txns, &concurrent_snapshot)
+            heap_fetch_visible(&pool, 3, rel, old_tid, &txns, &concurrent_snapshot)
                 .unwrap()
                 .unwrap();
         assert_eq!(old_visible.data, b"old".to_vec());
         assert!(
-            heap_fetch_visible(&mut pool, 3, rel, new_tid, &txns, &concurrent_snapshot)
+            heap_fetch_visible(&pool, 3, rel, new_tid, &txns, &concurrent_snapshot)
                 .unwrap()
                 .is_none()
         );
@@ -645,17 +639,17 @@ mod tests {
         txns.commit(updater).unwrap();
         let committed_snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert!(
-            heap_fetch_visible(&mut pool, 4, rel, old_tid, &txns, &committed_snapshot)
+            heap_fetch_visible(&pool, 4, rel, old_tid, &txns, &committed_snapshot)
                 .unwrap()
                 .is_none()
         );
         let new_visible =
-            heap_fetch_visible(&mut pool, 4, rel, new_tid, &txns, &committed_snapshot)
+            heap_fetch_visible(&pool, 4, rel, new_tid, &txns, &committed_snapshot)
                 .unwrap()
                 .unwrap();
         assert_eq!(new_visible.data, b"new".to_vec());
 
-        let old_stored = heap_fetch(&mut pool, 5, rel, old_tid).unwrap();
+        let old_stored = heap_fetch(&pool, 5, rel, old_tid).unwrap();
         assert_eq!(old_stored.header.xmax, updater);
         assert_eq!(old_stored.header.ctid, new_tid);
     }
@@ -665,12 +659,12 @@ mod tests {
         let base = temp_dir("mvcc_scan");
         let rel = rel(5007);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let mut txns = TransactionManager::default();
 
         let xid1 = txns.begin();
         let tid1 = heap_insert_mvcc(
-            &mut pool,
+            &pool,
             1,
             rel,
             xid1,
@@ -681,7 +675,7 @@ mod tests {
 
         let xid2 = txns.begin();
         let _tid2 = heap_update(
-            &mut pool,
+            &pool,
             2,
             rel,
             &txns,
@@ -693,10 +687,10 @@ mod tests {
         txns.commit(xid2).unwrap();
 
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
-        let mut scan = heap_scan_begin_visible(&mut pool, rel, snapshot).unwrap();
+        let mut scan = heap_scan_begin_visible(&pool, rel, snapshot).unwrap();
         let mut rows = Vec::new();
         while let Some((_tid, tuple)) =
-            heap_scan_next_visible(&mut pool, 3, &txns, &mut scan).unwrap()
+            heap_scan_next_visible(&pool, 3, &txns, &mut scan).unwrap()
         {
             rows.push(tuple.data);
         }
@@ -709,12 +703,12 @@ mod tests {
         let base = temp_dir("mvcc_buffer_cache");
         let rel = rel(5008);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let mut txns = TransactionManager::default();
 
         let insert_xid = txns.begin();
         let original_tid = heap_insert_mvcc(
-            &mut pool,
+            &pool,
             1,
             rel,
             insert_xid,
@@ -722,7 +716,7 @@ mod tests {
         )
         .unwrap();
         txns.commit(insert_xid).unwrap();
-        heap_flush(&mut pool, 1, rel, original_tid.block_number).unwrap();
+        heap_flush(&pool, 1, rel, original_tid.block_number).unwrap();
 
         let committed_snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert_eq!(
@@ -732,7 +726,7 @@ mod tests {
 
         let update_xid = txns.begin();
         let updated_tid = heap_update(
-            &mut pool,
+            &pool,
             1,
             rel,
             &txns,
@@ -744,13 +738,13 @@ mod tests {
         txns.commit(update_xid).unwrap();
 
         let delete_xid = txns.begin();
-        heap_delete(&mut pool, 1, rel, &txns, delete_xid, updated_tid).unwrap();
+        heap_delete(&pool, 1, rel, &txns, delete_xid, updated_tid).unwrap();
         txns.commit(delete_xid).unwrap();
 
         // The writer's pool sees both committed changes immediately because it is
         // reading the dirty page out of shared buffers, not reloading from disk.
         let writer_view = heap_fetch_visible(
-            &mut pool,
+            &pool,
             2,
             rel,
             original_tid,
@@ -761,13 +755,13 @@ mod tests {
         assert!(writer_view.is_none());
 
         let mut writer_scan = heap_scan_begin_visible(
-            &mut pool,
+            &pool,
             rel,
             txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         )
         .unwrap();
         assert!(
-            heap_scan_next_visible(&mut pool, 2, &txns, &mut writer_scan)
+            heap_scan_next_visible(&pool, 2, &txns, &mut writer_scan)
                 .unwrap()
                 .is_none()
         );
@@ -787,7 +781,7 @@ mod tests {
 
         // Flushing the touched block makes disk catch up with the buffered MVCC
         // state, so a fresh reader now sees the delete too.
-        heap_flush(&mut pool, 1, rel, updated_tid.block_number).unwrap();
+        heap_flush(&pool, 1, rel, updated_tid.block_number).unwrap();
         assert_eq!(
             visible_tuple_payloads(
                 &base,
@@ -806,12 +800,12 @@ mod tests {
 
         let tid = {
             let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-            let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+            let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
             let mut txns = TransactionManager::new_durable(&base).unwrap();
 
             let xid = txns.begin();
             let tid = heap_insert_mvcc(
-                &mut pool,
+                &pool,
                 1,
                 rel,
                 xid,
@@ -819,7 +813,7 @@ mod tests {
             )
             .unwrap();
             txns.commit(xid).unwrap();
-            heap_flush(&mut pool, 1, rel, tid.block_number).unwrap();
+            heap_flush(&pool, 1, rel, tid.block_number).unwrap();
             tid
         };
 
@@ -827,24 +821,24 @@ mod tests {
         let snapshot = reopened_txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
 
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-        let visible = heap_fetch_visible(&mut pool, 2, rel, tid, &reopened_txns, &snapshot)
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let visible = heap_fetch_visible(&pool, 2, rel, tid, &reopened_txns, &snapshot)
             .unwrap()
             .unwrap();
         assert_eq!(visible.data, b"row".to_vec());
 
         let deleting_xid = reopened_txns.begin();
-        heap_delete(&mut pool, 2, rel, &reopened_txns, deleting_xid, tid).unwrap();
+        heap_delete(&pool, 2, rel, &reopened_txns, deleting_xid, tid).unwrap();
         reopened_txns.commit(deleting_xid).unwrap();
-        heap_flush(&mut pool, 2, rel, tid.block_number).unwrap();
+        heap_flush(&pool, 2, rel, tid.block_number).unwrap();
         drop(pool);
 
         let final_txns = TransactionManager::new_durable(&base).unwrap();
         let final_snapshot = final_txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         assert!(
-            heap_fetch_visible(&mut pool, 3, rel, tid, &final_txns, &final_snapshot)
+            heap_fetch_visible(&pool, 3, rel, tid, &final_txns, &final_snapshot)
                 .unwrap()
                 .is_none()
         );

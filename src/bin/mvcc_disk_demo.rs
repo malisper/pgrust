@@ -111,12 +111,12 @@ fn print_visible_rows(
     label: &str,
 ) {
     let smgr = MdStorageManager::new(base_dir);
-    let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-    let mut scan = heap_scan_begin_visible(&mut pool, rel(), snapshot).unwrap();
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+    let mut scan = heap_scan_begin_visible(&pool, rel(), snapshot).unwrap();
 
     println!("  visible rows for {}:", label);
     let mut saw_any = false;
-    while let Some((tid, tuple)) = heap_scan_next_visible(&mut pool, 99, txns, &mut scan).unwrap() {
+    while let Some((tid, tuple)) = heap_scan_next_visible(&pool, 99, txns, &mut scan).unwrap() {
         saw_any = true;
         println!(
             "    ({},{}) {}",
@@ -220,7 +220,7 @@ fn inspect_relation(base_dir: &Path, desc: &[AttributeDesc], title: &str, show_f
     }
 }
 
-fn flush_blocks(pool: &mut BufferPool<SmgrStorageBackend>, blocks: impl IntoIterator<Item = u32>) {
+fn flush_blocks(pool: &BufferPool<SmgrStorageBackend>, blocks: impl IntoIterator<Item = u32>) {
     let mut seen = BTreeSet::new();
     for block in blocks {
         if seen.insert(block) {
@@ -245,18 +245,18 @@ fn main() {
     info(&format!("show raw file state: {}", show_file_state));
 
     let smgr = MdStorageManager::new(&base_dir);
-    let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
 
     let insert_xid = txns.begin();
     let insert_tid = heap_insert_mvcc(
-        &mut pool,
+        &pool,
         1,
         rel(),
         insert_xid,
         &tuple(&desc, 1, "alice", Some("new")),
     )
     .unwrap();
-    flush_blocks(&mut pool, [insert_tid.block_number]);
+    flush_blocks(&pool, [insert_tid.block_number]);
     inspect_relation(
         &base_dir,
         &desc,
@@ -287,7 +287,7 @@ fn main() {
 
     let update_xid = txns.begin();
     let update_tid = heap_update(
-        &mut pool,
+        &pool,
         1,
         rel(),
         &txns,
@@ -297,7 +297,7 @@ fn main() {
     )
     .unwrap();
     flush_blocks(
-        &mut pool,
+        &pool,
         [insert_tid.block_number, update_tid.block_number],
     );
     inspect_relation(
@@ -335,8 +335,8 @@ fn main() {
     );
 
     let delete_xid = txns.begin();
-    heap_delete(&mut pool, 1, rel(), &txns, delete_xid, update_tid).unwrap();
-    flush_blocks(&mut pool, [update_tid.block_number]);
+    heap_delete(&pool, 1, rel(), &txns, delete_xid, update_tid).unwrap();
+    flush_blocks(&pool, [update_tid.block_number]);
     inspect_relation(
         &base_dir,
         &desc,

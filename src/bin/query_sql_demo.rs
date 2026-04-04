@@ -106,7 +106,7 @@ fn main() -> Result<(), ExecError> {
 
     let mut txns = TransactionManager::new_durable(&base_dir).unwrap();
     let smgr = MdStorageManager::new(&base_dir);
-    let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
 
     let xid = txns.begin();
     for row in [
@@ -114,8 +114,8 @@ fn main() -> Result<(), ExecError> {
         tuple(2, "bob", None),
         tuple(3, "carol", Some("storage")),
     ] {
-        let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
-        heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap();
+        let tid = heap_insert_mvcc(&pool, 1, rel(), xid, &row).unwrap();
+        heap_flush(&pool, 1, rel(), tid.block_number).unwrap();
     }
     txns.commit(xid).unwrap();
 
@@ -129,7 +129,7 @@ fn main() -> Result<(), ExecError> {
     );
 
     let mut ctx = ExecutorContext {
-        pool: &mut pool,
+        pool: &pool,
         txns: &txns,
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 11,
