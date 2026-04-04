@@ -57,7 +57,10 @@ const XLOG_RECORD_HEADER: usize = 24;
 /// Block header: spc_oid(4) + db_oid(4) + rel_number(4) + fork(1) + pad(3) + block(4) = 20
 const BLOCK_HEADER: usize = 20;
 const WAL_RECORD_HEADER: usize = XLOG_RECORD_HEADER + BLOCK_HEADER; // 44
-pub const WAL_RECORD_LEN: usize = WAL_RECORD_HEADER + PAGE_SIZE;
+/// Maximum FPI record size (no hole compression). Used by tests.
+pub const WAL_RECORD_LEN: usize = WAL_RECORD_HEADER + FPI_HOLE_META + PAGE_SIZE;
+/// Hole metadata: hole_offset(2) + hole_length(2)
+const FPI_HOLE_META: usize = 4;
 /// Offset of the CRC field within the record.
 const CRC_OFFSET: usize = 20;
 
@@ -215,20 +218,37 @@ impl WalWriter {
         Ok(lsn)
     }
 
-    /// Internal: write a full page image record.
+    /// Internal: write a full page image record with hole compression.
+    ///
+    /// The "hole" is the range of zero bytes between `pd_lower` and `pd_upper`
+    /// in the page header. Omitting it can shrink an FPI from 8KB to a few
+    /// hundred bytes for a nearly-empty page.
     fn write_fpi(
         guard: &mut std::sync::MutexGuard<'_, WalWriterInner>,
         xid: u32,
         tag: BufferTag,
         page: &[u8; PAGE_SIZE],
     ) -> Result<Lsn, WalError> {
-        let prev_lsn = guard.insert_lsn;
-        let lsn = prev_lsn + WAL_RECORD_LEN as Lsn;
+        // Compute hole from page header: pd_lower at bytes 12-13, pd_upper at 14-15.
+        let pd_lower = u16::from_le_bytes([page[12], page[13]]) as usize;
+        let pd_upper = u16::from_le_bytes([page[14], page[15]]) as usize;
 
-        let mut record = [0u8; WAL_RECORD_LEN];
+        let (hole_offset, hole_length) = if pd_upper > pd_lower && pd_upper <= PAGE_SIZE && pd_lower > 0 {
+            (pd_lower as u16, (pd_upper - pd_lower) as u16)
+        } else {
+            (0u16, 0u16)
+        };
+
+        let page_data_len = PAGE_SIZE - hole_length as usize;
+        let record_len = WAL_RECORD_HEADER + FPI_HOLE_META + page_data_len;
+
+        let prev_lsn = guard.insert_lsn;
+        let lsn = prev_lsn + record_len as Lsn;
+
+        let mut record = vec![0u8; record_len];
 
         // XLogRecord header
-        record[0..4].copy_from_slice(&(WAL_RECORD_LEN as u32).to_le_bytes());
+        record[0..4].copy_from_slice(&(record_len as u32).to_le_bytes());
         record[4..8].copy_from_slice(&xid.to_le_bytes());
         record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
         record[16] = XLOG_FPI;
@@ -241,8 +261,21 @@ impl WalWriter {
         record[36] = tag.fork.as_u8();
         record[40..44].copy_from_slice(&tag.block.to_le_bytes());
 
-        // Page data
-        record[WAL_RECORD_HEADER..].copy_from_slice(page);
+        // Hole metadata
+        let hole_start = WAL_RECORD_HEADER;
+        record[hole_start..hole_start + 2].copy_from_slice(&hole_offset.to_le_bytes());
+        record[hole_start + 2..hole_start + 4].copy_from_slice(&hole_length.to_le_bytes());
+
+        // Page data (before hole + after hole)
+        let data_start = WAL_RECORD_HEADER + FPI_HOLE_META;
+        if hole_length > 0 {
+            let ho = hole_offset as usize;
+            let hl = hole_length as usize;
+            record[data_start..data_start + ho].copy_from_slice(&page[..ho]);
+            record[data_start + ho..].copy_from_slice(&page[ho + hl..]);
+        } else {
+            record[data_start..].copy_from_slice(page);
+        }
 
         // CRC
         let crc = crc32c::crc32c(&record);
@@ -437,9 +470,14 @@ mod tests {
         // block at bytes 40-43
         assert_eq!(u32::from_le_bytes(raw[40..44].try_into().unwrap()), 0xDD);
 
-        // page data starts at byte 44
-        assert_eq!(raw[WAL_RECORD_HEADER], 0x42);
-        assert_eq!(raw[WAL_RECORD_LEN - 1], 0x99);
+        // Hole metadata at bytes 44-47 (no hole since page header is invalid)
+        assert_eq!(u16::from_le_bytes(raw[44..46].try_into().unwrap()), 0, "hole_offset");
+        assert_eq!(u16::from_le_bytes(raw[46..48].try_into().unwrap()), 0, "hole_length");
+
+        // page data starts at byte 48 (after header + hole meta)
+        let data_start = WAL_RECORD_HEADER + FPI_HOLE_META;
+        assert_eq!(raw[data_start], 0x42);
+        assert_eq!(raw[raw.len() - 1], 0x99);
 
         // LSN should equal the record length (first record starts at offset 0)
         assert_eq!(lsn, WAL_RECORD_LEN as u64);
@@ -469,5 +507,56 @@ mod tests {
         wal2.flush().unwrap(); // flush BufWriter before checking file size
         let file_len = fs::metadata(dir.join("wal.log")).unwrap().len();
         assert_eq!(file_len, lsn2);
+    }
+
+    /// FPI hole compression omits zeros between pd_lower and pd_upper.
+    #[test]
+    fn fpi_hole_compression_reduces_record_size() {
+        use crate::storage::page;
+
+        let dir = test_dir("hole_compress");
+        let wal = WalWriter::new(&dir).unwrap();
+
+        // Create a properly initialized page with a small tuple.
+        let mut page_buf = [0u8; PAGE_SIZE];
+        page::page_init(&mut page_buf, 0);
+
+        // Add a small item so pd_lower advances and pd_upper retreats.
+        let item = [0xABu8; 32];
+        page::page_add_item(&mut page_buf, &item).unwrap();
+
+        let header = page::page_header(&page_buf).unwrap();
+        let pd_lower = header.pd_lower as usize;
+        let pd_upper = header.pd_upper as usize;
+        let hole_len = pd_upper - pd_lower;
+        assert!(hole_len > 0, "page should have a hole");
+
+        let lsn = wal.write_record(1, test_tag(0), &page_buf).unwrap();
+        wal.flush().unwrap();
+
+        // Record size should be header + hole_meta + (PAGE_SIZE - hole)
+        let expected_size = WAL_RECORD_HEADER + FPI_HOLE_META + PAGE_SIZE - hole_len;
+        assert_eq!(lsn, expected_size as u64);
+
+        let file_len = fs::metadata(dir.join("wal.log")).unwrap().len();
+        assert_eq!(file_len, expected_size as u64);
+
+        // Verify the record is much smaller than an uncompressed FPI.
+        assert!(expected_size < WAL_RECORD_LEN,
+            "compressed FPI ({expected_size}) should be smaller than max ({WAL_RECORD_LEN})");
+
+        // Read back and verify hole metadata.
+        let mut raw = Vec::new();
+        fs::File::open(dir.join("wal.log")).unwrap().read_to_end(&mut raw).unwrap();
+        let hole_offset = u16::from_le_bytes(raw[44..46].try_into().unwrap());
+        let hole_length = u16::from_le_bytes(raw[46..48].try_into().unwrap());
+        assert_eq!(hole_offset as usize, pd_lower);
+        assert_eq!(hole_length as usize, hole_len);
+
+        // Verify CRC
+        let crc = u32::from_le_bytes(raw[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
+        let mut check = raw.clone();
+        check[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(crc32c::crc32c(&check), crc, "CRC mismatch");
     }
 }

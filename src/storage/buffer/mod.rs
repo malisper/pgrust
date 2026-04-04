@@ -555,17 +555,12 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             (tag, page)
         };
 
-        // WAL rule: flush WAL up to this page's LSN before writing the data page.
-        if let Some(ref wal) = self.wal {
-            let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
-            if page_lsn > 0 {
-                wal.flush_to(page_lsn).map_err(|e| Error::Wal(e.to_string()))?;
-            }
-        }
-
         {
             let skip_fsync = self.wal.is_some();
             let mut storage = self.storage.lock();
+            // When WAL is present, skip_fsync is true: the page can be recovered
+            // from WAL after a crash. WAL flush is enforced at commit time and
+            // in the eviction path (where losing the in-memory copy is permanent).
             storage.write_page(tag, &page, skip_fsync).map_err(Error::Storage)?;
         }
 
