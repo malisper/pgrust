@@ -130,6 +130,7 @@ pub fn max_align(len: usize) -> usize {
     (len + (MAXALIGN - 1)) & !(MAXALIGN - 1)
 }
 
+#[inline]
 pub fn page_get_max_offset_number(page: &[u8; BLCKSZ]) -> Result<OffsetNumber, PageError> {
     let header = page_header(page)?;
     if usize::from(header.pd_lower) < max_align(SIZE_OF_PAGE_HEADER_DATA) {
@@ -175,6 +176,7 @@ pub fn page_init(page: &mut [u8; BLCKSZ], special_size: usize) {
     write_page_header(page, header);
 }
 
+#[inline]
 pub fn page_get_item(page: &[u8; BLCKSZ], offset: OffsetNumber) -> Result<&[u8], PageError> {
     let item_id = page_get_item_id(page, offset)?;
     if !item_id.has_storage() {
@@ -188,6 +190,7 @@ pub fn page_get_item(page: &[u8; BLCKSZ], offset: OffsetNumber) -> Result<&[u8],
     Ok(&page[start..end])
 }
 
+#[inline]
 pub fn page_get_item_id(
     page: &[u8; BLCKSZ],
     offset: OffsetNumber,
