@@ -86,6 +86,15 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
     }
 
+    /// Write a commit record to WAL for the given transaction.
+    /// No-op if this pool has no WAL writer.
+    pub fn write_wal_commit(&self, xid: u32) -> Result<Lsn, String> {
+        match &self.wal {
+            Some(wal) => wal.write_commit(xid).map_err(|e| e.to_string()),
+            None => Ok(INVALID_LSN),
+        }
+    }
+
     pub fn capacity(&self) -> usize {
         self.frames.len()
     }

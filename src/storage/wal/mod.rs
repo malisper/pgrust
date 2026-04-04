@@ -67,6 +67,11 @@ const CRC_OFFSET: usize = 20;
 /// xl_info values
 const XLOG_FPI: u8 = 0;           // Full page image
 const XLOG_HEAP_INSERT: u8 = 1;   // Row-level insert delta
+const XLOG_XACT_COMMIT: u8 = 0;   // Transaction commit
+
+/// xl_rmid values (resource manager IDs)
+const RM_HEAP_ID: u8 = 0;
+const RM_XACT_ID: u8 = 1;
 
 #[derive(Debug)]
 pub enum WalError {
@@ -192,7 +197,7 @@ impl WalWriter {
         record[4..8].copy_from_slice(&xid.to_le_bytes());
         record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
         record[16] = XLOG_HEAP_INSERT;
-        record[17] = 0;
+        record[17] = RM_HEAP_ID;
 
         // Block header
         record[24..28].copy_from_slice(&tag.rel.spc_oid.to_le_bytes());
@@ -207,6 +212,37 @@ impl WalWriter {
         record[WAL_RECORD_HEADER + 2..WAL_RECORD_HEADER + 4]
             .copy_from_slice(&(data_len as u16).to_le_bytes());
         record[WAL_RECORD_HEADER + 4..].copy_from_slice(tuple_data);
+
+        // CRC
+        let crc = crc32c::crc32c(&record);
+        record[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
+
+        guard.file.write_all(&record)?;
+        guard.insert_lsn = lsn;
+
+        Ok(lsn)
+    }
+
+    /// Write a commit record to WAL for the given transaction. This must be
+    /// called before flushing WAL at commit time so that recovery can replay
+    /// the commit and update the CLOG.
+    ///
+    /// The commit record is a minimal XLogRecord header (24 bytes) with no
+    /// block reference — just xl_rmid=RM_XACT_ID and xl_info=XLOG_XACT_COMMIT.
+    pub fn write_commit(&self, xid: u32) -> Result<Lsn, WalError> {
+        let mut guard = self.inner.lock().unwrap();
+
+        let record_len = XLOG_RECORD_HEADER; // 24 bytes, no block data
+        let prev_lsn = guard.insert_lsn;
+        let lsn = prev_lsn + record_len as Lsn;
+
+        let mut record = [0u8; XLOG_RECORD_HEADER];
+
+        record[0..4].copy_from_slice(&(record_len as u32).to_le_bytes());
+        record[4..8].copy_from_slice(&xid.to_le_bytes());
+        record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
+        record[16] = XLOG_XACT_COMMIT;
+        record[17] = RM_XACT_ID;
 
         // CRC
         let crc = crc32c::crc32c(&record);
@@ -252,7 +288,7 @@ impl WalWriter {
         record[4..8].copy_from_slice(&xid.to_le_bytes());
         record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
         record[16] = XLOG_FPI;
-        record[17] = 0;
+        record[17] = RM_HEAP_ID;
 
         // Block header
         record[24..28].copy_from_slice(&tag.rel.spc_oid.to_le_bytes());
