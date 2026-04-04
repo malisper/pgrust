@@ -8,7 +8,7 @@ use crate::access::heap::tuple::{
     heap_page_init, heap_page_replace_tuple,
 };
 use crate::database::TransactionWaiter;
-use crate::storage::page::{ItemIdFlags, PageError, page_get_item_id, page_get_max_offset_number};
+use crate::storage::page::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_max_offset_number};
 use crate::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::{BufferPool, ClientId, Error, RequestPageResult, SmgrStorageBackend};
 
@@ -147,6 +147,62 @@ pub fn heap_scan_next_visible(
             return Ok(Some((tid, tuple)));
         }
     }
+    Ok(None)
+}
+
+/// Scan for the next visible tuple without copying tuple data.
+/// Calls `process` with the raw tuple bytes (borrowing from the page buffer)
+/// and returns its result. The tuple bytes are only valid during the callback.
+pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    txns: &TransactionManager,
+    scan: &mut VisibleHeapScan,
+    mut process: impl FnMut(ItemPointerData, &[u8]) -> Result<T, E>,
+) -> Result<Option<T>, E> {
+    while scan.scan.current_block < scan.scan.nblocks {
+        let block = scan.scan.current_block;
+        let buffer_id = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+
+        // Borrow the page in-place to avoid copying 8KB.
+        let _content_lock = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let found = pool.with_page(buffer_id, |page| -> Result<Option<T>, E> {
+            let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+
+            while scan.scan.current_offset <= max_offset {
+                let off = scan.scan.current_offset;
+                scan.scan.current_offset += 1;
+
+                let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
+                    continue;
+                }
+
+                let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                if !scan.snapshot.tuple_bytes_visible(txns, tuple_bytes) {
+                    continue;
+                }
+
+                let tid = ItemPointerData {
+                    block_number: block,
+                    offset_number: off,
+                };
+                return Ok(Some(process(tid, tuple_bytes)?));
+            }
+            Ok(None)
+        }).ok_or_else(|| E::from(HeapError::Buffer(Error::InvalidBuffer)))?;
+        drop(_content_lock);
+
+        pool.unpin(client_id, buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+
+        if let Some(result) = found? {
+            return Ok(Some(result));
+        }
+
+        scan.scan.current_block += 1;
+        scan.scan.current_offset = 1;
+    }
+
     Ok(None)
 }
 

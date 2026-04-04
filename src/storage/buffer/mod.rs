@@ -215,6 +215,18 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
     }
 
+    /// Borrow the page in-place and pass it to a closure, avoiding the 8KB copy.
+    /// The page reference is only valid for the duration of the closure.
+    pub fn with_page<T>(&self, buffer_id: BufferId, f: impl FnOnce(&Page) -> T) -> Option<T> {
+        let frame = self.frames.get(buffer_id)?;
+        let inner = frame.inner.lock();
+        if inner.valid {
+            Some(f(&inner.page))
+        } else {
+            None
+        }
+    }
+
     pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
         // Fast path: check if the tag is already in the lookup table.
         {

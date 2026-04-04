@@ -55,7 +55,7 @@ pub(crate) fn execute_explain(
 
     Ok(StatementResult::Query {
         column_names: vec!["QUERY PLAN".into()],
-        rows: lines.into_iter().map(|line| vec![Value::Text(line)]).collect(),
+        rows: lines.into_iter().map(|line| vec![Value::Text(line.into())]).collect(),
     })
 }
 
@@ -64,7 +64,7 @@ pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecErr
         column_names: vec!["table_name".into()],
         rows: catalog
             .table_names()
-            .map(|name| vec![Value::Text(name.to_string())])
+            .map(|name| vec![Value::Text(name.to_string().into())])
             .collect(),
     })
 }
