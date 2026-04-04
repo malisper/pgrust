@@ -390,6 +390,51 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     /// directly to storage with an fsync to preserve the pre-WAL safety guarantee.
     /// Write a page image into the buffer, using an already-held exclusive content lock guard.
     /// The caller must hold the write guard from `lock_buffer_exclusive`.
+    /// Write a page image for an insert, using row-level WAL delta when possible.
+    /// Falls back to full page image for the first write to each page.
+    pub fn write_page_insert_locked(
+        &self,
+        buffer_id: BufferId,
+        xid: u32,
+        page: &Page,
+        guard: &mut RwLockWriteGuard<'_, Page>,
+        offset_number: u16,
+        tuple_data: &[u8],
+    ) -> Result<(), Error> {
+        let tag = {
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            if !frame.state.is_valid() {
+                return Err(Error::InvalidBuffer);
+            }
+            frame.tag.lock().ok_or(Error::UnknownBuffer)?
+        };
+
+        let mut page_to_store = *page;
+
+        if let Some(ref wal) = self.wal {
+            let lsn = wal
+                .write_insert(xid, tag, page, offset_number, tuple_data)
+                .map_err(|e| Error::Wal(e.to_string()))?;
+            page_to_store[0..8].copy_from_slice(&lsn.to_le_bytes());
+            **guard = page_to_store;
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            frame.state.set_dirty();
+        } else {
+            **guard = page_to_store;
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            frame.state.set_dirty();
+            {
+                let mut storage = self.storage.lock();
+                storage.write_page(tag, &page_to_store, false).map_err(Error::Storage)?;
+            }
+            self.stats_written.fetch_add(1, Ordering::Relaxed);
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            frame.state.clear_dirty();
+        }
+
+        Ok(())
+    }
+
     pub fn write_page_image_locked(
         &self,
         buffer_id: BufferId,

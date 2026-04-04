@@ -68,7 +68,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         base_dir: std::env::temp_dir().join("pgrust_insert_bench"),
-        row_count: 100_000,
+        row_count: 600_000,
         pool_size: 16384,
         autocommit: false,
     };

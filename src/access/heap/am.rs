@@ -746,9 +746,13 @@ fn heap_insert_version(
         stored.header.cid_or_xvac = cid;
         stored.header.infomask |= crate::access::heap::tuple::HEAP_XMAX_INVALID;
 
+        let serialized_tuple = stored.serialize();
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
-                pool.write_page_image_locked(buffer_id, xmin, &new_page, &mut guard)?;
+                pool.write_page_insert_locked(
+                    buffer_id, xmin, &new_page, &mut guard,
+                    offset_number, &serialized_tuple,
+                )?;
                 return Ok(ItemPointerData {
                     block_number: target_block,
                     offset_number,
