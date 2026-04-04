@@ -701,12 +701,15 @@ fn ensure_relation_exists(
     pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
 ) -> Result<(), HeapError> {
-    pool.with_storage_mut(|s| s.smgr.open(rel))?;
-    match pool.with_storage_mut(|s| s.smgr.create(rel, ForkNumber::Main, false)) {
-        Ok(()) => {}
-        Err(SmgrError::AlreadyExists { .. }) => {}
-        Err(e) => return Err(e.into()),
-    }
+    pool.with_storage_mut(|s| {
+        s.smgr.open(rel)?;
+        match s.smgr.create(rel, ForkNumber::Main, false) {
+            Ok(()) => {}
+            Err(SmgrError::AlreadyExists { .. }) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
