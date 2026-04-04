@@ -43,6 +43,8 @@ use std::sync::Mutex;
 /// Matches ~8 full-page WAL records.
 const WAL_BUF_SIZE: usize = 64 * 1024;
 
+use std::collections::HashSet;
+
 use crate::storage::buffer::{BufferTag, PAGE_SIZE};
 
 /// A Log Sequence Number — the byte offset immediately after the record.
@@ -58,6 +60,10 @@ const WAL_RECORD_HEADER: usize = XLOG_RECORD_HEADER + BLOCK_HEADER; // 44
 pub const WAL_RECORD_LEN: usize = WAL_RECORD_HEADER + PAGE_SIZE;
 /// Offset of the CRC field within the record.
 const CRC_OFFSET: usize = 20;
+
+/// xl_info values
+const XLOG_FPI: u8 = 0;           // Full page image
+const XLOG_HEAP_INSERT: u8 = 1;   // Row-level insert delta
 
 #[derive(Debug)]
 pub enum WalError {
@@ -85,6 +91,9 @@ struct WalWriterInner {
     insert_lsn: Lsn,
     /// Byte offset up to which the WAL file has been fsynced.
     flushed_lsn: Lsn,
+    /// Pages that have had a full page image written since WAL open.
+    /// Subsequent writes to these pages use row-level deltas instead.
+    pages_with_image: HashSet<BufferTag>,
 }
 
 pub struct WalWriter {
@@ -123,12 +132,14 @@ impl WalWriter {
                 file: BufWriter::with_capacity(WAL_BUF_SIZE, file),
                 insert_lsn: size,
                 flushed_lsn: size,
+                pages_with_image: HashSet::new(),
             }),
         })
     }
 
     /// Append a full-page-image WAL record for `tag` modified by transaction
     /// `xid`. Returns the LSN assigned to this record (byte offset after it).
+    /// Also marks the page as having a backup, so future writes can use deltas.
     pub fn write_record(
         &self,
         xid: u32,
@@ -136,33 +147,104 @@ impl WalWriter {
         page: &[u8; PAGE_SIZE],
     ) -> Result<Lsn, WalError> {
         let mut guard = self.inner.lock().unwrap();
+        let lsn = Self::write_fpi(&mut guard, xid, tag, page)?;
+        guard.pages_with_image.insert(tag);
+        Ok(lsn)
+    }
+
+    /// Write a WAL record for an insert. If the page already has a full image
+    /// in the WAL, writes only the tuple delta (~100 bytes). Otherwise writes
+    /// the full page image first.
+    ///
+    /// `tuple_data` is the serialized tuple bytes. `offset_number` is the
+    /// line pointer offset where the tuple was placed on the page.
+    pub fn write_insert(
+        &self,
+        xid: u32,
+        tag: BufferTag,
+        page: &[u8; PAGE_SIZE],
+        offset_number: u16,
+        tuple_data: &[u8],
+    ) -> Result<Lsn, WalError> {
+        let mut guard = self.inner.lock().unwrap();
+
+        if !guard.pages_with_image.contains(&tag) {
+            // First write to this page — write full page image.
+            let lsn = Self::write_fpi(&mut guard, xid, tag, page)?;
+            guard.pages_with_image.insert(tag);
+            return Ok(lsn);
+        }
+
+        // Page already has a backup — write just the insert delta.
+        let data_len = tuple_data.len();
+        let record_len = WAL_RECORD_HEADER + 4 + data_len; // header + offset(2) + len(2) + data
+
+        let mut record = vec![0u8; record_len];
 
         let prev_lsn = guard.insert_lsn;
-        let lsn = prev_lsn + WAL_RECORD_LEN as Lsn;
-
-        let mut record = [0u8; WAL_RECORD_LEN];
+        let lsn = prev_lsn + record_len as Lsn;
 
         // XLogRecord header
-        record[0..4].copy_from_slice(&(WAL_RECORD_LEN as u32).to_le_bytes()); // xl_tot_len
-        record[4..8].copy_from_slice(&xid.to_le_bytes());                      // xl_xid
-        record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());                // xl_prev
-        record[16] = 0;                                                         // xl_info
-        record[17] = 0;                                                         // xl_rmid
-        // bytes 18-19: padding (already zero)
-        // bytes 20-23: xl_crc — filled below after computing CRC
+        record[0..4].copy_from_slice(&(record_len as u32).to_le_bytes());
+        record[4..8].copy_from_slice(&xid.to_le_bytes());
+        record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
+        record[16] = XLOG_HEAP_INSERT;
+        record[17] = 0;
 
         // Block header
         record[24..28].copy_from_slice(&tag.rel.spc_oid.to_le_bytes());
         record[28..32].copy_from_slice(&tag.rel.db_oid.to_le_bytes());
         record[32..36].copy_from_slice(&tag.rel.rel_number.to_le_bytes());
         record[36] = tag.fork.as_u8();
-        // bytes 37-39: padding (already zero)
+        record[40..44].copy_from_slice(&tag.block.to_le_bytes());
+
+        // Insert data: offset_number(2) + tuple_len(2) + tuple_data
+        record[WAL_RECORD_HEADER..WAL_RECORD_HEADER + 2]
+            .copy_from_slice(&offset_number.to_le_bytes());
+        record[WAL_RECORD_HEADER + 2..WAL_RECORD_HEADER + 4]
+            .copy_from_slice(&(data_len as u16).to_le_bytes());
+        record[WAL_RECORD_HEADER + 4..].copy_from_slice(tuple_data);
+
+        // CRC
+        let crc = crc32c::crc32c(&record);
+        record[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
+
+        guard.file.write_all(&record)?;
+        guard.insert_lsn = lsn;
+
+        Ok(lsn)
+    }
+
+    /// Internal: write a full page image record.
+    fn write_fpi(
+        guard: &mut std::sync::MutexGuard<'_, WalWriterInner>,
+        xid: u32,
+        tag: BufferTag,
+        page: &[u8; PAGE_SIZE],
+    ) -> Result<Lsn, WalError> {
+        let prev_lsn = guard.insert_lsn;
+        let lsn = prev_lsn + WAL_RECORD_LEN as Lsn;
+
+        let mut record = [0u8; WAL_RECORD_LEN];
+
+        // XLogRecord header
+        record[0..4].copy_from_slice(&(WAL_RECORD_LEN as u32).to_le_bytes());
+        record[4..8].copy_from_slice(&xid.to_le_bytes());
+        record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
+        record[16] = XLOG_FPI;
+        record[17] = 0;
+
+        // Block header
+        record[24..28].copy_from_slice(&tag.rel.spc_oid.to_le_bytes());
+        record[28..32].copy_from_slice(&tag.rel.db_oid.to_le_bytes());
+        record[32..36].copy_from_slice(&tag.rel.rel_number.to_le_bytes());
+        record[36] = tag.fork.as_u8();
         record[40..44].copy_from_slice(&tag.block.to_le_bytes());
 
         // Page data
         record[WAL_RECORD_HEADER..].copy_from_slice(page);
 
-        // Compute CRC32C over entire record with crc field zeroed (it already is).
+        // CRC
         let crc = crc32c::crc32c(&record);
         record[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
 
