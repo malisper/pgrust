@@ -542,6 +542,35 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(())
     }
 
+    /// Create a PinnedBuffer guard for a buffer that is ALREADY pinned
+    /// (e.g., by request_page). Does NOT increment the pin count.
+    pub fn wrap_pinned(&self, client_id: ClientId, buffer_id: BufferId) -> PinnedBuffer<'_, S> {
+        PinnedBuffer {
+            pool: self,
+            client_id,
+            buffer_id,
+            released: false,
+        }
+    }
+
+    /// Pin a buffer and return an RAII guard that unpins on drop.
+    /// Prevents pin leaks when functions return early via `?`.
+    pub fn pin_buffer(&self, client_id: ClientId, buffer_id: BufferId) -> PinnedBuffer<'_, S> {
+        PinnedBuffer {
+            pool: self,
+            client_id,
+            buffer_id,
+            released: false,
+        }
+    }
+
+    /// Unpin the buffer without consuming the guard (for manual control).
+    fn unpin_raw(&self, buffer_id: BufferId) {
+        if let Some(frame) = self.frames.get(buffer_id) {
+            frame.state.decrement_pin();
+        }
+    }
+
     /// Wait until I/O completes on the given buffer.
     pub fn wait_for_io(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
@@ -625,6 +654,44 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         None
+    }
+}
+
+/// RAII guard that unpins a buffer on drop. Prevents pin leaks when
+/// functions return early via `?`. Similar to PostgreSQL's ResourceOwner
+/// cleanup on transaction abort.
+pub struct PinnedBuffer<'a, S: StorageBackend + Send> {
+    pool: &'a BufferPool<S>,
+    client_id: ClientId,
+    buffer_id: BufferId,
+    released: bool,
+}
+
+impl<'a, S: StorageBackend + Send> PinnedBuffer<'a, S> {
+    pub fn buffer_id(&self) -> BufferId {
+        self.buffer_id
+    }
+
+    /// Consume the guard and return the raw buffer_id WITHOUT unpinning.
+    /// The caller takes responsibility for eventually unpinning the buffer.
+    /// Used when transferring pin ownership to manual tracking (e.g., scan state).
+    pub fn into_raw(mut self) -> BufferId {
+        self.released = true;
+        self.buffer_id
+    }
+
+    /// Manually release the pin. After this, drop is a no-op.
+    pub fn release(mut self) -> Result<(), Error> {
+        self.released = true;
+        self.pool.unpin(self.client_id, self.buffer_id)
+    }
+}
+
+impl<S: StorageBackend + Send> Drop for PinnedBuffer<'_, S> {
+    fn drop(&mut self) {
+        if !self.released {
+            self.pool.unpin_raw(self.buffer_id);
+        }
     }
 }
 
