@@ -11,6 +11,7 @@ path = "src/lib.rs"
 deadlock_detection = ["parking_lot/deadlock_detection"]
 
 [dependencies]
+crc32c = "0.6.8"
 libc = "0.2"
 mimalloc = "0.1.48"
 parking_lot = "0.12"
