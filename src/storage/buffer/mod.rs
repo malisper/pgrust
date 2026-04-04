@@ -228,6 +228,36 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
     }
 
+    /// Mutably borrow the page for hint bit updates.
+    /// The closure returns (result, modified). If modified is true, the buffer
+    /// is marked dirty so hint bits are persisted on next flush.
+    pub fn with_page_set_hints<T>(&self, buffer_id: BufferId, f: impl FnOnce(&mut Page) -> (T, bool)) -> Option<T> {
+        let frame = self.frames.get(buffer_id)?;
+        let mut inner = frame.inner.lock();
+        if inner.valid {
+            let (result, modified) = f(&mut inner.page);
+            if modified {
+                inner.dirty = true;
+            }
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    /// Mutably borrow the page in-place and pass it to a closure.
+    /// Marks the buffer as dirty.
+    pub fn with_page_mut<T>(&self, buffer_id: BufferId, f: impl FnOnce(&mut Page) -> T) -> Option<T> {
+        let frame = self.frames.get(buffer_id)?;
+        let mut inner = frame.inner.lock();
+        if inner.valid {
+            inner.dirty = true;
+            Some(f(&mut inner.page))
+        } else {
+            None
+        }
+    }
+
     pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
         // Fast path: check if the tag is already in the lookup table.
         {

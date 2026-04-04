@@ -102,6 +102,59 @@ Re-profiled. malloc/free was ~23% of self-time. Tried two approaches:
   didn't help because re-pinning the same buffer is already a fast-path hit
 - Reverted in favor of keeping the simpler API
 
+## Round 4: 2.16ms → 1.26ms
+
+Re-profiled with 5000 iterations for better sample quality. Top costs:
+- MVCC check_visibility: 13.5% — BTreeMap lookup per tuple
+- exec_next_inner: 8.7% — per-row executor dispatch (including Projection cloning)
+- SipHash: 5% — buffer pool + pins_by_client hash lookups
+
+### 13. Eliminate identity projection for select *
+- `select *` always wrapped SeqScan in Projection, which cloned every value per row
+- Added optimization in `build_plan`: if targets are Column(0), Column(1), ..., Column(n-1)
+  matching all columns, skip the Projection node entirely
+- Impact: 2.15ms → 1.74ms (19% improvement)
+
+### 14. FxHashMap for buffer pool lookup and pins_by_client
+- Replaced `std::collections::HashMap` (SipHash) with `rustc_hash::FxHashMap`
+  for both the buffer pool tag→id lookup and per-frame pins_by_client
+- FxHash is much faster for small integer-like keys (no cryptographic overhead)
+- Impact: 1.74ms → 1.26ms (28% improvement)
+
+## Round 5: 1.26ms → 0.94ms
+
+### 15. Inline hot path functions
+- Added `#[inline]` / `#[inline(always)]` to MVCC check_visibility,
+  tuple_bytes_visible, page_get_item, page_get_item_id,
+  page_get_max_offset_number, and decode_tuple_from_bytes
+- Impact: 1.26ms → 1.19ms (6% improvement)
+
+### 16. Hint bits (matching PostgreSQL's approach)
+- Added HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HEAP_XMAX_COMMITTED,
+  HEAP_XMAX_INVALID hint bit constants in tuple infomask
+- INSERT sets HEAP_XMAX_INVALID on new tuples (xmax=0 means not deleted)
+- UPDATE/DELETE clears HEAP_XMAX_INVALID when setting a real xmax
+- Visibility check sets hint bits lazily on first scan (without marking page dirty)
+- Fast path: when hint bits are present, skip the `txns.status()` BTreeMap
+  lookup (the most expensive part of MVCC). Still checks
+  `transaction_active_in_snapshot()` for snapshot correctness.
+- Impact: 1.19ms → 0.94ms (21% improvement)
+
+#### Bugs found and fixed during hint bits implementation:
+1. **Setting XMAX_INVALID for xmax=0 in visibility check.** Should only be set
+   by INSERT. The visibility check was incorrectly setting it, which made tuples
+   with in-progress xmin appear visible on later scans after xmin committed.
+2. **Not clearing HEAP_XMAX_INVALID on UPDATE/DELETE.** When setting a real xmax,
+   the old XMAX_INVALID flag remained, making the fast path think the tuple was
+   not deleted. Fixed in heap_delete, heap_delete_with_waiter, heap_update_with_cid,
+   and try_claim_tuple.
+3. **Fast path skipping snapshot check.** The initial fast path returned visible
+   based solely on hint bits, without checking if xmin/xmax were in the snapshot's
+   in-progress set. This made tuples visible to snapshots that were taken before
+   the inserting transaction committed. Fixed by always checking
+   `transaction_active_in_snapshot()` in the fast path, matching PostgreSQL's
+   `XidInMVCCSnapshot()` behavior.
+
 ## Final Result
 
 | Stage | avg_ms_per_scan | rows_per_sec |
@@ -109,9 +162,11 @@ Re-profiled. malloc/free was ~23% of self-time. Tried two approaches:
 | Baseline | 8.25 | 1,211,721 |
 | After Round 1 | ~5.0 | ~2,000,000 |
 | After Round 2 | 2.5 | 3,957,228 |
-| After Round 3 | **2.16** | **4,620,976** |
+| After Round 3 | 2.16 | 4,620,976 |
+| After Round 4 | 1.26 | 8,160,353 |
+| After Round 5 | **0.94** | **~10,600,000** |
 
-**3.8x overall speedup.**
+**8.8x overall speedup.**
 
 ## Key Lessons
 
@@ -123,3 +178,6 @@ Re-profiled. malloc/free was ~23% of self-time. Tried two approaches:
 6. **Allocator choice matters.** mimalloc gave 15% for free — no code changes needed beyond swapping the global allocator.
 7. **A faster allocator can beat a smarter data structure.** Flat storage to avoid per-row Vec allocations was slower than just using mimalloc with the existing `Vec<Vec<Value>>`. The allocator handles small allocations so efficiently that the overhead of a more complex layout isn't worth it.
 8. **Bulk page pinning didn't help.** Re-pinning the same buffer is already a fast-path hit. The overhead of a more complex bulk closure outweighed the savings from fewer pin/unpin calls.
+9. **Eliminate unnecessary plan nodes.** `select *` going through Projection cloned every value for no reason. Detecting identity projections at plan time was a 19% win.
+10. **Hint bits skip lookups, not snapshot checks.** Following PostgreSQL: hint bits avoid the `txns.status()` BTreeMap lookup but still check `transaction_active_in_snapshot()`. Skipping the snapshot check causes correctness bugs with concurrent transactions.
+11. **Match the real database's approach.** Reading PostgreSQL's `HeapTupleSatisfiesMVCC` directly revealed that INSERT sets `HEAP_XMAX_INVALID` and UPDATE/DELETE clears it. Getting hint bits right requires matching this protocol exactly.
