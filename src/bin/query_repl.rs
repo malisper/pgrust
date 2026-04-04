@@ -565,6 +565,9 @@ fn run_statement(
                 }
             }
         }
+        Statement::Begin | Statement::Commit | Statement::Rollback => {
+            Ok(StatementResult::AffectedRows(0))
+        }
     }?;
 
     if needs_catalog_persist {

@@ -313,6 +313,12 @@ pub fn execute_statement(
         Statement::Insert(stmt) => execute_insert(bind_insert(&stmt, catalog)?, ctx, xid, cid),
         Statement::Update(stmt) => execute_update(bind_update(&stmt, catalog)?, ctx, xid, cid),
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, ctx, xid),
+        Statement::Begin | Statement::Commit | Statement::Rollback => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "non-transaction-control statement",
+                actual: "BEGIN/COMMIT/ROLLBACK".into(),
+            }))
+        }
     };
     ctx.next_command_id = ctx.next_command_id.saturating_add(1);
     result

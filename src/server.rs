@@ -3,7 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
-use crate::database::Database;
+use crate::database::{Database, Session};
 use crate::executor::{ExecError, StatementResult, Value};
 use crate::ClientId;
 
@@ -91,6 +91,8 @@ fn handle_connection(
     stream.flush()?;
 
     // Phase 3: query loop.
+    let mut session = Session::new(client_id);
+
     loop {
         let msg_type = match read_byte(&mut stream) {
             Ok(b) => b,
@@ -108,7 +110,7 @@ fn handle_connection(
         match msg_type {
             b'Q' => {
                 let sql = cstr_from_bytes(&body);
-                handle_query(&mut stream, db, client_id, &sql)?;
+                handle_query(&mut stream, db, &mut session, &sql)?;
                 stream.flush()?;
             }
             b'X' => {
@@ -120,7 +122,7 @@ fn handle_connection(
                     "0A000",
                     &format!("unsupported message type: '{}'", msg_type as char),
                 )?;
-                send_ready_for_query(&mut stream, b'I')?;
+                send_ready_for_query(&mut stream, session.ready_status())?;
                 stream.flush()?;
             }
         }
@@ -130,17 +132,17 @@ fn handle_connection(
 fn handle_query(
     stream: &mut TcpStream,
     db: &Database,
-    client_id: ClientId,
+    session: &mut Session,
     sql: &str,
 ) -> io::Result<()> {
     let sql = sql.trim().trim_end_matches(';').trim();
     if sql.is_empty() {
         send_empty_query(stream)?;
-        send_ready_for_query(stream, b'I')?;
+        send_ready_for_query(stream, session.ready_status())?;
         return Ok(());
     }
 
-    match db.execute(client_id, sql) {
+    match session.execute(db, sql) {
         Ok(StatementResult::Query { column_names, rows }) => {
             send_row_description(stream, &column_names)?;
             for row in &rows {
@@ -162,7 +164,7 @@ fn handle_query(
         }
     }
 
-    send_ready_for_query(stream, b'I')?;
+    send_ready_for_query(stream, session.ready_status())?;
     Ok(())
 }
 
@@ -178,6 +180,9 @@ fn infer_command_tag(sql: &str, affected: usize) -> String {
         "DELETE" => format!("DELETE {affected}"),
         "CREATE" => "CREATE TABLE".to_string(),
         "DROP" => "DROP TABLE".to_string(),
+        "BEGIN" | "START" => "BEGIN".to_string(),
+        "COMMIT" | "END" => "COMMIT".to_string(),
+        "ROLLBACK" => "ROLLBACK".to_string(),
         _ => format!("SELECT {affected}"),
     }
 }

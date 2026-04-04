@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ explain_stmt | select_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | insert_stmt | update_stmt | delete_stmt }
+stmt = _{ explain_stmt | select_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
 explain_option = { kw_analyze | kw_buffers }
@@ -20,6 +20,9 @@ create_table_stmt = { kw_create ~ kw_table ~ identifier ~ "(" ~ column_def ~ (",
 drop_table_stmt = { kw_drop ~ kw_table ~ identifier }
 update_stmt = { kw_update ~ identifier ~ kw_set ~ assignment ~ ("," ~ assignment)* ~ (kw_where ~ expr)? }
 delete_stmt = { kw_delete ~ kw_from ~ identifier ~ (kw_where ~ expr)? }
+begin_stmt = { (kw_begin | (kw_start ~ kw_transaction)) }
+commit_stmt = { (kw_commit | kw_end) }
+rollback_stmt = { kw_rollback }
 
 select_list = { star | expr ~ ("," ~ expr)* }
 values_row = { "(" ~ expr_list ~ ")" }
@@ -112,6 +115,12 @@ kw_asc = { kw_asc_atom }
 kw_desc = { kw_desc_atom }
 kw_first = { kw_first_atom }
 kw_last = { kw_last_atom }
+kw_begin = _{ kw_begin_atom }
+kw_start = _{ kw_start_atom }
+kw_transaction = _{ kw_transaction_atom }
+kw_commit = _{ kw_commit_atom }
+kw_end = _{ kw_end_atom }
+kw_rollback = _{ kw_rollback_atom }
 
 kw_select_atom = @{ ^"select" ~ keyword_end }
 kw_show_atom = @{ ^"show" ~ keyword_end }
@@ -163,3 +172,9 @@ kw_asc_atom = @{ ^"asc" ~ keyword_end }
 kw_desc_atom = @{ ^"desc" ~ keyword_end }
 kw_first_atom = @{ ^"first" ~ keyword_end }
 kw_last_atom = @{ ^"last" ~ keyword_end }
+kw_begin_atom = @{ ^"begin" ~ keyword_end }
+kw_start_atom = @{ ^"start" ~ keyword_end }
+kw_transaction_atom = @{ ^"transaction" ~ keyword_end }
+kw_commit_atom = @{ ^"commit" ~ keyword_end }
+kw_end_atom = @{ ^"end" ~ keyword_end }
+kw_rollback_atom = @{ ^"rollback" ~ keyword_end }
