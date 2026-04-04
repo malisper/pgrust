@@ -1,349 +1,27 @@
+pub mod nodes;
+pub mod expr;
+mod explain;
+mod commands;
+
+pub use nodes::*;
+pub use expr::eval_expr;
+
 use crate::access::heap::am::{
-    HeapError, VisibleHeapScan, heap_delete, heap_flush, heap_insert_mvcc_with_cid,
-    heap_scan_begin_visible, heap_scan_next_visible, heap_update_with_cid,
+    HeapError, heap_scan_begin_visible, heap_scan_next_visible,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
+use crate::access::heap::tuple::TupleError;
 use crate::catalog::Catalog;
-use crate::access::heap::tuple::{
-    AttributeDesc, HeapTuple, ItemPointerData, TupleError, TupleValue,
-};
 use crate::parser::{
-    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, DropTableStatement,
-    ExplainStatement, ParseError, Statement, bind_create_table, bind_delete, bind_insert,
-    bind_update, build_plan, parse_statement,
+    ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, parse_statement,
 };
-use crate::storage::smgr::StorageManager;
-use crate::{BufferPool, BufferUsageStats, ClientId, RelFileLocator, SmgrStorageBackend};
+use crate::{BufferPool, ClientId, SmgrStorageBackend};
+
 use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScalarType {
-    Int32,
-    Text,
-    Bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColumnDesc {
-    pub name: String,
-    pub storage: AttributeDesc,
-    pub ty: ScalarType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RelationDesc {
-    pub columns: Vec<ColumnDesc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Value {
-    Int32(i32),
-    Text(String),
-    Bool(bool),
-    Null,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetEntry {
-    pub name: String,
-    pub expr: Expr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrderByEntry {
-    pub expr: Expr,
-    pub descending: bool,
-    pub nulls_first: Option<bool>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AggFunc {
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
-impl AggFunc {
-    pub fn name(&self) -> &'static str {
-        match self {
-            AggFunc::Count => "count",
-            AggFunc::Sum => "sum",
-            AggFunc::Avg => "avg",
-            AggFunc::Min => "min",
-            AggFunc::Max => "max",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AggAccum {
-    pub func: AggFunc,
-    pub arg: Option<Expr>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expr {
-    Column(usize),
-    Const(Value),
-    Add(Box<Expr>, Box<Expr>),
-    Eq(Box<Expr>, Box<Expr>),
-    Lt(Box<Expr>, Box<Expr>),
-    Gt(Box<Expr>, Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
-    Not(Box<Expr>),
-    IsNull(Box<Expr>),
-    IsNotNull(Box<Expr>),
-    IsDistinctFrom(Box<Expr>, Box<Expr>),
-    IsNotDistinctFrom(Box<Expr>, Box<Expr>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Plan {
-    Result,
-    SeqScan {
-        rel: RelFileLocator,
-        desc: RelationDesc,
-    },
-    NestedLoopJoin {
-        left: Box<Plan>,
-        right: Box<Plan>,
-        on: Expr,
-    },
-    Filter {
-        input: Box<Plan>,
-        predicate: Expr,
-    },
-    OrderBy {
-        input: Box<Plan>,
-        items: Vec<OrderByEntry>,
-    },
-    Limit {
-        input: Box<Plan>,
-        limit: Option<usize>,
-        offset: usize,
-    },
-    Projection {
-        input: Box<Plan>,
-        targets: Vec<TargetEntry>,
-    },
-    Aggregate {
-        input: Box<Plan>,
-        group_by: Vec<Expr>,
-        accumulators: Vec<AggAccum>,
-        having: Option<Expr>,
-        output_columns: Vec<String>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TupleSlot {
-    column_names: Vec<String>,
-    source: SlotSource,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SlotSource {
-    Physical {
-        desc: RelationDesc,
-        tid: ItemPointerData,
-        tuple: HeapTuple,
-        materialized: Option<Vec<Value>>,
-    },
-    Virtual {
-        values: Vec<Value>,
-    },
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct NodeExecStats {
-    pub loops: u64,
-    pub rows: u64,
-    pub total_time: Duration,
-}
-
-#[derive(Debug)]
-pub enum PlanState {
-    Result(ResultState),
-    SeqScan(SeqScanState),
-    NestedLoopJoin(NestedLoopJoinState),
-    Filter(FilterState),
-    OrderBy(OrderByState),
-    Limit(LimitState),
-    Projection(ProjectionState),
-    Aggregate(AggregateState),
-}
-
-#[derive(Debug)]
-pub struct ResultState {
-    emitted: bool,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct SeqScanState {
-    rel: RelFileLocator,
-    desc: RelationDesc,
-    scan: Option<VisibleHeapScan>,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct FilterState {
-    input: Box<PlanState>,
-    predicate: Expr,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct NestedLoopJoinState {
-    left: Box<PlanState>,
-    right: Box<PlanState>,
-    on: Expr,
-    right_rows: Option<Vec<TupleSlot>>,
-    current_left: Option<TupleSlot>,
-    right_index: usize,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct ProjectionState {
-    input: Box<PlanState>,
-    targets: Vec<TargetEntry>,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct OrderByState {
-    input: Box<PlanState>,
-    items: Vec<OrderByEntry>,
-    rows: Option<Vec<TupleSlot>>,
-    next_index: usize,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct LimitState {
-    input: Box<PlanState>,
-    limit: Option<usize>,
-    offset: usize,
-    skipped: usize,
-    returned: usize,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug)]
-pub struct AggregateState {
-    input: Box<PlanState>,
-    group_by: Vec<Expr>,
-    accumulators: Vec<AggAccum>,
-    having: Option<Expr>,
-    output_columns: Vec<String>,
-    result_rows: Option<Vec<TupleSlot>>,
-    next_index: usize,
-    stats: NodeExecStats,
-}
-
-#[derive(Debug, Clone)]
-enum AccumState {
-    Count { count: i64 },
-    Sum { sum: Option<i64> },
-    Avg { sum: Option<i64>, count: i64 },
-    Min { min: Option<Value> },
-    Max { max: Option<Value> },
-}
-
-impl AccumState {
-    fn new(func: AggFunc) -> Self {
-        match func {
-            AggFunc::Count => AccumState::Count { count: 0 },
-            AggFunc::Sum => AccumState::Sum { sum: None },
-            AggFunc::Avg => AccumState::Avg { sum: None, count: 0 },
-            AggFunc::Min => AccumState::Min { min: None },
-            AggFunc::Max => AccumState::Max { max: None },
-        }
-    }
-
-    fn accumulate(&mut self, value: &Value, is_count_star: bool) {
-        match self {
-            AccumState::Count { count } => {
-                if is_count_star || !matches!(value, Value::Null) {
-                    *count += 1;
-                }
-            }
-            AccumState::Sum { sum } => {
-                if let Value::Int32(v) = value {
-                    *sum = Some(sum.unwrap_or(0) + *v as i64);
-                }
-            }
-            AccumState::Avg { sum, count } => {
-                if let Value::Int32(v) = value {
-                    *sum = Some(sum.unwrap_or(0) + *v as i64);
-                    *count += 1;
-                }
-            }
-            AccumState::Min { min } => {
-                if !matches!(value, Value::Null) {
-                    *min = Some(match min.take() {
-                        None => value.clone(),
-                        Some(current) => {
-                            if compare_order_values(value, &current, None, false) == Ordering::Less {
-                                value.clone()
-                            } else {
-                                current
-                            }
-                        }
-                    });
-                }
-            }
-            AccumState::Max { max } => {
-                if !matches!(value, Value::Null) {
-                    *max = Some(match max.take() {
-                        None => value.clone(),
-                        Some(current) => {
-                            if compare_order_values(value, &current, None, false) == Ordering::Greater {
-                                value.clone()
-                            } else {
-                                current
-                            }
-                        }
-                    });
-                }
-            }
-        }
-    }
-
-    fn finalize(&self) -> Value {
-        match self {
-            AccumState::Count { count } => Value::Int32(*count as i32),
-            AccumState::Sum { sum } => match sum {
-                Some(v) => Value::Int32(*v as i32),
-                None => Value::Null,
-            },
-            AccumState::Avg { sum, count } => {
-                if *count == 0 {
-                    Value::Null
-                } else {
-                    match sum {
-                        Some(v) => Value::Int32((*v / *count) as i32),
-                        None => Value::Null,
-                    }
-                }
-            }
-            AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
-            AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct AggGroup {
-    key_values: Vec<Value>,
-    accum_states: Vec<AccumState>,
-}
+use expr::{compare_order_by_keys, compare_order_values};
+use commands::*;
 
 pub struct ExecutorContext<'a> {
     pub pool: &'a mut BufferPool<SmgrStorageBackend>,
@@ -401,69 +79,111 @@ impl From<MvccError> for ExecError {
     }
 }
 
-impl RelationDesc {
-    pub fn attribute_descs(&self) -> Vec<AttributeDesc> {
-        self.columns.iter().map(|c| c.storage.clone()).collect()
-    }
+#[derive(Debug, Clone)]
+pub(crate) enum AccumState {
+    Count { count: i64 },
+    Sum { sum: Option<i64> },
+    Avg { sum: Option<i64>, count: i64 },
+    Min { min: Option<Value> },
+    Max { max: Option<Value> },
 }
 
-impl TupleSlot {
-    pub fn from_heap_tuple(desc: RelationDesc, tid: ItemPointerData, tuple: HeapTuple) -> Self {
-        Self {
-            column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
-            source: SlotSource::Physical {
-                desc,
-                tid,
-                tuple,
-                materialized: None,
-            },
+impl AccumState {
+    pub(crate) fn new(func: AggFunc) -> Self {
+        match func {
+            AggFunc::Count => AccumState::Count { count: 0 },
+            AggFunc::Sum => AccumState::Sum { sum: None },
+            AggFunc::Avg => AccumState::Avg { sum: None, count: 0 },
+            AggFunc::Min => AccumState::Min { min: None },
+            AggFunc::Max => AccumState::Max { max: None },
         }
     }
 
-    pub fn virtual_row(column_names: Vec<String>, values: Vec<Value>) -> Self {
-        Self {
-            column_names,
-            source: SlotSource::Virtual { values },
-        }
-    }
-
-    pub fn column_names(&self) -> &[String] {
-        &self.column_names
-    }
-
-    pub fn tid(&self) -> Option<ItemPointerData> {
-        match &self.source {
-            SlotSource::Physical { tid, .. } => Some(*tid),
-            SlotSource::Virtual { .. } => None,
-        }
-    }
-
-    pub fn values(&mut self) -> Result<&[Value], ExecError> {
-        match &mut self.source {
-            SlotSource::Virtual { values } => Ok(values.as_slice()),
-            SlotSource::Physical {
-                desc,
-                tuple,
-                materialized,
-                ..
-            } => {
-                if materialized.is_none() {
-                    let attr_descs = desc.attribute_descs();
-                    let raw = tuple.deform(&attr_descs)?;
-                    let mut values = Vec::with_capacity(desc.columns.len());
-                    for (column, datum) in desc.columns.iter().zip(raw.into_iter()) {
-                        values.push(decode_value(column, datum)?);
-                    }
-                    *materialized = Some(values);
+    pub(crate) fn accumulate(&mut self, value: &Value, is_count_star: bool) {
+        match self {
+            AccumState::Count { count } => {
+                if is_count_star || !matches!(value, Value::Null) {
+                    *count += 1;
                 }
-                Ok(materialized.as_ref().unwrap().as_slice())
+            }
+            AccumState::Sum { sum } => {
+                if let Value::Int32(v) = value {
+                    *sum = Some(sum.unwrap_or(0) + *v as i64);
+                }
+            }
+            AccumState::Avg { sum, count } => {
+                if let Value::Int32(v) = value {
+                    *sum = Some(sum.unwrap_or(0) + *v as i64);
+                    *count += 1;
+                }
+            }
+            AccumState::Min { min } => {
+                if !matches!(value, Value::Null) {
+                    *min = Some(match min.take() {
+                        None => value.clone(),
+                        Some(current) => {
+                            if compare_order_values(value, &current, None, false) == Ordering::Less {
+                                value.clone()
+                            } else {
+                                current
+                            }
+                        }
+                    });
+                }
+            }
+            AccumState::Max { max } => {
+                if !matches!(value, Value::Null) {
+                    *max = Some(match max.take() {
+                        None => value.clone(),
+                        Some(current) => {
+                            if compare_order_values(value, &current, None, false) == Ordering::Greater {
+                                value.clone()
+                            } else {
+                                current
+                            }
+                        }
+                    });
+                }
             }
         }
     }
 
-    pub fn into_values(mut self) -> Result<Vec<Value>, ExecError> {
-        Ok(self.values()?.to_vec())
+    pub(crate) fn finalize(&self) -> Value {
+        match self {
+            AccumState::Count { count } => Value::Int32(*count as i32),
+            AccumState::Sum { sum } => match sum {
+                Some(v) => Value::Int32(*v as i32),
+                None => Value::Null,
+            },
+            AccumState::Avg { sum, count } => {
+                if *count == 0 {
+                    Value::Null
+                } else {
+                    match sum {
+                        Some(v) => Value::Int32((*v / *count) as i32),
+                        None => Value::Null,
+                    }
+                }
+            }
+            AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
+            AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
+        }
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AggGroup {
+    pub(crate) key_values: Vec<Value>,
+    pub(crate) accum_states: Vec<AccumState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatementResult {
+    Query {
+        column_names: Vec<String>,
+        rows: Vec<Vec<Value>>,
+    },
+    AffectedRows(usize),
 }
 
 pub fn executor_start(plan: Plan) -> PlanState {
@@ -535,15 +255,6 @@ pub fn executor_start(plan: Plan) -> PlanState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StatementResult {
-    Query {
-        column_names: Vec<String>,
-        rows: Vec<Vec<Value>>,
-    },
-    AffectedRows(usize),
-}
-
 pub fn execute_plan(
     plan: Plan,
     ctx: &mut ExecutorContext<'_>,
@@ -551,7 +262,7 @@ pub fn execute_plan(
     Ok(execute_plan_internal(plan, ctx)?.0)
 }
 
-fn execute_plan_internal(
+pub(crate) fn execute_plan_internal(
     plan: Plan,
     ctx: &mut ExecutorContext<'_>,
 ) -> Result<(StatementResult, PlanState, Duration), ExecError> {
@@ -605,81 +316,6 @@ pub fn execute_statement(
     };
     ctx.next_command_id = ctx.next_command_id.saturating_add(1);
     result
-}
-
-fn execute_explain(
-    stmt: ExplainStatement,
-    catalog: &mut Catalog,
-    ctx: &mut ExecutorContext<'_>,
-) -> Result<StatementResult, ExecError> {
-    let Statement::Select(select) = *stmt.statement else {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "SELECT statement after EXPLAIN",
-            actual: "non-select statement".into(),
-        }));
-    };
-
-    let plan = build_plan(&select, catalog)?;
-    let mut lines = Vec::new();
-    if stmt.analyze {
-        ctx.pool.reset_usage_stats();
-        let (result, state, elapsed) = execute_plan_internal(plan, ctx)?;
-        format_explain_lines(&state, 0, true, &mut lines);
-        lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
-        if stmt.buffers {
-            let stats = ctx.pool.usage_stats();
-            lines.push(format_buffer_usage(stats));
-        }
-        if let StatementResult::Query { rows, .. } = result {
-            lines.push(format!("Result Rows: {}", rows.len()));
-        }
-    } else {
-        let state = executor_start(plan);
-        format_explain_lines(&state, 0, false, &mut lines);
-    }
-
-    Ok(StatementResult::Query {
-        column_names: vec!["QUERY PLAN".into()],
-        rows: lines.into_iter().map(|line| vec![Value::Text(line)]).collect(),
-    })
-}
-
-fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
-    Ok(StatementResult::Query {
-        column_names: vec!["table_name".into()],
-        rows: catalog
-            .table_names()
-            .map(|name| vec![Value::Text(name.to_string())])
-            .collect(),
-    })
-}
-
-fn execute_create_table(
-    stmt: crate::parser::CreateTableStatement,
-    catalog: &mut Catalog,
-) -> Result<StatementResult, ExecError> {
-    let _entry = bind_create_table(&stmt, catalog)?;
-    Ok(StatementResult::AffectedRows(0))
-}
-
-fn execute_drop_table(
-    stmt: DropTableStatement,
-    catalog: &mut Catalog,
-    ctx: &mut ExecutorContext<'_>,
-) -> Result<StatementResult, ExecError> {
-    let entry = catalog
-        .drop_table(&stmt.table_name)
-        .map_err(|err| match err {
-            crate::catalog::CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
-            other => ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "droppable table",
-                actual: format!("{other:?}"),
-            }),
-        })?;
-
-    let _ = ctx.pool.invalidate_relation(entry.rel);
-    ctx.pool.storage_mut().smgr.unlink(entry.rel, None, false);
-    Ok(StatementResult::AffectedRows(0))
 }
 
 pub fn exec_next(
@@ -965,8 +601,6 @@ fn exec_aggregate(
 }
 
 fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecError> {
-    let left = left;
-    let right = right;
     let mut names = left.column_names().to_vec();
     names.extend_from_slice(right.column_names());
     let mut values = left.into_values()?;
@@ -987,449 +621,6 @@ fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
     }
 }
 
-fn node_stats(state: &PlanState) -> &NodeExecStats {
-    match state {
-        PlanState::Result(result) => &result.stats,
-        PlanState::SeqScan(scan) => &scan.stats,
-        PlanState::NestedLoopJoin(join) => &join.stats,
-        PlanState::Filter(filter) => &filter.stats,
-        PlanState::OrderBy(order_by) => &order_by.stats,
-        PlanState::Limit(limit) => &limit.stats,
-        PlanState::Projection(projection) => &projection.stats,
-        PlanState::Aggregate(aggregate) => &aggregate.stats,
-    }
-}
-
-fn format_explain_lines(
-    state: &PlanState,
-    indent: usize,
-    analyze: bool,
-    lines: &mut Vec<String>,
-) {
-    let prefix = "  ".repeat(indent);
-    let label = node_label(state);
-    if analyze {
-        let stats = node_stats(state);
-        lines.push(format!(
-            "{prefix}{label} (actual rows={} loops={} time={:.3} ms)",
-            stats.rows,
-            stats.loops,
-            stats.total_time.as_secs_f64() * 1000.0
-        ));
-    } else {
-        lines.push(format!("{prefix}{label}"));
-    }
-
-    match state {
-        PlanState::Result(_) => {}
-        PlanState::SeqScan(_) => {}
-        PlanState::NestedLoopJoin(join) => {
-            format_explain_lines(&join.left, indent + 1, analyze, lines);
-            format_explain_lines(&join.right, indent + 1, analyze, lines);
-        }
-        PlanState::Filter(filter) => format_explain_lines(&filter.input, indent + 1, analyze, lines),
-        PlanState::OrderBy(order_by) => format_explain_lines(&order_by.input, indent + 1, analyze, lines),
-        PlanState::Limit(limit) => format_explain_lines(&limit.input, indent + 1, analyze, lines),
-        PlanState::Projection(projection) => {
-            format_explain_lines(&projection.input, indent + 1, analyze, lines)
-        }
-        PlanState::Aggregate(aggregate) => {
-            format_explain_lines(&aggregate.input, indent + 1, analyze, lines)
-        }
-    }
-}
-
-fn node_label(state: &PlanState) -> String {
-    match state {
-        PlanState::Result(_) => "Result".into(),
-        PlanState::SeqScan(scan) => format!("Seq Scan on rel {}", scan.rel.rel_number),
-        PlanState::NestedLoopJoin(_) => "Nested Loop".into(),
-        PlanState::Filter(_) => "Filter".into(),
-        PlanState::OrderBy(_) => "Sort".into(),
-        PlanState::Limit(_) => "Limit".into(),
-        PlanState::Projection(_) => "Projection".into(),
-        PlanState::Aggregate(_) => "Aggregate".into(),
-    }
-}
-
-fn compare_order_by_keys(
-    items: &[OrderByEntry],
-    left_keys: &[Value],
-    right_keys: &[Value],
-) -> Ordering {
-    for (item, (left_value, right_value)) in items.iter().zip(left_keys.iter().zip(right_keys.iter())) {
-        let ordering = compare_order_values(left_value, right_value, item.nulls_first, item.descending);
-        if ordering != Ordering::Equal {
-            return if item.descending && !matches!((left_value, right_value), (Value::Null, _) | (_, Value::Null)) {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-        }
-    }
-    Ordering::Equal
-}
-
-fn compare_order_values(
-    left: &Value,
-    right: &Value,
-    nulls_first: Option<bool>,
-    descending: bool,
-) -> Ordering {
-    let nulls_first = nulls_first.unwrap_or(descending);
-    match (left, right) {
-        (Value::Null, Value::Null) => Ordering::Equal,
-        (Value::Null, _) => {
-            if nulls_first { Ordering::Less } else { Ordering::Greater }
-        }
-        (_, Value::Null) => {
-            if nulls_first { Ordering::Greater } else { Ordering::Less }
-        }
-        (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
-        (Value::Text(a), Value::Text(b)) => a.cmp(b),
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        _ => Ordering::Equal,
-    }
-}
-
-fn format_buffer_usage(stats: BufferUsageStats) -> String {
-    format!(
-        "Buffers: shared hit={} read={} written={}",
-        stats.shared_hit, stats.shared_read, stats.shared_written
-    )
-}
-
-pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
-    match expr {
-        Expr::Column(index) => slot
-            .values()?
-            .get(*index)
-            .cloned()
-            .ok_or(ExecError::InvalidColumn(*index)),
-        Expr::Const(value) => Ok(value.clone()),
-        Expr::Add(left, right) => add_values(eval_expr(left, slot)?, eval_expr(right, slot)?),
-        Expr::Eq(left, right) => {
-            compare_values("=", eval_expr(left, slot)?, eval_expr(right, slot)?)
-        }
-        Expr::Lt(left, right) => order_values(
-            "<",
-            eval_expr(left, slot)?,
-            eval_expr(right, slot)?,
-            |a, b| a < b,
-        ),
-        Expr::Gt(left, right) => order_values(
-            ">",
-            eval_expr(left, slot)?,
-            eval_expr(right, slot)?,
-            |a, b| a > b,
-        ),
-        Expr::And(left, right) => eval_and(eval_expr(left, slot)?, eval_expr(right, slot)?),
-        Expr::Or(left, right) => eval_or(eval_expr(left, slot)?, eval_expr(right, slot)?),
-        Expr::Not(inner) => match eval_expr(inner, slot)? {
-            Value::Bool(value) => Ok(Value::Bool(!value)),
-            Value::Null => Ok(Value::Null),
-            other => Err(ExecError::NonBoolQual(other)),
-        },
-        Expr::IsNull(inner) => Ok(Value::Bool(matches!(eval_expr(inner, slot)?, Value::Null))),
-        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(eval_expr(inner, slot)?, Value::Null))),
-        Expr::IsDistinctFrom(left, right) => Ok(Value::Bool(values_are_distinct(
-            &eval_expr(left, slot)?,
-            &eval_expr(right, slot)?,
-        ))),
-        Expr::IsNotDistinctFrom(left, right) => Ok(Value::Bool(!values_are_distinct(
-            &eval_expr(left, slot)?,
-            &eval_expr(right, slot)?,
-        ))),
-    }
-}
-
-fn execute_insert(
-    stmt: BoundInsertStatement,
-    ctx: &mut ExecutorContext<'_>,
-    xid: TransactionId,
-    cid: CommandId,
-) -> Result<StatementResult, ExecError> {
-    let column_names: Vec<String> = stmt.desc.columns.iter().map(|c| c.name.clone()).collect();
-    let mut touched_blocks = std::collections::BTreeSet::new();
-
-    for row in &stmt.values {
-        let mut slot =
-            TupleSlot::virtual_row(column_names.clone(), vec![Value::Null; stmt.desc.columns.len()]);
-        let mut values = vec![Value::Null; stmt.desc.columns.len()];
-        for (column_index, expr) in stmt.target_indexes.iter().zip(row.iter()) {
-            values[*column_index] = eval_expr(expr, &mut slot)?;
-        }
-
-        let tuple = tuple_from_values(&stmt.desc, &values)?;
-        let tid = heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, stmt.rel, xid, cid, &tuple)?;
-        touched_blocks.insert(tid.block_number);
-    }
-
-    for block_number in touched_blocks {
-        heap_flush(ctx.pool, ctx.client_id, stmt.rel, block_number)?;
-    }
-
-    Ok(StatementResult::AffectedRows(stmt.values.len()))
-}
-
-fn execute_update(
-    stmt: BoundUpdateStatement,
-    ctx: &mut ExecutorContext<'_>,
-    xid: TransactionId,
-    cid: CommandId,
-) -> Result<StatementResult, ExecError> {
-    let mut scan = heap_scan_begin_visible(ctx.pool, stmt.rel, ctx.snapshot.clone())?;
-    let mut affected_rows = 0;
-
-    while let Some((tid, tuple)) =
-        heap_scan_next_visible(ctx.pool, ctx.client_id, ctx.txns, &mut scan)?
-    {
-        let mut slot = TupleSlot::from_heap_tuple(stmt.desc.clone(), tid, tuple);
-        if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
-            continue;
-        }
-        let original_values = slot.into_values()?;
-        let mut eval_slot = TupleSlot::virtual_row(
-            stmt.desc.columns.iter().map(|c| c.name.clone()).collect(),
-            original_values.clone(),
-        );
-        let mut values = original_values;
-        for assignment in &stmt.assignments {
-            values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot)?;
-        }
-
-        let replacement = tuple_from_values(&stmt.desc, &values)?;
-        let new_tid = heap_update_with_cid(
-            ctx.pool,
-            ctx.client_id,
-            stmt.rel,
-            ctx.txns,
-            xid,
-            cid,
-            tid,
-            &replacement,
-        )?;
-        heap_flush(ctx.pool, ctx.client_id, stmt.rel, tid.block_number)?;
-        if new_tid.block_number != tid.block_number {
-            heap_flush(ctx.pool, ctx.client_id, stmt.rel, new_tid.block_number)?;
-        }
-        affected_rows += 1;
-    }
-
-    Ok(StatementResult::AffectedRows(affected_rows))
-}
-
-fn execute_delete(
-    stmt: BoundDeleteStatement,
-    ctx: &mut ExecutorContext<'_>,
-    xid: TransactionId,
-) -> Result<StatementResult, ExecError> {
-    let mut scan = heap_scan_begin_visible(ctx.pool, stmt.rel, ctx.snapshot.clone())?;
-    let mut targets = Vec::new();
-
-    while let Some((tid, tuple)) =
-        heap_scan_next_visible(ctx.pool, ctx.client_id, ctx.txns, &mut scan)?
-    {
-        let mut slot = TupleSlot::from_heap_tuple(stmt.desc.clone(), tid, tuple);
-        if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
-            continue;
-        }
-        targets.push(tid);
-    }
-
-    for tid in &targets {
-        heap_delete(ctx.pool, ctx.client_id, stmt.rel, ctx.txns, xid, *tid)?;
-        heap_flush(ctx.pool, ctx.client_id, stmt.rel, tid.block_number)?;
-    }
-
-    Ok(StatementResult::AffectedRows(targets.len()))
-}
-
-fn predicate_matches(predicate: Option<&Expr>, slot: &mut TupleSlot) -> Result<bool, ExecError> {
-    let Some(predicate) = predicate else {
-        return Ok(true);
-    };
-    match eval_expr(predicate, slot)? {
-        Value::Bool(true) => Ok(true),
-        Value::Bool(false) | Value::Null => Ok(false),
-        other => Err(ExecError::NonBoolQual(other)),
-    }
-}
-
-fn tuple_from_values(desc: &RelationDesc, values: &[Value]) -> Result<HeapTuple, ExecError> {
-    let tuple_values = desc
-        .columns
-        .iter()
-        .zip(values.iter())
-        .map(|(column, value)| encode_value(column, value))
-        .collect::<Result<Vec<_>, _>>()?;
-    HeapTuple::from_values(&desc.attribute_descs(), &tuple_values).map_err(ExecError::from)
-}
-
-fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleValue, ExecError> {
-    match (column.ty, value) {
-        (_, Value::Null) => {
-            if !column.storage.nullable {
-                Err(ExecError::MissingRequiredColumn(column.name.clone()))
-            } else {
-                Ok(TupleValue::Null)
-            }
-        }
-        (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Text, Value::Text(v)) => Ok(TupleValue::Bytes(v.as_bytes().to_vec())),
-        (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(*v)])),
-        (_, other) => Err(ExecError::TypeMismatch {
-            op: "assignment",
-            left: Value::Null,
-            right: other.clone(),
-        }),
-    }
-}
-
-fn eval_and(left: Value, right: Value) -> Result<Value, ExecError> {
-    match (left, right) {
-        (Value::Bool(false), _) | (_, Value::Bool(false)) => Ok(Value::Bool(false)),
-        (Value::Bool(true), Value::Bool(true)) => Ok(Value::Bool(true)),
-        (Value::Bool(true), Value::Null)
-        | (Value::Null, Value::Bool(true))
-        | (Value::Null, Value::Null) => Ok(Value::Null),
-        (left, right) => Err(ExecError::TypeMismatch {
-            op: "AND",
-            left,
-            right,
-        }),
-    }
-}
-
-fn eval_or(left: Value, right: Value) -> Result<Value, ExecError> {
-    match (left, right) {
-        (Value::Bool(true), _) | (_, Value::Bool(true)) => Ok(Value::Bool(true)),
-        (Value::Bool(false), Value::Bool(false)) => Ok(Value::Bool(false)),
-        (Value::Bool(false), Value::Null)
-        | (Value::Null, Value::Bool(false))
-        | (Value::Null, Value::Null) => Ok(Value::Null),
-        (left, right) => Err(ExecError::TypeMismatch {
-            op: "OR",
-            left,
-            right,
-        }),
-    }
-}
-
-fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, ExecError> {
-    if matches!(left, Value::Null) || matches!(right, Value::Null) {
-        return Ok(Value::Null);
-    }
-    match (&left, &right) {
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
-        (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(l == r)),
-        (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
-        _ => Err(ExecError::TypeMismatch { op, left, right }),
-    }
-}
-
-fn values_are_distinct(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Null, Value::Null) => false,
-        (Value::Null, _) | (_, Value::Null) => true,
-        (Value::Int32(l), Value::Int32(r)) => l != r,
-        (Value::Text(l), Value::Text(r)) => l != r,
-        (Value::Bool(l), Value::Bool(r)) => l != r,
-        _ => true,
-    }
-}
-
-fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
-    if matches!(left, Value::Null) || matches!(right, Value::Null) {
-        return Ok(Value::Null);
-    }
-    match (&left, &right) {
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l + r)),
-        _ => Err(ExecError::TypeMismatch {
-            op: "+",
-            left,
-            right,
-        }),
-    }
-}
-
-fn order_values<F>(op: &'static str, left: Value, right: Value, cmp: F) -> Result<Value, ExecError>
-where
-    F: FnOnce(i32, i32) -> bool + Copy,
-{
-    if matches!(left, Value::Null) || matches!(right, Value::Null) {
-        return Ok(Value::Null);
-    }
-    match (&left, &right) {
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(cmp(*l, *r))),
-        (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(match op {
-            "<" => l < r,
-            ">" => l > r,
-            _ => unreachable!(),
-        })),
-        _ => Err(ExecError::TypeMismatch { op, left, right }),
-    }
-}
-
-fn decode_value(column: &ColumnDesc, bytes: Option<Vec<u8>>) -> Result<Value, ExecError> {
-    let Some(bytes) = bytes else {
-        return Ok(Value::Null);
-    };
-
-    match column.ty {
-        ScalarType::Int32 => {
-            if column.storage.attlen != 4 || bytes.len() != 4 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty,
-                    attlen: column.storage.attlen,
-                });
-            }
-            Ok(Value::Int32(i32::from_le_bytes(
-                bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| ExecError::InvalidStorageValue {
-                        column: column.name.clone(),
-                        details: "int4 must be exactly 4 bytes".into(),
-                    })?,
-            )))
-        }
-        ScalarType::Text => {
-            if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty,
-                    attlen: column.storage.attlen,
-                });
-            }
-            String::from_utf8(bytes)
-                .map(Value::Text)
-                .map_err(|e| ExecError::InvalidStorageValue {
-                    column: column.name.clone(),
-                    details: e.to_string(),
-                })
-        }
-        ScalarType::Bool => {
-            if column.storage.attlen != 1 || bytes.len() != 1 {
-                return Err(ExecError::UnsupportedStorageType {
-                    column: column.name.clone(),
-                    ty: column.ty,
-                    attlen: column.storage.attlen,
-                });
-            }
-            match bytes[0] {
-                0 => Ok(Value::Bool(false)),
-                1 => Ok(Value::Bool(true)),
-                other => Err(ExecError::InvalidStorageValue {
-                    column: column.name.clone(),
-                    details: format!("invalid bool byte {}", other),
-                }),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1438,6 +629,8 @@ mod tests {
     use crate::access::heap::tuple::{AttributeAlign, TupleValue};
     use crate::parser::{Catalog, CatalogEntry};
     use crate::storage::smgr::MdStorageManager;
+    use crate::access::heap::tuple::{AttributeDesc, HeapTuple};
+    use crate::RelFileLocator;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1657,94 +850,25 @@ mod tests {
             desc.columns.iter().map(|c| c.name.clone()).collect(),
             vec![Value::Int32(7), Value::Text("alice".into()), Value::Null],
         );
-
-        assert_eq!(
-            eval_expr(
-                &Expr::Eq(
-                    Box::new(Expr::Column(0)),
-                    Box::new(Expr::Const(Value::Int32(7)))
-                ),
-                &mut slot
-            )
-            .unwrap(),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval_expr(
-                &Expr::Eq(
-                    Box::new(Expr::Column(2)),
-                    Box::new(Expr::Const(Value::Text("x".into())))
-                ),
-                &mut slot
-            )
-            .unwrap(),
-            Value::Null
-        );
-        assert_eq!(
-            eval_expr(
-                &Expr::And(
-                    Box::new(Expr::Const(Value::Bool(true))),
-                    Box::new(Expr::Const(Value::Null))
-                ),
-                &mut slot
-            )
-            .unwrap(),
-            Value::Null
-        );
-        assert_eq!(
-            eval_expr(&Expr::IsNull(Box::new(Expr::Column(2))), &mut slot).unwrap(),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval_expr(&Expr::IsNotNull(Box::new(Expr::Column(2))), &mut slot).unwrap(),
-            Value::Bool(false)
-        );
-        assert_eq!(
-            eval_expr(
-                &Expr::IsDistinctFrom(
-                    Box::new(Expr::Column(2)),
-                    Box::new(Expr::Const(Value::Null))
-                ),
-                &mut slot
-            )
-            .unwrap(),
-            Value::Bool(false)
-        );
-        assert_eq!(
-            eval_expr(
-                &Expr::IsDistinctFrom(
-                    Box::new(Expr::Column(1)),
-                    Box::new(Expr::Const(Value::Null))
-                ),
-                &mut slot
-            )
-            .unwrap(),
-            Value::Bool(true)
-        );
+        assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Int32(7)))), &mut slot).unwrap(), Value::Bool(true));
+        assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(2)), Box::new(Expr::Const(Value::Text("x".into())))), &mut slot).unwrap(), Value::Null);
+        assert_eq!(eval_expr(&Expr::And(Box::new(Expr::Const(Value::Bool(true))), Box::new(Expr::Const(Value::Null))), &mut slot).unwrap(), Value::Null);
+        assert_eq!(eval_expr(&Expr::IsNull(Box::new(Expr::Column(2))), &mut slot).unwrap(), Value::Bool(true));
+        assert_eq!(eval_expr(&Expr::IsNotNull(Box::new(Expr::Column(2))), &mut slot).unwrap(), Value::Bool(false));
+        assert_eq!(eval_expr(&Expr::IsDistinctFrom(Box::new(Expr::Column(2)), Box::new(Expr::Const(Value::Null))), &mut slot).unwrap(), Value::Bool(false));
+        assert_eq!(eval_expr(&Expr::IsDistinctFrom(Box::new(Expr::Column(1)), Box::new(Expr::Const(Value::Null))), &mut slot).unwrap(), Value::Bool(true));
     }
 
     #[test]
     fn physical_slot_lazily_deforms_heap_tuple() {
+        use crate::access::heap::tuple::ItemPointerData;
         let mut slot = TupleSlot::from_heap_tuple(
             relation_desc(),
-            ItemPointerData {
-                block_number: 0,
-                offset_number: 1,
-            },
+            ItemPointerData { block_number: 0, offset_number: 1 },
             tuple(1, "alice", None),
         );
-
-        assert_eq!(
-            slot.values().unwrap(),
-            &[Value::Int32(1), Value::Text("alice".into()), Value::Null,]
-        );
-        assert_eq!(
-            slot.tid(),
-            Some(ItemPointerData {
-                block_number: 0,
-                offset_number: 1,
-            })
-        );
+        assert_eq!(slot.values().unwrap(), &[Value::Int32(1), Value::Text("alice".into()), Value::Null]);
+        assert_eq!(slot.tid(), Some(ItemPointerData { block_number: 0, offset_number: 1 }));
     }
 
     #[test]
@@ -1753,63 +877,29 @@ mod tests {
         let mut txns = TransactionManager::new_durable(&base).unwrap();
         let smgr = MdStorageManager::new(&base);
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-
         let xid = txns.begin();
-        let rows = [
-            tuple(1, "alice", Some("alpha")),
-            tuple(2, "bob", None),
-            tuple(3, "carol", Some("gamma")),
-        ];
+        let rows = [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None), tuple(3, "carol", Some("gamma"))];
         let mut blocks = Vec::new();
-        for row in rows {
-            let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
-            blocks.push(tid.block_number);
-        }
+        for row in rows { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); blocks.push(tid.block_number); }
         txns.commit(xid).unwrap();
-        blocks.sort();
-        blocks.dedup();
-        for block in blocks {
-            heap_flush(&mut pool, 1, rel(), block).unwrap();
-        }
+        blocks.sort(); blocks.dedup();
+        for block in blocks { heap_flush(&mut pool, 1, rel(), block).unwrap(); }
         drop(pool);
-
         let plan = Plan::Projection {
             input: Box::new(Plan::Filter {
-                input: Box::new(Plan::SeqScan {
-                    rel: rel(),
-                    desc: relation_desc(),
-                }),
-                predicate: Expr::Gt(
-                    Box::new(Expr::Column(0)),
-                    Box::new(Expr::Const(Value::Int32(1))),
-                ),
+                input: Box::new(Plan::SeqScan { rel: rel(), desc: relation_desc() }),
+                predicate: Expr::Gt(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Int32(1)))),
             }),
             targets: vec![
-                TargetEntry {
-                    name: "name".into(),
-                    expr: Expr::Column(1),
-                },
-                TargetEntry {
-                    name: "note_is_null".into(),
-                    expr: Expr::IsNull(Box::new(Expr::Column(2))),
-                },
+                TargetEntry { name: "name".into(), expr: Expr::Column(1) },
+                TargetEntry { name: "note_is_null".into(), expr: Expr::IsNull(Box::new(Expr::Column(2))) },
             ],
         };
-
         let rows = run_plan(&base, &txns, plan).unwrap();
-        assert_eq!(
-            rows,
-            vec![
-                (
-                    vec!["name".into(), "note_is_null".into()],
-                    vec![Value::Text("bob".into()), Value::Bool(true)]
-                ),
-                (
-                    vec!["name".into(), "note_is_null".into()],
-                    vec![Value::Text("carol".into()), Value::Bool(false)]
-                )
-            ]
-        );
+        assert_eq!(rows, vec![
+            (vec!["name".into(), "note_is_null".into()], vec![Value::Text("bob".into()), Value::Bool(true)]),
+            (vec!["name".into(), "note_is_null".into()], vec![Value::Text("carol".into()), Value::Bool(false)]),
+        ]);
     }
 
     #[test]
@@ -1818,1054 +908,47 @@ mod tests {
         let mut txns = TransactionManager::new_durable(&base).unwrap();
         let smgr = MdStorageManager::new(&base);
         let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-
         let insert_xid = txns.begin();
-        let old_tid = heap_insert_mvcc(
-            &mut pool,
-            1,
-            rel(),
-            insert_xid,
-            &tuple(1, "alice", Some("old")),
-        )
-        .unwrap();
+        let old_tid = heap_insert_mvcc(&mut pool, 1, rel(), insert_xid, &tuple(1, "alice", Some("old"))).unwrap();
         txns.commit(insert_xid).unwrap();
-
         let update_xid = txns.begin();
-        let new_tid = heap_update(
-            &mut pool,
-            1,
-            rel(),
-            &txns,
-            update_xid,
-            old_tid,
-            &tuple(1, "alice", Some("new")),
-        )
-        .unwrap();
+        let new_tid = heap_update(&mut pool, 1, rel(), &txns, update_xid, old_tid, &tuple(1, "alice", Some("new"))).unwrap();
         txns.commit(update_xid).unwrap();
         heap_flush(&mut pool, 1, rel(), old_tid.block_number).unwrap();
-        if new_tid.block_number != old_tid.block_number {
-            heap_flush(&mut pool, 1, rel(), new_tid.block_number).unwrap();
-        }
+        if new_tid.block_number != old_tid.block_number { heap_flush(&mut pool, 1, rel(), new_tid.block_number).unwrap(); }
         drop(pool);
-
-        let plan = Plan::SeqScan {
-            rel: rel(),
-            desc: relation_desc(),
-        };
+        let plan = Plan::SeqScan { rel: rel(), desc: relation_desc() };
         let rows = run_plan(&base, &txns, plan).unwrap();
-        assert_eq!(
-            rows,
-            vec![(
-                vec!["id".into(), "name".into(), "note".into()],
-                vec![
-                    Value::Int32(1),
-                    Value::Text("alice".into()),
-                    Value::Text("new".into())
-                ]
-            )]
-        );
+        assert_eq!(rows, vec![(vec!["id".into(), "name".into(), "note".into()], vec![Value::Int32(1), Value::Text("alice".into()), Value::Text("new".into())])]);
     }
 
-    #[test]
-    fn insert_sql_inserts_row() {
-        let base = temp_dir("insert_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        assert_eq!(
-            run_sql(
-                &base,
-                &txns,
-                xid,
-                "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-            )
-            .unwrap(),
-            StatementResult::AffectedRows(1)
-        );
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select name, note from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![
-                        Value::Text("alice".into()),
-                        Value::Text("alpha".into())
-                    ]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn insert_sql_inserts_multiple_rows() {
-        let base = temp_dir("insert_multi_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        assert_eq!(
-            run_sql(
-                &base,
-                &txns,
-                xid,
-                "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)",
-            )
-            .unwrap(),
-            StatementResult::AffectedRows(2)
-        );
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id, name, note from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![
-                            Value::Int32(1),
-                            Value::Text("alice".into()),
-                            Value::Text("alpha".into())
-                        ],
-                        vec![Value::Int32(2), Value::Text("bob".into()), Value::Null]
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn update_sql_updates_matching_rows() {
-        let base = temp_dir("update_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let insert_xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into people (id, name, note) values (1, 'alice', 'old')",
-        )
-        .unwrap();
-        txns.commit(insert_xid).unwrap();
-
-        let update_xid = txns.begin();
-        assert_eq!(
-            run_sql(
-                &base,
-                &txns,
-                update_xid,
-                "update people set note = 'new' where id = 1",
-            )
-            .unwrap(),
-            StatementResult::AffectedRows(1)
-        );
-        txns.commit(update_xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select note from people where id = 1",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("new".into())]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn delete_sql_deletes_matching_rows() {
-        let base = temp_dir("delete_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let insert_xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into people (id, name, note) values (1, 'alice', null)",
-        )
-        .unwrap();
-        run_sql(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into people (id, name, note) values (2, 'bob', 'keep')",
-        )
-        .unwrap();
-        txns.commit(insert_xid).unwrap();
-
-        let delete_xid = txns.begin();
-        assert_eq!(
-            run_sql(
-                &base,
-                &txns,
-                delete_xid,
-                "delete from people where note is null",
-            )
-            .unwrap(),
-            StatementResult::AffectedRows(1)
-        );
-        txns.commit(delete_xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select name from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("bob".into())]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn order_by_limit_offset_returns_expected_rows() {
-        let base = temp_dir("order_by_limit_offset");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let insert_xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into people (id, name, note) values (1, 'alice', 'a'), (3, 'carol', 'c'), (2, 'bob', null)",
-        )
-        .unwrap();
-        txns.commit(insert_xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id, name from people order by id desc limit 2 offset 1",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Int32(2), Value::Text("bob".into())],
-                        vec![Value::Int32(1), Value::Text("alice".into())],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn explain_mentions_sort_and_limit_nodes() {
-        let base = temp_dir("explain_sort_limit");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "explain select name from people order by id desc limit 1 offset 2",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                let rendered = rows
-                    .into_iter()
-                    .map(|row| match &row[0] {
-                        Value::Text(text) => text.clone(),
-                        other => panic!("expected explain text row, got {:?}", other),
-                    })
-                    .collect::<Vec<_>>();
-                assert!(rendered.iter().any(|line| line.contains("Projection")));
-                assert!(rendered.iter().any(|line| line.contains("Limit")));
-                assert!(rendered.iter().any(|line| line.contains("Sort")));
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn order_by_nulls_first_and_last_work() {
-        let base = temp_dir("order_by_nulls");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let insert_xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
-        )
-        .unwrap();
-        txns.commit(insert_xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id from people order by note asc nulls first",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Int32(2)],
-                        vec![Value::Int32(1)],
-                        vec![Value::Int32(3)],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id from people order by note desc nulls last",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Int32(3)],
-                        vec![Value::Int32(1)],
-                        vec![Value::Int32(2)],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn null_predicates_work_in_where_clause() {
-        let base = temp_dir("null_predicates");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let insert_xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            insert_xid,
-            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
-        )
-        .unwrap();
-        txns.commit(insert_xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id from people where note is null",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id from people where note is not null order by id",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id from people where note is distinct from null order by id",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id from people where note is not distinct from null",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn show_tables_lists_catalog_tables() {
-        let base = temp_dir("show_tables");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "show tables").unwrap() {
-            StatementResult::Query { column_names, rows } => {
-                assert_eq!(column_names, vec!["table_name".to_string()]);
-                assert_eq!(rows, vec![vec![Value::Text("people".into())]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn explain_returns_plan_lines() {
-        let base = temp_dir("explain_sql");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "explain select name from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { column_names, rows } => {
-                assert_eq!(column_names, vec!["QUERY PLAN".to_string()]);
-                let rendered = rows
-                    .into_iter()
-                    .map(|row| match &row[0] {
-                        Value::Text(text) => text.clone(),
-                        other => panic!("expected text explain line, got {:?}", other),
-                    })
-                    .collect::<Vec<_>>();
-                assert!(rendered.iter().any(|line| line.contains("Projection")));
-                assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn select_without_from_returns_constant_row() {
-        let base = temp_dir("select_without_from");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1").unwrap() {
-            StatementResult::Query { column_names, rows } => {
-                assert_eq!(column_names, vec!["expr1".to_string()]);
-                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn select_from_people_returns_zero_column_rows() {
-        let base = temp_dir("select_from_people");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select from people").unwrap() {
-            StatementResult::Query { column_names, rows } => {
-                assert!(column_names.is_empty());
-                assert_eq!(rows, vec![vec![], vec![]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn explain_analyze_buffers_reports_runtime_and_buffers() {
-        let base = temp_dir("explain_analyze_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "explain (analyze, buffers) select name from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                let rendered = rows
-                    .into_iter()
-                    .map(|row| match &row[0] {
-                        Value::Text(text) => text.clone(),
-                        other => panic!("expected text explain line, got {:?}", other),
-                    })
-                    .collect::<Vec<_>>();
-                assert!(rendered.iter().any(|line| line.contains("actual rows=")));
-                assert!(rendered.iter().any(|line| line.contains("Execution Time:")));
-                assert!(rendered.iter().any(|line| line.contains("Buffers: shared")));
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn inner_join_returns_matching_rows() {
-        let base = temp_dir("join_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-        let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-
-        let xid = txns.begin();
-        let people = [
-            tuple(1, "alice", Some("alpha")),
-            tuple(2, "bob", None),
-            tuple(3, "carol", Some("storage")),
-        ];
-        let pets = [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)];
-        for row in people {
-            let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
-            heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap();
-        }
-        for row in pets {
-            let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap();
-            heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap();
-        }
-        txns.commit(xid).unwrap();
-
-        match run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select people.name, pets.name from people join pets on people.id = pets.owner_id",
-            catalog_with_pets(),
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Text("bob".into()), Value::Text("Kitchen".into())],
-                        vec![Value::Text("carol".into()), Value::Text("Mocha".into())]
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn cross_join_returns_cartesian_product() {
-        let base = temp_dir("cross_join_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-        let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-
-        let xid = txns.begin();
-        for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] {
-            let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
-            heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap();
-        }
-        for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] {
-            let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap();
-            heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap();
-        }
-        txns.commit(xid).unwrap();
-
-        match run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select people.name, pets.name from people, pets",
-            catalog_with_pets(),
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Text("alice".into()), Value::Text("Kitchen".into())],
-                        vec![Value::Text("alice".into()), Value::Text("Mocha".into())],
-                        vec![Value::Text("bob".into()), Value::Text("Kitchen".into())],
-                        vec![Value::Text("bob".into()), Value::Text("Mocha".into())],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn cross_join_where_clause_can_use_addition() {
-        let base = temp_dir("cross_join_addition_sql");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-        let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-
-        let xid = txns.begin();
-        for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] {
-            let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap();
-            heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap();
-        }
-        for row in [pet_tuple(10, "Kitchen", 1), pet_tuple(11, "Mocha", 2)] {
-            let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap();
-            heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap();
-        }
-        txns.commit(xid).unwrap();
-
-        match run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select people.name, pets.name from people, pets where pets.owner_id + 1 = people.id",
-            catalog_with_pets(),
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn count_star_without_group_by() {
-        let base = temp_dir("count_star");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select count(*) from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { column_names, rows } => {
-                assert_eq!(column_names, vec!["count"]);
-                assert_eq!(rows, vec![vec![Value::Int32(3)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn count_star_on_empty_table() {
-        let base = temp_dir("count_star_empty");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select count(*) from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(0)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn group_by_with_count() {
-        let base = temp_dir("group_by_count");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select note, count(*) from people group by note order by note",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { column_names, rows } => {
-                assert_eq!(column_names, vec!["note", "count"]);
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Text("a".into()), Value::Int32(2)],
-                        vec![Value::Text("b".into()), Value::Int32(1)],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn sum_avg_min_max_aggregates() {
-        let base = temp_dir("sum_avg_min_max");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', 'b'), (30, 'carol', 'c')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select sum(id), avg(id), min(id), max(id) from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { column_names, rows } => {
-                assert_eq!(column_names, vec!["sum", "avg", "min", "max"]);
-                assert_eq!(
-                    rows,
-                    vec![vec![
-                        Value::Int32(60),
-                        Value::Int32(20),
-                        Value::Int32(10),
-                        Value::Int32(30),
-                    ]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn having_filters_groups() {
-        let base = temp_dir("having_filter");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select note, count(*) from people group by note having count(*) > 1",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Text("a".into()), Value::Int32(2)]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn count_expr_skips_nulls() {
-        let base = temp_dir("count_expr_nulls");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select count(note) from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn sum_of_all_nulls_returns_null() {
-        let base = temp_dir("sum_all_nulls");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', null)",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select min(note), max(note) from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn null_group_by_keys_are_grouped_together() {
-        let base = temp_dir("null_group_keys");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', 'a'), (3, 'carol', null), (4, 'dave', 'a')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select note, count(*) from people group by note order by note",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 2);
-                assert_eq!(rows[0], vec![Value::Text("a".into()), Value::Int32(2)]);
-                assert_eq!(rows[1], vec![Value::Null, Value::Int32(2)]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn sum_and_avg_skip_nulls() {
-        let base = temp_dir("sum_avg_skip_nulls");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select count(*), count(note), sum(id), avg(id), min(id), max(id) from people",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { column_names, rows } => {
-                assert_eq!(
-                    column_names,
-                    vec!["count", "count", "sum", "avg", "min", "max"]
-                );
-                assert_eq!(
-                    rows,
-                    vec![vec![
-                        Value::Int32(3),  // COUNT(*) counts all rows including NULLs
-                        Value::Int32(2),  // COUNT(note) skips the NULL
-                        Value::Int32(60), // SUM(id) includes all non-NULL ids
-                        Value::Int32(20), // AVG(id) = 60/3
-                        Value::Int32(10),
-                        Value::Int32(30),
-                    ]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn ungrouped_column_is_rejected() {
-        let base = temp_dir("ungrouped_column");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        let result = run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select name, count(*) from people",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn aggregate_in_where_is_rejected() {
-        let base = temp_dir("agg_in_where");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        let result = run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select name from people where count(*) > 1",
-        );
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn explain_shows_aggregate_node() {
-        let base = temp_dir("explain_agg");
-        let txns = TransactionManager::new_durable(&base).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "explain select note, count(*) from people group by note",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                let rendered = rows
-                    .into_iter()
-                    .map(|row| match &row[0] {
-                        Value::Text(text) => text.clone(),
-                        other => panic!("expected text, got {:?}", other),
-                    })
-                    .collect::<Vec<_>>();
-                assert!(rendered.iter().any(|line| line.contains("Aggregate")));
-                assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn group_by_with_order_by_and_limit() {
-        let base = temp_dir("group_by_order_limit");
-        let mut txns = TransactionManager::new_durable(&base).unwrap();
-
-        let xid = txns.begin();
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y'), (3, 'carol', 'x'), (4, 'dave', 'y'), (5, 'eve', 'z')",
-        )
-        .unwrap();
-        txns.commit(xid).unwrap();
-
-        match run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select note, count(*) from people group by note order by count(*) desc limit 2",
-        )
-        .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Text("x".into()), Value::Int32(2)],
-                        vec![Value::Text("y".into()), Value::Int32(2)],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
+    #[test] fn insert_sql_inserts_row() { let base = temp_dir("insert_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); assert_eq!(run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap(), StatementResult::AffectedRows(1)); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, note from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Text("alpha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn insert_sql_inserts_multiple_rows() { let base = temp_dir("insert_multi_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); assert_eq!(run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)").unwrap(), StatementResult::AffectedRows(2)); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id, name, note from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("alice".into()), Value::Text("alpha".into())], vec![Value::Int32(2), Value::Text("bob".into()), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn update_sql_updates_matching_rows() { let base = temp_dir("update_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let insert_xid = txns.begin(); run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', 'old')").unwrap(); txns.commit(insert_xid).unwrap(); let update_xid = txns.begin(); assert_eq!(run_sql(&base, &txns, update_xid, "update people set note = 'new' where id = 1").unwrap(), StatementResult::AffectedRows(1)); txns.commit(update_xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note from people where id = 1").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("new".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn delete_sql_deletes_matching_rows() { let base = temp_dir("delete_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let insert_xid = txns.begin(); run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', null)").unwrap(); run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (2, 'bob', 'keep')").unwrap(); txns.commit(insert_xid).unwrap(); let delete_xid = txns.begin(); assert_eq!(run_sql(&base, &txns, delete_xid, "delete from people where note is null").unwrap(), StatementResult::AffectedRows(1)); txns.commit(delete_xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn order_by_limit_offset_returns_expected_rows() { let base = temp_dir("order_by_limit_offset"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let insert_xid = txns.begin(); run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (3, 'carol', 'c'), (2, 'bob', null)").unwrap(); txns.commit(insert_xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id, name from people order by id desc limit 2 offset 1").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(2), Value::Text("bob".into())], vec![Value::Int32(1), Value::Text("alice".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn explain_mentions_sort_and_limit_nodes() { let base = temp_dir("explain_sort_limit"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "explain select name from people order by id desc limit 1 offset 2").unwrap() { StatementResult::Query { rows, .. } => { let rendered = rows.into_iter().map(|row| match &row[0] { Value::Text(text) => text.clone(), other => panic!("expected explain text row, got {:?}", other), }).collect::<Vec<_>>(); assert!(rendered.iter().any(|line| line.contains("Projection"))); assert!(rendered.iter().any(|line| line.contains("Limit"))); assert!(rendered.iter().any(|line| line.contains("Sort"))); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn order_by_nulls_first_and_last_work() { let base = temp_dir("order_by_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let insert_xid = txns.begin(); run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(insert_xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id from people order by note asc nulls first").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(2)], vec![Value::Int32(1)], vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id from people order by note desc nulls last").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(3)], vec![Value::Int32(1)], vec![Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn null_predicates_work_in_where_clause() { let base = temp_dir("null_predicates"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let insert_xid = txns.begin(); run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(insert_xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id from people where note is null").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id from people where note is not null order by id").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id from people where note is distinct from null order by id").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id from people where note is not distinct from null").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn show_tables_lists_catalog_tables() { let base = temp_dir("show_tables"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "show tables").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["table_name".to_string()]); assert_eq!(rows, vec![vec![Value::Text("people".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn explain_returns_plan_lines() { let base = temp_dir("explain_sql"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "explain select name from people").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["QUERY PLAN".to_string()]); let rendered = rows.into_iter().map(|row| match &row[0] { Value::Text(text) => text.clone(), other => panic!("expected text explain line, got {:?}", other), }).collect::<Vec<_>>(); assert!(rendered.iter().any(|line| line.contains("Projection"))); assert!(rendered.iter().any(|line| line.contains("Seq Scan"))); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn select_without_from_returns_constant_row() { let base = temp_dir("select_without_from"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["expr1".to_string()]); assert_eq!(rows, vec![vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn select_from_people_returns_zero_column_rows() { let base = temp_dir("select_from_people"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select from people").unwrap() { StatementResult::Query { column_names, rows } => { assert!(column_names.is_empty()); assert_eq!(rows, vec![vec![], vec![]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn explain_analyze_buffers_reports_runtime_and_buffers() { let base = temp_dir("explain_analyze_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "explain (analyze, buffers) select name from people").unwrap() { StatementResult::Query { rows, .. } => { let rendered = rows.into_iter().map(|row| match &row[0] { Value::Text(text) => text.clone(), other => panic!("expected text explain line, got {:?}", other), }).collect::<Vec<_>>(); assert!(rendered.iter().any(|line| line.contains("actual rows="))); assert!(rendered.iter().any(|line| line.contains("Execution Time:"))); assert!(rendered.iter().any(|line| line.contains("Buffers: shared"))); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn inner_join_returns_matching_rows() { let base = temp_dir("join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let smgr = MdStorageManager::new(&base); let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None), tuple(3, "carol", Some("storage"))] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people join pets on people.id = pets.owner_id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("carol".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn cross_join_returns_cartesian_product() { let base = temp_dir("cross_join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let smgr = MdStorageManager::new(&base); let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Text("Kitchen".into())], vec![Value::Text("alice".into()), Value::Text("Mocha".into())], vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("bob".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn cross_join_where_clause_can_use_addition() { let base = temp_dir("cross_join_addition_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let smgr = MdStorageManager::new(&base); let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 1), pet_tuple(11, "Mocha", 2)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets where pets.owner_id + 1 = people.id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_star_without_group_by() { let base = temp_dir("count_star"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["count"]); assert_eq!(rows, vec![vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_star_on_empty_table() { let base = temp_dir("count_star_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(0)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn group_by_with_count() { let base = temp_dir("group_by_count"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by note").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["note", "count"]); assert_eq!(rows, vec![vec![Value::Text("a".into()), Value::Int32(2)], vec![Value::Text("b".into()), Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn sum_avg_min_max_aggregates() { let base = temp_dir("sum_avg_min_max"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', 'b'), (30, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select sum(id), avg(id), min(id), max(id) from people").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["sum", "avg", "min", "max"]); assert_eq!(rows, vec![vec![Value::Int32(60), Value::Int32(20), Value::Int32(10), Value::Int32(30)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn having_filters_groups() { let base = temp_dir("having_filter"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note having count(*) > 1").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("a".into()), Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_expr_skips_nulls() { let base = temp_dir("count_expr_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn sum_of_all_nulls_returns_null() { let base = temp_dir("sum_all_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select min(note), max(note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Null, Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn null_group_by_keys_are_grouped_together() { let base = temp_dir("null_group_keys"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', 'a'), (3, 'carol', null), (4, 'dave', 'a')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by note").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows.len(), 2); assert_eq!(rows[0], vec![Value::Text("a".into()), Value::Int32(2)]); assert_eq!(rows[1], vec![Value::Null, Value::Int32(2)]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn sum_and_avg_skip_nulls() { let base = temp_dir("sum_avg_skip_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*), count(note), sum(id), avg(id), min(id), max(id) from people").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["count", "count", "sum", "avg", "min", "max"]); assert_eq!(rows, vec![vec![Value::Int32(3), Value::Int32(2), Value::Int32(60), Value::Int32(20), Value::Int32(10), Value::Int32(30)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn ungrouped_column_is_rejected() { let base = temp_dir("ungrouped_column"); let txns = TransactionManager::new_durable(&base).unwrap(); let result = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, count(*) from people"); assert!(result.is_err()); }
+    #[test] fn aggregate_in_where_is_rejected() { let base = temp_dir("agg_in_where"); let txns = TransactionManager::new_durable(&base).unwrap(); let result = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name from people where count(*) > 1"); assert!(result.is_err()); }
+    #[test] fn explain_shows_aggregate_node() { let base = temp_dir("explain_agg"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "explain select note, count(*) from people group by note").unwrap() { StatementResult::Query { rows, .. } => { let rendered = rows.into_iter().map(|row| match &row[0] { Value::Text(text) => text.clone(), other => panic!("expected text, got {:?}", other), }).collect::<Vec<_>>(); assert!(rendered.iter().any(|line| line.contains("Aggregate"))); assert!(rendered.iter().any(|line| line.contains("Seq Scan"))); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn group_by_with_order_by_and_limit() { let base = temp_dir("group_by_order_limit"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y'), (3, 'carol', 'x'), (4, 'dave', 'y'), (5, 'eve', 'z')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by count(*) desc limit 2").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("x".into()), Value::Int32(2)], vec![Value::Text("y".into()), Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
 }
