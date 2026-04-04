@@ -17,15 +17,21 @@
 //! ## Record layout (8224 bytes)
 //!
 //! ```text
-//!  bytes  0-7  : lsn        (u64 LE) — byte offset after this record
-//!  bytes  8-11 : xid        (u32 LE) — transaction id
-//!  bytes 12-15 : spc_oid    (u32 LE)
-//!  bytes 16-19 : db_oid     (u32 LE)
-//!  bytes 20-23 : rel_number (u32 LE)
-//!  byte  24    : fork       (u8)
-//!  bytes 25-27 : _pad       ([u8; 3])
-//!  bytes 28-31 : block      (u32 LE)
-//!  bytes 32..  : page data  (PAGE_SIZE = 8192 bytes)
+//!  bytes  0-3  : xl_tot_len   (u32 LE) — total length of entire record
+//!  bytes  4-7  : xl_xid       (u32 LE) — transaction id
+//!  bytes  8-15 : xl_prev      (u64 LE) — LSN of previous record
+//!  byte  16    : xl_info      (u8)     — flag bits
+//!  byte  17    : xl_rmid      (u8)     — resource manager id
+//!  bytes 18-19 : _pad         (2 bytes, zero)
+//!  bytes 20-23 : xl_crc       (u32 LE) — CRC32C of entire record (with crc field zeroed)
+//!  --- block header (simplified, one block per record) ---
+//!  bytes 24-27 : spc_oid      (u32 LE)
+//!  bytes 28-31 : db_oid       (u32 LE)
+//!  bytes 32-35 : rel_number   (u32 LE)
+//!  byte  36    : fork         (u8)
+//!  bytes 37-39 : _pad2        (3 bytes, zero)
+//!  bytes 40-43 : block        (u32 LE)
+//!  bytes 44..  : page data    (PAGE_SIZE = 8192 bytes)
 //! ```
 
 use std::fs::{File, OpenOptions};
@@ -40,8 +46,14 @@ use crate::storage::buffer::{BufferTag, PAGE_SIZE};
 pub type Lsn = u64;
 pub const INVALID_LSN: Lsn = 0;
 
-const WAL_RECORD_HEADER: usize = 32;
+/// XLogRecord header: tot_len(4) + xid(4) + prev(8) + info(1) + rmid(1) + pad(2) + crc(4) = 24
+const XLOG_RECORD_HEADER: usize = 24;
+/// Block header: spc_oid(4) + db_oid(4) + rel_number(4) + fork(1) + pad(3) + block(4) = 20
+const BLOCK_HEADER: usize = 20;
+const WAL_RECORD_HEADER: usize = XLOG_RECORD_HEADER + BLOCK_HEADER; // 44
 pub const WAL_RECORD_LEN: usize = WAL_RECORD_HEADER + PAGE_SIZE;
+/// Offset of the CRC field within the record.
+const CRC_OFFSET: usize = 20;
 
 #[derive(Debug)]
 pub enum WalError {
@@ -109,18 +121,34 @@ impl WalWriter {
     ) -> Result<Lsn, WalError> {
         let mut guard = self.inner.lock().unwrap();
 
-        let lsn = guard.insert_lsn + WAL_RECORD_LEN as Lsn;
+        let prev_lsn = guard.insert_lsn;
+        let lsn = prev_lsn + WAL_RECORD_LEN as Lsn;
 
         let mut record = [0u8; WAL_RECORD_LEN];
-        record[0..8].copy_from_slice(&lsn.to_le_bytes());
-        record[8..12].copy_from_slice(&xid.to_le_bytes());
-        record[12..16].copy_from_slice(&tag.rel.spc_oid.to_le_bytes());
-        record[16..20].copy_from_slice(&tag.rel.db_oid.to_le_bytes());
-        record[20..24].copy_from_slice(&tag.rel.rel_number.to_le_bytes());
-        record[24] = tag.fork.as_u8();
-        // bytes 25-27: padding (already zero)
-        record[28..32].copy_from_slice(&tag.block.to_le_bytes());
+
+        // XLogRecord header
+        record[0..4].copy_from_slice(&(WAL_RECORD_LEN as u32).to_le_bytes()); // xl_tot_len
+        record[4..8].copy_from_slice(&xid.to_le_bytes());                      // xl_xid
+        record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());                // xl_prev
+        record[16] = 0;                                                         // xl_info
+        record[17] = 0;                                                         // xl_rmid
+        // bytes 18-19: padding (already zero)
+        // bytes 20-23: xl_crc — filled below after computing CRC
+
+        // Block header
+        record[24..28].copy_from_slice(&tag.rel.spc_oid.to_le_bytes());
+        record[28..32].copy_from_slice(&tag.rel.db_oid.to_le_bytes());
+        record[32..36].copy_from_slice(&tag.rel.rel_number.to_le_bytes());
+        record[36] = tag.fork.as_u8();
+        // bytes 37-39: padding (already zero)
+        record[40..44].copy_from_slice(&tag.block.to_le_bytes());
+
+        // Page data
         record[WAL_RECORD_HEADER..].copy_from_slice(page);
+
+        // Compute CRC32C over entire record with crc field zeroed (it already is).
+        let crc = crc32c::crc32c(&record);
+        record[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
 
         guard.file.seek(SeekFrom::End(0))?;
         guard.file.write_all(&record)?;
@@ -261,23 +289,43 @@ mod tests {
 
         assert_eq!(raw.len(), WAL_RECORD_LEN);
 
-        // lsn at bytes 0-7
-        assert_eq!(u64::from_le_bytes(raw[0..8].try_into().unwrap()), lsn);
-        // xid at bytes 8-11
-        assert_eq!(u32::from_le_bytes(raw[8..12].try_into().unwrap()), xid);
-        // spc_oid at bytes 12-15
-        assert_eq!(u32::from_le_bytes(raw[12..16].try_into().unwrap()), 0xAA);
-        // db_oid at bytes 16-19
-        assert_eq!(u32::from_le_bytes(raw[16..20].try_into().unwrap()), 0xBB);
-        // rel_number at bytes 20-23
-        assert_eq!(u32::from_le_bytes(raw[20..24].try_into().unwrap()), 0xCC);
-        // fork at byte 24
-        assert_eq!(raw[24], ForkNumber::Main.as_u8());
-        // block at bytes 28-31
-        assert_eq!(u32::from_le_bytes(raw[28..32].try_into().unwrap()), 0xDD);
-        // page data starts at byte 32
+        // XLogRecord header
+        // xl_tot_len at bytes 0-3
+        assert_eq!(u32::from_le_bytes(raw[0..4].try_into().unwrap()), WAL_RECORD_LEN as u32);
+        // xl_xid at bytes 4-7
+        assert_eq!(u32::from_le_bytes(raw[4..8].try_into().unwrap()), xid);
+        // xl_prev at bytes 8-15 (previous LSN = 0 for first record)
+        assert_eq!(u64::from_le_bytes(raw[8..16].try_into().unwrap()), 0);
+        // xl_info at byte 16
+        assert_eq!(raw[16], 0);
+        // xl_rmid at byte 17
+        assert_eq!(raw[17], 0);
+        // xl_crc at bytes 20-23 (non-zero)
+        let crc = u32::from_le_bytes(raw[CRC_OFFSET..CRC_OFFSET + 4].try_into().unwrap());
+        assert_ne!(crc, 0, "CRC should be computed");
+        // Verify CRC: zero out the crc field and recompute
+        let mut check = raw.clone();
+        check[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(crc32c::crc32c(&check), crc, "CRC mismatch");
+
+        // Block header
+        // spc_oid at bytes 24-27
+        assert_eq!(u32::from_le_bytes(raw[24..28].try_into().unwrap()), 0xAA);
+        // db_oid at bytes 28-31
+        assert_eq!(u32::from_le_bytes(raw[28..32].try_into().unwrap()), 0xBB);
+        // rel_number at bytes 32-35
+        assert_eq!(u32::from_le_bytes(raw[32..36].try_into().unwrap()), 0xCC);
+        // fork at byte 36
+        assert_eq!(raw[36], ForkNumber::Main.as_u8());
+        // block at bytes 40-43
+        assert_eq!(u32::from_le_bytes(raw[40..44].try_into().unwrap()), 0xDD);
+
+        // page data starts at byte 44
         assert_eq!(raw[WAL_RECORD_HEADER], 0x42);
         assert_eq!(raw[WAL_RECORD_LEN - 1], 0x99);
+
+        // LSN should equal the record length (first record starts at offset 0)
+        assert_eq!(lsn, WAL_RECORD_LEN as u64);
     }
 
     /// A freshly-opened `WalWriter` on an existing file resumes from the
