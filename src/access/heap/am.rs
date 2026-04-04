@@ -69,6 +69,10 @@ impl From<MvccError> for HeapError {
 pub struct VisibleHeapScan {
     scan: HeapScan,
     snapshot: Snapshot,
+    /// Buffer ID of the currently pinned page, if any. Kept pinned across
+    /// tuples on the same page to avoid per-tuple pin/unpin overhead.
+    /// The content lock is NOT held — only re-acquired briefly per tuple.
+    pinned_buffer: Option<(u32, usize)>,  // (block_number, buffer_id)
 }
 
 pub fn heap_scan_begin(
@@ -131,6 +135,7 @@ pub fn heap_scan_begin_visible(
     Ok(VisibleHeapScan {
         scan: heap_scan_begin(pool, rel)?,
         snapshot,
+        pinned_buffer: None,
     })
 }
 
@@ -162,10 +167,23 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
 
     while scan.scan.current_block < scan.scan.nblocks {
         let block = scan.scan.current_block;
-        let buffer_id = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
 
-        // Hold shared content lock for the page scan. Hint bits are written
-        // via unsafe under this shared lock, matching PostgreSQL's approach.
+        // Reuse pinned buffer if we're still on the same page.
+        let buffer_id = match scan.pinned_buffer {
+            Some((pinned_block, bid)) if pinned_block == block => bid,
+            _ => {
+                // Unpin previous buffer if any.
+                if let Some((_, old_bid)) = scan.pinned_buffer.take() {
+                    pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
+                }
+                let bid = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+                scan.pinned_buffer = Some((block, bid));
+                bid
+            }
+        };
+
+        // Acquire shared content lock briefly for this tuple batch.
+        // Released after processing — does NOT block writers across exec_next calls.
         let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
         let page: &Page = &*guard;
         let mut any_hints_written = false;
@@ -186,10 +204,6 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
                 let (visible, hints) = scan.snapshot.tuple_bytes_visible_with_hints(txns, tuple_bytes);
 
                 if hints != 0 {
-                    // SAFETY: Hint bit writes are idempotent ORs on infomask bytes.
-                    // The shared content lock prevents structural page changes.
-                    // Multiple concurrent hint writers are safe (OR is commutative).
-                    // This matches PostgreSQL's SetHintBits under shared buffer lock.
                     unsafe {
                         let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
                         let page_ptr = page as *const Page as *mut u8;
@@ -219,17 +233,97 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
         }
         drop(guard);
 
-        pool.unpin(client_id, buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
-
         if let Some(result) = found? {
+            // Keep buffer pinned — next call will likely need the same page.
             return Ok(Some(result));
         }
 
+        // Page exhausted — unpin and move to next block.
+        if let Some((_, old_bid)) = scan.pinned_buffer.take() {
+            pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        }
         scan.scan.current_block += 1;
         scan.scan.current_offset = 1;
     }
 
+    // Scan complete — unpin any remaining buffer.
+    if let Some((_, old_bid)) = scan.pinned_buffer.take() {
+        pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
+    }
+
     Ok(None)
+}
+
+/// Scan ALL remaining visible tuples, calling `process` for each one.
+/// Holds a single shared content lock per page, avoiding per-tuple lock
+/// acquire/release. Sets hint bits via unsafe under the shared lock.
+pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    txns: &TransactionManager,
+    scan: &mut VisibleHeapScan,
+    mut process: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<usize, E> {
+    use crate::access::heap::tuple::INFOMASK_OFFSET;
+
+    let mut count = 0usize;
+    while scan.scan.current_block < scan.scan.nblocks {
+        let block = scan.scan.current_block;
+        let buffer_id = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+
+        let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let page: &Page = &*guard;
+        let mut any_hints_written = false;
+
+        let result: Result<(), E> = (|| {
+            let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+
+            while scan.scan.current_offset <= max_offset {
+                let off = scan.scan.current_offset;
+                scan.scan.current_offset += 1;
+
+                let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
+                    continue;
+                }
+
+                let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                let (visible, hints) = scan.snapshot.tuple_bytes_visible_with_hints(txns, tuple_bytes);
+
+                if hints != 0 {
+                    unsafe {
+                        let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
+                        let page_ptr = page as *const Page as *mut u8;
+                        let current = u16::from_le_bytes([*page_ptr.add(hint_off), *page_ptr.add(hint_off + 1)]);
+                        let updated = (current | hints).to_le_bytes();
+                        *page_ptr.add(hint_off) = updated[0];
+                        *page_ptr.add(hint_off + 1) = updated[1];
+                    }
+                    any_hints_written = true;
+                }
+
+                if !visible {
+                    continue;
+                }
+
+                process(tuple_bytes)?;
+                count += 1;
+            }
+            Ok(())
+        })();
+
+        if any_hints_written {
+            pool.mark_buffer_dirty_hint(buffer_id);
+        }
+        drop(guard);
+        pool.unpin(client_id, buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+
+        result?;
+        scan.scan.current_block += 1;
+        scan.scan.current_offset = 1;
+    }
+
+    Ok(count)
 }
 
 pub fn heap_insert(

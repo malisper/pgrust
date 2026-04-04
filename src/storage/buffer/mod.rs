@@ -16,7 +16,6 @@ use crate::storage::wal::{INVALID_LSN, Lsn, WalWriter};
 struct BufferFrame {
     state: BufferState,
     tag: Mutex<Option<BufferTag>>,
-    pins_by_client: Mutex<FxHashMap<ClientId, usize>>,
     content_lock: RwLock<Page>,
     io_complete: Condvar,
 }
@@ -57,7 +56,6 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             .map(|_| BufferFrame {
                 state: BufferState::new(),
                 tag: Mutex::new(None),
-                pins_by_client: Mutex::new(FxHashMap::default()),
                 content_lock: RwLock::new([0u8; PAGE_SIZE]),
                 io_complete: Condvar::new(),
             })
@@ -196,7 +194,6 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             if let Some(&buffer_id) = lookup.get(&tag) {
                 let frame = &self.frames[buffer_id];
                 frame.state.pin_and_bump_usage(self.max_usage_count);
-                *frame.pins_by_client.lock().entry(client_id).or_insert(0) += 1;
                 if frame.state.is_valid() {
                     self.stats_hit.fetch_add(1, Ordering::Relaxed);
                     return Ok(RequestPageResult::Hit { buffer_id });
@@ -233,7 +230,6 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
             let existing_frame = &self.frames[existing_id];
             existing_frame.state.pin_and_bump_usage(self.max_usage_count);
-            *existing_frame.pins_by_client.lock().entry(client_id).or_insert(0) += 1;
             if existing_frame.state.is_valid() {
                 self.stats_hit.fetch_add(1, Ordering::Relaxed);
                 return Ok(RequestPageResult::Hit {
@@ -290,13 +286,6 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         // Reset atomic state: pin_count=1, usage_count=1, io_in_progress=true
         frame.state.init_for_io();
-
-        // Reset per-client pin tracking
-        {
-            let mut pins = frame.pins_by_client.lock();
-            pins.clear();
-            *pins.entry(client_id).or_insert(0) += 1;
-        }
 
         lookup.insert(tag, buffer_id);
 
@@ -546,18 +535,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(())
     }
 
-    pub fn unpin(&self, client_id: ClientId, buffer_id: BufferId) -> Result<(), Error> {
+    pub fn unpin(&self, _client_id: ClientId, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        {
-            let mut pins = frame.pins_by_client.lock();
-            let entry = pins
-                .get_mut(&client_id)
-                .ok_or(Error::BufferPinned)?;
-            *entry -= 1;
-            if *entry == 0 {
-                pins.remove(&client_id);
-            }
-        }
+        debug_assert!(frame.state.pin_count() > 0, "unpin on buffer with pin_count=0");
         frame.state.decrement_pin();
         Ok(())
     }
@@ -607,7 +587,6 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             // Reset the frame to default state
             *tag_guard = None;
             frame.state.store(0);
-            frame.pins_by_client.lock().clear();
             *frame.content_lock.write() = [0u8; PAGE_SIZE];
             strategy.free_list.push_back(buffer_id);
             removed += 1;
