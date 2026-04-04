@@ -258,8 +258,24 @@ impl WalWriter {
     /// (fdatasync). Returns the flushed LSN. A no-op if already up to date.
     pub fn flush(&self) -> Result<Lsn, WalError> {
         let mut guard = self.inner.lock().unwrap();
+        Self::flush_inner(&mut guard)
+    }
+
+    /// Ensure WAL is durable up to at least `target_lsn`. If the WAL has
+    /// already been flushed past that point, this is a no-op. Returns the
+    /// flushed LSN.
+    pub fn flush_to(&self, target_lsn: Lsn) -> Result<Lsn, WalError> {
+        let mut guard = self.inner.lock().unwrap();
+        if guard.flushed_lsn >= target_lsn {
+            return Ok(guard.flushed_lsn);
+        }
+        Self::flush_inner(&mut guard)
+    }
+
+    fn flush_inner(
+        guard: &mut std::sync::MutexGuard<'_, WalWriterInner>,
+    ) -> Result<Lsn, WalError> {
         if guard.flushed_lsn < guard.insert_lsn {
-            // Flush BufWriter to kernel, then fsync to disk.
             guard.file.flush()?;
             guard.file.get_ref().sync_data()?;
             guard.flushed_lsn = guard.insert_lsn;
