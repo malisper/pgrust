@@ -1,11 +1,13 @@
 # Concurrency — Deferred Features
 
 This note records what is intentionally missing from the current multi-threading
-implementation.
+and row-level locking implementation, and where the implementation simplifies or
+diverges from PostgreSQL.
 
-The current code has:
+## What is implemented
 
-- per-frame `Mutex` on buffer descriptors
+- per-frame `Mutex` on buffer descriptors (metadata)
+- per-frame `RwLock<()>` content lock (shared for reads, exclusive for writes)
 - `RwLock` on the buffer tag lookup table
 - `Mutex` on the free list / clock sweep strategy
 - `Mutex` on the storage backend (I/O serialized)
@@ -13,132 +15,203 @@ The current code has:
 - `AtomicU64` for buffer pool hit/read/written stats
 - `Arc<BufferPool>` + `Arc<RwLock<TransactionManager>>` + `Arc<RwLock<DurableCatalog>>`
   in the `Database` handle for cross-thread sharing
+- row-level locking via xmax as a claim marker + content lock for atomicity
+- transaction wait mechanism (`TransactionWaiter` with condvar)
+- EvalPlanQual-style retry: follow ctid chain, re-evaluate WHERE, recompute SET
+- per-table lock manager with AccessShare / RowExclusive / AccessExclusive modes
+- catalog lock held only briefly for name resolution, not during execution
 
-That is enough for multiple threads to run concurrent queries against the same
-database instance. It is not a realistic implementation of PostgreSQL's
-concurrency model.
+---
 
-## Content locks (LWLock per buffer)
+## Simplifications (correct but less capable than PostgreSQL)
 
-PostgreSQL has a separate content lock per buffer — an `LWLock` that supports
-shared (read) and exclusive (write) access to page contents. This allows
-multiple readers to access the same page simultaneously while writers get
-exclusive access.
+### Page copy instead of pointer-into-buffer
 
-The current implementation uses a single `Mutex` per frame that protects both
-metadata and page contents. This means any access (even a read) serializes
-against all other accesses to the same frame.
+PostgreSQL reads tuples via a pointer into the still-pinned shared buffer
+(zero-copy). `heap_scan_next` and `heap_fetch` copy the entire 8KB page under
+the shared content lock, then work from the copy.
 
-**To add:** Replace the per-frame `Mutex` with a split design: a spinlock or
-small `Mutex` for metadata (pin count, flags) and an `RwLock` for page content.
-Readers take a shared content lock; writers take an exclusive content lock.
+This costs an extra memcpy per page access but avoids the complexity of keeping
+tuple pointers valid while the buffer is pinned. The lock is held for only the
+duration of the copy.
 
-## Buffer pin hazard tracking
+### Global storage mutex instead of per-relation extension lock
 
-PostgreSQL's pin system uses atomic operations (`pg_atomic_fetch_add_u32`) for
-the shared refcount in the buffer header, with a separate backend-private
-`PrivateRefCountEntry` array to track which buffers each backend has pinned.
-This avoids contending on the buffer header spinlock for pin/unpin in the common
-case.
+PostgreSQL uses a dedicated `RelationExtensionLock` per relation for extending
+files. Extending table A does not block extending table B.
 
-The current implementation uses per-frame `HashMap<ClientId, usize>` under the
-frame `Mutex` for pin tracking. This works but is slower than PostgreSQL's
-approach for high-contention buffers.
+The current implementation wraps `nblocks()` + `extend()` inside a single global
+`Mutex<S>` on the storage backend. All storage operations (including extensions
+of different relations) are serialized.
 
-**To add:** Use an `AtomicU32` for the shared pin count and a thread-local
-`HashMap` for per-thread pin tracking.
+**To improve:** Add a per-relation extension lock (e.g., a `HashMap<RelFileLocator,
+Mutex<()>>`) so extensions of different relations can proceed in parallel.
 
-## Transaction isolation levels
+### No Free Space Map (FSM)
 
-The current implementation provides only a single MVCC snapshot model that
-behaves like READ COMMITTED — each statement sees a fresh snapshot. PostgreSQL
-supports:
+PostgreSQL uses the FSM to find pages with available space for inserts. The
+current implementation always tries the last page and extends the relation if
+it is full. This wastes space on tables with fragmented free space.
 
-- READ UNCOMMITTED (treated as READ COMMITTED)
-- READ COMMITTED (snapshot per statement)
-- REPEATABLE READ (snapshot per transaction)
-- SERIALIZABLE (snapshot per transaction + predicate locks)
+**To add:** An FSM implementation and integration with `heap_insert_version`'s
+page selection logic.
 
-**To add:** Store the isolation level on the transaction and conditionally
-reuse the transaction-start snapshot for REPEATABLE READ. SERIALIZABLE requires
-predicate lock tracking (SIRead locks).
+### `try_read` loop for transaction status under content lock
 
-## Row-level locking
+PostgreSQL checks transaction status (via CLOG/pg_xact) under the buffer content
+lock without deadlock risk because CLOG has its own partition LWLocks that do not
+conflict with buffer content locks.
 
-`SELECT FOR UPDATE`, `SELECT FOR SHARE`, `SELECT FOR NO KEY UPDATE`, and
-`SELECT FOR KEY SHARE` are not implemented. PostgreSQL uses tuple-level lock
-bits (`xmax` and infomask flags) to implement these without blocking readers.
+The current implementation has a single `RwLock<TransactionManager>` that serves
+both purposes. Because `parking_lot::RwLock` is write-preferring, a blocking
+`read()` call while holding the content lock can deadlock (a pending txns writer
+blocks the reader, while the writer waits for another thread that holds the
+content lock). The workaround is a `try_read` loop with `yield_now` (10 attempts)
+that avoids the deadlock by failing gracefully instead of blocking.
 
-**To add:** Extend the tuple header with lock mode flags. Add a lock-wait
-queue per tuple or per buffer. Integrate with the executor to acquire row
-locks during scan.
+**To improve:** Separate the transaction status store from the transaction
+lifecycle lock. Use a concurrent data structure (e.g., `DashMap`) or per-xid
+atomics for status lookups, eliminating the need for `try_read`.
 
-## Serializable snapshot isolation (SSI)
+### Transaction wait uses condvar + timeout instead of per-xid locks
 
-PostgreSQL implements SSI via predicate locks (SIRead locks) that track which
-tuples and index ranges were read by serializable transactions. Conflicts are
-detected by checking for dangerous read-write dependency cycles.
+PostgreSQL uses `XactLockTableWait`, which works through the lock manager.
+Every running transaction holds an `ExclusiveLock` on its own xid. A waiter
+requests a `ShareLock` on the target xid, which blocks in the lock manager's
+wait queue until the target commits or aborts and releases its lock. There is
+no race between checking and waiting — the lock request is registered
+atomically.
 
-**To add:** A predicate lock manager, conflict detection at commit time, and
-serialization failure error handling.
+The current implementation uses a `TransactionWaiter` with a `Condvar`. The
+waiter checks the transaction status, then sleeps on the condvar with a 10ms
+timeout. If `notify_all` fires between the status check and the sleep, the
+notification is missed and the thread sleeps for the full 10ms before
+re-checking. This adds up to 10ms of unnecessary latency per missed
+notification.
 
-## Deadlock detection
+**To improve:** Implement per-transaction-id locks matching PostgreSQL's
+`XactLockTableWait`. Each transaction holds an exclusive lock on its xid at
+start. Waiters request a shared lock on the target xid, which blocks
+atomically with no polling or timeouts. On commit/abort, the exclusive lock
+is released and all waiters wake immediately.
 
-PostgreSQL has a deadlock detector that runs periodically to check for circular
-waits in the lock manager. The current implementation has no heavyweight lock
-manager and no deadlock detection.
+### No tuple-level lock manager
 
-**To add:** Build a wait-for graph from lock waiters and check for cycles on a
-timer or when a wait exceeds a timeout.
+PostgreSQL uses `heap_acquire_tuplock` to establish priority among waiters for
+the same row. This prevents starvation: once you acquire the tuple lock, you are
+next in line even if another transaction commits in the meantime.
 
-## Two-phase commit
+The current implementation wakes all waiters simultaneously via `notify_all`.
+They race to re-acquire the row, with no fairness guarantee. Under very high
+contention on a single row, some threads could be starved.
 
-`PREPARE TRANSACTION` and `COMMIT PREPARED` are not implemented. These allow
-transactions to be durably prepared and committed later, even across server
-restarts.
+**To add:** A per-tuple or per-page wait queue that grants access in order.
 
-**To add:** Persist prepared transaction state to disk and add a recovery path
-that resolves prepared transactions on startup.
+### Single-threaded transaction status persistence
 
-## Savepoints and subtransactions
+`TransactionManager::persist` rewrites the entire status file on every
+`begin`/`commit`/`abort`. PostgreSQL uses CLOG, a paged/segmented structure
+where each transaction status is 2 bits, and only the affected page is written.
 
-`SAVEPOINT`, `ROLLBACK TO SAVEPOINT`, and `RELEASE SAVEPOINT` are not
-implemented. PostgreSQL uses a subtransaction stack with sub-XIDs.
+**To improve:** Replace the flat file with a paged structure similar to
+PostgreSQL's CLOG.
 
-**To add:** A subtransaction ID allocator, snapshot nesting, and rollback
-logic that reverts changes to the most recent savepoint.
+---
 
-## Background workers
+## Divergences (structurally different from PostgreSQL)
 
-PostgreSQL runs several background processes: bgwriter, checkpointer,
-autovacuum launcher, WAL writer, stats collector, etc. None of these exist.
+### heap_update splits the lock across three acquisitions
 
-**To add:** Background threads for:
-- flushing dirty buffers (bgwriter)
-- periodic checkpoints
-- dead tuple reclamation (autovacuum)
-- WAL writing
+PostgreSQL's `heap_update`, when the new tuple fits on the same page as the
+old one, holds the buffer content lock continuously for the entire operation
+(check xmax, insert new version, update old version's ctid). When the new
+tuple goes on a different page, PostgreSQL releases the lock but uses a
+WAL-logged "lock only" marking on the old tuple to signal that it is being
+updated (not deleted).
 
-## Local buffers for temp tables
+The current implementation always does the update in three separate lock
+acquisitions:
 
-PostgreSQL uses a separate unshared buffer pool for temporary tables so they
-do not compete with the shared buffer pool or require locking.
+1. Lock old page, check xmax, set `xmax = our xid` (claim). Unlock.
+2. Insert new version on whatever page has space (separate lock).
+3. Lock old page again, set `ctid = new_tid`. Unlock.
 
-**To add:** A per-session `LocalBufferPool` that bypasses the shared pool
-for temp-table relations.
+Between steps 1 and 3, the old tuple has `xmax` set but `ctid` still points
+to itself, which looks like a delete rather than an update. This is safe
+because during the gap our transaction is in-progress:
 
-## Ring buffer strategy
+- Concurrent readers see `xmax = InProgress` and treat the tuple as still
+  visible (the xmax is not yet committed, so the old version is live).
+- Concurrent writers see `xmax = InProgress` and wait for our transaction
+  to finish. By the time we commit, ctid is already set correctly.
 
-PostgreSQL uses special buffer replacement strategies for operations that scan
-large amounts of data (sequential scans, VACUUM, bulk writes). These strategies
-use a small ring of buffers to avoid polluting the shared buffer cache.
+No transaction can observe the "looks deleted" intermediate state and act on
+it incorrectly. However, this differs from PostgreSQL's approach and would
+need to change if WAL and crash recovery are added (a crash between steps 1
+and 3 would leave a tuple that appears deleted but should appear updated).
 
-**To add:** Strategy objects that override the default clock sweep when a
-scan accesses more than a threshold fraction of the pool.
+---
 
-## Advisory locks
+## Still deferred (not implemented)
 
-`pg_advisory_lock`, `pg_try_advisory_lock`, and related functions are not
-implemented.
+### Buffer pin hazard tracking
 
-**To add:** A shared hash table mapping lock keys to wait queues.
+PostgreSQL's pin system uses atomic operations for the shared refcount with a
+separate backend-private `PrivateRefCountEntry` array. The current implementation
+uses per-frame `HashMap<ClientId, usize>` under the frame `Mutex`.
+
+**To add:** `AtomicU32` for the shared pin count and thread-local pin tracking.
+
+### Transaction isolation levels
+
+Only READ COMMITTED behavior (snapshot per statement). No REPEATABLE READ or
+SERIALIZABLE.
+
+**To add:** Store isolation level on the transaction, conditionally reuse
+transaction-start snapshot, predicate lock tracking for SERIALIZABLE.
+
+### SELECT FOR UPDATE / FOR SHARE
+
+Not implemented. PostgreSQL uses tuple-level lock bits (`xmax` + infomask flags).
+
+**To add:** Lock mode flags on tuple header, lock-wait queue, executor
+integration.
+
+### Serializable snapshot isolation (SSI)
+
+No predicate locks, no read-write dependency cycle detection.
+
+**To add:** Predicate lock manager, conflict detection at commit time.
+
+### Deadlock detection
+
+No heavyweight lock manager, no deadlock detection. The `parking_lot`
+`deadlock_detection` feature is available for debugging but is not integrated
+into the runtime.
+
+**To add:** Wait-for graph and cycle detection.
+
+### Two-phase commit
+
+`PREPARE TRANSACTION` / `COMMIT PREPARED` not implemented.
+
+### Savepoints and subtransactions
+
+`SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT` not implemented.
+
+### Background workers
+
+No bgwriter, checkpointer, autovacuum, WAL writer, or stats collector.
+
+### Local buffers for temp tables
+
+No separate unshared buffer pool for temporary tables.
+
+### Ring buffer strategy
+
+No special buffer replacement strategy for sequential scans, VACUUM, or bulk
+writes.
+
+### Advisory locks
+
+`pg_advisory_lock` and related functions not implemented.

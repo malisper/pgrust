@@ -6,7 +6,7 @@ pub use backend::*;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::storage::smgr::RelFileLocator;
 
@@ -72,6 +72,7 @@ impl BufferFrameInner {
 
 struct BufferFrame {
     inner: Mutex<BufferFrameInner>,
+    content_lock: RwLock<()>,
     io_complete: Condvar,
 }
 
@@ -101,6 +102,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         let frames = (0..capacity)
             .map(|_| BufferFrame {
                 inner: Mutex::new(BufferFrameInner::default()),
+                content_lock: RwLock::new(()),
                 io_complete: Condvar::new(),
             })
             .collect();
@@ -128,7 +130,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     where
         F: FnOnce(&S) -> R,
     {
-        let storage = self.storage.lock().unwrap();
+        let storage = self.storage.lock();
         f(&storage)
     }
 
@@ -136,7 +138,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     where
         F: FnOnce(&mut S) -> R,
     {
-        let mut storage = self.storage.lock().unwrap();
+        let mut storage = self.storage.lock();
         f(&mut storage)
     }
 
@@ -154,16 +156,37 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         self.stats_written.store(0, Ordering::Relaxed);
     }
 
+    /// Acquire a shared content lock on a buffer frame. Multiple readers can
+    /// hold this simultaneously. The caller must hold a pin on the buffer.
+    pub fn lock_buffer_shared(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<RwLockReadGuard<'_, ()>, Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        Ok(frame.content_lock.read())
+    }
+
+    /// Acquire an exclusive content lock on a buffer frame. Only one writer
+    /// can hold this at a time, and it blocks all readers. The caller must
+    /// hold a pin on the buffer.
+    pub fn lock_buffer_exclusive(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<RwLockWriteGuard<'_, ()>, Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        Ok(frame.content_lock.write())
+    }
+
     pub fn buffer_state(&self, buffer_id: BufferId) -> Option<BufferStateView> {
         let frame = self.frames.get(buffer_id)?;
-        let inner = frame.inner.lock().unwrap();
+        let inner = frame.inner.lock();
         Some(inner.state_view())
     }
 
     /// Returns a copy of the page in the given buffer frame.
     pub fn read_page(&self, buffer_id: BufferId) -> Option<Page> {
         let frame = self.frames.get(buffer_id)?;
-        let inner = frame.inner.lock().unwrap();
+        let inner = frame.inner.lock();
         if inner.valid {
             Some(inner.page)
         } else {
@@ -174,10 +197,10 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> RequestPageResult {
         // Fast path: check if the tag is already in the lookup table.
         {
-            let lookup = self.lookup.read().unwrap();
+            let lookup = self.lookup.read();
             if let Some(&buffer_id) = lookup.get(&tag) {
                 let frame = &self.frames[buffer_id];
-                let mut inner = frame.inner.lock().unwrap();
+                let mut inner = frame.inner.lock();
                 inner.pin(client_id);
                 if inner.usage_count < self.max_usage_count {
                     inner.usage_count += 1;
@@ -192,15 +215,15 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         // Slow path: allocate a victim and install the new tag.
-        let mut strategy = self.strategy.lock().unwrap();
+        let mut strategy = self.strategy.lock();
 
         let Some(buffer_id) = self.allocate_victim(&mut strategy) else {
             return RequestPageResult::AllBuffersPinned;
         };
 
         let frame = &self.frames[buffer_id];
-        let mut inner = frame.inner.lock().unwrap();
-        let mut lookup = self.lookup.write().unwrap();
+        let mut inner = frame.inner.lock();
+        let mut lookup = self.lookup.write();
 
         // Re-check: another thread may have inserted this tag while we waited.
         if let Some(&existing_id) = lookup.get(&tag) {
@@ -210,7 +233,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             drop(strategy);
 
             let existing_frame = &self.frames[existing_id];
-            let mut existing_inner = existing_frame.inner.lock().unwrap();
+            let mut existing_inner = existing_frame.inner.lock();
             existing_inner.pin(client_id);
             if existing_inner.usage_count < self.max_usage_count {
                 existing_inner.usage_count += 1;
@@ -249,7 +272,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn pending_io(&self, buffer_id: BufferId) -> Option<PendingIo> {
         let frame = self.frames.get(buffer_id)?;
-        let inner = frame.inner.lock().unwrap();
+        let inner = frame.inner.lock();
         if !inner.io_in_progress {
             return None;
         }
@@ -264,7 +287,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
 
         let tag = {
-            let inner = frame.inner.lock().unwrap();
+            let inner = frame.inner.lock();
             if !inner.io_in_progress {
                 return Err(Error::NoIoInProgress);
             }
@@ -275,12 +298,12 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         };
 
         let page = {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.storage.lock();
             storage.read_page(tag).map_err(Error::Storage)?
         };
 
         {
-            let mut inner = frame.inner.lock().unwrap();
+            let mut inner = frame.inner.lock();
             inner.page = page;
             inner.valid = true;
             inner.io_in_progress = false;
@@ -295,7 +318,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn fail_read(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
         {
-            let inner = frame.inner.lock().unwrap();
+            let inner = frame.inner.lock();
             if !inner.io_in_progress {
                 return Err(Error::NoIoInProgress);
             }
@@ -305,7 +328,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         {
-            let mut inner = frame.inner.lock().unwrap();
+            let mut inner = frame.inner.lock();
             inner.valid = false;
             inner.io_in_progress = false;
             inner.io_error = true;
@@ -317,7 +340,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn mark_dirty(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock().unwrap();
+        let mut inner = frame.inner.lock();
         if !inner.valid {
             return Err(Error::InvalidBuffer);
         }
@@ -332,7 +355,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         value: u8,
     ) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock().unwrap();
+        let mut inner = frame.inner.lock();
         if !inner.valid {
             return Err(Error::InvalidBuffer);
         }
@@ -343,7 +366,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn write_page_image(&self, buffer_id: BufferId, page: &Page) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock().unwrap();
+        let mut inner = frame.inner.lock();
         if !inner.valid {
             return Err(Error::InvalidBuffer);
         }
@@ -354,7 +377,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn flush_buffer(&self, buffer_id: BufferId) -> Result<FlushResult, Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock().unwrap();
+        let mut inner = frame.inner.lock();
         if inner.io_in_progress {
             return Ok(FlushResult::InProgress);
         }
@@ -373,7 +396,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
 
         let (tag, page) = {
-            let inner = frame.inner.lock().unwrap();
+            let inner = frame.inner.lock();
             if !inner.io_in_progress {
                 return Err(Error::NoIoInProgress);
             }
@@ -385,12 +408,12 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         };
 
         {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.storage.lock();
             storage.write_page(tag, &page).map_err(Error::Storage)?;
         }
 
         {
-            let mut inner = frame.inner.lock().unwrap();
+            let mut inner = frame.inner.lock();
             inner.dirty = false;
             inner.io_in_progress = false;
             inner.io_error = false;
@@ -404,7 +427,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn fail_write(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
         {
-            let inner = frame.inner.lock().unwrap();
+            let inner = frame.inner.lock();
             if !inner.io_in_progress {
                 return Err(Error::NoIoInProgress);
             }
@@ -414,7 +437,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         {
-            let mut inner = frame.inner.lock().unwrap();
+            let mut inner = frame.inner.lock();
             inner.io_in_progress = false;
             inner.io_error = true;
             inner.dirty = true;
@@ -426,16 +449,16 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn unpin(&self, client_id: ClientId, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock().unwrap();
+        let mut inner = frame.inner.lock();
         inner.unpin(client_id)
     }
 
     /// Wait until I/O completes on the given buffer.
     pub fn wait_for_io(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock().unwrap();
+        let mut inner = frame.inner.lock();
         while inner.io_in_progress {
-            inner = frame.io_complete.wait(inner).unwrap();
+            frame.io_complete.wait(&mut inner);
         }
         if inner.io_error {
             Err(Error::InvalidBuffer)
@@ -445,12 +468,12 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     }
 
     pub fn invalidate_relation(&self, rel: RelFileLocator) -> Result<usize, Error> {
-        let mut lookup = self.lookup.write().unwrap();
-        let mut strategy = self.strategy.lock().unwrap();
+        let mut lookup = self.lookup.write();
+        let mut strategy = self.strategy.lock();
 
         // First pass: verify no frames are pinned or have I/O in progress.
         for frame in &self.frames {
-            let inner = frame.inner.lock().unwrap();
+            let inner = frame.inner.lock();
             if !matches!(inner.tag, Some(tag) if tag.rel == rel) {
                 continue;
             }
@@ -465,7 +488,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         // Second pass: clear matching frames.
         let mut removed = 0;
         for (buffer_id, frame) in self.frames.iter().enumerate() {
-            let mut inner = frame.inner.lock().unwrap();
+            let mut inner = frame.inner.lock();
             let Some(tag) = inner.tag else { continue };
             if tag.rel != rel {
                 continue;
@@ -483,7 +506,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     fn allocate_victim(&self, strategy: &mut StrategyState) -> Option<BufferId> {
         while let Some(buffer_id) = strategy.free_list.pop_front() {
             let frame = &self.frames[buffer_id];
-            let inner = frame.inner.lock().unwrap();
+            let inner = frame.inner.lock();
             if inner.pin_count == 0 && !inner.io_in_progress {
                 return Some(buffer_id);
             }
@@ -501,7 +524,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             scanned += 1;
 
             let frame = &self.frames[buffer_id];
-            let mut inner = frame.inner.lock().unwrap();
+            let mut inner = frame.inner.lock();
             if inner.pin_count > 0 || inner.io_in_progress {
                 continue;
             }

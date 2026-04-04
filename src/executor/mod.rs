@@ -1,7 +1,7 @@
 pub mod nodes;
 pub mod expr;
 mod explain;
-mod commands;
+pub mod commands;
 
 pub use nodes::*;
 pub use expr::eval_expr;
@@ -25,7 +25,7 @@ use commands::*;
 
 pub struct ExecutorContext<'a> {
     pub pool: &'a BufferPool<SmgrStorageBackend>,
-    pub txns: &'a TransactionManager,
+    pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,
@@ -303,7 +303,7 @@ pub fn execute_statement(
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
     let cid = ctx.next_command_id;
-    ctx.snapshot = ctx.txns.snapshot_for_command(xid, cid)?;
+    ctx.snapshot = ctx.txns.read().snapshot_for_command(xid, cid)?;
     let result = match stmt {
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
@@ -316,6 +316,23 @@ pub fn execute_statement(
     };
     ctx.next_command_id = ctx.next_command_id.saturating_add(1);
     result
+}
+
+/// Execute a read-only statement (SELECT, EXPLAIN, SHOW) with only a shared catalog reference.
+pub fn execute_readonly_statement(
+    stmt: Statement,
+    catalog: &Catalog,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<StatementResult, ExecError> {
+    match stmt {
+        Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
+        Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::ShowTables => execute_show_tables(catalog),
+        other => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: format!("{other:?}"),
+        })),
+    }
 }
 
 pub fn exec_next(
@@ -367,7 +384,8 @@ fn exec_seq_scan(
     }
 
     let scan = state.scan.as_mut().unwrap();
-    if let Some((tid, tuple)) = heap_scan_next_visible(ctx.pool, ctx.client_id, ctx.txns, scan)? {
+    let txns_guard = ctx.txns.read();
+    if let Some((tid, tuple)) = heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, scan)? {
         Ok(Some(TupleSlot::from_heap_tuple(
             state.desc.clone(),
             tid,
@@ -798,11 +816,12 @@ mod tests {
         plan: Plan,
     ) -> Result<Vec<(Vec<String>, Vec<Value>)>, ExecError> {
         let smgr = MdStorageManager::new(base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut state = executor_start(plan);
         let mut ctx = ExecutorContext {
-            pool: &mut pool,
-            txns,
+            pool: &pool,
+            txns: txns_arc,
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
             client_id: 42,
             next_command_id: 0,
@@ -832,10 +851,11 @@ mod tests {
         mut catalog: Catalog,
     ) -> Result<StatementResult, ExecError> {
         let smgr = MdStorageManager::new(base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
-            pool: &mut pool,
-            txns,
+            pool: &pool,
+            txns: txns_arc,
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
             next_command_id: 0,

@@ -1,10 +1,13 @@
+use parking_lot::RwLock;
+
 use crate::access::heap::am::{
-    heap_delete, heap_flush, heap_insert_mvcc_with_cid, heap_scan_begin_visible,
-    heap_scan_next_visible, heap_update_with_cid,
+    HeapError, heap_delete_with_waiter, heap_fetch, heap_flush, heap_insert_mvcc_with_cid,
+    heap_scan_begin_visible, heap_scan_next_visible, heap_update_with_waiter,
 };
-use crate::access::heap::mvcc::TransactionId;
+use crate::access::heap::mvcc::{TransactionId, TransactionManager};
 use crate::access::heap::mvcc::CommandId;
 use crate::catalog::Catalog;
+use crate::database::TransactionWaiter;
 use crate::parser::{
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, DropTableStatement,
     ExplainStatement, ParseError, Statement, bind_create_table, build_plan,
@@ -18,7 +21,7 @@ use super::{ExecError, ExecutorContext, StatementResult, execute_plan_internal, 
 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
-    catalog: &mut Catalog,
+    catalog: &Catalog,
     ctx: &mut ExecutorContext<'_>,
 ) -> Result<StatementResult, ExecError> {
     let Statement::Select(select) = *stmt.statement else {
@@ -53,7 +56,7 @@ pub(crate) fn execute_explain(
     })
 }
 
-pub(crate) fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
+pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
     Ok(StatementResult::Query {
         column_names: vec!["table_name".into()],
         rows: catalog
@@ -63,7 +66,7 @@ pub(crate) fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, 
     })
 }
 
-pub(crate) fn execute_create_table(
+pub fn execute_create_table(
     stmt: crate::parser::CreateTableStatement,
     catalog: &mut Catalog,
 ) -> Result<StatementResult, ExecError> {
@@ -71,7 +74,7 @@ pub(crate) fn execute_create_table(
     Ok(StatementResult::AffectedRows(0))
 }
 
-pub(crate) fn execute_drop_table(
+pub fn execute_drop_table(
     stmt: DropTableStatement,
     catalog: &mut Catalog,
     ctx: &mut ExecutorContext<'_>,
@@ -91,7 +94,7 @@ pub(crate) fn execute_drop_table(
     Ok(StatementResult::AffectedRows(0))
 }
 
-pub(crate) fn execute_insert(
+pub fn execute_insert(
     stmt: BoundInsertStatement,
     ctx: &mut ExecutorContext<'_>,
     xid: TransactionId,
@@ -126,12 +129,23 @@ pub(crate) fn execute_update(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
+    execute_update_with_waiter(stmt, ctx, xid, cid, None)
+}
+
+pub fn execute_update_with_waiter(
+    stmt: BoundUpdateStatement,
+    ctx: &mut ExecutorContext<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
+) -> Result<StatementResult, ExecError> {
     let mut scan = heap_scan_begin_visible(ctx.pool, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
-    while let Some((tid, tuple)) =
-        heap_scan_next_visible(ctx.pool, ctx.client_id, ctx.txns, &mut scan)?
-    {
+    while let Some((tid, tuple)) = {
+        let txns_guard = ctx.txns.read();
+        heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
+    } {
         let mut slot = TupleSlot::from_heap_tuple(stmt.desc.clone(), tid, tuple);
         if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
             continue;
@@ -147,21 +161,57 @@ pub(crate) fn execute_update(
         }
 
         let replacement = tuple_from_values(&stmt.desc, &values)?;
-        let new_tid = heap_update_with_cid(
-            ctx.pool,
-            ctx.client_id,
-            stmt.rel,
-            ctx.txns,
-            xid,
-            cid,
-            tid,
-            &replacement,
-        )?;
-        heap_flush(ctx.pool, ctx.client_id, stmt.rel, tid.block_number)?;
-        if new_tid.block_number != tid.block_number {
-            heap_flush(ctx.pool, ctx.client_id, stmt.rel, new_tid.block_number)?;
+        let mut current_tid = tid;
+        let mut current_replacement = replacement;
+        loop {
+            match heap_update_with_waiter(
+                ctx.pool,
+                ctx.client_id,
+                stmt.rel,
+                &ctx.txns,
+                xid,
+                cid,
+                current_tid,
+                &current_replacement,
+                waiter,
+            ) {
+                Ok(new_tid) => {
+                    heap_flush(ctx.pool, ctx.client_id, stmt.rel, current_tid.block_number)?;
+                    if new_tid.block_number != current_tid.block_number {
+                        heap_flush(ctx.pool, ctx.client_id, stmt.rel, new_tid.block_number)?;
+                    }
+                    affected_rows += 1;
+                    break;
+                }
+                Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                    let new_tuple = heap_fetch(ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                    let mut new_slot = TupleSlot::from_heap_tuple(
+                        stmt.desc.clone(),
+                        new_ctid,
+                        new_tuple,
+                    );
+                    if !predicate_matches(stmt.predicate.as_ref(), &mut new_slot)? {
+                        break;
+                    }
+                    let new_values_base = new_slot.into_values()?;
+                    let mut eval_slot = TupleSlot::virtual_row(
+                        stmt.desc.columns.iter().map(|c| c.name.clone()).collect(),
+                        new_values_base.clone(),
+                    );
+                    let mut new_values = new_values_base;
+                    for assignment in &stmt.assignments {
+                        new_values[assignment.column_index] =
+                            eval_expr(&assignment.expr, &mut eval_slot)?;
+                    }
+                    current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
+                    current_tid = new_ctid;
+                }
+                Err(HeapError::TupleAlreadyModified(_)) => {
+                    break;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
-        affected_rows += 1;
     }
 
     Ok(StatementResult::AffectedRows(affected_rows))
@@ -172,12 +222,22 @@ pub(crate) fn execute_delete(
     ctx: &mut ExecutorContext<'_>,
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
+    execute_delete_with_waiter(stmt, ctx, xid, None)
+}
+
+pub fn execute_delete_with_waiter(
+    stmt: BoundDeleteStatement,
+    ctx: &mut ExecutorContext<'_>,
+    xid: TransactionId,
+    waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
+) -> Result<StatementResult, ExecError> {
     let mut scan = heap_scan_begin_visible(ctx.pool, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();
 
-    while let Some((tid, tuple)) =
-        heap_scan_next_visible(ctx.pool, ctx.client_id, ctx.txns, &mut scan)?
-    {
+    while let Some((tid, tuple)) = {
+        let txns_guard = ctx.txns.read();
+        heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
+    } {
         let mut slot = TupleSlot::from_heap_tuple(stmt.desc.clone(), tid, tuple);
         if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
             continue;
@@ -186,7 +246,7 @@ pub(crate) fn execute_delete(
     }
 
     for tid in &targets {
-        heap_delete(ctx.pool, ctx.client_id, stmt.rel, ctx.txns, xid, *tid)?;
+        heap_delete_with_waiter(ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, *tid, waiter)?;
         heap_flush(ctx.pool, ctx.client_id, stmt.rel, tid.block_number)?;
     }
 
