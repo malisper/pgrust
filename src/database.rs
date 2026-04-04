@@ -908,9 +908,28 @@ mod tests {
 
     use std::time::{Duration, Instant};
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+    /// Run a test body with a timeout. If it doesn't complete within the
+    /// timeout, panic with a deadlock message. This catches deadlocks in
+    /// setup code that `join_all_with_timeout` wouldn't detect.
+    fn with_test_timeout<F: FnOnce() + Send + 'static>(f: F) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+        match rx.recv_timeout(TEST_TIMEOUT) {
+            Ok(()) => { handle.join().unwrap(); }
+            Err(_) => {
+                #[cfg(feature = "deadlock_detection")]
+                log_deadlocks();
+                panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock");
+            }
+        }
+    }
 
     fn join_all_with_timeout(handles: Vec<thread::JoinHandle<()>>, timeout: Duration) {
         let deadline = Instant::now() + timeout;
@@ -930,6 +949,7 @@ mod tests {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => std::panic::resume_unwind(e),
                 Err(_) => {
+                    #[cfg(feature = "deadlock_detection")]
                     log_deadlocks();
                     panic!("test timed out after {timeout:?} — likely deadlock");
                 }

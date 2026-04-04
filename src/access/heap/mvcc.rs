@@ -273,7 +273,7 @@ impl Snapshot {
         let mut hints: u16 = 0;
 
         // Determine xmin hint.
-        let xmin_settled = if infomask & (HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID) != 0 {
+        let _xmin_settled = if infomask & (HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID) != 0 {
             true // already has hints
         } else if xmin == INVALID_TRANSACTION_ID || xmin == self.current_xid {
             false // can't set hints for bootstrap or own txn

@@ -13,69 +13,11 @@ use rustc_hash::FxHashMap;
 use crate::storage::smgr::RelFileLocator;
 use crate::storage::wal::{INVALID_LSN, Lsn, WalWriter};
 
-struct BufferFrameInner {
-    tag: Option<BufferTag>,
-    page: Page,
-    valid: bool,
-    dirty: bool,
-    io_in_progress: bool,
-    io_error: bool,
-    usage_count: u8,
-    pin_count: usize,
-    pins_by_client: FxHashMap<ClientId, usize>,
-}
-
-impl Default for BufferFrameInner {
-    fn default() -> Self {
-        Self {
-            tag: None,
-            page: [0; PAGE_SIZE],
-            valid: false,
-            dirty: false,
-            io_in_progress: false,
-            io_error: false,
-            usage_count: 0,
-            pin_count: 0,
-            pins_by_client: FxHashMap::default(),
-        }
-    }
-}
-
-impl BufferFrameInner {
-    fn state_view(&self) -> BufferStateView {
-        BufferStateView {
-            tag: self.tag,
-            valid: self.valid,
-            dirty: self.dirty,
-            io_in_progress: self.io_in_progress,
-            io_error: self.io_error,
-            pin_count: self.pin_count,
-            usage_count: self.usage_count,
-        }
-    }
-
-    fn pin(&mut self, client_id: ClientId) {
-        self.pin_count += 1;
-        *self.pins_by_client.entry(client_id).or_insert(0) += 1;
-    }
-
-    fn unpin(&mut self, client_id: ClientId) -> Result<(), Error> {
-        let entry = self
-            .pins_by_client
-            .get_mut(&client_id)
-            .ok_or(Error::BufferPinned)?;
-        *entry -= 1;
-        if *entry == 0 {
-            self.pins_by_client.remove(&client_id);
-        }
-        self.pin_count -= 1;
-        Ok(())
-    }
-}
-
 struct BufferFrame {
-    inner: Mutex<BufferFrameInner>,
-    content_lock: RwLock<()>,
+    state: BufferState,
+    tag: Mutex<Option<BufferTag>>,
+    pins_by_client: Mutex<FxHashMap<ClientId, usize>>,
+    content_lock: RwLock<Page>,
     io_complete: Condvar,
 }
 
@@ -113,8 +55,10 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         let frames = (0..capacity)
             .map(|_| BufferFrame {
-                inner: Mutex::new(BufferFrameInner::default()),
-                content_lock: RwLock::new(()),
+                state: BufferState::new(),
+                tag: Mutex::new(None),
+                pins_by_client: Mutex::new(FxHashMap::default()),
+                content_lock: RwLock::new([0u8; PAGE_SIZE]),
                 io_complete: Condvar::new(),
             })
             .collect();
@@ -183,7 +127,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn lock_buffer_shared(
         &self,
         buffer_id: BufferId,
-    ) -> Result<RwLockReadGuard<'_, ()>, Error> {
+    ) -> Result<RwLockReadGuard<'_, Page>, Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
         Ok(frame.content_lock.read())
     }
@@ -194,54 +138,42 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn lock_buffer_exclusive(
         &self,
         buffer_id: BufferId,
-    ) -> Result<RwLockWriteGuard<'_, ()>, Error> {
+    ) -> Result<RwLockWriteGuard<'_, Page>, Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
         Ok(frame.content_lock.write())
     }
 
     pub fn buffer_state(&self, buffer_id: BufferId) -> Option<BufferStateView> {
         let frame = self.frames.get(buffer_id)?;
-        let inner = frame.inner.lock();
-        Some(inner.state_view())
+        let tag = *frame.tag.lock();
+        Some(frame.state.to_view(tag))
     }
 
     /// Returns a copy of the page in the given buffer frame.
     pub fn read_page(&self, buffer_id: BufferId) -> Option<Page> {
         let frame = self.frames.get(buffer_id)?;
-        let inner = frame.inner.lock();
-        if inner.valid {
-            Some(inner.page)
-        } else {
-            None
+        if !frame.state.is_valid() {
+            return None;
         }
+        let guard = frame.content_lock.read();
+        Some(*guard)
     }
 
     /// Borrow the page in-place and pass it to a closure, avoiding the 8KB copy.
     /// The page reference is only valid for the duration of the closure.
     pub fn with_page<T>(&self, buffer_id: BufferId, f: impl FnOnce(&Page) -> T) -> Option<T> {
         let frame = self.frames.get(buffer_id)?;
-        let inner = frame.inner.lock();
-        if inner.valid {
-            Some(f(&inner.page))
-        } else {
-            None
+        if !frame.state.is_valid() {
+            return None;
         }
+        let guard = frame.content_lock.read();
+        Some(f(&*guard))
     }
 
-    /// Mutably borrow the page for hint bit updates.
-    /// The closure returns (result, modified). If modified is true, the buffer
-    /// is marked dirty so hint bits are persisted on next flush.
-    pub fn with_page_set_hints<T>(&self, buffer_id: BufferId, f: impl FnOnce(&mut Page) -> (T, bool)) -> Option<T> {
-        let frame = self.frames.get(buffer_id)?;
-        let mut inner = frame.inner.lock();
-        if inner.valid {
-            let (result, modified) = f(&mut inner.page);
-            if modified {
-                inner.dirty = true;
-            }
-            Some(result)
-        } else {
-            None
+    /// Mark a buffer as dirty (for use after hint bit writes).
+    pub fn mark_buffer_dirty_hint(&self, buffer_id: BufferId) {
+        if let Some(frame) = self.frames.get(buffer_id) {
+            frame.state.set_dirty();
         }
     }
 
@@ -249,13 +181,12 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     /// Marks the buffer as dirty.
     pub fn with_page_mut<T>(&self, buffer_id: BufferId, f: impl FnOnce(&mut Page) -> T) -> Option<T> {
         let frame = self.frames.get(buffer_id)?;
-        let mut inner = frame.inner.lock();
-        if inner.valid {
-            inner.dirty = true;
-            Some(f(&mut inner.page))
-        } else {
-            None
+        if !frame.state.is_valid() {
+            return None;
         }
+        let mut guard = frame.content_lock.write();
+        frame.state.set_dirty();
+        Some(f(&mut *guard))
     }
 
     pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
@@ -264,12 +195,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             let lookup = self.lookup.read();
             if let Some(&buffer_id) = lookup.get(&tag) {
                 let frame = &self.frames[buffer_id];
-                let mut inner = frame.inner.lock();
-                inner.pin(client_id);
-                if inner.usage_count < self.max_usage_count {
-                    inner.usage_count += 1;
-                }
-                if inner.valid {
+                frame.state.pin_and_bump_usage(self.max_usage_count);
+                *frame.pins_by_client.lock().entry(client_id).or_insert(0) += 1;
+                if frame.state.is_valid() {
                     self.stats_hit.fetch_add(1, Ordering::Relaxed);
                     return Ok(RequestPageResult::Hit { buffer_id });
                 } else {
@@ -287,13 +215,11 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         let frame = &self.frames[buffer_id];
         let mut lookup = self.lookup.write();
-        let mut inner = frame.inner.lock();
 
         // Re-check: while we were waiting for the mapping lock, another
         // reader that already held a shared lookup lock could have pinned
         // this candidate buffer. In that case, restart victim selection.
-        if inner.pin_count > 0 || inner.io_in_progress {
-            drop(inner);
+        if frame.state.pin_count() > 0 || frame.state.is_io_in_progress() {
             drop(lookup);
             drop(strategy);
             return self.request_page(client_id, tag);
@@ -301,18 +227,14 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         // Re-check: another thread may have inserted this tag while we waited.
         if let Some(&existing_id) = lookup.get(&tag) {
-            drop(inner);
             strategy.free_list.push_back(buffer_id);
             drop(lookup);
             drop(strategy);
 
             let existing_frame = &self.frames[existing_id];
-            let mut existing_inner = existing_frame.inner.lock();
-            existing_inner.pin(client_id);
-            if existing_inner.usage_count < self.max_usage_count {
-                existing_inner.usage_count += 1;
-            }
-            if existing_inner.valid {
+            existing_frame.state.pin_and_bump_usage(self.max_usage_count);
+            *existing_frame.pins_by_client.lock().entry(client_id).or_insert(0) += 1;
+            if existing_frame.state.is_valid() {
                 self.stats_hit.fetch_add(1, Ordering::Relaxed);
                 return Ok(RequestPageResult::Hit {
                     buffer_id: existing_id,
@@ -327,11 +249,11 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         // If the victim holds a dirty page, write it out before reusing.
         // When WAL is present, skip_fsync is safe: WAL is flushed at commit so
         // the page can be recovered after a crash. Without WAL, fsync immediately.
-        if inner.dirty {
-            if let Some(old_tag) = inner.tag {
-                let page = inner.page;
+        if frame.state.is_dirty() {
+            let old_tag = *frame.tag.lock();
+            if let Some(old_tag) = old_tag {
+                let page = *frame.content_lock.read();
                 let skip_fsync = self.wal.is_some();
-                drop(inner);
                 drop(lookup);
                 drop(strategy);
 
@@ -344,12 +266,10 @@ impl<S: StorageBackend + Send> BufferPool<S> {
                 // Re-acquire all locks in the same order as above.
                 strategy = self.strategy.lock();
                 lookup = self.lookup.write();
-                inner = frame.inner.lock();
 
                 // Re-check: another thread may have pinned or replaced this
                 // buffer while we dropped locks. If so, start over.
-                if inner.pin_count > 0 || inner.tag != Some(old_tag) {
-                    drop(inner);
+                if frame.state.pin_count() > 0 || *frame.tag.lock() != Some(old_tag) {
                     drop(lookup);
                     drop(strategy);
                     return self.request_page(client_id, tag);
@@ -357,20 +277,26 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             }
         }
 
-        if let Some(old_tag) = inner.tag.take() {
-            lookup.remove(&old_tag);
+        {
+            let mut tag_guard = frame.tag.lock();
+            if let Some(old_tag) = tag_guard.take() {
+                lookup.remove(&old_tag);
+            }
+            *tag_guard = Some(tag);
         }
 
-        inner.tag = Some(tag);
-        inner.page = [0; PAGE_SIZE];
-        inner.valid = false;
-        inner.dirty = false;
-        inner.io_in_progress = true;
-        inner.io_error = false;
-        inner.usage_count = 1;
-        inner.pin_count = 0;
-        inner.pins_by_client.clear();
-        inner.pin(client_id);
+        // Reset page data
+        *frame.content_lock.write() = [0u8; PAGE_SIZE];
+
+        // Reset atomic state: pin_count=1, usage_count=1, io_in_progress=true
+        frame.state.init_for_io();
+
+        // Reset per-client pin tracking
+        {
+            let mut pins = frame.pins_by_client.lock();
+            pins.clear();
+            *pins.entry(client_id).or_insert(0) += 1;
+        }
 
         lookup.insert(tag, buffer_id);
 
@@ -379,14 +305,14 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn pending_io(&self, buffer_id: BufferId) -> Option<PendingIo> {
         let frame = self.frames.get(buffer_id)?;
-        let inner = frame.inner.lock();
-        if !inner.io_in_progress {
+        if !frame.state.is_io_in_progress() {
             return None;
         }
+        let tag = (*frame.tag.lock())?;
         Some(PendingIo {
             buffer_id,
-            op: if inner.valid { IoOp::Write } else { IoOp::Read },
-            tag: inner.tag?,
+            op: if frame.state.is_valid() { IoOp::Write } else { IoOp::Read },
+            tag,
         })
     }
 
@@ -394,14 +320,13 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
 
         let tag = {
-            let inner = frame.inner.lock();
-            if !inner.io_in_progress {
+            if !frame.state.is_io_in_progress() {
                 return Err(Error::NoIoInProgress);
             }
-            if inner.valid {
+            if frame.state.is_valid() {
                 return Err(Error::WrongIoOp);
             }
-            inner.tag.ok_or(Error::UnknownBuffer)?
+            frame.tag.lock().ok_or(Error::UnknownBuffer)?
         };
 
         let page = {
@@ -410,12 +335,12 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         };
 
         {
-            let mut inner = frame.inner.lock();
-            inner.page = page;
-            inner.valid = true;
-            inner.io_in_progress = false;
-            inner.io_error = false;
+            let mut guard = frame.content_lock.write();
+            *guard = page;
         }
+        frame.state.set_valid();
+        frame.state.clear_io_in_progress();
+        frame.state.clear_io_error();
 
         frame.io_complete.notify_all();
         self.stats_read.fetch_add(1, Ordering::Relaxed);
@@ -424,22 +349,16 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn fail_read(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        {
-            let inner = frame.inner.lock();
-            if !inner.io_in_progress {
-                return Err(Error::NoIoInProgress);
-            }
-            if inner.valid {
-                return Err(Error::WrongIoOp);
-            }
+        if !frame.state.is_io_in_progress() {
+            return Err(Error::NoIoInProgress);
+        }
+        if frame.state.is_valid() {
+            return Err(Error::WrongIoOp);
         }
 
-        {
-            let mut inner = frame.inner.lock();
-            inner.valid = false;
-            inner.io_in_progress = false;
-            inner.io_error = true;
-        }
+        frame.state.clear_valid();
+        frame.state.clear_io_in_progress();
+        frame.state.set_io_error();
 
         frame.io_complete.notify_all();
         Ok(())
@@ -447,11 +366,10 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn mark_dirty(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock();
-        if !inner.valid {
+        if !frame.state.is_valid() {
             return Err(Error::InvalidBuffer);
         }
-        inner.dirty = true;
+        frame.state.set_dirty();
         Ok(())
     }
 
@@ -462,33 +380,75 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         value: u8,
     ) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock();
-        if !inner.valid {
+        if !frame.state.is_valid() {
             return Err(Error::InvalidBuffer);
         }
-        inner.page[offset] = value;
-        inner.dirty = true;
+        let mut guard = frame.content_lock.write();
+        guard[offset] = value;
+        frame.state.set_dirty();
         Ok(())
     }
 
     /// Write a modified page image into the buffer frame.
     ///
     /// If this pool has a WAL writer, a full-page-image WAL record is appended
-    /// and the page's `pd_lsn` (bytes 0–7) is stamped with the assigned LSN.
+    /// and the page's `pd_lsn` (bytes 0-7) is stamped with the assigned LSN.
     /// The page is marked dirty and left in the buffer cache; the caller must
     /// flush WAL before committing and the data page will reach disk via
     /// eviction or an explicit `flush_buffer` + `complete_write`.
     ///
     /// If no WAL writer is present (e.g. in unit tests), the page is written
     /// directly to storage with an fsync to preserve the pre-WAL safety guarantee.
+    /// Write a page image into the buffer, using an already-held exclusive content lock guard.
+    /// The caller must hold the write guard from `lock_buffer_exclusive`.
+    pub fn write_page_image_locked(
+        &self,
+        buffer_id: BufferId,
+        xid: u32,
+        page: &Page,
+        guard: &mut RwLockWriteGuard<'_, Page>,
+    ) -> Result<(), Error> {
+        let tag = {
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            if !frame.state.is_valid() {
+                return Err(Error::InvalidBuffer);
+            }
+            frame.tag.lock().ok_or(Error::UnknownBuffer)?
+        };
+
+        let mut page_to_store = *page;
+
+        if let Some(ref wal) = self.wal {
+            let lsn = wal
+                .write_record(xid, tag, page)
+                .map_err(|e| Error::Wal(e.to_string()))?;
+            page_to_store[0..8].copy_from_slice(&lsn.to_le_bytes());
+            **guard = page_to_store;
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            frame.state.set_dirty();
+        } else {
+            **guard = page_to_store;
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            frame.state.set_dirty();
+            {
+                let mut storage = self.storage.lock();
+                storage.write_page(tag, &page_to_store, false).map_err(Error::Storage)?;
+            }
+            self.stats_written.fetch_add(1, Ordering::Relaxed);
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            frame.state.clear_dirty();
+        }
+
+        Ok(())
+    }
+
     pub fn write_page_image(&self, buffer_id: BufferId, xid: u32, page: &Page) -> Result<(), Error> {
         let tag = {
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-            let inner = frame.inner.lock();
-            if !inner.valid {
+            if !frame.state.is_valid() {
                 return Err(Error::InvalidBuffer);
             }
-            inner.tag.ok_or(Error::UnknownBuffer)?
+            frame.tag.lock().ok_or(Error::UnknownBuffer)?
         };
 
         // Determine the page image to store. If WAL is available, stamp pd_lsn.
@@ -504,18 +464,18 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             page_to_store[0..8].copy_from_slice(&lsn.to_le_bytes());
 
             // Store updated page in buffer frame and mark dirty.
-            // The data file write is deferred — WAL provides crash durability.
+            // The data file write is deferred -- WAL provides crash durability.
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-            let mut inner = frame.inner.lock();
-            inner.page = page_to_store;
-            inner.dirty = true;
+            let mut guard = frame.content_lock.write();
+            *guard = page_to_store;
+            frame.state.set_dirty();
         } else {
             // No WAL: fall back to immediate write + fsync for safety.
             {
                 let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-                let mut inner = frame.inner.lock();
-                inner.page = page_to_store;
-                inner.dirty = true;
+                let mut guard = frame.content_lock.write();
+                *guard = page_to_store;
+                frame.state.set_dirty();
             }
             {
                 let mut storage = self.storage.lock();
@@ -524,8 +484,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             self.stats_written.fetch_add(1, Ordering::Relaxed);
             {
                 let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-                let mut inner = frame.inner.lock();
-                inner.dirty = false;
+                frame.state.clear_dirty();
             }
         }
 
@@ -534,34 +493,25 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn flush_buffer(&self, buffer_id: BufferId) -> Result<FlushResult, Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock();
-        if inner.io_in_progress {
-            return Ok(FlushResult::InProgress);
+        match frame.state.try_start_flush() {
+            Ok(()) => Ok(FlushResult::WriteIssued),
+            Err(result) => Ok(result),
         }
-        if !inner.valid {
-            return Ok(FlushResult::Invalid);
-        }
-        if !inner.dirty {
-            return Ok(FlushResult::AlreadyClean);
-        }
-        inner.io_in_progress = true;
-        inner.io_error = false;
-        Ok(FlushResult::WriteIssued)
     }
 
     pub fn complete_write(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
 
         let (tag, page) = {
-            let inner = frame.inner.lock();
-            if !inner.io_in_progress {
+            if !frame.state.is_io_in_progress() {
                 return Err(Error::NoIoInProgress);
             }
-            if !inner.valid {
+            if !frame.state.is_valid() {
                 return Err(Error::WrongIoOp);
             }
-            let tag = inner.tag.ok_or(Error::UnknownBuffer)?;
-            (tag, inner.page)
+            let tag = frame.tag.lock().ok_or(Error::UnknownBuffer)?;
+            let page = *frame.content_lock.read();
+            (tag, page)
         };
 
         {
@@ -570,12 +520,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             storage.write_page(tag, &page, skip_fsync).map_err(Error::Storage)?;
         }
 
-        {
-            let mut inner = frame.inner.lock();
-            inner.dirty = false;
-            inner.io_in_progress = false;
-            inner.io_error = false;
-        }
+        frame.state.clear_dirty();
+        frame.state.clear_io_in_progress();
+        frame.state.clear_io_error();
 
         frame.io_complete.notify_all();
         self.stats_written.fetch_add(1, Ordering::Relaxed);
@@ -584,22 +531,16 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn fail_write(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        {
-            let inner = frame.inner.lock();
-            if !inner.io_in_progress {
-                return Err(Error::NoIoInProgress);
-            }
-            if !inner.valid {
-                return Err(Error::WrongIoOp);
-            }
+        if !frame.state.is_io_in_progress() {
+            return Err(Error::NoIoInProgress);
+        }
+        if !frame.state.is_valid() {
+            return Err(Error::WrongIoOp);
         }
 
-        {
-            let mut inner = frame.inner.lock();
-            inner.io_in_progress = false;
-            inner.io_error = true;
-            inner.dirty = true;
-        }
+        frame.state.clear_io_in_progress();
+        frame.state.set_io_error();
+        frame.state.set_dirty();
 
         frame.io_complete.notify_all();
         Ok(())
@@ -607,18 +548,28 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn unpin(&self, client_id: ClientId, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock();
-        inner.unpin(client_id)
+        {
+            let mut pins = frame.pins_by_client.lock();
+            let entry = pins
+                .get_mut(&client_id)
+                .ok_or(Error::BufferPinned)?;
+            *entry -= 1;
+            if *entry == 0 {
+                pins.remove(&client_id);
+            }
+        }
+        frame.state.decrement_pin();
+        Ok(())
     }
 
     /// Wait until I/O completes on the given buffer.
     pub fn wait_for_io(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock();
-        while inner.io_in_progress {
-            frame.io_complete.wait(&mut inner);
+        let mut guard = frame.tag.lock();
+        while frame.state.is_io_in_progress() {
+            frame.io_complete.wait(&mut guard);
         }
-        if inner.io_error {
+        if frame.state.is_io_error() {
             Err(Error::InvalidBuffer)
         } else {
             Ok(())
@@ -631,14 +582,14 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         // First pass: verify no frames are pinned or have I/O in progress.
         for frame in &self.frames {
-            let inner = frame.inner.lock();
-            if !matches!(inner.tag, Some(tag) if tag.rel == rel) {
+            let tag_guard = frame.tag.lock();
+            if !matches!(*tag_guard, Some(tag) if tag.rel == rel) {
                 continue;
             }
-            if inner.pin_count > 0 {
+            if frame.state.pin_count() > 0 {
                 return Err(Error::BufferPinned);
             }
-            if inner.io_in_progress {
+            if frame.state.is_io_in_progress() {
                 return Err(Error::NoIoInProgress);
             }
         }
@@ -646,14 +597,18 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         // Second pass: clear matching frames.
         let mut removed = 0;
         for (buffer_id, frame) in self.frames.iter().enumerate() {
-            let mut inner = frame.inner.lock();
-            let Some(tag) = inner.tag else { continue };
+            let mut tag_guard = frame.tag.lock();
+            let Some(tag) = *tag_guard else { continue };
             if tag.rel != rel {
                 continue;
             }
 
             lookup.remove(&tag);
-            *inner = BufferFrameInner::default();
+            // Reset the frame to default state
+            *tag_guard = None;
+            frame.state.store(0);
+            frame.pins_by_client.lock().clear();
+            *frame.content_lock.write() = [0u8; PAGE_SIZE];
             strategy.free_list.push_back(buffer_id);
             removed += 1;
         }
@@ -664,8 +619,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     fn allocate_victim(&self, strategy: &mut StrategyState) -> Option<BufferId> {
         while let Some(buffer_id) = strategy.free_list.pop_front() {
             let frame = &self.frames[buffer_id];
-            let inner = frame.inner.lock();
-            if inner.pin_count == 0 && !inner.io_in_progress {
+            if frame.state.pin_count() == 0 && !frame.state.is_io_in_progress() {
                 return Some(buffer_id);
             }
         }
@@ -682,12 +636,10 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             scanned += 1;
 
             let frame = &self.frames[buffer_id];
-            let mut inner = frame.inner.lock();
-            if inner.pin_count > 0 || inner.io_in_progress {
+            if frame.state.pin_count() > 0 || frame.state.is_io_in_progress() {
                 continue;
             }
-            if inner.usage_count > 0 {
-                inner.usage_count -= 1;
+            if frame.state.decrement_usage() {
                 continue;
             }
             return Some(buffer_id);
@@ -1060,7 +1012,7 @@ mod tests {
         assert!(pool.buffer_state(0).unwrap().dirty);
         pool.unpin(1, 0).unwrap();
 
-        // Request block 1 — the single-frame pool must evict block 0.
+        // Request block 1 -- the single-frame pool must evict block 0.
         // The eviction path should write the dirty page to disk.
         assert_eq!(
             pool.request_page(1, t1).unwrap(),
@@ -1181,18 +1133,18 @@ mod tests {
         new_page[100] = 0xEE;
         pool.write_page_image(0, 1, &new_page).unwrap();
 
-        // Frame should be dirty — write was deferred.
+        // Frame should be dirty -- write was deferred.
         assert!(pool.buffer_state(0).unwrap().dirty, "page should still be dirty after WAL write");
 
         // On-disk file must still have the original content.
         let on_disk = read_block_from_disk(&base, rel_number, 0);
         assert_eq!(
             on_disk[100], fill,
-            "data page should not be on disk yet — WAL defers the write"
+            "data page should not be on disk yet -- WAL defers the write"
         );
     }
 
-    /// With WAL, `write_page_image` stamps the WAL LSN into `pd_lsn` (bytes 0–7).
+    /// With WAL, `write_page_image` stamps the WAL LSN into `pd_lsn` (bytes 0-7).
     #[test]
     fn integ_wal_stamps_pd_lsn_in_page() {
         let base = temp_dir("wal_pd_lsn");
@@ -1222,7 +1174,7 @@ mod tests {
     }
 
     /// After eviction from a WAL-backed pool, the data page reaches disk
-    /// (without requiring a separate fsync — WAL provides that guarantee).
+    /// (without requiring a separate fsync -- WAL provides that guarantee).
     #[test]
     fn integ_wal_eviction_writes_data_page_to_disk() {
         let base = temp_dir("wal_evict_writes");
@@ -1250,7 +1202,7 @@ mod tests {
         let before = read_block_from_disk(&base, rel_number, 0);
         assert_eq!(before[50], fill, "data page not on disk yet");
 
-        // Request block 1 — evicts block 0, which must be written to disk.
+        // Request block 1 -- evicts block 0, which must be written to disk.
         assert_eq!(
             pool.request_page(1, t1).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
