@@ -243,13 +243,20 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         // If the victim holds a dirty page, write it out before reusing.
-        // When WAL is present, skip_fsync is safe: WAL is flushed at commit so
-        // the page can be recovered after a crash. Without WAL, fsync immediately.
+        // WAL rule: flush WAL up to the page's LSN before writing the data page.
         if frame.state.is_dirty() {
             let old_tag = *frame.tag.lock();
             if let Some(old_tag) = old_tag {
                 let page = *frame.content_lock.read();
                 let skip_fsync = self.wal.is_some();
+
+                // Ensure WAL is flushed up to this page's LSN (write-ahead rule).
+                if let Some(ref wal) = self.wal {
+                    let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
+                    if page_lsn > 0 {
+                        let _ = wal.flush_to(page_lsn);
+                    }
+                }
                 drop(lookup);
                 drop(strategy);
 
@@ -547,6 +554,14 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             let page = *frame.content_lock.read();
             (tag, page)
         };
+
+        // WAL rule: flush WAL up to this page's LSN before writing the data page.
+        if let Some(ref wal) = self.wal {
+            let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
+            if page_lsn > 0 {
+                wal.flush_to(page_lsn).map_err(|e| Error::Wal(e.to_string()))?;
+            }
+        }
 
         {
             let skip_fsync = self.wal.is_some();
