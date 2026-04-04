@@ -17,7 +17,7 @@ pub enum AttributeAlign {
 }
 
 impl AttributeAlign {
-    fn align_offset(self, off: usize) -> usize {
+    pub fn align_offset(self, off: usize) -> usize {
         match self {
             Self::Char => off,
             Self::Short => (off + 1) & !1,
@@ -353,6 +353,84 @@ impl HeapTuple {
     }
 }
 
+/// Deform a tuple directly from raw on-page bytes without copying.
+/// Returns slices that borrow from the input bytes.
+pub fn deform_raw<'a>(bytes: &'a [u8], desc: &[AttributeDesc]) -> Result<Vec<Option<&'a [u8]>>, TupleError> {
+    if bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
+        return Err(TupleError::HeaderTooShort);
+    }
+    let hoff = bytes[22];
+    if usize::from(hoff) < SIZEOF_HEAP_TUPLE_HEADER || usize::from(hoff) > bytes.len() {
+        return Err(TupleError::InvalidHeaderOffset);
+    }
+    let infomask2 = u16::from_le_bytes([bytes[18], bytes[19]]);
+    let infomask = u16::from_le_bytes([bytes[20], bytes[21]]);
+    let natts = usize::from(infomask2 & HEAP_NATTS_MASK);
+    if natts != desc.len() {
+        return Err(TupleError::WrongValueCount {
+            expected: natts,
+            actual: desc.len(),
+        });
+    }
+
+    let null_bitmap = if infomask & HEAP_HASNULL != 0 {
+        &bytes[SIZEOF_HEAP_TUPLE_HEADER..]
+    } else {
+        &[] as &[u8]
+    };
+    let data = &bytes[usize::from(hoff)..];
+
+    let mut values = Vec::with_capacity(desc.len());
+    let mut off = 0usize;
+
+    for (i, attr) in desc.iter().enumerate() {
+        let is_null = infomask & HEAP_HASNULL != 0 && att_isnull(i, null_bitmap);
+        if is_null {
+            values.push(None);
+            continue;
+        }
+
+        match attr.attlen {
+            len if len > 0 => {
+                off = attr.attalign.align_offset(off);
+                let end = off + len as usize;
+                values.push(Some(&data[off..end]));
+                off = end;
+            }
+            -1 => {
+                off = attr.attalign.align_offset(off);
+                let total_len = u32::from_le_bytes([
+                    data[off],
+                    data[off + 1],
+                    data[off + 2],
+                    data[off + 3],
+                ]) as usize;
+                let start = off + 4;
+                let end = off + total_len;
+                values.push(Some(&data[start..end]));
+                off = end;
+            }
+            -2 => {
+                let mut end = off;
+                while data[end] != 0 {
+                    end += 1;
+                }
+                values.push(Some(&data[off..end]));
+                off = end + 1;
+            }
+            other => {
+                return Err(TupleError::UnsupportedAttributeType {
+                    attnum: i + 1,
+                    name: attr.name.clone(),
+                    attlen: other,
+                });
+            }
+        }
+    }
+
+    Ok(values)
+}
+
 pub fn heap_page_init(page: &mut [u8; BLCKSZ]) {
     page_init(page, 0);
 }
@@ -412,7 +490,7 @@ fn bitmap_len(natts: u16) -> usize {
     usize::from(natts).div_ceil(8)
 }
 
-fn att_isnull(attnum: usize, bits: &[u8]) -> bool {
+pub fn att_isnull(attnum: usize, bits: &[u8]) -> bool {
     (bits[attnum >> 3] & (1 << (attnum & 0x07))) == 0
 }
 

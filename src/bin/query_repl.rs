@@ -160,7 +160,7 @@ fn render_value(value: &Value) -> String {
     match value {
         Value::Int32(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
-        Value::Text(v) => v.clone(),
+        Value::Text(v) => v.to_string(),
         Value::Bool(v) => v.to_string(),
         Value::Null => "NULL".into(),
     }

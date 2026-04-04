@@ -491,7 +491,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             .parse::<i32>()
             .map(|value| SqlExpr::Const(Value::Int32(value)))
             .map_err(|_| ParseError::InvalidInteger(pair.as_str().into())),
-        Rule::string_literal => Ok(SqlExpr::Const(Value::Text(unescape_string(pair.as_str())))),
+        Rule::string_literal => Ok(SqlExpr::Const(Value::Text(unescape_string(pair.as_str()).into()))),
         Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),

@@ -1,5 +1,6 @@
 use crate::access::heap::am::VisibleHeapScan;
 use crate::access::heap::tuple::{AttributeDesc, HeapTuple, ItemPointerData};
+use crate::compact_string::CompactString;
 use crate::RelFileLocator;
 use std::rc::Rc;
 use std::time::Duration;
@@ -35,7 +36,7 @@ impl RelationDesc {
 pub enum Value {
     Int32(i32),
     Float64(f64),
-    Text(String),
+    Text(CompactString),
     Bool(bool),
     Null,
 }
@@ -45,7 +46,7 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
-            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Text(a), Value::Text(b)) => a.as_str() == b.as_str(),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,

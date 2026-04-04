@@ -88,7 +88,7 @@ fn parse_args() -> Result<Args, String> {
         base_dir: std::env::temp_dir().join("pgrust_full_scan_bench"),
         row_count: 10_000,
         iterations: 100,
-        pool_size: 128,
+        pool_size: 16384, // 128MB at 8KB per page
         pause_before_scan_secs: 0,
         preserve_existing: false,
         skip_load: false,

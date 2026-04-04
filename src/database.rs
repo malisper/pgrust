@@ -831,14 +831,14 @@ impl Session {
                                         raw.clone(),
                                     ))
                                 }),
-                            ScalarType::Text => Ok(Value::Text(raw.clone())),
+                            ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),
                                 "f" | "false" | "0" => Ok(Value::Bool(false)),
                                 _ => Err(ExecError::TypeMismatch {
                                     op: "copy assignment",
                                     left: Value::Null,
-                                    right: Value::Text(raw.clone()),
+                                    right: Value::Text(raw.clone().into()),
                                 }),
                             },
                         }

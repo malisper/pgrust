@@ -7,7 +7,7 @@ pub use nodes::*;
 pub use expr::eval_expr;
 
 use crate::access::heap::am::{
-    HeapError, heap_scan_begin_visible, heap_scan_next_visible,
+    HeapError, heap_scan_begin_visible, heap_scan_next_visible_raw,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
 use crate::access::heap::tuple::{AttributeDesc, TupleError};
@@ -410,14 +410,20 @@ fn exec_seq_scan(
 
     let scan = state.scan.as_mut().unwrap();
     let txns_guard = ctx.txns.read();
-    if let Some((tid, tuple)) = heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, scan)? {
-        Ok(Some(TupleSlot::from_heap_tuple(
-            Rc::clone(&state.desc),
-            Rc::clone(&state.attr_descs),
-            Rc::clone(&state.column_names),
-            tid,
-            tuple,
-        )))
+    let desc = Rc::clone(&state.desc);
+    let attr_descs = Rc::clone(&state.attr_descs);
+    let column_names = Rc::clone(&state.column_names);
+    if let Some(slot) = heap_scan_next_visible_raw(
+        ctx.pool,
+        ctx.client_id,
+        &txns_guard,
+        scan,
+        |_tid, tuple_bytes| -> Result<TupleSlot, ExecError> {
+            let values = expr::decode_tuple_from_bytes(tuple_bytes, &desc, &attr_descs)?;
+            Ok(TupleSlot::virtual_row(column_names.clone(), values))
+        },
+    )? {
+        Ok(Some(slot))
     } else {
         Ok(None)
     }

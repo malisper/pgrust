@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::compact_string::CompactString;
 use super::nodes::*;
 use super::ExecError;
 
@@ -49,7 +50,7 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
             &eval_expr(right, slot)?,
         ))),
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
-        Expr::CurrentTimestamp => Ok(Value::Text(render_current_timestamp())),
+        Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(render_current_timestamp()))),
     }
 }
 
@@ -133,7 +134,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
             }
         }
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Text, Value::Text(v)) => Ok(TupleValue::Bytes(v.as_bytes().to_vec())),
+        (ScalarType::Text, Value::Text(v)) => Ok(TupleValue::Bytes(v.as_str().as_bytes().to_vec())),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(*v)])),
         (_, other) => Err(ExecError::TypeMismatch {
             op: "assignment",
@@ -175,7 +176,7 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 });
             }
             std::str::from_utf8(bytes)
-                .map(|s| Value::Text(s.to_owned()))
+                .map(|s| Value::Text(CompactString::new(s)))
                 .map_err(|e| ExecError::InvalidStorageValue {
                     column: column.name.clone(),
                     details: e.to_string(),
@@ -198,6 +199,124 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 }),
             }
         }
+    }
+}
+
+/// Decode all values from raw on-page tuple bytes in a single pass.
+/// This fuses deform + decode, avoiding the intermediate Vec<Option<&[u8]>>.
+pub(crate) fn decode_tuple_from_bytes(
+    tuple_bytes: &[u8],
+    desc: &RelationDesc,
+    attr_descs: &[crate::access::heap::tuple::AttributeDesc],
+) -> Result<Vec<Value>, ExecError> {
+    use crate::access::heap::tuple::{HEAP_HASNULL, HEAP_NATTS_MASK, SIZEOF_HEAP_TUPLE_HEADER};
+
+    if tuple_bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
+        return Err(ExecError::Tuple(crate::access::heap::tuple::TupleError::HeaderTooShort));
+    }
+    let hoff = tuple_bytes[22];
+    let infomask2 = u16::from_le_bytes([tuple_bytes[18], tuple_bytes[19]]);
+    let infomask = u16::from_le_bytes([tuple_bytes[20], tuple_bytes[21]]);
+    let has_null = infomask & HEAP_HASNULL != 0;
+    let null_bitmap = if has_null {
+        &tuple_bytes[SIZEOF_HEAP_TUPLE_HEADER..]
+    } else {
+        &[] as &[u8]
+    };
+    let data = &tuple_bytes[usize::from(hoff)..];
+
+    let mut values = Vec::with_capacity(desc.columns.len());
+    let mut off = 0usize;
+
+    for (i, (column, attr)) in desc.columns.iter().zip(attr_descs.iter()).enumerate() {
+        let is_null = has_null && crate::access::heap::tuple::att_isnull(i, null_bitmap);
+        if is_null {
+            values.push(Value::Null);
+            continue;
+        }
+
+        match attr.attlen {
+            len if len > 0 => {
+                off = attr.attalign.align_offset(off);
+                let end = off + len as usize;
+                let bytes = &data[off..end];
+                off = end;
+                values.push(decode_fixed_value(column, bytes)?);
+            }
+            -1 => {
+                off = attr.attalign.align_offset(off);
+                let total_len = u32::from_le_bytes([
+                    data[off], data[off + 1], data[off + 2], data[off + 3],
+                ]) as usize;
+                let start = off + 4;
+                let end = off + total_len;
+                let bytes = &data[start..end];
+                off = end;
+                values.push(decode_varlen_value(column, bytes)?);
+            }
+            -2 => {
+                let mut end = off;
+                while data[end] != 0 {
+                    end += 1;
+                }
+                let bytes = &data[off..end];
+                off = end + 1;
+                values.push(decode_varlen_value(column, bytes)?);
+            }
+            _other => {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty,
+                    attlen: attr.attlen,
+                });
+            }
+        }
+    }
+
+    Ok(values)
+}
+
+#[inline]
+fn decode_fixed_value(column: &ColumnDesc, bytes: &[u8]) -> Result<Value, ExecError> {
+    match column.ty {
+        ScalarType::Int32 => Ok(Value::Int32(i32::from_le_bytes(
+            bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
+                column: column.name.clone(),
+                details: "int4 must be exactly 4 bytes".into(),
+            })?,
+        ))),
+        ScalarType::Bool => match bytes[0] {
+            0 => Ok(Value::Bool(false)),
+            1 => Ok(Value::Bool(true)),
+            other => Err(ExecError::InvalidStorageValue {
+                column: column.name.clone(),
+                details: format!("invalid bool byte {}", other),
+            }),
+        },
+        ScalarType::Text => Err(ExecError::UnsupportedStorageType {
+            column: column.name.clone(),
+            ty: column.ty,
+            attlen: column.storage.attlen,
+        }),
+    }
+}
+
+#[inline]
+fn decode_varlen_value(column: &ColumnDesc, bytes: &[u8]) -> Result<Value, ExecError> {
+    match column.ty {
+        ScalarType::Text => {
+            std::str::from_utf8(bytes)
+                .map(|s| Value::Text(CompactString::new(s)))
+                .map_err(|e| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: e.to_string(),
+                })
+        }
+        _ => Err(ExecError::UnsupportedStorageType {
+            column: column.name.clone(),
+            ty: column.ty,
+            attlen: column.storage.attlen,
+        }),
     }
 }
 

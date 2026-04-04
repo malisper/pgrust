@@ -190,13 +190,24 @@ impl Snapshot {
             && self.in_progress.contains(&xid)
     }
 
+    /// Check visibility from raw on-page tuple bytes without parsing.
+    pub fn tuple_bytes_visible(&self, txns: &TransactionManager, bytes: &[u8]) -> bool {
+        let xmin = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let xmax = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        let cid = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        self.check_visibility(txns, xmin, xmax, cid)
+    }
+
     pub fn tuple_visible(&self, txns: &TransactionManager, tuple: &HeapTuple) -> bool {
-        let xmin = tuple.header.xmin;
+        self.check_visibility(txns, tuple.header.xmin, tuple.header.xmax, tuple.header.cid_or_xvac)
+    }
+
+    fn check_visibility(&self, txns: &TransactionManager, xmin: u32, xmax: u32, cid: u32) -> bool {
         if xmin == INVALID_TRANSACTION_ID {
             return true;
         }
         if xmin == self.current_xid {
-            return tuple.header.cid_or_xvac < self.current_cid;
+            return cid < self.current_cid;
         }
         if xmin >= self.xmax {
             return false;
@@ -211,7 +222,6 @@ impl Snapshot {
             }
         }
 
-        let xmax = tuple.header.xmax;
         if xmax == INVALID_TRANSACTION_ID {
             return true;
         }

@@ -510,7 +510,7 @@ fn execute_special_query(
         let table_name = params.first()?.as_ref()?.to_ascii_lowercase();
         let exists = db.catalog.read().catalog().get(&table_name).is_some();
         let rows = if exists {
-            vec![vec![Value::Text("r".to_string())]]
+            vec![vec![Value::Text("r".into())]]
         } else {
             Vec::new()
         };
@@ -738,7 +738,7 @@ fn render_value(val: &Value) -> String {
     match val {
         Value::Int32(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
-        Value::Text(v) => v.clone(),
+        Value::Text(v) => v.to_string(),
         Value::Bool(true) => "t".to_string(),
         Value::Bool(false) => "f".to_string(),
         Value::Null => String::new(),

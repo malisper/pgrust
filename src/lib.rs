@@ -1,5 +1,6 @@
 pub mod access;
 pub mod catalog;
+pub mod compact_string;
 pub mod database;
 pub mod executor;
 pub mod parser;
