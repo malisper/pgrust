@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read as _, Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::access::heap::tuple::HeapTuple;
@@ -7,7 +8,8 @@ use crate::access::heap::tuple::HeapTuple;
 pub type TransactionId = u32;
 pub type CommandId = u32;
 pub const INVALID_TRANSACTION_ID: TransactionId = 0;
-const TXN_STATUS_FORMAT_VERSION: u32 = 1;
+/// Header: next_xid(4). Status bytes start at offset 4.
+const STATUS_FILE_HEADER_SIZE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionStatus {
@@ -33,11 +35,42 @@ pub struct Snapshot {
     in_progress: BTreeSet<TransactionId>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct TransactionManager {
     next_xid: TransactionId,
     statuses: BTreeMap<TransactionId, TransactionStatus>,
     status_path: Option<PathBuf>,
+    /// Open file handle for single-byte status writes.
+    /// Avoids open/close per commit — just seek + write 1 byte.
+    status_file: Option<File>,
+}
+
+impl Clone for TransactionManager {
+    fn clone(&self) -> Self {
+        Self {
+            next_xid: self.next_xid,
+            statuses: self.statuses.clone(),
+            status_path: self.status_path.clone(),
+            status_file: self.status_file.as_ref().and_then(|f| f.try_clone().ok()),
+        }
+    }
+}
+
+fn status_to_byte(status: TransactionStatus) -> u8 {
+    match status {
+        TransactionStatus::InProgress => 1,
+        TransactionStatus::Committed => 2,
+        TransactionStatus::Aborted => 3,
+    }
+}
+
+fn byte_to_status(b: u8) -> Option<TransactionStatus> {
+    match b {
+        1 => Some(TransactionStatus::InProgress),
+        2 => Some(TransactionStatus::Committed),
+        3 => Some(TransactionStatus::Aborted),
+        _ => None,
+    }
 }
 
 impl TransactionManager {
@@ -49,19 +82,34 @@ impl TransactionManager {
 
         if path.exists() {
             let (next_xid, statuses) = load_status_file(&path)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| MvccError::Io(e.to_string()))?;
             Ok(Self {
                 next_xid,
                 statuses,
                 status_path: Some(path),
+                status_file: Some(file),
             })
         } else {
-            let manager = Self {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .map_err(|e| MvccError::Io(e.to_string()))?;
+            // Write header: next_xid = 0
+            file.write_all(&INVALID_TRANSACTION_ID.to_le_bytes())
+                .map_err(|e| MvccError::Io(e.to_string()))?;
+            Ok(Self {
                 next_xid: INVALID_TRANSACTION_ID,
                 statuses: BTreeMap::new(),
                 status_path: Some(path),
-            };
-            manager.persist()?;
-            Ok(manager)
+                status_file: Some(file),
+            })
         }
     }
 
@@ -69,8 +117,8 @@ impl TransactionManager {
         self.next_xid += 1;
         let xid = self.next_xid;
         self.statuses.insert(xid, TransactionStatus::InProgress);
-        self.persist()
-            .expect("persisting transaction status must succeed");
+        self.write_status_byte(xid, TransactionStatus::InProgress);
+        self.write_next_xid();
         xid
     }
 
@@ -78,7 +126,7 @@ impl TransactionManager {
         match self.statuses.get_mut(&xid) {
             Some(status @ TransactionStatus::InProgress) => {
                 *status = TransactionStatus::Committed;
-                self.persist()?;
+                self.write_status_byte(xid, TransactionStatus::Committed);
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -90,7 +138,7 @@ impl TransactionManager {
         match self.statuses.get_mut(&xid) {
             Some(status @ TransactionStatus::InProgress) => {
                 *status = TransactionStatus::Aborted;
-                self.persist()?;
+                self.write_status_byte(xid, TransactionStatus::Aborted);
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -149,25 +197,19 @@ impl TransactionManager {
         base_dir.join("pg_xact").join("status")
     }
 
-    fn persist(&self) -> Result<(), MvccError> {
-        let Some(path) = &self.status_path else {
-            return Ok(());
-        };
+    /// Write one status byte at offset `HEADER_SIZE + xid`. No fsync.
+    fn write_status_byte(&mut self, xid: TransactionId, status: TransactionStatus) {
+        let Some(ref mut file) = self.status_file else { return };
+        let offset = STATUS_FILE_HEADER_SIZE as u64 + xid as u64;
+        let _ = file.seek(SeekFrom::Start(offset));
+        let _ = file.write_all(&[status_to_byte(status)]);
+    }
 
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&TXN_STATUS_FORMAT_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&self.next_xid.to_le_bytes());
-        bytes.extend_from_slice(&(self.statuses.len() as u32).to_le_bytes());
-        for (&xid, &status) in &self.statuses {
-            bytes.extend_from_slice(&xid.to_le_bytes());
-            bytes.push(match status {
-                TransactionStatus::InProgress => 0,
-                TransactionStatus::Committed => 1,
-                TransactionStatus::Aborted => 2,
-            });
-        }
-
-        fs::write(path, bytes).map_err(|e| MvccError::Io(e.to_string()))
+    /// Update next_xid in the header (first 4 bytes).
+    fn write_next_xid(&mut self) {
+        let Some(ref mut file) = self.status_file else { return };
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = file.write_all(&self.next_xid.to_le_bytes());
     }
 }
 
@@ -348,44 +390,23 @@ impl Snapshot {
     }
 }
 
+/// Load status file: header is next_xid (4 bytes), then 1 byte per xid
+/// at offset HEADER_SIZE + xid.
 fn load_status_file(
     path: &Path,
 ) -> Result<(TransactionId, BTreeMap<TransactionId, TransactionStatus>), MvccError> {
     let bytes = fs::read(path).map_err(|e| MvccError::Io(e.to_string()))?;
-    if bytes.len() < 12 {
+    if bytes.len() < STATUS_FILE_HEADER_SIZE {
         return Err(MvccError::CorruptStatusFile("header too short"));
     }
 
-    let version = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-    if version != TXN_STATUS_FORMAT_VERSION {
-        return Err(MvccError::CorruptStatusFile("unknown format version"));
-    }
-
-    let next_xid = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let expected_len = 12 + count * 5;
-    if bytes.len() != expected_len {
-        return Err(MvccError::CorruptStatusFile(
-            "entry count does not match file length",
-        ));
-    }
+    let next_xid = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
 
     let mut statuses = BTreeMap::new();
-    let mut offset = 12;
-    for _ in 0..count {
-        let xid = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        let status = match bytes[offset + 4] {
-            0 => TransactionStatus::InProgress,
-            1 => TransactionStatus::Committed,
-            2 => TransactionStatus::Aborted,
-            _ => {
-                return Err(MvccError::CorruptStatusFile(
-                    "invalid transaction status byte",
-                ));
-            }
-        };
-        statuses.insert(xid, status);
-        offset += 5;
+    for (i, &b) in bytes[STATUS_FILE_HEADER_SIZE..].iter().enumerate() {
+        if let Some(status) = byte_to_status(b) {
+            statuses.insert(i as TransactionId, status);
+        }
     }
 
     Ok((next_xid, statuses))
