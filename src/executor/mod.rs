@@ -680,7 +680,7 @@ mod tests {
     use crate::access::heap::mvcc::INVALID_TRANSACTION_ID;
     use crate::access::heap::tuple::{AttributeAlign, TupleValue};
     use crate::parser::{Catalog, CatalogEntry};
-    use crate::storage::smgr::MdStorageManager;
+    use crate::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
     use crate::access::heap::tuple::{AttributeDesc, HeapTuple};
     use crate::RelFileLocator;
     use std::fs;
@@ -844,13 +844,39 @@ mod tests {
         .unwrap()
     }
 
+    /// Test-only: create the storage fork for a relation.
+    fn create_fork(pool: &BufferPool<SmgrStorageBackend>, rel: RelFileLocator) {
+        pool.with_storage_mut(|s| {
+            s.smgr.open(rel).unwrap();
+            match s.smgr.create(rel, ForkNumber::Main, false) {
+                Ok(()) => {}
+                Err(crate::storage::smgr::SmgrError::AlreadyExists { .. }) => {}
+                Err(e) => panic!("create_fork failed: {e:?}"),
+            }
+        });
+    }
+
+    /// Test-only: create a buffer pool with the "people" table fork ready.
+    fn test_pool(base: &PathBuf) -> BufferPool<SmgrStorageBackend> {
+        let smgr = MdStorageManager::new(base);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        create_fork(&pool, rel());
+        pool
+    }
+
+    /// Test-only: create a buffer pool with both "people" and "pets" forks ready.
+    fn test_pool_with_pets(base: &PathBuf) -> BufferPool<SmgrStorageBackend> {
+        let pool = test_pool(base);
+        create_fork(&pool, pets_rel());
+        pool
+    }
+
     fn run_plan(
         base: &PathBuf,
         txns: &TransactionManager,
         plan: Plan,
     ) -> Result<Vec<(Vec<String>, Vec<Value>)>, ExecError> {
-        let smgr = MdStorageManager::new(base);
-        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = test_pool(base);
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut state = executor_start(plan);
         let mut ctx = ExecutorContext {
@@ -886,6 +912,11 @@ mod tests {
     ) -> Result<StatementResult, ExecError> {
         let smgr = MdStorageManager::new(base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        for name in catalog.table_names().collect::<Vec<_>>() {
+            if let Some(entry) = catalog.get(&name) {
+                create_fork(&pool, entry.rel);
+            }
+        }
         let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
         let mut ctx = ExecutorContext {
             pool: &pool,
@@ -935,8 +966,7 @@ mod tests {
     fn seqscan_filter_projection_returns_expected_rows() {
         let base = temp_dir("scan_filter_project");
         let mut txns = TransactionManager::new_durable(&base).unwrap();
-        let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let mut pool = test_pool(&base);
         let xid = txns.begin();
         let rows = [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None), tuple(3, "carol", Some("gamma"))];
         let mut blocks = Vec::new();
@@ -966,8 +996,7 @@ mod tests {
     fn seqscan_skips_superseded_versions() {
         let base = temp_dir("visible_versions");
         let mut txns = TransactionManager::new_durable(&base).unwrap();
-        let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let mut pool = test_pool(&base);
         let insert_xid = txns.begin();
         let old_tid = heap_insert_mvcc(&mut pool, 1, rel(), insert_xid, &tuple(1, "alice", Some("old"))).unwrap();
         txns.commit(insert_xid).unwrap();
@@ -995,9 +1024,9 @@ mod tests {
     #[test] fn select_without_from_returns_constant_row() { let base = temp_dir("select_without_from"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["expr1".to_string()]); assert_eq!(rows, vec![vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn select_from_people_returns_zero_column_rows() { let base = temp_dir("select_from_people"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select from people").unwrap() { StatementResult::Query { column_names, rows } => { assert!(column_names.is_empty()); assert_eq!(rows, vec![vec![], vec![]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn explain_analyze_buffers_reports_runtime_and_buffers() { let base = temp_dir("explain_analyze_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "explain (analyze, buffers) select name from people").unwrap() { StatementResult::Query { rows, .. } => { let rendered = rows.into_iter().map(|row| match &row[0] { Value::Text(text) => text.clone(), other => panic!("expected text explain line, got {:?}", other), }).collect::<Vec<_>>(); assert!(rendered.iter().any(|line| line.contains("actual rows="))); assert!(rendered.iter().any(|line| line.contains("Execution Time:"))); assert!(rendered.iter().any(|line| line.contains("Buffers: shared"))); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn inner_join_returns_matching_rows() { let base = temp_dir("join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let smgr = MdStorageManager::new(&base); let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None), tuple(3, "carol", Some("storage"))] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people join pets on people.id = pets.owner_id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("carol".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn cross_join_returns_cartesian_product() { let base = temp_dir("cross_join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let smgr = MdStorageManager::new(&base); let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Text("Kitchen".into())], vec![Value::Text("alice".into()), Value::Text("Mocha".into())], vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("bob".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn cross_join_where_clause_can_use_addition() { let base = temp_dir("cross_join_addition_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let smgr = MdStorageManager::new(&base); let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 1), pet_tuple(11, "Mocha", 2)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets where pets.owner_id + 1 = people.id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn inner_join_returns_matching_rows() { let base = temp_dir("join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let mut pool = test_pool_with_pets(&base); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None), tuple(3, "carol", Some("storage"))] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people join pets on people.id = pets.owner_id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("carol".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn cross_join_returns_cartesian_product() { let base = temp_dir("cross_join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let mut pool = test_pool_with_pets(&base); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Text("Kitchen".into())], vec![Value::Text("alice".into()), Value::Text("Mocha".into())], vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("bob".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn cross_join_where_clause_can_use_addition() { let base = temp_dir("cross_join_addition_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let mut pool = test_pool_with_pets(&base); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&mut pool, 1, rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 1), pet_tuple(11, "Mocha", 2)] { let tid = heap_insert_mvcc(&mut pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&mut pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets where pets.owner_id + 1 = people.id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn count_star_without_group_by() { let base = temp_dir("count_star"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["count"]); assert_eq!(rows, vec![vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn count_star_on_empty_table() { let base = temp_dir("count_star_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(0)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn group_by_with_count() { let base = temp_dir("group_by_count"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by note").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["note", "count"]); assert_eq!(rows, vec![vec![Value::Text("a".into()), Value::Int32(2)], vec![Value::Text("b".into()), Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }

@@ -697,22 +697,6 @@ pub fn heap_flush(
     Ok(())
 }
 
-fn ensure_relation_exists(
-    pool: &BufferPool<SmgrStorageBackend>,
-    rel: RelFileLocator,
-) -> Result<(), HeapError> {
-    pool.with_storage_mut(|s| {
-        s.smgr.open(rel)?;
-        match s.smgr.create(rel, ForkNumber::Main, false) {
-            Ok(()) => {}
-            Err(SmgrError::AlreadyExists { .. }) => {}
-            Err(e) => return Err(e),
-        }
-        Ok(())
-    })?;
-    Ok(())
-}
-
 fn heap_insert_version(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
@@ -721,7 +705,6 @@ fn heap_insert_version(
     xmin: TransactionId,
     cid: CommandId,
 ) -> Result<ItemPointerData, HeapError> {
-    ensure_relation_exists(pool, rel)?;
 
     loop {
         let target_block = pool.with_storage_mut(|s| -> Result<u32, HeapError> {
@@ -836,6 +819,20 @@ mod tests {
         }
     }
 
+    /// Test-only: create the storage fork for a relation. In production,
+    /// forks are created at startup by `Database::open` and by `CREATE TABLE`.
+    /// Tests that use raw buffer pools must call this before inserting.
+    fn create_fork(pool: &BufferPool<SmgrStorageBackend>, rel: RelFileLocator) {
+        pool.with_storage_mut(|s| {
+            s.smgr.open(rel).unwrap();
+            match s.smgr.create(rel, ForkNumber::Main, false) {
+                Ok(()) => {}
+                Err(SmgrError::AlreadyExists { .. }) => {}
+                Err(e) => panic!("create_fork failed: {e:?}"),
+            }
+        });
+    }
+
     fn visible_tuple_payloads(
         base: &std::path::Path,
         rel: RelFileLocator,
@@ -859,6 +856,7 @@ mod tests {
         let base = temp_dir("insert_fetch_roundtrip");
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+        create_fork(&pool, rel(5000));
         let tuple = HeapTuple::new_raw(2, b"hello|heap".to_vec());
 
         let tid = heap_insert(&pool, 1, rel(5000), &tuple).unwrap();
@@ -875,6 +873,7 @@ mod tests {
         let tid = {
             let smgr = crate::storage::smgr::MdStorageManager::new(&base);
             let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+            create_fork(&pool, rel);
             let tuple = HeapTuple::new_raw(2, b"persisted-tuple".to_vec());
             let tid = heap_insert(&pool, 1, rel, &tuple).unwrap();
             heap_flush(&pool, 1, rel, tid.block_number).unwrap();
@@ -893,6 +892,7 @@ mod tests {
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let rel = rel(5002);
+        create_fork(&pool, rel);
 
         let large = HeapTuple::new_raw(1, vec![0xAB; 7000]);
         let first = heap_insert(&pool, 1, rel, &large).unwrap();
@@ -910,6 +910,7 @@ mod tests {
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
         let rel = rel(5003);
+        create_fork(&pool, rel);
 
         let large = HeapTuple::new_raw(1, vec![0xAA; 7000]);
         let small = HeapTuple::new_raw(1, b"tail".to_vec());
@@ -969,6 +970,7 @@ mod tests {
         let rel = rel(5005);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        create_fork(&pool, rel);
         let mut txns = TransactionManager::default();
 
         let inserter = txns.begin();
@@ -1006,6 +1008,7 @@ mod tests {
         let rel = rel(5006);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        create_fork(&pool, rel);
         let mut txns = TransactionManager::default();
 
         let inserter = txns.begin();
@@ -1068,6 +1071,7 @@ mod tests {
         let rel = rel(5007);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        create_fork(&pool, rel);
         let mut txns = TransactionManager::default();
 
         let xid1 = txns.begin();
@@ -1112,6 +1116,7 @@ mod tests {
         let rel = rel(5008);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
         let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        create_fork(&pool, rel);
         let mut txns = TransactionManager::default();
 
         let insert_xid = txns.begin();
@@ -1196,6 +1201,7 @@ mod tests {
         let tid = {
             let smgr = crate::storage::smgr::MdStorageManager::new(&base);
             let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+            create_fork(&pool, rel);
             let mut txns = TransactionManager::new_durable(&base).unwrap();
 
             let xid = txns.begin();
