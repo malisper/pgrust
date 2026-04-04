@@ -333,4 +333,12 @@ mod tests {
         let stmt = parse_select("select name from people where count(*) > 1").unwrap();
         assert!(matches!(build_plan(&stmt, &catalog()), Err(ParseError::AggInWhere)));
     }
+
+    #[test]
+    fn parse_random_function() {
+        let stmt = parse_select("select random()").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::Random));
+        assert_eq!(stmt.targets[0].output_name, "random");
+    }
 }

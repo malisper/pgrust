@@ -12,3 +12,4 @@ libc = "0.2"
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 pest = "2.7"
 pest_derive = "2.7"
+rand = "0.8"

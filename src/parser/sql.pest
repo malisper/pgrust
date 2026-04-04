@@ -54,9 +54,11 @@ is_not_null_suffix = { kw_is ~ kw_not ~ kw_null }
 is_distinct_suffix = { kw_is ~ kw_distinct ~ kw_from ~ add_expr }
 is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 comp_op = { "=" | "<" | ">" }
-primary_expr = { kw_null | kw_true | kw_false | agg_call | identifier | integer | string_literal | "(" ~ expr ~ ")" }
+primary_expr = { kw_null | kw_true | kw_false | agg_call | func_call | identifier | integer | string_literal | "(" ~ expr ~ ")" }
 agg_call = { agg_func ~ "(" ~ (star | expr) ~ ")" }
 agg_func = { kw_count | kw_sum | kw_avg | kw_min | kw_max }
+func_call = { kw_random ~ "(" ~ ")" }
+kw_random = { ^"random" ~ keyword_end }
 
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
 keyword_end = _{ !ident_cont }

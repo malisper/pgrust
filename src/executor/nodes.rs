@@ -30,13 +30,29 @@ impl RelationDesc {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Int32(i32),
+    Float64(f64),
     Text(String),
     Bool(bool),
     Null,
 }
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int32(a), Value::Int32(b)) => a == b,
+            (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
+            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Null, Value::Null) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Value {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetEntry {
@@ -93,6 +109,7 @@ pub enum Expr {
     IsNotNull(Box<Expr>),
     IsDistinctFrom(Box<Expr>, Box<Expr>),
     IsNotDistinctFrom(Box<Expr>, Box<Expr>),
+    Random,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

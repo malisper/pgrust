@@ -314,6 +314,7 @@ fn send_error(w: &mut impl Write, sqlstate: &str, message: &str) -> io::Result<(
 fn render_value(val: &Value) -> String {
     match val {
         Value::Int32(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
         Value::Text(v) => v.clone(),
         Value::Bool(true) => "t".to_string(),
         Value::Bool(false) => "f".to_string(),
