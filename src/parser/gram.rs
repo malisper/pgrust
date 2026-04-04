@@ -48,6 +48,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
         Rule::update_stmt => Ok(Statement::Update(build_update(inner)?)),
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
+        Rule::begin_stmt => Ok(Statement::Begin),
+        Rule::commit_stmt => Ok(Statement::Commit),
+        Rule::rollback_stmt => Ok(Statement::Rollback),
         _ => Err(ParseError::UnexpectedToken {
             expected: "statement",
             actual: inner.as_str().into(),

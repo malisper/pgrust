@@ -345,6 +345,10 @@ impl Database {
                 }
                 result
             }
+
+            Statement::Begin | Statement::Commit | Statement::Rollback => {
+                Ok(StatementResult::AffectedRows(0))
+            }
         }
     }
 
@@ -396,6 +400,273 @@ impl Database {
                 let _ = self.txns.write().abort(xid);
                 self.txn_waiter.notify();
                 Err(e)
+            }
+        }
+    }
+}
+
+struct ActiveTransaction {
+    xid: TransactionId,
+    failed: bool,
+    held_table_locks: Vec<RelFileLocator>,
+    next_command_id: u32,
+}
+
+pub struct Session {
+    pub client_id: ClientId,
+    active_txn: Option<ActiveTransaction>,
+}
+
+impl Session {
+    pub fn new(client_id: ClientId) -> Self {
+        Self {
+            client_id,
+            active_txn: None,
+        }
+    }
+
+    pub fn in_transaction(&self) -> bool {
+        self.active_txn.is_some()
+    }
+
+    pub fn transaction_failed(&self) -> bool {
+        self.active_txn.as_ref().is_some_and(|t| t.failed)
+    }
+
+    /// Returns the ReadyForQuery status byte for the wire protocol.
+    pub fn ready_status(&self) -> u8 {
+        match &self.active_txn {
+            None => b'I',
+            Some(t) if t.failed => b'E',
+            Some(_) => b'T',
+        }
+    }
+
+    pub fn execute(
+        &mut self,
+        db: &Database,
+        sql: &str,
+    ) -> Result<StatementResult, ExecError> {
+        use crate::parser::{Statement, parse_statement};
+
+        let stmt = parse_statement(sql)?;
+
+        match stmt {
+            Statement::Begin => {
+                if self.active_txn.is_some() {
+                    return Err(ExecError::Parse(crate::parser::ParseError::UnexpectedToken {
+                        expected: "no active transaction",
+                        actual: "already in a transaction block".into(),
+                    }));
+                }
+                let xid = db.txns.write().begin();
+                self.active_txn = Some(ActiveTransaction {
+                    xid,
+                    failed: false,
+                    held_table_locks: Vec::new(),
+                    next_command_id: 0,
+                });
+                Ok(StatementResult::AffectedRows(0))
+            }
+
+            Statement::Commit => {
+                let txn = match self.active_txn.take() {
+                    Some(t) => t,
+                    None => return Ok(StatementResult::AffectedRows(0)),
+                };
+                for rel in &txn.held_table_locks {
+                    db.table_locks.unlock_table(*rel, self.client_id);
+                }
+                db.txns.write().commit(txn.xid).map_err(|e| {
+                    ExecError::Heap(crate::access::heap::am::HeapError::Mvcc(e))
+                })?;
+                db.txn_waiter.notify();
+                Ok(StatementResult::AffectedRows(0))
+            }
+
+            Statement::Rollback => {
+                let txn = match self.active_txn.take() {
+                    Some(t) => t,
+                    None => return Ok(StatementResult::AffectedRows(0)),
+                };
+                for rel in &txn.held_table_locks {
+                    db.table_locks.unlock_table(*rel, self.client_id);
+                }
+                let _ = db.txns.write().abort(txn.xid);
+                db.txn_waiter.notify();
+                Ok(StatementResult::AffectedRows(0))
+            }
+
+            _ => {
+                if let Some(ref txn) = self.active_txn {
+                    if txn.failed {
+                        return Err(ExecError::Parse(crate::parser::ParseError::UnexpectedToken {
+                            expected: "ROLLBACK",
+                            actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
+                        }));
+                    }
+                }
+
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    db.execute(self.client_id, sql)
+                }
+            }
+        }
+    }
+
+    fn execute_in_transaction(
+        &mut self,
+        db: &Database,
+        stmt: crate::parser::Statement,
+    ) -> Result<StatementResult, ExecError> {
+        use crate::executor::execute_readonly_statement;
+        use crate::executor::commands::{
+            execute_create_table, execute_delete_with_waiter, execute_drop_table,
+            execute_insert, execute_update_with_waiter,
+        };
+        use crate::parser::{
+            Statement, bind_delete, bind_insert, bind_update,
+        };
+
+        let txn = self.active_txn.as_mut().unwrap();
+        let xid = txn.xid;
+        let cid = txn.next_command_id;
+        txn.next_command_id = txn.next_command_id.saturating_add(1);
+        let client_id = self.client_id;
+
+        match stmt {
+            Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let catalog_guard = db.catalog.read();
+                let mut ctx = ExecutorContext {
+                    pool: &db.pool,
+                    txns: db.txns.clone(),
+                    snapshot,
+                    client_id,
+                    next_command_id: cid,
+                };
+                execute_readonly_statement(stmt, catalog_guard.catalog(), &mut ctx)
+            }
+
+            Statement::Insert(ref insert_stmt) => {
+                let bound = {
+                    let catalog_guard = db.catalog.read();
+                    bind_insert(insert_stmt, catalog_guard.catalog())?
+                };
+                let rel = bound.rel;
+                let txn = self.active_txn.as_mut().unwrap();
+                if !txn.held_table_locks.contains(&rel) {
+                    db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                    txn.held_table_locks.push(rel);
+                }
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let mut ctx = ExecutorContext {
+                    pool: &db.pool,
+                    txns: db.txns.clone(),
+                    snapshot,
+                    client_id,
+                    next_command_id: cid,
+                };
+                execute_insert(bound, &mut ctx, xid, cid)
+            }
+
+            Statement::Update(ref update_stmt) => {
+                let bound = {
+                    let catalog_guard = db.catalog.read();
+                    bind_update(update_stmt, catalog_guard.catalog())?
+                };
+                let rel = bound.rel;
+                let txn = self.active_txn.as_mut().unwrap();
+                if !txn.held_table_locks.contains(&rel) {
+                    db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                    txn.held_table_locks.push(rel);
+                }
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let mut ctx = ExecutorContext {
+                    pool: &db.pool,
+                    txns: db.txns.clone(),
+                    snapshot,
+                    client_id,
+                    next_command_id: cid,
+                };
+                execute_update_with_waiter(
+                    bound, &mut ctx, xid, cid,
+                    Some((&db.txns, &db.txn_waiter)),
+                )
+            }
+
+            Statement::Delete(ref delete_stmt) => {
+                let bound = {
+                    let catalog_guard = db.catalog.read();
+                    bind_delete(delete_stmt, catalog_guard.catalog())?
+                };
+                let rel = bound.rel;
+                let txn = self.active_txn.as_mut().unwrap();
+                if !txn.held_table_locks.contains(&rel) {
+                    db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                    txn.held_table_locks.push(rel);
+                }
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let mut ctx = ExecutorContext {
+                    pool: &db.pool,
+                    txns: db.txns.clone(),
+                    snapshot,
+                    client_id,
+                    next_command_id: cid,
+                };
+                execute_delete_with_waiter(
+                    bound, &mut ctx, xid,
+                    Some((&db.txns, &db.txn_waiter)),
+                )
+            }
+
+            Statement::CreateTable(ref create_stmt) => {
+                let mut catalog_guard = db.catalog.write();
+                let result = execute_create_table(create_stmt.clone(), catalog_guard.catalog_mut());
+                if result.is_ok() {
+                    let _ = catalog_guard.persist();
+                }
+                result
+            }
+
+            Statement::DropTable(ref drop_stmt) => {
+                let rel = {
+                    let catalog_guard = db.catalog.read();
+                    catalog_guard.catalog().get(&drop_stmt.table_name).map(|e| e.rel)
+                };
+                if let Some(rel) = rel {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    if !txn.held_table_locks.contains(&rel) {
+                        db.table_locks.lock_table(rel, TableLockMode::AccessExclusive, client_id);
+                        txn.held_table_locks.push(rel);
+                    }
+                }
+                let mut catalog_guard = db.catalog.write();
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let mut ctx = ExecutorContext {
+                    pool: &db.pool,
+                    txns: db.txns.clone(),
+                    snapshot,
+                    client_id,
+                    next_command_id: cid,
+                };
+                let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
+                if result.is_ok() {
+                    let _ = catalog_guard.persist();
+                }
+                result
+            }
+
+            Statement::Begin | Statement::Commit | Statement::Rollback => {
+                unreachable!("handled in Session::execute")
             }
         }
     }
@@ -1004,6 +1275,398 @@ mod tests {
         match db.execute(1, "select val from dltest where id = 1").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int32(expected as i32)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn begin_commit_groups_statements() {
+        let base = temp_dir("begin_commit");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table txtest (id int4 not null, val int4 not null)").unwrap();
+        session.execute(&db, "begin").unwrap();
+        assert!(session.in_transaction());
+        assert_eq!(session.ready_status(), b'T');
+
+        session.execute(&db, "insert into txtest (id, val) values (1, 10)").unwrap();
+        session.execute(&db, "insert into txtest (id, val) values (2, 20)").unwrap();
+        session.execute(&db, "commit").unwrap();
+        assert!(!session.in_transaction());
+        assert_eq!(session.ready_status(), b'I');
+
+        match session.execute(&db, "select count(*) from txtest").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rollback_discards_changes() {
+        let base = temp_dir("rollback");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table rbtest (id int4 not null)").unwrap();
+        session.execute(&db, "insert into rbtest (id) values (1)").unwrap();
+
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, "insert into rbtest (id) values (2)").unwrap();
+        session.execute(&db, "insert into rbtest (id) values (3)").unwrap();
+        session.execute(&db, "rollback").unwrap();
+
+        match session.execute(&db, "select count(*) from rbtest").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]],
+                    "only the autocommitted row should survive rollback");
+            }
+            other => panic!("expected query, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn failed_transaction_rejects_commands() {
+        let base = temp_dir("failed_txn");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table ftest (id int4 not null)").unwrap();
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, "insert into ftest (id) values (1)").unwrap();
+
+        let err = session.execute(&db, "select * from nonexistent");
+        assert!(err.is_err());
+        assert!(session.transaction_failed());
+        assert_eq!(session.ready_status(), b'E');
+
+        let err = session.execute(&db, "select * from ftest");
+        assert!(err.is_err(), "commands should be rejected in failed transaction");
+
+        session.execute(&db, "rollback").unwrap();
+        assert!(!session.in_transaction());
+        assert_eq!(session.ready_status(), b'I');
+
+        match session.execute(&db, "select count(*) from ftest").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(0)]],
+                    "all inserts should be rolled back");
+            }
+            other => panic!("expected query, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn autocommit_still_works_without_begin() {
+        let base = temp_dir("autocommit");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create table atest (id int4 not null)").unwrap();
+        session.execute(&db, "insert into atest (id) values (1)").unwrap();
+        session.execute(&db, "insert into atest (id) values (2)").unwrap();
+
+        match session.execute(&db, "select count(*) from atest").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_committed_isolation() {
+        let base = temp_dir("read_committed");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session_a = Session::new(1);
+        let mut session_b = Session::new(2);
+
+        session_a.execute(&db, "create table isotest (id int4 not null, val int4 not null)").unwrap();
+        session_a.execute(&db, "insert into isotest (id, val) values (1, 100)").unwrap();
+
+        session_a.execute(&db, "begin").unwrap();
+        session_a.execute(&db, "insert into isotest (id, val) values (2, 200)").unwrap();
+
+        match session_b.execute(&db, "select count(*) from isotest").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]],
+                    "session B should not see session A's uncommitted insert");
+            }
+            other => panic!("expected query, got {:?}", other),
+        }
+
+        session_a.execute(&db, "commit").unwrap();
+
+        match session_b.execute(&db, "select count(*) from isotest").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(2)]],
+                    "session B should see session A's committed insert");
+            }
+            other => panic!("expected query, got {:?}", other),
+        }
+    }
+
+    /// Multiple threads each run a loop of BEGIN; UPDATE counter; COMMIT.
+    /// The row-level lock must be held for the duration of the explicit
+    /// transaction, so updates cannot interleave — the final value must equal
+    /// num_threads × iterations_per_thread.
+    #[test]
+    fn concurrent_transactions_update_counter() {
+        let base = temp_dir("txn_update_counter");
+        let db = Database::open(&base, 64).unwrap();
+
+        db.execute(1, "create table counter (id int4 not null, val int4 not null)")
+            .unwrap();
+        db.execute(1, "insert into counter (id, val) values (1, 0)")
+            .unwrap();
+
+        let num_threads = 4;
+        let iters_per_thread = 10;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let db = db.clone();
+                thread::spawn(move || {
+                    let mut session = Session::new((t + 1500) as ClientId);
+                    for _ in 0..iters_per_thread {
+                        session.execute(&db, "begin").unwrap();
+                        session
+                            .execute(&db, "update counter set val = val + 1 where id = 1")
+                            .unwrap();
+                        session.execute(&db, "commit").unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        join_all_with_timeout(handles, TEST_TIMEOUT);
+
+        let expected = num_threads * iters_per_thread;
+        match db.execute(1, "select val from counter where id = 1").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(expected as i32)]],
+                    "all transactional updates must be serialized — expected {expected}"
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    /// Within a single BEGIN block, a row inserted earlier in the transaction
+    /// must be visible to a SELECT issued later in the same transaction
+    /// (read-your-own-writes / command-id visibility).
+    #[test]
+    fn read_your_own_writes_within_transaction() {
+        let base = temp_dir("read_own_writes");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table rowtable (id int4 not null, val int4 not null)")
+            .unwrap();
+
+        session.execute(&db, "begin").unwrap();
+        session
+            .execute(&db, "insert into rowtable (id, val) values (1, 42)")
+            .unwrap();
+
+        // The insert is not yet committed, but the same session must see it.
+        match session.execute(&db, "select val from rowtable where id = 1").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(42)]],
+                    "own uncommitted insert must be visible within the transaction"
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        session.execute(&db, "commit").unwrap();
+
+        // After commit the row must still be there.
+        match session.execute(&db, "select count(*) from rowtable").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    /// Each thread runs one explicit transaction that inserts a batch of rows.
+    /// No row must be lost: the final count must equal num_threads × batch_size,
+    /// even though all transactions overlap in time.
+    #[test]
+    fn concurrent_transactions_bulk_insert() {
+        let base = temp_dir("txn_bulk_insert");
+        let db = Database::open(&base, 64).unwrap();
+
+        db.execute(1, "create table bulk (id int4 not null)").unwrap();
+
+        let num_threads = 4;
+        let batch_size = 10;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let db = db.clone();
+                thread::spawn(move || {
+                    let mut session = Session::new((t + 1600) as ClientId);
+                    session.execute(&db, "begin").unwrap();
+                    for i in 0..batch_size {
+                        let id = t * 10_000 + i;
+                        session
+                            .execute(&db, &format!("insert into bulk (id) values ({id})"))
+                            .unwrap();
+                    }
+                    session.execute(&db, "commit").unwrap();
+                })
+            })
+            .collect();
+
+        join_all_with_timeout(handles, TEST_TIMEOUT);
+
+        let expected = (num_threads * batch_size) as i32;
+        match db.execute(1, "select count(*) from bulk").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(expected)]],
+                    "all bulk-inserted rows must survive — expected {expected}"
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    /// Thread A opens a transaction and inserts a row, then waits for a signal
+    /// before committing.  Thread B reads the table repeatedly while A is still
+    /// in progress — it must never see A's uncommitted row (no dirty reads).
+    /// After A commits, B must see the row.
+    #[test]
+    fn no_dirty_reads_concurrent() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let base = temp_dir("no_dirty_reads");
+        let db = Database::open(&base, 64).unwrap();
+
+        db.execute(1, "create table dirty (id int4 not null)").unwrap();
+
+        // Shared flags: writer signals when it has inserted (but not committed),
+        // and when it has committed.
+        let inserted = Arc::new(AtomicBool::new(false));
+        let committed = Arc::new(AtomicBool::new(false));
+
+        let inserted_w = inserted.clone();
+        let committed_w = committed.clone();
+        let db_w = db.clone();
+
+        let writer = thread::spawn(move || {
+            let mut session = Session::new(1700);
+            session.execute(&db_w, "begin").unwrap();
+            session
+                .execute(&db_w, "insert into dirty (id) values (1)")
+                .unwrap();
+            // Signal that the insert is done but not yet committed.
+            inserted_w.store(true, Ordering::Release);
+            // Busy-wait a moment to give the reader time to observe the state.
+            let deadline = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+            session.execute(&db_w, "commit").unwrap();
+            committed_w.store(true, Ordering::Release);
+        });
+
+        // Reader: spin until writer has inserted, then verify no dirty read.
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while !inserted.load(Ordering::Acquire) {
+            if Instant::now() > deadline {
+                panic!("timed out waiting for writer to insert");
+            }
+            std::hint::spin_loop();
+        }
+
+        // While writer is still in progress, we must see 0 rows.
+        match db.execute(1800, "select count(*) from dirty").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(0)]],
+                    "must not see uncommitted row (dirty read)"
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        writer
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
+
+        assert!(committed.load(Ordering::Acquire));
+
+        // After commit, the row must now be visible.
+        match db.execute(1800, "select count(*) from dirty").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(1)]],
+                    "committed row must be visible after commit"
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    /// Half the threads commit their transaction; half roll it back.
+    /// Only the committed threads' rows must survive.
+    #[test]
+    fn concurrent_mixed_commit_and_rollback() {
+        let base = temp_dir("mixed_commit_rollback");
+        let db = Database::open(&base, 64).unwrap();
+
+        db.execute(1, "create table mixed (id int4 not null)").unwrap();
+
+        let num_threads = 6; // must be even
+        let rows_per_thread = 5;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let db = db.clone();
+                thread::spawn(move || {
+                    let mut session = Session::new((t + 1900) as ClientId);
+                    session.execute(&db, "begin").unwrap();
+                    for i in 0..rows_per_thread {
+                        let id = t * 10_000 + i;
+                        session
+                            .execute(&db, &format!("insert into mixed (id) values ({id})"))
+                            .unwrap();
+                    }
+                    // Even-numbered threads commit; odd-numbered threads roll back.
+                    if t % 2 == 0 {
+                        session.execute(&db, "commit").unwrap();
+                    } else {
+                        session.execute(&db, "rollback").unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        join_all_with_timeout(handles, TEST_TIMEOUT);
+
+        let committing_threads = num_threads / 2; // threads 0, 2, 4, …
+        let expected = (committing_threads * rows_per_thread) as i32;
+        match db.execute(1, "select count(*) from mixed").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(expected)]],
+                    "only committed rows should survive — expected {expected}"
+                );
             }
             other => panic!("expected query result, got {:?}", other),
         }
