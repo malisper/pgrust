@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use rustc_hash::FxHashMap;
 
 use crate::storage::smgr::RelFileLocator;
 use crate::storage::wal::{INVALID_LSN, Lsn, WalWriter};
@@ -21,7 +22,7 @@ struct BufferFrameInner {
     io_error: bool,
     usage_count: u8,
     pin_count: usize,
-    pins_by_client: HashMap<ClientId, usize>,
+    pins_by_client: FxHashMap<ClientId, usize>,
 }
 
 impl Default for BufferFrameInner {
@@ -35,7 +36,7 @@ impl Default for BufferFrameInner {
             io_error: false,
             usage_count: 0,
             pin_count: 0,
-            pins_by_client: HashMap::new(),
+            pins_by_client: FxHashMap::default(),
         }
     }
 }
@@ -87,7 +88,7 @@ pub struct BufferPool<S: StorageBackend + Send> {
     storage: Mutex<S>,
     wal: Option<Arc<WalWriter>>,
     frames: Vec<BufferFrame>,
-    lookup: RwLock<HashMap<BufferTag, BufferId>>,
+    lookup: RwLock<FxHashMap<BufferTag, BufferId>>,
     strategy: Mutex<StrategyState>,
     max_usage_count: u8,
     stats_hit: AtomicU64,
@@ -122,7 +123,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             storage: Mutex::new(storage),
             wal,
             frames,
-            lookup: RwLock::new(HashMap::new()),
+            lookup: RwLock::new(FxHashMap::default()),
             strategy: Mutex::new(StrategyState {
                 free_list,
                 next_victim: 0,
