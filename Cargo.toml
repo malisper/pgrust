@@ -12,6 +12,7 @@ deadlock_detection = ["parking_lot/deadlock_detection"]
 
 [dependencies]
 libc = "0.2"
+mimalloc = "0.1.48"
 parking_lot = "0.12"
 pest = "2.7"
 pest_derive = "2.7"
