@@ -20,7 +20,7 @@ use crate::storage::smgr::StorageManager;
 use super::nodes::*;
 use super::expr::{eval_expr, predicate_matches, tuple_from_values};
 use super::explain::{format_buffer_usage, format_explain_lines};
-use super::{ExecError, ExecutorContext, QueryResult, StatementResult, execute_plan_internal, executor_start};
+use super::{ExecError, ExecutorContext, StatementResult, execute_plan_internal, executor_start};
 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
@@ -45,36 +45,28 @@ pub(crate) fn execute_explain(
             let stats = ctx.pool.usage_stats();
             lines.push(format_buffer_usage(stats));
         }
-        if let StatementResult::Query(qr) = &result {
-            lines.push(format!("Result Rows: {}", qr.row_count()));
+        if let StatementResult::Query { rows, .. } = result {
+            lines.push(format!("Result Rows: {}", rows.len()));
         }
     } else {
         let state = executor_start(plan);
         format_explain_lines(&state, 0, false, &mut lines);
     }
 
-    let nrows = lines.len();
-    let values: Vec<Value> = lines.into_iter().map(|line| Value::Text(line.into())).collect();
-    Ok(StatementResult::Query(QueryResult::new(
-        vec!["QUERY PLAN".into()],
-        1,
-        nrows,
-        values,
-    )))
+    Ok(StatementResult::Query {
+        column_names: vec!["QUERY PLAN".into()],
+        rows: lines.into_iter().map(|line| vec![Value::Text(line.into())]).collect(),
+    })
 }
 
 pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
-    let values: Vec<Value> = catalog
-        .table_names()
-        .map(|name| Value::Text(name.to_string().into()))
-        .collect();
-    let nrows = values.len();
-    Ok(StatementResult::Query(QueryResult::new(
-        vec!["table_name".into()],
-        1,
-        nrows,
-        values,
-    )))
+    Ok(StatementResult::Query {
+        column_names: vec!["table_name".into()],
+        rows: catalog
+            .table_names()
+            .map(|name| vec![Value::Text(name.to_string().into())])
+            .collect(),
+    })
 }
 
 pub fn execute_create_table(

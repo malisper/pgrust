@@ -209,19 +209,6 @@ pub(crate) fn decode_tuple_from_bytes(
     desc: &RelationDesc,
     attr_descs: &[crate::access::heap::tuple::AttributeDesc],
 ) -> Result<Vec<Value>, ExecError> {
-    let mut values = Vec::with_capacity(desc.columns.len());
-    decode_tuple_into(tuple_bytes, desc, attr_descs, &mut values)?;
-    Ok(values)
-}
-
-/// Decode tuple values directly into an existing Vec, avoiding intermediate allocation.
-/// Returns the number of columns decoded.
-pub(crate) fn decode_tuple_into(
-    tuple_bytes: &[u8],
-    desc: &RelationDesc,
-    attr_descs: &[crate::access::heap::tuple::AttributeDesc],
-    target: &mut Vec<Value>,
-) -> Result<usize, ExecError> {
     use crate::access::heap::tuple::{HEAP_HASNULL, HEAP_NATTS_MASK, SIZEOF_HEAP_TUPLE_HEADER};
 
     if tuple_bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
@@ -237,15 +224,14 @@ pub(crate) fn decode_tuple_into(
         &[] as &[u8]
     };
     let data = &tuple_bytes[usize::from(hoff)..];
-    let ncols = desc.columns.len();
 
-    target.reserve(ncols);
+    let mut values = Vec::with_capacity(desc.columns.len());
     let mut off = 0usize;
 
     for (i, (column, attr)) in desc.columns.iter().zip(attr_descs.iter()).enumerate() {
         let is_null = has_null && crate::access::heap::tuple::att_isnull(i, null_bitmap);
         if is_null {
-            target.push(Value::Null);
+            values.push(Value::Null);
             continue;
         }
 
@@ -255,7 +241,7 @@ pub(crate) fn decode_tuple_into(
                 let end = off + len as usize;
                 let bytes = &data[off..end];
                 off = end;
-                target.push(decode_fixed_value(column, bytes)?);
+                values.push(decode_fixed_value(column, bytes)?);
             }
             -1 => {
                 off = attr.attalign.align_offset(off);
@@ -266,7 +252,7 @@ pub(crate) fn decode_tuple_into(
                 let end = off + total_len;
                 let bytes = &data[start..end];
                 off = end;
-                target.push(decode_varlen_value(column, bytes)?);
+                values.push(decode_varlen_value(column, bytes)?);
             }
             -2 => {
                 let mut end = off;
@@ -275,7 +261,7 @@ pub(crate) fn decode_tuple_into(
                 }
                 let bytes = &data[off..end];
                 off = end + 1;
-                target.push(decode_varlen_value(column, bytes)?);
+                values.push(decode_varlen_value(column, bytes)?);
             }
             _other => {
                 return Err(ExecError::UnsupportedStorageType {
@@ -287,7 +273,7 @@ pub(crate) fn decode_tuple_into(
         }
     }
 
-    Ok(ncols)
+    Ok(values)
 }
 
 #[inline]

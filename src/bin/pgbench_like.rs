@@ -208,18 +208,15 @@ fn run_tpcb_like_transaction<R: Rng>(
 fn execute_expect_affected(session: &mut Session, db: &Database, sql: &str) -> Result<(), String> {
     match session.execute(db, sql) {
         Ok(StatementResult::AffectedRows(_)) => Ok(()),
-        Ok(StatementResult::Query(_)) => Err(format!("expected affected-rows result for: {sql}")),
+        Ok(StatementResult::Query { .. }) => Err(format!("expected affected-rows result for: {sql}")),
         Err(e) => Err(format!("{sql}: {e:?}")),
     }
 }
 
 fn execute_expect_select(session: &mut Session, db: &Database, sql: &str) -> Result<i32, String> {
     match session.execute(db, sql) {
-        Ok(StatementResult::Query(qr)) => {
-            if qr.row_count() == 0 {
-                return Err(format!("no rows returned for: {sql}"));
-            }
-            let row = qr.row(0);
+        Ok(StatementResult::Query { rows, .. }) => {
+            let row = rows.first().ok_or_else(|| format!("no rows returned for: {sql}"))?;
             let value = row.first().ok_or_else(|| format!("empty row returned for: {sql}"))?;
             match value {
                 Value::Int32(v) => Ok(*v),
