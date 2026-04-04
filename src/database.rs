@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::access::heap::mvcc::{MvccError, TransactionId, TransactionManager};
 use crate::catalog::{CatalogError, DurableCatalog};
 use crate::executor::{ExecError, ExecutorContext, StatementResult};
 use crate::storage::smgr::{MdStorageManager, RelFileLocator};
-use crate::storage::wal::{WalWriter, WalError};
+use crate::storage::wal::{WalBgWriter, WalWriter, WalError};
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
@@ -151,6 +152,8 @@ pub struct Database {
     pub catalog: Arc<RwLock<DurableCatalog>>,
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
+    /// Background WAL writer — flushes BufWriter to kernel periodically.
+    _wal_bg_writer: Arc<WalBgWriter>,
 }
 
 impl Database {
@@ -183,6 +186,8 @@ impl Database {
             }
         }
 
+        let wal_bg_writer = WalBgWriter::start(Arc::clone(&wal), Duration::from_millis(200));
+
         Ok(Self {
             pool: Arc::new(pool),
             wal,
@@ -190,6 +195,7 @@ impl Database {
             catalog: Arc::new(RwLock::new(catalog)),
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
+            _wal_bg_writer: Arc::new(wal_bg_writer),
         })
     }
 
