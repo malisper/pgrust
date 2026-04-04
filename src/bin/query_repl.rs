@@ -171,16 +171,15 @@ fn print_result(result: StatementResult) {
         StatementResult::AffectedRows(count) => {
             println!("AFFECTED ROWS: {}", count);
         }
-        StatementResult::Query { column_names, rows } => {
-            if column_names.is_empty() {
-                println!("({} rows)", rows.len());
+        StatementResult::Query(qr) => {
+            if qr.column_names().is_empty() {
+                println!("({} rows)", qr.row_count());
                 return;
             }
 
-            let mut widths = column_names.iter().map(|name| name.len()).collect::<Vec<_>>();
-            let rendered_rows = rows
-                .into_iter()
-                .map(|row| row.into_iter().map(|value| render_value(&value)).collect::<Vec<_>>())
+            let mut widths = qr.column_names().iter().map(|name| name.len()).collect::<Vec<_>>();
+            let rendered_rows = qr.rows()
+                .map(|row| row.iter().map(|value| render_value(value)).collect::<Vec<_>>())
                 .collect::<Vec<_>>();
 
             for row in &rendered_rows {
@@ -189,7 +188,7 @@ fn print_result(result: StatementResult) {
                 }
             }
 
-            let header = column_names
+            let header = qr.column_names()
                 .iter()
                 .enumerate()
                 .map(|(idx, name)| format!("{name:<width$}", width = widths[idx]))

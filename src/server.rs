@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use crate::database::{Database, Session};
-use crate::executor::{ExecError, StatementResult, Value};
+use crate::executor::{ExecError, QueryResult, StatementResult, Value};
 use crate::parser::{parse_statement, Statement};
 use crate::ClientId;
 
@@ -220,8 +220,8 @@ fn handle_query(
     }
 
     match state.session.execute(db, sql) {
-        Ok(StatementResult::Query { column_names, rows }) => {
-            send_query_result(stream, &column_names, &rows, &format!("SELECT {}", rows.len()))?;
+        Ok(StatementResult::Query(qr)) => {
+            send_query_result_from_qr(stream, &qr, &format!("SELECT {}", qr.row_count()))?;
         }
         Ok(StatementResult::AffectedRows(n)) => {
             let tag = infer_command_tag(sql, n);
@@ -457,12 +457,12 @@ fn execute_portal(
 
     let sql = substitute_params(&portal.sql, &portal.params);
     match session.execute(db, &sql) {
-        Ok(StatementResult::Query { column_names: _, rows }) => {
+        Ok(StatementResult::Query(qr)) => {
             // Extended protocol: Execute sends DataRows + CommandComplete only.
-            for row in &rows {
+            for row in qr.rows() {
                 send_data_row(stream, row)?;
             }
-            send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
+            send_command_complete(stream, &format!("SELECT {}", qr.row_count()))?;
         }
         Ok(StatementResult::AffectedRows(n)) => {
             let tag = infer_command_tag(&sql, n);
@@ -535,14 +535,13 @@ fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
         .replace("::regclass", "")
 }
 
-fn send_query_result(
+fn send_query_result_from_qr(
     stream: &mut TcpStream,
-    column_names: &[String],
-    rows: &[Vec<Value>],
+    qr: &QueryResult,
     tag: &str,
 ) -> io::Result<()> {
-    send_row_description(stream, column_names)?;
-    for row in rows {
+    send_row_description(stream, qr.column_names())?;
+    for row in qr.rows() {
         send_data_row(stream, row)?;
     }
     send_command_complete(stream, tag)

@@ -206,6 +206,54 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
     Ok(None)
 }
 
+/// Scan ALL remaining visible tuples, calling `process` for each one.
+/// Processes all tuples on each page before moving to the next, avoiding
+/// repeated pin/unpin per tuple.
+pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    txns: &TransactionManager,
+    scan: &mut VisibleHeapScan,
+    mut process: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<usize, E> {
+    let mut count = 0usize;
+    while scan.scan.current_block < scan.scan.nblocks {
+        let block = scan.scan.current_block;
+        let buffer_id = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+
+        let _content_lock = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        pool.with_page(buffer_id, |page| -> Result<(), E> {
+            let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+
+            while scan.scan.current_offset <= max_offset {
+                let off = scan.scan.current_offset;
+                scan.scan.current_offset += 1;
+
+                let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
+                    continue;
+                }
+
+                let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                if !scan.snapshot.tuple_bytes_visible(txns, tuple_bytes) {
+                    continue;
+                }
+
+                process(tuple_bytes)?;
+                count += 1;
+            }
+            Ok(())
+        }).ok_or_else(|| E::from(HeapError::Buffer(Error::InvalidBuffer)))??;
+        drop(_content_lock);
+
+        pool.unpin(client_id, buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        scan.scan.current_block += 1;
+        scan.scan.current_offset = 1;
+    }
+
+    Ok(count)
+}
+
 pub fn heap_insert(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,

@@ -47,11 +47,11 @@ fn main() -> Result<(), String> {
         let result = db
             .execute(2, "select * from scanbench")
             .map_err(|e| format!("{e:?}"))?;
-        let StatementResult::Query { rows, .. } = result else {
+        let StatementResult::Query(qr) = result else {
             return Err("expected query result".into());
         };
-        total_rows += rows.len();
-        checksum += rows.iter().map(|row| row_checksum(row)).sum::<i64>();
+        total_rows += qr.row_count();
+        checksum += qr.rows().map(|row| row_checksum(row)).sum::<i64>();
     }
     let elapsed = started.elapsed();
     let stats = db.pool.usage_stats();

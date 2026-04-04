@@ -981,10 +981,10 @@ mod tests {
             .unwrap();
 
         match db.execute(1, "select id, name from items order by id").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 2);
-                assert_eq!(rows[0], vec![Value::Int32(1), Value::Text("alpha".into())]);
-                assert_eq!(rows[1], vec![Value::Int32(2), Value::Text("beta".into())]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row_count(), 2);
+                assert_eq!(qr.row(0), &[Value::Int32(1), Value::Text("alpha".into())]);
+                assert_eq!(qr.row(1), &[Value::Int32(2), Value::Text("beta".into())]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1021,16 +1021,15 @@ mod tests {
             )
             .unwrap()
         {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row_count(), 2);
+                assert_eq!(qr.row(0), &[Value::Int32(1), Value::Int32(0), Value::Null]);
                 assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Int32(1), Value::Int32(0), Value::Null],
-                        vec![
-                            Value::Int32(2),
-                            Value::Int32(5),
-                            Value::Text("branch".into()),
-                        ],
+                    qr.row(1),
+                    &[
+                        Value::Int32(2),
+                        Value::Int32(5),
+                        Value::Text("branch".into()),
                     ]
                 );
             }
@@ -1065,8 +1064,8 @@ mod tests {
             .execute(&db, "select count(*) from pgbench_tellers")
             .unwrap()
         {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(0)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(0)]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1080,15 +1079,15 @@ mod tests {
             )
             .unwrap()
         {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![
+                    qr.row(0),
+                    &[
                         Value::Int32(10),
                         Value::Int32(1),
                         Value::Int32(0),
                         Value::Null,
-                    ]]
+                    ]
                 );
             }
             other => panic!("expected query result, got {:?}", other),
@@ -1123,8 +1122,8 @@ mod tests {
                             )
                             .unwrap()
                         {
-                            StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows, vec![vec![Value::Int32(10)]]);
+                            StatementResult::Query(qr) => {
+                                assert_eq!(qr.row(0), &[Value::Int32(10)]);
                             }
                             other => panic!("expected query result, got {:?}", other),
                         }
@@ -1172,8 +1171,8 @@ mod tests {
             .execute(1, "select count(*) from log")
             .unwrap()
         {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(total as i32)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(total as i32)]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1206,8 +1205,8 @@ mod tests {
                         )
                         .unwrap();
                     match result {
-                        StatementResult::Query { rows, .. } => {
-                            assert_eq!(rows.len(), 1);
+                        StatementResult::Query(qr) => {
+                            assert_eq!(qr.row_count(), 1);
                         }
                         other => panic!("expected query result, got {:?}", other),
                     }
@@ -1237,9 +1236,9 @@ mod tests {
             .execute(1, "select count(*) from counters")
             .unwrap()
         {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 let expected = 1 + num_writers * ops_per_thread;
-                assert_eq!(rows, vec![vec![Value::Int32(expected as i32)]]);
+                assert_eq!(qr.row(0), &[Value::Int32(expected as i32)]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1277,10 +1276,10 @@ mod tests {
 
         let expected = num_threads * updates_per_thread;
         match db.execute(1, "select val from counter where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected as i32)]],
+                    qr.row(0),
+                    &[Value::Int32(expected as i32)],
                     "expected val={expected} after {num_threads} threads x {updates_per_thread} increments"
                 );
             }
@@ -1328,10 +1327,10 @@ mod tests {
                 .execute(1, &format!("select val from slots where id = {i}"))
                 .unwrap()
             {
-                StatementResult::Query { rows, .. } => {
+                StatementResult::Query(qr) => {
                     assert_eq!(
-                        rows,
-                        vec![vec![Value::Int32(updates_per_thread as i32)]],
+                        qr.row(0),
+                        &[Value::Int32(updates_per_thread as i32)],
                         "row {i} should have val={updates_per_thread}"
                     );
                 }
@@ -1391,8 +1390,8 @@ mod tests {
         );
 
         match db.execute(1, "select val from flag where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(99)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(99)]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1429,8 +1428,8 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
 
         match db.execute(1, "select count(*) from ftest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(80)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(80)]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1469,10 +1468,10 @@ mod tests {
 
         let expected = num_threads * inserts_per_thread;
         match db.execute(1, "select count(*) from itest").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected as i32)]],
+                    qr.row(0),
+                    &[Value::Int32(expected as i32)],
                     "expected {expected} rows, no lost inserts"
                 );
             }
@@ -1508,8 +1507,8 @@ mod tests {
                             )
                             .unwrap()
                         {
-                            StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows, vec![vec![Value::Int32(5)]]);
+                            StatementResult::Query(qr) => {
+                                assert_eq!(qr.row(0), &[Value::Int32(5)]);
                             }
                             other => panic!("expected query result, got {:?}", other),
                         }
@@ -1563,9 +1562,9 @@ mod tests {
                         )
                         .unwrap()
                     {
-                        StatementResult::Query { rows, .. } => {
-                            assert_eq!(rows.len(), 1, "should always see exactly one row");
-                            match &rows[0][0] {
+                        StatementResult::Query(qr) => {
+                            assert_eq!(qr.row_count(), 1, "should always see exactly one row");
+                            match &qr.row(0)[0] {
                                 Value::Int32(v) => assert!(*v >= 0, "val should never be negative"),
                                 other => panic!("expected Int32, got {:?}", other),
                             }
@@ -1580,10 +1579,10 @@ mod tests {
 
         let expected_val = num_writers * 20;
         match db.execute(1, "select val from rwtest where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected_val as i32)]],
+                    qr.row(0),
+                    &[Value::Int32(expected_val as i32)],
                     "all writer updates should be applied"
                 );
             }
@@ -1628,8 +1627,8 @@ mod tests {
 
         let expected = num_threads * updates_per_thread;
         match db.execute(1, "select val from dltest where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(expected as i32)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(expected as i32)]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1683,8 +1682,8 @@ mod tests {
                             )
                             .unwrap()
                         {
-                            StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows.len(), 1);
+                            StatementResult::Query(qr) => {
+                                assert_eq!(qr.row_count(), 1);
                             }
                             other => panic!("expected query result, got {:?}", other),
                         }
@@ -1714,8 +1713,8 @@ mod tests {
         assert_eq!(session.ready_status(), b'I');
 
         match session.execute(&db, "select count(*) from txtest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(2)]);
             }
             other => panic!("expected query, got {:?}", other),
         }
@@ -1736,8 +1735,8 @@ mod tests {
         session.execute(&db, "rollback").unwrap();
 
         match session.execute(&db, "select count(*) from rbtest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]],
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(1)],
                     "only the autocommitted row should survive rollback");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1767,8 +1766,8 @@ mod tests {
         assert_eq!(session.ready_status(), b'I');
 
         match session.execute(&db, "select count(*) from ftest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(0)]],
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(0)],
                     "all inserts should be rolled back");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1786,8 +1785,8 @@ mod tests {
         session.execute(&db, "insert into atest (id) values (2)").unwrap();
 
         match session.execute(&db, "select count(*) from atest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(2)]);
             }
             other => panic!("expected query, got {:?}", other),
         }
@@ -1807,8 +1806,8 @@ mod tests {
         session_a.execute(&db, "insert into isotest (id, val) values (2, 200)").unwrap();
 
         match session_b.execute(&db, "select count(*) from isotest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]],
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(1)],
                     "session B should not see session A's uncommitted insert");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1817,8 +1816,8 @@ mod tests {
         session_a.execute(&db, "commit").unwrap();
 
         match session_b.execute(&db, "select count(*) from isotest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]],
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(2)],
                     "session B should see session A's committed insert");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1862,10 +1861,10 @@ mod tests {
 
         let expected = num_threads * iters_per_thread;
         match db.execute(1, "select val from counter where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected as i32)]],
+                    qr.row(0),
+                    &[Value::Int32(expected as i32)],
                     "all transactional updates must be serialized — expected {expected}"
                 );
             }
@@ -1893,10 +1892,10 @@ mod tests {
 
         // The insert is not yet committed, but the same session must see it.
         match session.execute(&db, "select val from rowtable where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(42)]],
+                    qr.row(0),
+                    &[Value::Int32(42)],
                     "own uncommitted insert must be visible within the transaction"
                 );
             }
@@ -1907,8 +1906,8 @@ mod tests {
 
         // After commit the row must still be there.
         match session.execute(&db, "select count(*) from rowtable").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            StatementResult::Query(qr) => {
+                assert_eq!(qr.row(0), &[Value::Int32(1)]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1948,10 +1947,10 @@ mod tests {
 
         let expected = (num_threads * batch_size) as i32;
         match db.execute(1, "select count(*) from bulk").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected)]],
+                    qr.row(0),
+                    &[Value::Int32(expected)],
                     "all bulk-inserted rows must survive — expected {expected}"
                 );
             }
@@ -2009,10 +2008,10 @@ mod tests {
 
         // While writer is still in progress, we must see 0 rows.
         match db.execute(1800, "select count(*) from dirty").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(0)]],
+                    qr.row(0),
+                    &[Value::Int32(0)],
                     "must not see uncommitted row (dirty read)"
                 );
             }
@@ -2027,10 +2026,10 @@ mod tests {
 
         // After commit, the row must now be visible.
         match db.execute(1800, "select count(*) from dirty").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(1)]],
+                    qr.row(0),
+                    &[Value::Int32(1)],
                     "committed row must be visible after commit"
                 );
             }
@@ -2077,10 +2076,10 @@ mod tests {
         let committing_threads = num_threads / 2; // threads 0, 2, 4, …
         let expected = (committing_threads * rows_per_thread) as i32;
         match db.execute(1, "select count(*) from mixed").unwrap() {
-            StatementResult::Query { rows, .. } => {
+            StatementResult::Query(qr) => {
                 assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected)]],
+                    qr.row(0),
+                    &[Value::Int32(expected)],
                     "only committed rows should survive — expected {expected}"
                 );
             }
