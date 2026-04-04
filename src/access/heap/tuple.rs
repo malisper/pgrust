@@ -41,7 +41,7 @@ pub enum TupleValue {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct ItemPointerData {
     pub block_number: u32,
     pub offset_number: OffsetNumber,

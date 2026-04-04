@@ -3,6 +3,8 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 use pgrust::access::heap::am::{heap_flush, heap_insert_mvcc};
 use pgrust::access::heap::mvcc::{INVALID_TRANSACTION_ID, TransactionManager};
@@ -370,7 +372,7 @@ fn ensure_default_people_table(catalog_store: &mut DurableCatalog) -> Result<(),
 fn seed_if_empty(
     pool: &BufferPool<SmgrStorageBackend>,
     catalog: &Catalog,
-    txns: &mut TransactionManager,
+    txns: &Arc<RwLock<TransactionManager>>,
 ) -> Result<(), ExecError> {
     let rel = catalog
         .get("people")
@@ -381,7 +383,7 @@ fn seed_if_empty(
         return Ok(());
     }
 
-    let xid = txns.begin();
+    let xid = txns.write().begin();
     for row in [
         tuple(1, "alice", Some("alpha")),
         tuple(2, "bob", None),
@@ -390,14 +392,14 @@ fn seed_if_empty(
         let tid = heap_insert_mvcc(pool, 1, rel, xid, &row)?;
         heap_flush(pool, 1, rel, tid.block_number)?;
     }
-    txns.commit(xid)?;
+    txns.write().commit(xid)?;
     Ok(())
 }
 
 fn run_statement(
     sql: &str,
     pool: &BufferPool<SmgrStorageBackend>,
-    txns: &mut TransactionManager,
+    txns: &Arc<RwLock<TransactionManager>>,
     catalog_store: &mut DurableCatalog,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
@@ -407,8 +409,8 @@ fn run_statement(
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool,
-                txns,
-                snapshot: txns.snapshot(INVALID_TRANSACTION_ID)?,
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
             };
@@ -422,8 +424,8 @@ fn run_statement(
         Statement::Select(stmt) => {
             let mut ctx = ExecutorContext {
                 pool,
-                txns,
-                snapshot: txns.snapshot(INVALID_TRANSACTION_ID)?,
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
             };
@@ -437,8 +439,8 @@ fn run_statement(
         Statement::ShowTables => {
             let mut ctx = ExecutorContext {
                 pool,
-                txns,
-                snapshot: txns.snapshot(INVALID_TRANSACTION_ID)?,
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
             };
@@ -452,8 +454,8 @@ fn run_statement(
         Statement::CreateTable(stmt) => {
             let mut ctx = ExecutorContext {
                 pool,
-                txns,
-                snapshot: txns.snapshot(INVALID_TRANSACTION_ID)?,
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
             };
@@ -467,8 +469,8 @@ fn run_statement(
         Statement::DropTable(stmt) => {
             let mut ctx = ExecutorContext {
                 pool,
-                txns,
-                snapshot: txns.snapshot(INVALID_TRANSACTION_ID)?,
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
             };
@@ -480,12 +482,12 @@ fn run_statement(
             )
         }
         Statement::Insert(stmt) => {
-            let xid = txns.begin();
+            let xid = txns.write().begin();
             let result = {
                 let mut ctx = ExecutorContext {
                     pool,
-                    txns,
-                    snapshot: txns.snapshot(xid)?,
+                    txns: txns.clone(),
+                    snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
                 };
@@ -498,22 +500,22 @@ fn run_statement(
             };
             match result {
                 Ok(result) => {
-                    txns.commit(xid)?;
+                    txns.write().commit(xid)?;
                     Ok(result)
                 }
                 Err(err) => {
-                    txns.abort(xid)?;
+                    txns.write().abort(xid)?;
                     Err(err)
                 }
             }
         }
         Statement::Update(stmt) => {
-            let xid = txns.begin();
+            let xid = txns.write().begin();
             let result = {
                 let mut ctx = ExecutorContext {
                     pool,
-                    txns,
-                    snapshot: txns.snapshot(xid)?,
+                    txns: txns.clone(),
+                    snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
                 };
@@ -526,22 +528,22 @@ fn run_statement(
             };
             match result {
                 Ok(result) => {
-                    txns.commit(xid)?;
+                    txns.write().commit(xid)?;
                     Ok(result)
                 }
                 Err(err) => {
-                    txns.abort(xid)?;
+                    txns.write().abort(xid)?;
                     Err(err)
                 }
             }
         }
         Statement::Delete(stmt) => {
-            let xid = txns.begin();
+            let xid = txns.write().begin();
             let result = {
                 let mut ctx = ExecutorContext {
                     pool,
-                    txns,
-                    snapshot: txns.snapshot(xid)?,
+                    txns: txns.clone(),
+                    snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
                 };
@@ -554,11 +556,11 @@ fn run_statement(
             };
             match result {
                 Ok(result) => {
-                    txns.commit(xid)?;
+                    txns.write().commit(xid)?;
                     Ok(result)
                 }
                 Err(err) => {
-                    txns.abort(xid)?;
+                    txns.write().abort(xid)?;
                     Err(err)
                 }
             }
@@ -584,13 +586,15 @@ fn main() -> Result<(), String> {
         .unwrap_or_else(default_base_dir);
     fs::create_dir_all(&base_dir).map_err(|e| e.to_string())?;
 
-    let mut txns = TransactionManager::new_durable(&base_dir).map_err(|e| format!("{e:?}"))?;
+    let txns = Arc::new(RwLock::new(
+        TransactionManager::new_durable(&base_dir).map_err(|e| format!("{e:?}"))?,
+    ));
     let mut catalog_store = DurableCatalog::load(&base_dir).map_err(|e| format!("{e:?}"))?;
     ensure_default_people_table(&mut catalog_store)?;
 
     let smgr = MdStorageManager::new(&base_dir);
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-    seed_if_empty(&pool, catalog_store.catalog(), &mut txns).map_err(|e| format!("{e:?}"))?;
+    seed_if_empty(&pool, catalog_store.catalog(), &txns).map_err(|e| format!("{e:?}"))?;
 
     println!("PGRUST SQL REPL");
     println!("BASE DIRECTORY: {}", base_dir.display());
@@ -627,7 +631,7 @@ fn main() -> Result<(), String> {
         }
 
         let sql = input.trim_end_matches(';').trim();
-        match run_statement(sql, &pool, &mut txns, &mut catalog_store) {
+        match run_statement(sql, &pool, &txns, &mut catalog_store) {
             Ok(result) => print_result(result),
             Err(err) => eprintln!("ERROR: {}", render_exec_error(&err)),
         }

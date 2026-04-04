@@ -13,6 +13,8 @@ use pgrust::storage::smgr::MdStorageManager;
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 fn rel() -> RelFileLocator {
     RelFileLocator {
@@ -96,11 +98,13 @@ fn main() -> Result<(), ExecError> {
     println!("=== Setup ===");
     println!("  base directory: {:?}", base_dir);
 
-    let mut txns = TransactionManager::new_durable(&base_dir).unwrap();
+    let txns = Arc::new(RwLock::new(
+        TransactionManager::new_durable(&base_dir).unwrap(),
+    ));
     let smgr = MdStorageManager::new(&base_dir);
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
 
-    let xid = txns.begin();
+    let xid = txns.write().begin();
     for row in [
         tuple(1, "alice", Some("alpha")),
         tuple(2, "bob", None),
@@ -109,7 +113,7 @@ fn main() -> Result<(), ExecError> {
         let tid = heap_insert_mvcc(&pool, 1, rel(), xid, &row).unwrap();
         heap_flush(&pool, 1, rel(), tid.block_number).unwrap();
     }
-    txns.commit(xid).unwrap();
+    txns.write().commit(xid).unwrap();
 
     println!("=== Plan ===");
     println!("  PROJECT name, note");
@@ -142,8 +146,8 @@ fn main() -> Result<(), ExecError> {
     let mut state = executor_start(plan);
     let mut ctx = ExecutorContext {
         pool: &pool,
-        txns: &txns,
-        snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        txns: txns.clone(),
+        snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
         next_command_id: 0,
     };
