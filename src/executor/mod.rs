@@ -7,7 +7,7 @@ pub use nodes::*;
 pub use expr::eval_expr;
 
 use crate::access::heap::am::{
-    HeapError, heap_scan_begin_visible, heap_scan_next_visible_raw, heap_scan_all_visible_raw,
+    HeapError, heap_scan_begin_visible, heap_scan_next_visible_raw,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
 use crate::access::heap::tuple::{AttributeDesc, TupleError};
@@ -288,59 +288,6 @@ pub(crate) fn execute_plan_internal(
     Ok((
         StatementResult::Query {
             column_names: column_names.map(|rc| rc.to_vec()).unwrap_or_default(),
-            rows,
-        },
-        state,
-        started_at.elapsed(),
-    ))
-}
-
-/// Optimized path for bare SeqScan: uses bulk scan that holds one shared
-/// content lock per page and decodes tuples directly.
-fn execute_seq_scan_bulk(
-    mut state: PlanState,
-    ctx: &mut ExecutorContext<'_>,
-) -> Result<(StatementResult, PlanState, Duration), ExecError> {
-    let PlanState::SeqScan(ref mut scan_state) = state else {
-        unreachable!();
-    };
-
-    if scan_state.scan.is_none() {
-        scan_state.scan = Some(heap_scan_begin_visible(
-            ctx.pool,
-            scan_state.rel,
-            ctx.snapshot.clone(),
-        )?);
-    }
-
-    let desc = Rc::clone(&scan_state.desc);
-    let attr_descs = Rc::clone(&scan_state.attr_descs);
-    let column_names: Vec<String> = scan_state.column_names.to_vec();
-    let ncols = desc.columns.len();
-    let mut rows = Vec::new();
-
-    let started_at = Instant::now();
-    let PlanState::SeqScan(ref mut scan_state) = state else {
-        unreachable!();
-    };
-    let scan = scan_state.scan.as_mut().unwrap();
-    let txns_guard = ctx.txns.read();
-
-    let nrows = heap_scan_all_visible_raw(
-        ctx.pool,
-        ctx.client_id,
-        &txns_guard,
-        scan,
-        |tuple_bytes| -> Result<(), ExecError> {
-            let values = expr::decode_tuple_from_bytes(tuple_bytes, &desc, &attr_descs)?;
-            rows.push(values);
-            Ok(())
-        },
-    )?;
-
-    Ok((
-        StatementResult::Query {
-            column_names,
             rows,
         },
         state,
