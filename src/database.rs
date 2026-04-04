@@ -7,12 +7,14 @@ use crate::access::heap::mvcc::{MvccError, TransactionId, TransactionManager};
 use crate::catalog::{CatalogError, DurableCatalog};
 use crate::executor::{ExecError, ExecutorContext, StatementResult};
 use crate::storage::smgr::{MdStorageManager, RelFileLocator};
+use crate::storage::wal::{WalWriter, WalError};
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
 pub enum DatabaseError {
     Catalog(CatalogError),
     Mvcc(MvccError),
+    Wal(WalError),
 }
 
 impl From<CatalogError> for DatabaseError {
@@ -144,6 +146,7 @@ impl TableLockManager {
 #[derive(Clone)]
 pub struct Database {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
+    pub wal: Arc<WalWriter>,
     pub txns: Arc<RwLock<TransactionManager>>,
     pub catalog: Arc<RwLock<DurableCatalog>>,
     pub txn_waiter: Arc<TransactionWaiter>,
@@ -159,10 +162,15 @@ impl Database {
         let txns = TransactionManager::new_durable(&base_dir)?;
         let catalog = DurableCatalog::load(&base_dir)?;
         let smgr = MdStorageManager::new(&base_dir);
-        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), pool_size);
+
+        let wal_dir = base_dir.join("pg_wal");
+        let wal = Arc::new(WalWriter::new(&wal_dir).map_err(DatabaseError::Wal)?);
+
+        let pool = BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), pool_size, Arc::clone(&wal));
 
         Ok(Self {
             pool: Arc::new(pool),
+            wal,
             txns: Arc::new(RwLock::new(txns)),
             catalog: Arc::new(RwLock::new(catalog)),
             txn_waiter: Arc::new(TransactionWaiter::new()),
@@ -390,6 +398,16 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         match result {
             Ok(r) => {
+                // Flush WAL before recording the commit. This guarantees that
+                // all page modifications made by this transaction are durable
+                // on disk before any other session can observe the commit.
+                self.pool.flush_wal().map_err(|e| {
+                    ExecError::Heap(crate::access::heap::am::HeapError::Storage(
+                        crate::storage::smgr::SmgrError::Io(
+                            std::io::Error::new(std::io::ErrorKind::Other, e)
+                        )
+                    ))
+                })?;
                 self.txns.write().commit(xid).map_err(|e| {
                     ExecError::Heap(crate::access::heap::am::HeapError::Mvcc(e))
                 })?;

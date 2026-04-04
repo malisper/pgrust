@@ -337,10 +337,9 @@ impl StorageManager for MdStorageManager {
             });
         }
 
-        // Without WAL there is no crash-recovery path, so skip_fsync is never
-        // safe to honour. Always sync regardless of what the caller requests.
-        let _ = skip_fsync;
-        seg.file.sync_data()?;
+        if !skip_fsync {
+            seg.file.sync_data()?;
+        }
 
         Ok(())
     }
@@ -451,10 +450,9 @@ impl StorageManager for MdStorageManager {
             });
         }
 
-        // Without WAL there is no crash-recovery path, so skip_fsync is never
-        // safe to honour. Always sync regardless of what the caller requests.
-        let _ = skip_fsync;
-        seg.file.sync_data()?;
+        if !skip_fsync {
+            seg.file.sync_data()?;
+        }
 
         Ok(())
     }

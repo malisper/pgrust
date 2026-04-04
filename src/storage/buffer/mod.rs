@@ -5,10 +5,12 @@ pub use types::*;
 pub use backend::*;
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::storage::smgr::RelFileLocator;
+use crate::storage::wal::{INVALID_LSN, Lsn, WalWriter};
 
 struct BufferFrameInner {
     tag: Option<BufferTag>,
@@ -83,6 +85,7 @@ struct StrategyState {
 
 pub struct BufferPool<S: StorageBackend + Send> {
     storage: Mutex<S>,
+    wal: Option<Arc<WalWriter>>,
     frames: Vec<BufferFrame>,
     lookup: RwLock<HashMap<BufferTag, BufferId>>,
     strategy: Mutex<StrategyState>,
@@ -94,6 +97,14 @@ pub struct BufferPool<S: StorageBackend + Send> {
 
 impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn new(storage: S, capacity: usize) -> Self {
+        Self::new_inner(storage, capacity, None)
+    }
+
+    pub fn new_with_wal(storage: S, capacity: usize, wal: Arc<WalWriter>) -> Self {
+        Self::new_inner(storage, capacity, Some(wal))
+    }
+
+    fn new_inner(storage: S, capacity: usize, wal: Option<Arc<WalWriter>>) -> Self {
         let mut free_list = VecDeque::with_capacity(capacity);
         for id in 0..capacity {
             free_list.push_back(id);
@@ -109,6 +120,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         Self {
             storage: Mutex::new(storage),
+            wal,
             frames,
             lookup: RwLock::new(HashMap::new()),
             strategy: Mutex::new(StrategyState {
@@ -119,6 +131,15 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             stats_hit: AtomicU64::new(0),
             stats_read: AtomicU64::new(0),
             stats_written: AtomicU64::new(0),
+        }
+    }
+
+    /// Flush all pending WAL records to disk. Returns the flushed LSN, or
+    /// `INVALID_LSN` if this pool has no WAL writer.
+    pub fn flush_wal(&self) -> Result<Lsn, String> {
+        match &self.wal {
+            Some(wal) => wal.flush().map_err(|e| e.to_string()),
+            None => Ok(INVALID_LSN),
         }
     }
 
@@ -251,17 +272,19 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         // If the victim holds a dirty page, write it out before reusing.
-        // Without WAL there is no other path to recover these writes.
+        // When WAL is present, skip_fsync is safe: WAL is flushed at commit so
+        // the page can be recovered after a crash. Without WAL, fsync immediately.
         if inner.dirty {
             if let Some(old_tag) = inner.tag {
                 let page = inner.page;
+                let skip_fsync = self.wal.is_some();
                 drop(inner);
                 drop(lookup);
                 drop(strategy);
 
                 {
                     let mut storage = self.storage.lock();
-                    storage.write_page(old_tag, &page).map_err(Error::Storage)?;
+                    storage.write_page(old_tag, &page, skip_fsync).map_err(Error::Storage)?;
                 }
                 self.stats_written.fetch_add(1, Ordering::Relaxed);
 
@@ -395,32 +418,62 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(())
     }
 
-    pub fn write_page_image(&self, buffer_id: BufferId, page: &Page) -> Result<(), Error> {
+    /// Write a modified page image into the buffer frame.
+    ///
+    /// If this pool has a WAL writer, a full-page-image WAL record is appended
+    /// and the page's `pd_lsn` (bytes 0–7) is stamped with the assigned LSN.
+    /// The page is marked dirty and left in the buffer cache; the caller must
+    /// flush WAL before committing and the data page will reach disk via
+    /// eviction or an explicit `flush_buffer` + `complete_write`.
+    ///
+    /// If no WAL writer is present (e.g. in unit tests), the page is written
+    /// directly to storage with an fsync to preserve the pre-WAL safety guarantee.
+    pub fn write_page_image(&self, buffer_id: BufferId, xid: u32, page: &Page) -> Result<(), Error> {
         let tag = {
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-            let mut inner = frame.inner.lock();
+            let inner = frame.inner.lock();
             if !inner.valid {
                 return Err(Error::InvalidBuffer);
             }
-            inner.page = *page;
-            inner.dirty = true;
             inner.tag.ok_or(Error::UnknownBuffer)?
         };
 
-        // Without WAL, a crash between marking dirty and flushing loses the
-        // write. Sync to disk immediately so durability is guaranteed as soon
-        // as write_page_image returns.
-        {
-            let mut storage = self.storage.lock();
-            storage.write_page(tag, page).map_err(Error::Storage)?;
-        }
-        self.stats_written.fetch_add(1, Ordering::Relaxed);
+        // Determine the page image to store. If WAL is available, stamp pd_lsn.
+        let mut page_to_store = *page;
 
-        // Clear the dirty flag — the page is now on disk.
-        {
+        if let Some(ref wal) = self.wal {
+            // Write WAL record first (write-ahead). The returned LSN is stamped
+            // into the page header so recovery can tell when this page was last
+            // modified.
+            let lsn = wal
+                .write_record(xid, tag, page)
+                .map_err(|e| Error::Wal(e.to_string()))?;
+            page_to_store[0..8].copy_from_slice(&lsn.to_le_bytes());
+
+            // Store updated page in buffer frame and mark dirty.
+            // The data file write is deferred — WAL provides crash durability.
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
             let mut inner = frame.inner.lock();
-            inner.dirty = false;
+            inner.page = page_to_store;
+            inner.dirty = true;
+        } else {
+            // No WAL: fall back to immediate write + fsync for safety.
+            {
+                let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+                let mut inner = frame.inner.lock();
+                inner.page = page_to_store;
+                inner.dirty = true;
+            }
+            {
+                let mut storage = self.storage.lock();
+                storage.write_page(tag, &page_to_store, false).map_err(Error::Storage)?;
+            }
+            self.stats_written.fetch_add(1, Ordering::Relaxed);
+            {
+                let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+                let mut inner = frame.inner.lock();
+                inner.dirty = false;
+            }
         }
 
         Ok(())
@@ -459,8 +512,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         };
 
         {
+            let skip_fsync = self.wal.is_some();
             let mut storage = self.storage.lock();
-            storage.write_page(tag, &page).map_err(Error::Storage)?;
+            storage.write_page(tag, &page, skip_fsync).map_err(Error::Storage)?;
         }
 
         {
@@ -1019,5 +1073,142 @@ mod tests {
             pool.request_page(1, t).unwrap(),
             RequestPageResult::ReadIssued { .. }
         ));
+    }
+
+    fn pool_with_wal(
+        base: &PathBuf,
+        rel_number: u32,
+        nblocks: u32,
+        capacity: usize,
+    ) -> BufferPool<SmgrStorageBackend> {
+        let mut smgr = MdStorageManager::new(base);
+        let rel = smgr_rel(rel_number);
+        smgr.open(rel).unwrap();
+        smgr.create(rel, ForkNumber::Main, false).unwrap();
+        for i in 0..nblocks {
+            let fill = ((rel_number + i) % 200) as u8;
+            smgr.extend(rel, ForkNumber::Main, i, &[fill; PAGE_SIZE], true)
+                .unwrap();
+        }
+        smgr.immedsync(rel, ForkNumber::Main).unwrap();
+
+        let wal_dir = base.join("pg_wal");
+        let wal = Arc::new(crate::storage::wal::WalWriter::new(&wal_dir).unwrap());
+        BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), capacity, wal)
+    }
+
+    fn read_block_from_disk(base: &PathBuf, rel_number: u32, block: u32) -> Page {
+        let mut smgr = MdStorageManager::new(base);
+        let mut buf = [0u8; PAGE_SIZE];
+        smgr.read_block(smgr_rel(rel_number), ForkNumber::Main, block, &mut buf)
+            .unwrap();
+        buf
+    }
+
+    /// With WAL, `write_page_image` must NOT write the data page immediately.
+    /// The on-disk file should still contain the original fill until the page
+    /// is evicted or explicitly flushed.
+    #[test]
+    fn integ_wal_defers_data_page_write() {
+        let base = temp_dir("wal_defers_write");
+        let rel_number = 20u32;
+        let fill = (rel_number % 200) as u8;
+        let pool = pool_with_wal(&base, rel_number, 1, 4);
+        let t = smgr_tag(rel_number, 0);
+
+        // Load the page.
+        assert_eq!(
+            pool.request_page(1, t).unwrap(),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
+        pool.complete_read(0).unwrap();
+
+        // Modify via write_page_image (WAL path).
+        let mut new_page = [fill; PAGE_SIZE];
+        new_page[100] = 0xEE;
+        pool.write_page_image(0, 1, &new_page).unwrap();
+
+        // Frame should be dirty — write was deferred.
+        assert!(pool.buffer_state(0).unwrap().dirty, "page should still be dirty after WAL write");
+
+        // On-disk file must still have the original content.
+        let on_disk = read_block_from_disk(&base, rel_number, 0);
+        assert_eq!(
+            on_disk[100], fill,
+            "data page should not be on disk yet — WAL defers the write"
+        );
+    }
+
+    /// With WAL, `write_page_image` stamps the WAL LSN into `pd_lsn` (bytes 0–7).
+    #[test]
+    fn integ_wal_stamps_pd_lsn_in_page() {
+        let base = temp_dir("wal_pd_lsn");
+        let rel_number = 21u32;
+        let pool = pool_with_wal(&base, rel_number, 1, 4);
+        let t = smgr_tag(rel_number, 0);
+
+        assert_eq!(
+            pool.request_page(1, t).unwrap(),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
+        pool.complete_read(0).unwrap();
+
+        // Use a zeroed page so pd_lsn starts at 0.
+        let new_page = [0u8; PAGE_SIZE];
+        pool.write_page_image(0, 1, &new_page).unwrap();
+
+        let page_after = pool.read_page(0).unwrap();
+        let lsn_after = u64::from_le_bytes(page_after[0..8].try_into().unwrap());
+
+        // LSN must be non-zero: the WAL writer stamped the assigned record LSN.
+        assert_ne!(lsn_after, 0, "pd_lsn should be stamped with the WAL LSN");
+        // The first (and only) record lands at offset WAL_RECORD_LEN.
+        use crate::storage::wal::WAL_RECORD_LEN;
+        assert_eq!(lsn_after, WAL_RECORD_LEN as u64,
+            "first WAL record LSN should equal WAL_RECORD_LEN");
+    }
+
+    /// After eviction from a WAL-backed pool, the data page reaches disk
+    /// (without requiring a separate fsync — WAL provides that guarantee).
+    #[test]
+    fn integ_wal_eviction_writes_data_page_to_disk() {
+        let base = temp_dir("wal_evict_writes");
+        let rel_number = 22u32;
+        let fill = (rel_number % 200) as u8;
+        // Single-frame pool forces eviction when block 1 is requested.
+        let pool = pool_with_wal(&base, rel_number, 2, 1);
+
+        let t0 = smgr_tag(rel_number, 0);
+        let t1 = smgr_tag(rel_number, 1);
+
+        // Load block 0 and dirty it via write_page_image.
+        assert_eq!(
+            pool.request_page(1, t0).unwrap(),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
+        pool.complete_read(0).unwrap();
+
+        let mut new_page = [fill; PAGE_SIZE];
+        new_page[50] = 0xBE;
+        pool.write_page_image(0, 99, &new_page).unwrap();
+        pool.unpin(1, 0).unwrap();
+
+        // Data page is still deferred at this point.
+        let before = read_block_from_disk(&base, rel_number, 0);
+        assert_eq!(before[50], fill, "data page not on disk yet");
+
+        // Request block 1 — evicts block 0, which must be written to disk.
+        assert_eq!(
+            pool.request_page(1, t1).unwrap(),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
+        pool.complete_read(0).unwrap();
+
+        // Now block 0 should be on disk with the modified byte.
+        let after = read_block_from_disk(&base, rel_number, 0);
+        assert_eq!(
+            after[50], 0xBE,
+            "eviction should have written the dirty page to disk"
+        );
     }
 }
