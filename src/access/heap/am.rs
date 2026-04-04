@@ -11,7 +11,7 @@ use crate::database::TransactionWaiter;
 use crate::storage::page::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_max_offset_number};
 use crate::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::storage::buffer::Page;
-use crate::{BufferPool, ClientId, Error, RequestPageResult, SmgrStorageBackend};
+use crate::{BufferPool, ClientId, Error, PinnedBuffer, RequestPageResult, SmgrStorageBackend};
 
 #[derive(Debug)]
 pub enum HeapError {
@@ -95,7 +95,8 @@ pub fn heap_scan_next(
 ) -> Result<Option<(ItemPointerData, HeapTuple)>, HeapError> {
     while scan.current_block < scan.nblocks {
         let block = scan.current_block;
-        let buffer_id = pin_existing_block(pool, client_id, scan.rel, block)?;
+        let pin = pin_existing_block(pool, client_id, scan.rel, block)?;
+        let buffer_id = pin.buffer_id();
         let page = pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
         let max_offset = page_get_max_offset_number(&page).map_err(TupleError::from)?;
 
@@ -109,7 +110,7 @@ pub fn heap_scan_next(
             }
 
             let tuple = heap_page_get_tuple(&page, off)?;
-            pool.unpin(client_id, buffer_id)?;
+            drop(pin);
             return Ok(Some((
                 ItemPointerData {
                     block_number: block,
@@ -119,7 +120,7 @@ pub fn heap_scan_next(
             )));
         }
 
-        pool.unpin(client_id, buffer_id)?;
+        drop(pin);
         scan.current_block += 1;
         scan.current_offset = 1;
     }
@@ -176,7 +177,8 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
                 if let Some((_, old_bid)) = scan.pinned_buffer.take() {
                     pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
                 }
-                let bid = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+                let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+                let bid = pin.into_raw();
                 scan.pinned_buffer = Some((block, bid));
                 bid
             }
@@ -269,7 +271,8 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
     let mut count = 0usize;
     while scan.scan.current_block < scan.scan.nblocks {
         let block = scan.scan.current_block;
-        let buffer_id = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+        let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+        let buffer_id = pin.buffer_id();
 
         let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
         let page: &Page = &*guard;
@@ -316,7 +319,7 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
             pool.mark_buffer_dirty_hint(buffer_id);
         }
         drop(guard);
-        pool.unpin(client_id, buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        drop(pin);
 
         result?;
         scan.scan.current_block += 1;
@@ -362,10 +365,10 @@ pub fn heap_fetch(
     rel: RelFileLocator,
     tid: ItemPointerData,
 ) -> Result<HeapTuple, HeapError> {
-    let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
-    let page = pool.read_page(buffer_id).ok_or(Error::InvalidBuffer)?;
+    let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+    let page = pool.read_page(pin.buffer_id()).ok_or(Error::InvalidBuffer)?;
     let tuple = heap_page_get_tuple(&page, tid.offset_number)?;
-    pool.unpin(client_id, buffer_id)?;
+    drop(pin);
     Ok(tuple)
 }
 
@@ -395,23 +398,20 @@ pub fn heap_delete(
 ) -> Result<(), HeapError> {
     let snapshot = txns.snapshot(xid)?;
 
-    let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+    let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+    let buffer_id = pin.buffer_id();
 
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
     let mut tuple = heap_page_get_tuple(&new_page, tid.offset_number)?;
 
     if !snapshot.tuple_visible(txns, &tuple) {
-        drop(guard);
-        pool.unpin(client_id, buffer_id)?;
         return Err(HeapError::TupleNotVisible(tid));
     }
 
     if tuple.header.xmax != 0 {
         let xmax_status = txns.status(tuple.header.xmax);
         if !matches!(xmax_status, Some(TransactionStatus::Aborted) | None) {
-            drop(guard);
-            pool.unpin(client_id, buffer_id)?;
             return Err(HeapError::TupleAlreadyModified(tid));
         }
     }
@@ -421,8 +421,6 @@ pub fn heap_delete(
     tuple.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
     heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
     pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
-    drop(guard);
-    pool.unpin(client_id, buffer_id)?;
     Ok(())
 }
 
@@ -438,7 +436,8 @@ pub fn heap_delete_with_waiter(
     let snapshot = txns.read().snapshot(xid)?;
 
     loop {
-        let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+        let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+        let buffer_id = pin.buffer_id();
 
         let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
         let mut new_page = *guard;
@@ -447,8 +446,6 @@ pub fn heap_delete_with_waiter(
         {
             let txns_guard = txns.read();
             if !snapshot.tuple_visible(&txns_guard, &tuple) {
-                drop(guard);
-                pool.unpin(client_id, buffer_id)?;
                 return Err(HeapError::TupleNotVisible(tid));
             }
         }
@@ -459,13 +456,11 @@ pub fn heap_delete_with_waiter(
             tuple.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
             pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
-            drop(guard);
-            pool.unpin(client_id, buffer_id)?;
             return Ok(());
         }
 
         drop(guard);
-        pool.unpin(client_id, buffer_id)?;
+        drop(pin);
 
         let xmax_status = txns.read().status(xmax);
 
@@ -480,21 +475,20 @@ pub fn heap_delete_with_waiter(
             Some(TransactionStatus::Aborted) => {
                 // Re-acquire lock and claim: retry will re-read the tuple;
                 // if xmax is still the aborted xid, we treat it as claimable.
-                let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
-                let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
+                let pin2 = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+                let buffer_id2 = pin2.buffer_id();
+                let mut guard = pool.lock_buffer_exclusive(buffer_id2)?;
                 let mut new_page = *guard;
                 let mut recheck = heap_page_get_tuple(&new_page, tid.offset_number)?;
                 if recheck.header.xmax != xmax {
                     drop(guard);
-                    pool.unpin(client_id, buffer_id)?;
+                    drop(pin2);
                     continue;
                 }
                 recheck.header.xmax = xid;
                 recheck.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
                 heap_page_replace_tuple(&mut new_page, tid.offset_number, &recheck)?;
-                pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
-                drop(guard);
-                pool.unpin(client_id, buffer_id)?;
+                pool.write_page_image_locked(buffer_id2, xid, &new_page, &mut guard)?;
                 return Ok(());
             }
             Some(TransactionStatus::Committed) => {
@@ -540,7 +534,8 @@ pub fn heap_update_with_cid(
 
     let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid, cid)?;
 
-    let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+    let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+    let buffer_id = pin.buffer_id();
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
     let mut old_version = heap_page_get_tuple(&new_page, tid.offset_number)?;
@@ -550,8 +545,6 @@ pub fn heap_update_with_cid(
     old_version.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
     heap_page_replace_tuple(&mut new_page, tid.offset_number, &old_version)?;
     pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
-    drop(guard);
-    pool.unpin(client_id, buffer_id)?;
 
     Ok(new_tid)
 }
@@ -572,7 +565,8 @@ fn try_claim_tuple(
     xid: TransactionId,
     target_tid: ItemPointerData,
 ) -> Result<(ClaimResult, ItemPointerData), HeapError> {
-    let buffer_id = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
+    let pin = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
+    let buffer_id = pin.buffer_id();
 
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
@@ -584,8 +578,6 @@ fn try_claim_tuple(
         modified.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
         heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
         pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
-        drop(guard);
-        pool.unpin(client_id, buffer_id)?;
         return Ok((ClaimResult::Claimed, target_tid));
     }
 
@@ -593,7 +585,7 @@ fn try_claim_tuple(
     let ctid = tuple.header.ctid;
 
     drop(guard);
-    pool.unpin(client_id, buffer_id)?;
+    drop(pin);
 
     // Check xmax status after releasing the buffer. We use try_read to
     // avoid deadlock with parking_lot's write-preferring RwLock: a pending
@@ -617,16 +609,15 @@ fn try_claim_tuple(
             Ok((ClaimResult::WaitFor(xmax), target_tid))
         }
         Some(TransactionStatus::Aborted) => {
-            let buffer_id = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
-            let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
+            let pin2 = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
+            let buffer_id2 = pin2.buffer_id();
+            let mut guard = pool.lock_buffer_exclusive(buffer_id2)?;
             let mut new_page = *guard;
             let mut modified = heap_page_get_tuple(&new_page, target_tid.offset_number)?;
             modified.header.xmax = xid;
             modified.header.infomask &= !crate::access::heap::tuple::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
-            pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
-            drop(guard);
-            pool.unpin(client_id, buffer_id)?;
+            pool.write_page_image_locked(buffer_id2, xid, &new_page, &mut guard)?;
             Ok((ClaimResult::Claimed, target_tid))
         }
         Some(TransactionStatus::Committed) => {
@@ -657,7 +648,8 @@ pub fn heap_update_with_waiter(
             ClaimResult::Claimed => {
                 let new_tid = heap_insert_version(pool, client_id, rel, replacement, xid, cid)?;
 
-                let buffer_id = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+                let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+                let buffer_id = pin.buffer_id();
                 let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
                 let mut new_page = *guard;
                 let mut old_version =
@@ -670,8 +662,6 @@ pub fn heap_update_with_waiter(
                     &old_version,
                 )?;
                 pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
-                drop(guard);
-                pool.unpin(client_id, buffer_id)?;
 
                 return Ok(new_tid);
             }
@@ -699,11 +689,11 @@ pub fn heap_flush(
     block_number: u32,
 ) -> Result<(), HeapError> {
     use crate::FlushResult;
-    let buffer_id = pin_existing_block(pool, client_id, rel, block_number)?;
+    let pin = pin_existing_block(pool, client_id, rel, block_number)?;
+    let buffer_id = pin.buffer_id();
     if let FlushResult::WriteIssued = pool.flush_buffer(buffer_id)? {
         pool.complete_write(buffer_id)?;
     }
-    pool.unpin(client_id, buffer_id)?;
     Ok(())
 }
 
@@ -743,7 +733,8 @@ fn heap_insert_version(
             }
         })?;
 
-        let buffer_id = pin_existing_block(pool, client_id, rel, target_block)?;
+        let pin = pin_existing_block(pool, client_id, rel, target_block)?;
+        let buffer_id = pin.buffer_id();
         let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
         let mut new_page = *guard;
         let mut stored = tuple.clone();
@@ -755,8 +746,6 @@ fn heap_insert_version(
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
                 pool.write_page_image_locked(buffer_id, xmin, &new_page, &mut guard)?;
-                drop(guard);
-                pool.unpin(client_id, buffer_id)?;
                 return Ok(ItemPointerData {
                     block_number: target_block,
                     offset_number,
@@ -764,7 +753,7 @@ fn heap_insert_version(
             }
             Err(TupleError::Page(PageError::NoSpace)) => {
                 drop(guard);
-                pool.unpin(client_id, buffer_id)?;
+                drop(pin);
                 pool.with_storage_mut(|s| -> Result<(), HeapError> {
                     let current_nblocks = s.smgr.nblocks(rel, ForkNumber::Main)?;
                     let mut page = [0u8; crate::BLCKSZ];
@@ -774,8 +763,6 @@ fn heap_insert_version(
                 })?;
             }
             Err(e) => {
-                drop(guard);
-                pool.unpin(client_id, buffer_id)?;
                 return Err(e.into());
             }
         }
@@ -783,29 +770,32 @@ fn heap_insert_version(
 }
 
 
-fn pin_existing_block(
-    pool: &BufferPool<SmgrStorageBackend>,
+fn pin_existing_block<'a>(
+    pool: &'a BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
     rel: RelFileLocator,
     block_number: u32,
-) -> Result<usize, HeapError> {
+) -> Result<PinnedBuffer<'a, SmgrStorageBackend>, HeapError> {
     let tag = crate::BufferTag {
         rel,
         fork: ForkNumber::Main,
         block: block_number,
     };
-    match pool.request_page(client_id, tag)? {
-        RequestPageResult::Hit { buffer_id } => Ok(buffer_id),
+    let buffer_id = match pool.request_page(client_id, tag)? {
+        RequestPageResult::Hit { buffer_id } => buffer_id,
         RequestPageResult::ReadIssued { buffer_id } => {
             pool.complete_read(buffer_id)?;
-            Ok(buffer_id)
+            buffer_id
         }
         RequestPageResult::WaitingOnRead { buffer_id } => {
             pool.wait_for_io(buffer_id)?;
-            Ok(buffer_id)
+            buffer_id
         }
-        RequestPageResult::AllBuffersPinned => Err(HeapError::NoBufferAvailable),
-    }
+        RequestPageResult::AllBuffersPinned => return Err(HeapError::NoBufferAvailable),
+    };
+    // request_page already pinned the buffer; wrap it in an RAII guard
+    // that will unpin on drop without incrementing the pin count again.
+    Ok(pool.wrap_pinned(client_id, buffer_id))
 }
 
 #[cfg(test)]
