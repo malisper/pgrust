@@ -142,12 +142,12 @@ fn main() -> Result<(), ExecError> {
     };
 
     match execute_sql(&sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)? {
-        StatementResult::Query(qr) => {
+        StatementResult::Query { column_names, rows } => {
             println!("=== Output Rows ===");
-            for row in qr.rows() {
+            for row in rows {
                 println!(
                     "  {}",
-                    qr.column_names()
+                    column_names
                         .iter()
                         .zip(row.iter())
                         .map(|(name, value)| format!("{}={}", name, render_value(value)))

@@ -57,12 +57,12 @@ fn main() {
     eprintln!("--- SELECT (0 additional fdatasync expected) ---");
     let result = db.execute(CLIENT, "SELECT id, name FROM t ORDER BY id").unwrap();
     match result {
-        pgrust::executor::StatementResult::Query(qr) => {
-            for row in qr.rows() {
+        pgrust::executor::StatementResult::Query { column_names: _, rows } => {
+            for row in &rows {
                 let cols: Vec<String> = row.iter().map(|v| format!("{v:?}")).collect();
                 eprintln!("  row: {}", cols.join(", "));
             }
-            eprintln!("  ({} rows)", qr.row_count());
+            eprintln!("  ({} rows)", rows.len());
         }
         other => eprintln!("  {other:?}"),
     }

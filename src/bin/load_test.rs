@@ -130,10 +130,10 @@ fn main() {
 
             for _ in 0..n {
                 match db.execute(client_id, "select count(*) from events") {
-                    Ok(StatementResult::Query(qr)) => {
+                    Ok(StatementResult::Query { rows, .. }) => {
                         total_reader_ops.fetch_add(1, Ordering::Relaxed);
-                        if qr.row_count() > 0 {
-                            if let Some(Value::Int32(count)) = qr.row(0).first() {
+                        if let Some(row) = rows.first() {
+                            if let Some(Value::Int32(count)) = row.first() {
                                 assert!(*count >= 5, "expected at least 5 rows, got {count}");
                             }
                         }
@@ -207,8 +207,8 @@ fn main() {
     let expected_inserts =
         5 + config.num_writer_threads * config.inserts_per_writer - total_e as usize;
     match db.execute(0, "select count(*) from events").unwrap() {
-        StatementResult::Query(qr) => {
-            let count = match &qr.row(0)[0] {
+        StatementResult::Query { rows, .. } => {
+            let count = match &rows[0][0] {
                 Value::Int32(n) => *n,
                 other => panic!("unexpected value: {other:?}"),
             };
