@@ -101,7 +101,10 @@ impl WalWriter {
             .read(true)
             .write(true)
             .open(&path)?;
+        let mut file = file;
         let size = file.metadata()?.len();
+        // Seek to end once so subsequent writes append without per-write seeks.
+        file.seek(SeekFrom::End(0))?;
         Ok(WalWriter {
             inner: Mutex::new(WalWriterInner {
                 file,
@@ -150,7 +153,6 @@ impl WalWriter {
         let crc = crc32c::crc32c(&record);
         record[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
 
-        guard.file.seek(SeekFrom::End(0))?;
         guard.file.write_all(&record)?;
         guard.insert_lsn = lsn;
 
