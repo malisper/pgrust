@@ -6,7 +6,7 @@
 
 use super::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -50,6 +50,10 @@ pub struct MdStorageManager {
     base_dir: PathBuf,
     open_segs: HashMap<SegKey, OpenSeg>,
     pub in_recovery: bool,
+    /// Cache of opened relations — avoids mkdir/create_dir_all per insert.
+    opened_rels: HashSet<RelFileLocator>,
+    /// Cache of block counts — avoids stat() per insert. Updated on extend.
+    nblocks_cache: HashMap<(RelFileLocator, ForkNumber), BlockNumber>,
 }
 
 impl MdStorageManager {
@@ -58,6 +62,8 @@ impl MdStorageManager {
             base_dir: base_dir.into(),
             open_segs: HashMap::new(),
             in_recovery: false,
+            opened_rels: HashSet::new(),
+            nblocks_cache: HashMap::new(),
         }
     }
 
@@ -66,6 +72,8 @@ impl MdStorageManager {
             base_dir: base_dir.into(),
             open_segs: HashMap::new(),
             in_recovery: true,
+            opened_rels: HashSet::new(),
+            nblocks_cache: HashMap::new(),
         }
     }
 
@@ -213,14 +221,19 @@ impl MdStorageManager {
 
 impl StorageManager for MdStorageManager {
     fn open(&mut self, rel: RelFileLocator) -> Result<(), SmgrError> {
+        if self.opened_rels.contains(&rel) {
+            return Ok(());
+        }
         let dir = self.db_dir(rel);
         fs::create_dir_all(&dir)?;
+        self.opened_rels.insert(rel);
         Ok(())
     }
 
     fn close(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), SmgrError> {
         self.open_segs
             .retain(|key, _| !(key.rel == rel && key.fork == fork));
+        self.nblocks_cache.remove(&(rel, fork));
         Ok(())
     }
 
@@ -230,8 +243,11 @@ impl StorageManager for MdStorageManager {
         fork: ForkNumber,
         is_redo: bool,
     ) -> Result<(), SmgrError> {
-        let dir = self.db_dir(rel);
-        fs::create_dir_all(&dir)?;
+        if !self.opened_rels.contains(&rel) {
+            let dir = self.db_dir(rel);
+            fs::create_dir_all(&dir)?;
+            self.opened_rels.insert(rel);
+        }
 
         let path = self.seg_path(rel, fork, 0);
 
@@ -281,6 +297,10 @@ impl StorageManager for MdStorageManager {
             ],
         };
 
+        for f in &forks {
+            self.nblocks_cache.remove(&(rel, *f));
+        }
+        self.opened_rels.remove(&rel);
         for f in forks {
             self.remove_segments_from(rel, f, 0);
         }
@@ -454,6 +474,12 @@ impl StorageManager for MdStorageManager {
             seg.file.sync_data()?;
         }
 
+        // Update nblocks cache.
+        let entry = self.nblocks_cache.entry((rel, fork)).or_insert(0);
+        if block + 1 > *entry {
+            *entry = block + 1;
+        }
+
         Ok(())
     }
 
@@ -473,7 +499,12 @@ impl StorageManager for MdStorageManager {
     }
 
     fn nblocks(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<BlockNumber, SmgrError> {
-        self.count_blocks(rel, fork)
+        if let Some(&cached) = self.nblocks_cache.get(&(rel, fork)) {
+            return Ok(cached);
+        }
+        let n = self.count_blocks(rel, fork)?;
+        self.nblocks_cache.insert((rel, fork), n);
+        Ok(n)
     }
 
     fn truncate(
@@ -516,6 +547,9 @@ impl StorageManager for MdStorageManager {
         } else {
             self.deactivate_segments_from(rel, fork, target_seg + 1);
         }
+
+        // Update nblocks cache.
+        self.nblocks_cache.insert((rel, fork), nblocks);
 
         Ok(())
     }
