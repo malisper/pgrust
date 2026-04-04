@@ -335,4 +335,22 @@ impl TupleSlot {
             SlotSource::Physical { materialized: None, .. } => unreachable!("values() just materialized"),
         }
     }
+
+    /// Extend the target Vec with this slot's values, avoiding an intermediate allocation.
+    pub fn extend_values_into(mut self, target: &mut Vec<Value>) -> Result<usize, super::ExecError> {
+        self.values()?;
+        match self.source {
+            SlotSource::Virtual { values } => {
+                let n = values.len();
+                target.extend(values);
+                Ok(n)
+            }
+            SlotSource::Physical { materialized: Some(values), .. } => {
+                let n = values.len();
+                target.extend(values);
+                Ok(n)
+            }
+            SlotSource::Physical { materialized: None, .. } => unreachable!("values() just materialized"),
+        }
+    }
 }
