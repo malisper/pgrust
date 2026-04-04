@@ -128,9 +128,9 @@ fn main() {
 
     while let Some((tid, tuple)) = heap_scan_next(&pool, 2, &mut scan).unwrap() {
         let vals = tuple.deform(&desc).unwrap();
-        let id = i32::from_le_bytes(vals[0].clone().unwrap().try_into().unwrap());
-        let name = String::from_utf8(vals[1].clone().unwrap()).unwrap();
-        let note = vals[2].clone().map(|v| String::from_utf8(v).unwrap());
+        let id = i32::from_le_bytes(vals[0].unwrap().try_into().unwrap());
+        let name = std::str::from_utf8(vals[1].unwrap()).unwrap().to_owned();
+        let note = vals[2].map(|v| std::str::from_utf8(v).unwrap().to_owned());
 
         println!(
             "  tid=({},{}) id={} name={:?} note={:?}",

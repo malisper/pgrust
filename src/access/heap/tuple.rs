@@ -291,7 +291,7 @@ impl HeapTuple {
         Ok(Self { header, data })
     }
 
-    pub fn deform(&self, desc: &[AttributeDesc]) -> Result<Vec<Option<Vec<u8>>>, TupleError> {
+    pub fn deform<'a>(&'a self, desc: &[AttributeDesc]) -> Result<Vec<Option<&'a [u8]>>, TupleError> {
         let natts = usize::from(self.header.infomask2 & HEAP_NATTS_MASK);
         if natts != desc.len() {
             return Err(TupleError::WrongValueCount {
@@ -315,7 +315,7 @@ impl HeapTuple {
                 len if len > 0 => {
                     off = attr.attalign.align_offset(off);
                     let end = off + len as usize;
-                    values.push(Some(self.data[off..end].to_vec()));
+                    values.push(Some(&self.data[off..end]));
                     off = end;
                 }
                 -1 => {
@@ -328,7 +328,7 @@ impl HeapTuple {
                     ]) as usize;
                     let start = off + 4;
                     let end = off + total_len;
-                    values.push(Some(self.data[start..end].to_vec()));
+                    values.push(Some(&self.data[start..end]));
                     off = end;
                 }
                 -2 => {
@@ -336,7 +336,7 @@ impl HeapTuple {
                     while self.data[end] != 0 {
                         end += 1;
                     }
-                    values.push(Some(self.data[off..end].to_vec()));
+                    values.push(Some(&self.data[off..end]));
                     off = end + 1;
                 }
                 other => {
@@ -505,9 +505,9 @@ mod tests {
         assert_eq!(&tuple.data[12..17], b"hello");
 
         let deformed = tuple.deform(&desc).unwrap();
-        assert_eq!(deformed[0], Some(vec![0x11, 0x22]));
-        assert_eq!(deformed[1], Some(vec![0x33, 0x44, 0x55, 0x66]));
-        assert_eq!(deformed[2], Some(b"hello".to_vec()));
+        assert_eq!(deformed[0], Some(&[0x11, 0x22][..]));
+        assert_eq!(deformed[1], Some(&[0x33, 0x44, 0x55, 0x66][..]));
+        assert_eq!(deformed[2], Some(&b"hello"[..]));
     }
 
     #[test]
@@ -547,8 +547,8 @@ mod tests {
         assert_eq!(tuple.header.null_bitmap, vec![0b0000_0101]);
 
         let deformed = tuple.deform(&desc).unwrap();
-        assert_eq!(deformed[0], Some(vec![1, 2, 3, 4]));
+        assert_eq!(deformed[0], Some(&[1, 2, 3, 4][..]));
         assert_eq!(deformed[1], None);
-        assert_eq!(deformed[2], Some(vec![9, 10, 11, 12]));
+        assert_eq!(deformed[2], Some(&[9, 10, 11, 12][..]));
     }
 }

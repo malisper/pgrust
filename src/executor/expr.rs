@@ -143,7 +143,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
     }
 }
 
-pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<Vec<u8>>) -> Result<Value, ExecError> {
+pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<Value, ExecError> {
     let Some(bytes) = bytes else {
         return Ok(Value::Null);
     };
@@ -159,7 +159,6 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<Vec<u8>>) -> Resul
             }
             Ok(Value::Int32(i32::from_le_bytes(
                 bytes
-                    .as_slice()
                     .try_into()
                     .map_err(|_| ExecError::InvalidStorageValue {
                         column: column.name.clone(),
@@ -175,8 +174,8 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<Vec<u8>>) -> Resul
                     attlen: column.storage.attlen,
                 });
             }
-            String::from_utf8(bytes)
-                .map(Value::Text)
+            std::str::from_utf8(bytes)
+                .map(|s| Value::Text(s.to_owned()))
                 .map_err(|e| ExecError::InvalidStorageValue {
                     column: column.name.clone(),
                     details: e.to_string(),

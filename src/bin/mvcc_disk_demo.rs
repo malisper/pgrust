@@ -94,11 +94,10 @@ fn info(msg: &str) {
 
 fn values_to_string(desc: &[AttributeDesc], tuple: &HeapTuple) -> String {
     let values = tuple.deform(desc).unwrap();
-    let id = i32::from_le_bytes(values[0].clone().unwrap().try_into().unwrap());
-    let name = String::from_utf8(values[1].clone().unwrap()).unwrap();
+    let id = i32::from_le_bytes(values[0].unwrap().try_into().unwrap());
+    let name = std::str::from_utf8(values[1].unwrap()).unwrap().to_owned();
     let status = values[2]
-        .clone()
-        .map(|v| String::from_utf8(v).unwrap())
+        .map(|v| std::str::from_utf8(v).unwrap().to_owned())
         .unwrap_or_else(|| "NULL".into());
     format!("id={} name={:?} status={:?}", id, name, status)
 }

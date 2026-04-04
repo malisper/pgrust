@@ -7,9 +7,12 @@ edition = "2024"
 name = "pgrust"
 path = "src/lib.rs"
 
+[features]
+deadlock_detection = ["parking_lot/deadlock_detection"]
+
 [dependencies]
 libc = "0.2"
-parking_lot = { version = "0.12", features = ["deadlock_detection"] }
+parking_lot = "0.12"
 pest = "2.7"
 pest_derive = "2.7"
 rand = "0.8"

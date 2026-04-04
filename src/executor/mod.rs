@@ -10,7 +10,7 @@ use crate::access::heap::am::{
     HeapError, heap_scan_begin_visible, heap_scan_next_visible,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
-use crate::access::heap::tuple::TupleError;
+use crate::access::heap::tuple::{AttributeDesc, TupleError};
 use crate::catalog::Catalog;
 use crate::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, parse_statement,
@@ -18,6 +18,7 @@ use crate::parser::{
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use expr::{compare_order_by_keys, compare_order_values};
@@ -192,12 +193,18 @@ pub fn executor_start(plan: Plan) -> PlanState {
             emitted: false,
             stats: NodeExecStats::default(),
         }),
-        Plan::SeqScan { rel, desc } => PlanState::SeqScan(SeqScanState {
-            rel,
-            desc,
-            scan: None,
-            stats: NodeExecStats::default(),
-        }),
+        Plan::SeqScan { rel, desc } => {
+            let column_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let attr_descs: Rc<[AttributeDesc]> = desc.attribute_descs().into();
+            PlanState::SeqScan(SeqScanState {
+                rel,
+                desc: Rc::new(desc),
+                attr_descs,
+                column_names,
+                scan: None,
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::NestedLoopJoin { left, right, on } => PlanState::NestedLoopJoin(NestedLoopJoinState {
             left: Box::new(executor_start(*left)),
             right: Box::new(executor_start(*right)),
@@ -259,26 +266,27 @@ pub fn execute_plan(
     plan: Plan,
     ctx: &mut ExecutorContext<'_>,
 ) -> Result<StatementResult, ExecError> {
-    Ok(execute_plan_internal(plan, ctx)?.0)
+    Ok(execute_plan_internal(plan, ctx, false)?.0)
 }
 
 pub(crate) fn execute_plan_internal(
     plan: Plan,
     ctx: &mut ExecutorContext<'_>,
+    timed: bool,
 ) -> Result<(StatementResult, PlanState, Duration), ExecError> {
     let mut state = executor_start(plan);
     let mut rows = Vec::new();
     let mut column_names = None;
     let started_at = Instant::now();
-    while let Some(slot) = exec_next(&mut state, ctx)? {
+    while let Some(slot) = exec_next_inner(&mut state, ctx, timed)? {
         if column_names.is_none() {
-            column_names = Some(slot.column_names().to_vec());
+            column_names = Some(Rc::clone(slot.column_names()));
         }
         rows.push(slot.into_values()?);
     }
     Ok((
         StatementResult::Query {
-            column_names: column_names.unwrap_or_default(),
+            column_names: column_names.map(|rc| rc.to_vec()).unwrap_or_default(),
             rows,
         },
         state,
@@ -347,7 +355,15 @@ pub fn exec_next(
     state: &mut PlanState,
     ctx: &mut ExecutorContext<'_>,
 ) -> Result<Option<TupleSlot>, ExecError> {
-    let started_at = Instant::now();
+    exec_next_inner(state, ctx, false)
+}
+
+fn exec_next_inner(
+    state: &mut PlanState,
+    ctx: &mut ExecutorContext<'_>,
+    timed: bool,
+) -> Result<Option<TupleSlot>, ExecError> {
+    let started_at = if timed { Some(Instant::now()) } else { None };
     let result = match state {
         PlanState::Result(result) => exec_result(result),
         PlanState::SeqScan(scan) => exec_seq_scan(scan, ctx),
@@ -358,11 +374,12 @@ pub fn exec_next(
         PlanState::Projection(projection) => exec_projection(projection, ctx),
         PlanState::Aggregate(aggregate) => exec_aggregate(aggregate, ctx),
     };
-    let elapsed = started_at.elapsed();
     if let Ok(slot) = &result {
         let stats = node_stats_mut(state);
         stats.loops += 1;
-        stats.total_time += elapsed;
+        if let Some(started_at) = started_at {
+            stats.total_time += started_at.elapsed();
+        }
         if slot.is_some() {
             stats.rows += 1;
         }
@@ -375,7 +392,7 @@ fn exec_result(state: &mut ResultState) -> Result<Option<TupleSlot>, ExecError> 
         Ok(None)
     } else {
         state.emitted = true;
-        Ok(Some(TupleSlot::virtual_row(Vec::new(), Vec::new())))
+        Ok(Some(TupleSlot::virtual_row(Rc::from(Vec::<String>::new()), Vec::new())))
     }
 }
 
@@ -395,7 +412,9 @@ fn exec_seq_scan(
     let txns_guard = ctx.txns.read();
     if let Some((tid, tuple)) = heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, scan)? {
         Ok(Some(TupleSlot::from_heap_tuple(
-            state.desc.clone(),
+            Rc::clone(&state.desc),
+            Rc::clone(&state.attr_descs),
+            Rc::clone(&state.column_names),
             tid,
             tuple,
         )))
@@ -474,7 +493,7 @@ fn exec_projection(
         names.push(target.name.clone());
     }
 
-    Ok(Some(TupleSlot::virtual_row(names, values)))
+    Ok(Some(TupleSlot::virtual_row(names.into(), values)))
 }
 
 fn exec_order_by(
@@ -599,7 +618,7 @@ fn exec_aggregate(
 
             if let Some(having) = &state.having {
                 let mut having_slot =
-                    TupleSlot::virtual_row(state.output_columns.clone(), row_values.clone());
+                    TupleSlot::virtual_row(state.output_columns.clone().into(), row_values.clone());
                 match eval_expr(having, &mut having_slot)? {
                     Value::Bool(true) => {}
                     Value::Bool(false) | Value::Null => continue,
@@ -608,7 +627,7 @@ fn exec_aggregate(
             }
 
             result_rows.push(TupleSlot::virtual_row(
-                state.output_columns.clone(),
+                state.output_columns.clone().into(),
                 row_values,
             ));
         }
@@ -627,11 +646,11 @@ fn exec_aggregate(
 }
 
 fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecError> {
-    let mut names = left.column_names().to_vec();
+    let mut names: Vec<String> = left.column_names().to_vec();
     names.extend_from_slice(right.column_names());
     let mut values = left.into_values()?;
     values.extend(right.into_values()?);
-    Ok(TupleSlot::virtual_row(names, values))
+    Ok(TupleSlot::virtual_row(names.into(), values))
 }
 
 fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
@@ -874,8 +893,9 @@ mod tests {
     #[test]
     fn expr_eval_obeys_null_semantics() {
         let desc = relation_desc();
+        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
         let mut slot = TupleSlot::virtual_row(
-            desc.columns.iter().map(|c| c.name.clone()).collect(),
+            col_names,
             vec![Value::Int32(7), Value::Text("alice".into()), Value::Null],
         );
         assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Int32(7)))), &mut slot).unwrap(), Value::Bool(true));
@@ -890,8 +910,13 @@ mod tests {
     #[test]
     fn physical_slot_lazily_deforms_heap_tuple() {
         use crate::access::heap::tuple::ItemPointerData;
+        let desc = Rc::new(relation_desc());
+        let attr_descs: Rc<[AttributeDesc]> = desc.attribute_descs().into();
+        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
         let mut slot = TupleSlot::from_heap_tuple(
-            relation_desc(),
+            desc,
+            attr_descs,
+            col_names,
             ItemPointerData { block_number: 0, offset_number: 1 },
             tuple(1, "alice", None),
         );
