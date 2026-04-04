@@ -262,16 +262,9 @@ mod tests {
     fn select_star_expands_to_all_columns() {
         let stmt = parse_select("select * from people").unwrap();
         let plan = build_plan(&stmt, &catalog()).unwrap();
-        match plan {
-            Plan::Projection { input, targets } => {
-                assert_eq!(targets.len(), 3);
-                assert_eq!(targets[0].name, "id");
-                assert_eq!(targets[1].name, "name");
-                assert_eq!(targets[2].name, "note");
-                assert!(matches!(*input, Plan::SeqScan { .. }));
-            }
-            other => panic!("expected projection, got {:?}", other),
-        }
+        // select * is an identity projection — optimized away to bare SeqScan
+        assert!(matches!(plan, Plan::SeqScan { .. }),
+            "expected SeqScan (identity projection elided), got {:?}", plan);
     }
 
     #[test]

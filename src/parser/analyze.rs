@@ -233,10 +233,20 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
             };
         }
 
-        Ok(Plan::Projection {
-            input: Box::new(plan),
-            targets: bind_select_targets(&stmt.targets, &scope)?,
-        })
+        let targets = bind_select_targets(&stmt.targets, &scope)?;
+
+        // Optimization: skip Projection if it's an identity mapping (select *)
+        let is_identity = targets.len() == scope.columns.len()
+            && targets.iter().enumerate().all(|(i, t)| matches!(&t.expr, Expr::Column(c) if *c == i));
+
+        if is_identity {
+            Ok(plan)
+        } else {
+            Ok(Plan::Projection {
+                input: Box::new(plan),
+                targets,
+            })
+        }
     }
 }
 
