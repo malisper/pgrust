@@ -6,7 +6,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pgrust::database::Database;
+use pgrust::database::{Database, Session};
 use pgrust::executor::{StatementResult, Value};
 
 fn main() -> Result<(), String> {
@@ -19,19 +19,19 @@ fn main() -> Result<(), String> {
 
     let db = Database::open(&args.base_dir, args.pool_size).map_err(|e| format!("{e:?}"))?;
     if !args.skip_load {
-        db.execute(
-            1,
-            "create table scanbench (id int not null, payload text not null)",
-        )
-        .map_err(|e| format!("{e:?}"))?;
+        let mut session = Session::new(1);
+        session.execute(&db, "create table scanbench (id int not null, payload text not null)")
+            .map_err(|e| format!("{e:?}"))?;
 
+        session.execute(&db, "begin").map_err(|e| format!("{e:?}"))?;
         for i in 0..args.row_count {
-            db.execute(
-                1,
+            session.execute(
+                &db,
                 &format!("insert into scanbench (id, payload) values ({i}, 'row-{i}')"),
             )
             .map_err(|e| format!("{e:?}"))?;
         }
+        session.execute(&db, "commit").map_err(|e| format!("{e:?}"))?;
     }
 
     if args.pause_before_scan_secs > 0 {

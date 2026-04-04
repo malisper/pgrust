@@ -168,6 +168,21 @@ impl Database {
 
         let pool = BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), pool_size, Arc::clone(&wal));
 
+        // Open storage files for all existing relations so inserts don't need to.
+        {
+            use crate::storage::smgr::{ForkNumber, StorageManager};
+            let cat = catalog.catalog();
+            for name in cat.table_names().collect::<Vec<_>>() {
+                if let Some(entry) = cat.get(name) {
+                    let rel = entry.rel;
+                    pool.with_storage_mut(|s| {
+                        let _ = s.smgr.open(rel);
+                        let _ = s.smgr.create(rel, ForkNumber::Main, false);
+                    });
+                }
+            }
+        }
+
         Ok(Self {
             pool: Arc::new(pool),
             wal,
@@ -317,6 +332,15 @@ impl Database {
                 let mut catalog_guard = self.catalog.write();
                 let result = execute_create_table(create_stmt.clone(), catalog_guard.catalog_mut());
                 if result.is_ok() {
+                    // Create the relation's storage files so inserts don't need to.
+                    if let Some(entry) = catalog_guard.catalog().get(&create_stmt.table_name) {
+                        let rel = entry.rel;
+                        let _ = self.pool.with_storage_mut(|s| {
+                            use crate::storage::smgr::StorageManager;
+                            let _ = s.smgr.open(rel);
+                            let _ = s.smgr.create(rel, crate::storage::smgr::ForkNumber::Main, false);
+                        });
+                    }
                     let _ = catalog_guard.persist();
                 }
                 result
@@ -686,6 +710,14 @@ impl Session {
                 let mut catalog_guard = db.catalog.write();
                 let result = execute_create_table(create_stmt.clone(), catalog_guard.catalog_mut());
                 if result.is_ok() {
+                    if let Some(entry) = catalog_guard.catalog().get(&create_stmt.table_name) {
+                        let rel = entry.rel;
+                        let _ = db.pool.with_storage_mut(|s| {
+                            use crate::storage::smgr::StorageManager;
+                            let _ = s.smgr.open(rel);
+                            let _ = s.smgr.create(rel, crate::storage::smgr::ForkNumber::Main, false);
+                        });
+                    }
                     let _ = catalog_guard.persist();
                 }
                 result
