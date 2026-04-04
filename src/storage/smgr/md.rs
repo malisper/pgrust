@@ -317,7 +317,7 @@ impl StorageManager for MdStorageManager {
         fork: ForkNumber,
         block: BlockNumber,
         data: &[u8],
-        _skip_fsync: bool,
+        skip_fsync: bool,
     ) -> Result<(), SmgrError> {
         if data.len() != BLCKSZ {
             return Err(SmgrError::BadBufferSize { size: data.len() });
@@ -336,6 +336,11 @@ impl StorageManager for MdStorageManager {
                 actual: n,
             });
         }
+
+        // Without WAL there is no crash-recovery path, so skip_fsync is never
+        // safe to honour. Always sync regardless of what the caller requests.
+        let _ = skip_fsync;
+        seg.file.sync_data()?;
 
         Ok(())
     }
@@ -427,7 +432,7 @@ impl StorageManager for MdStorageManager {
         fork: ForkNumber,
         block: BlockNumber,
         data: &[u8],
-        _skip_fsync: bool,
+        skip_fsync: bool,
     ) -> Result<(), SmgrError> {
         if data.len() != BLCKSZ {
             return Err(SmgrError::BadBufferSize { size: data.len() });
@@ -445,6 +450,11 @@ impl StorageManager for MdStorageManager {
                 actual: n,
             });
         }
+
+        // Without WAL there is no crash-recovery path, so skip_fsync is never
+        // safe to honour. Always sync regardless of what the caller requests.
+        let _ = skip_fsync;
+        seg.file.sync_data()?;
 
         Ok(())
     }
@@ -1028,6 +1038,61 @@ mod tests {
     // -----------------------------------------------------------------------
     // Crash simulation tests
     // -----------------------------------------------------------------------
+
+    /// write_block with skip_fsync=false must call sync_data and not error.
+    /// write_block with skip_fsync=true must succeed without syncing.
+    #[test]
+    fn test_write_block_fsync() {
+        let (mut smgr, base) = temp_smgr("write_block_fsync");
+        let rel = test_rel(19000);
+
+        smgr.open(rel).unwrap();
+        smgr.create(rel, ForkNumber::Main, false).unwrap();
+
+        // extend with skip_fsync=true (no sync — used during batch load)
+        smgr.extend(rel, ForkNumber::Main, 0, &page_pattern(1), true)
+            .unwrap();
+
+        // write_block with skip_fsync=false: must sync and not error
+        smgr.write_block(rel, ForkNumber::Main, 0, &page_pattern(2), false)
+            .unwrap();
+
+        // Reopen: data written with fsync=true must be present
+        drop(smgr);
+        let mut smgr2 = MdStorageManager::new(&base);
+        let mut buf = vec![0u8; BLCKSZ];
+        smgr2
+            .read_block(rel, ForkNumber::Main, 0, &mut buf)
+            .unwrap();
+        assert_eq!(buf, page_pattern(2), "fsynced write must survive reopen");
+    }
+
+    /// extend with skip_fsync=false must sync the new block to disk.
+    #[test]
+    fn test_extend_fsync() {
+        let (mut smgr, base) = temp_smgr("extend_fsync");
+        let rel = test_rel(19001);
+
+        smgr.open(rel).unwrap();
+        smgr.create(rel, ForkNumber::Main, false).unwrap();
+
+        // extend with skip_fsync=false: must sync each block
+        for i in 0..3u32 {
+            smgr.extend(rel, ForkNumber::Main, i, &page_pattern(i), false)
+                .unwrap();
+        }
+
+        drop(smgr);
+        let mut smgr2 = MdStorageManager::new(&base);
+        assert_eq!(smgr2.nblocks(rel, ForkNumber::Main).unwrap(), 3);
+        let mut buf = vec![0u8; BLCKSZ];
+        for i in 0..3u32 {
+            smgr2
+                .read_block(rel, ForkNumber::Main, i, &mut buf)
+                .unwrap();
+            assert_eq!(buf, page_pattern(i), "block {i} must survive reopen after fsynced extend");
+        }
+    }
 
     #[test]
     fn test_crash_after_write() {

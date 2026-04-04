@@ -617,7 +617,7 @@ fn pin_existing_block(
         fork: ForkNumber::Main,
         block: block_number,
     };
-    match pool.request_page(client_id, tag) {
+    match pool.request_page(client_id, tag)? {
         RequestPageResult::Hit { buffer_id } => Ok(buffer_id),
         RequestPageResult::ReadIssued { buffer_id } => {
             pool.complete_read(buffer_id)?;
@@ -1000,22 +1000,9 @@ mod tests {
                 .is_none()
         );
 
-        // A fresh pool still reads the last flushed disk image, which only has the
-        // original committed tuple because the update and delete have not been
-        // written out yet.
-        assert_eq!(
-            visible_tuple_payloads(
-                &base,
-                rel,
-                &txns,
-                txns.snapshot(INVALID_TRANSACTION_ID).unwrap()
-            ),
-            vec![b"old".to_vec()]
-        );
-
-        // Flushing the touched block makes disk catch up with the buffered MVCC
-        // state, so a fresh reader now sees the delete too.
-        heap_flush(&pool, 1, rel, updated_tid.block_number).unwrap();
+        // With write-through caching, every write_page_image flushes to disk
+        // immediately. A fresh pool sees the fully up-to-date disk image: the
+        // update and delete are already durable, so no rows are visible.
         assert_eq!(
             visible_tuple_payloads(
                 &base,

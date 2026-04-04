@@ -194,7 +194,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
     }
 
-    pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> RequestPageResult {
+    pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
         // Fast path: check if the tag is already in the lookup table.
         {
             let lookup = self.lookup.read();
@@ -207,9 +207,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
                 }
                 if inner.valid {
                     self.stats_hit.fetch_add(1, Ordering::Relaxed);
-                    return RequestPageResult::Hit { buffer_id };
+                    return Ok(RequestPageResult::Hit { buffer_id });
                 } else {
-                    return RequestPageResult::WaitingOnRead { buffer_id };
+                    return Ok(RequestPageResult::WaitingOnRead { buffer_id });
                 }
             }
         }
@@ -218,7 +218,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         let mut strategy = self.strategy.lock();
 
         let Some(buffer_id) = self.allocate_victim(&mut strategy) else {
-            return RequestPageResult::AllBuffersPinned;
+            return Ok(RequestPageResult::AllBuffersPinned);
         };
 
         let frame = &self.frames[buffer_id];
@@ -240,13 +240,44 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             }
             if existing_inner.valid {
                 self.stats_hit.fetch_add(1, Ordering::Relaxed);
-                return RequestPageResult::Hit {
+                return Ok(RequestPageResult::Hit {
                     buffer_id: existing_id,
-                };
+                });
             } else {
-                return RequestPageResult::WaitingOnRead {
+                return Ok(RequestPageResult::WaitingOnRead {
                     buffer_id: existing_id,
-                };
+                });
+            }
+        }
+
+        // If the victim holds a dirty page, write it out before reusing.
+        // Without WAL there is no other path to recover these writes.
+        if inner.dirty {
+            if let Some(old_tag) = inner.tag {
+                let page = inner.page;
+                drop(inner);
+                drop(lookup);
+                drop(strategy);
+
+                {
+                    let mut storage = self.storage.lock();
+                    storage.write_page(old_tag, &page).map_err(Error::Storage)?;
+                }
+                self.stats_written.fetch_add(1, Ordering::Relaxed);
+
+                // Re-acquire all locks in the same order as above.
+                strategy = self.strategy.lock();
+                lookup = self.lookup.write();
+                inner = frame.inner.lock();
+
+                // Re-check: another thread may have pinned or replaced this
+                // buffer while we dropped locks. If so, start over.
+                if inner.pin_count > 0 || inner.tag != Some(old_tag) {
+                    drop(inner);
+                    drop(lookup);
+                    drop(strategy);
+                    return self.request_page(client_id, tag);
+                }
             }
         }
 
@@ -267,7 +298,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         lookup.insert(tag, buffer_id);
 
-        RequestPageResult::ReadIssued { buffer_id }
+        Ok(RequestPageResult::ReadIssued { buffer_id })
     }
 
     pub fn pending_io(&self, buffer_id: BufferId) -> Option<PendingIo> {
@@ -365,13 +396,33 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     }
 
     pub fn write_page_image(&self, buffer_id: BufferId, page: &Page) -> Result<(), Error> {
-        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        let mut inner = frame.inner.lock();
-        if !inner.valid {
-            return Err(Error::InvalidBuffer);
+        let tag = {
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            let mut inner = frame.inner.lock();
+            if !inner.valid {
+                return Err(Error::InvalidBuffer);
+            }
+            inner.page = *page;
+            inner.dirty = true;
+            inner.tag.ok_or(Error::UnknownBuffer)?
+        };
+
+        // Without WAL, a crash between marking dirty and flushing loses the
+        // write. Sync to disk immediately so durability is guaranteed as soon
+        // as write_page_image returns.
+        {
+            let mut storage = self.storage.lock();
+            storage.write_page(tag, page).map_err(Error::Storage)?;
         }
-        inner.page = *page;
-        inner.dirty = true;
+        self.stats_written.fetch_add(1, Ordering::Relaxed);
+
+        // Clear the dirty flag — the page is now on disk.
+        {
+            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+            let mut inner = frame.inner.lock();
+            inner.dirty = false;
+        }
+
         Ok(())
     }
 
@@ -573,12 +624,12 @@ mod tests {
         storage.put_page(tag, page(7));
         let pool = BufferPool::new(storage, 2);
 
-        let first = pool.request_page(1, tag);
+        let first = pool.request_page(1, tag).unwrap();
         assert_eq!(first, RequestPageResult::ReadIssued { buffer_id: 0 });
         pool.complete_read(0).unwrap();
         pool.unpin(1, 0).unwrap();
 
-        let second = pool.request_page(2, tag);
+        let second = pool.request_page(2, tag).unwrap();
         assert_eq!(second, RequestPageResult::Hit { buffer_id: 0 });
         let state = pool.buffer_state(0).unwrap();
         assert!(state.valid);
@@ -593,11 +644,11 @@ mod tests {
         let pool = BufferPool::new(storage, 2);
 
         assert_eq!(
-            pool.request_page(1, tag),
+            pool.request_page(1, tag).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         assert_eq!(
-            pool.request_page(2, tag),
+            pool.request_page(2, tag).unwrap(),
             RequestPageResult::WaitingOnRead { buffer_id: 0 }
         );
 
@@ -615,7 +666,7 @@ mod tests {
         let pool = BufferPool::new(storage, 1);
 
         assert_eq!(
-            pool.request_page(1, tag),
+            pool.request_page(1, tag).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -638,7 +689,7 @@ mod tests {
         let pool = BufferPool::new(storage, 1);
 
         assert_eq!(
-            pool.request_page(1, tag),
+            pool.request_page(1, tag).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -671,19 +722,19 @@ mod tests {
         let pool = BufferPool::new(storage, 2);
 
         assert_eq!(
-            pool.request_page(1, a),
+            pool.request_page(1, a).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
 
         assert_eq!(
-            pool.request_page(2, b),
+            pool.request_page(2, b).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 1 }
         );
         pool.complete_read(1).unwrap();
         pool.unpin(2, 1).unwrap();
 
-        let third = pool.request_page(3, c);
+        let third = pool.request_page(3, c).unwrap();
         assert_eq!(third, RequestPageResult::ReadIssued { buffer_id: 1 });
 
         let state0 = pool.buffer_state(0).unwrap();
@@ -702,12 +753,12 @@ mod tests {
         let pool = BufferPool::new(storage, 2);
 
         assert_eq!(
-            pool.request_page(1, a),
+            pool.request_page(1, a).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
         assert_eq!(
-            pool.request_page(2, b),
+            pool.request_page(2, b).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 1 }
         );
         pool.complete_read(1).unwrap();
@@ -772,7 +823,7 @@ mod tests {
         let fill = (1u32 % 200) as u8;
 
         assert_eq!(
-            pool.request_page(1, t),
+            pool.request_page(1, t).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -791,14 +842,14 @@ mod tests {
         let t = smgr_tag(2, 0);
 
         assert_eq!(
-            pool.request_page(1, t),
+            pool.request_page(1, t).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
         pool.unpin(1, 0).unwrap();
 
         assert_eq!(
-            pool.request_page(2, t),
+            pool.request_page(2, t).unwrap(),
             RequestPageResult::Hit { buffer_id: 0 }
         );
     }
@@ -810,7 +861,7 @@ mod tests {
             let pool = pool_with_relation(&base, 3, 1, 8);
             let t = smgr_tag(3, 0);
 
-            pool.request_page(1, t);
+            pool.request_page(1, t).unwrap();
             pool.complete_read(0).unwrap();
 
             pool.write_byte(0, 0, 0xFF).unwrap();
@@ -837,14 +888,14 @@ mod tests {
         for block in 0..2u32 {
             let t = smgr_tag(4, block);
             assert!(matches!(
-                pool.request_page(1, t),
+                pool.request_page(1, t).unwrap(),
                 RequestPageResult::ReadIssued { .. }
             ));
             pool.complete_read(block as usize).unwrap();
         }
 
         let t = smgr_tag(4, 2);
-        assert_eq!(pool.request_page(1, t), RequestPageResult::AllBuffersPinned);
+        assert_eq!(pool.request_page(1, t).unwrap(), RequestPageResult::AllBuffersPinned);
     }
 
     #[test]
@@ -856,7 +907,7 @@ mod tests {
         let t1 = smgr_tag(5, 1);
 
         assert_eq!(
-            pool.request_page(1, t0),
+            pool.request_page(1, t0).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -866,7 +917,7 @@ mod tests {
         pool.unpin(1, 0).unwrap();
 
         assert_eq!(
-            pool.request_page(1, t1),
+            pool.request_page(1, t1).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -882,6 +933,44 @@ mod tests {
         );
     }
 
+    /// A dirty buffer that is evicted without a prior explicit flush must
+    /// still be written to disk before the frame is reused.
+    #[test]
+    fn integ_eviction_of_unflushed_dirty_frame_writes_to_disk() {
+        let base = temp_dir("evict_unflushed_dirty");
+        let pool = pool_with_relation(&base, 15, 2, 1);
+
+        let t0 = smgr_tag(15, 0);
+        let t1 = smgr_tag(15, 1);
+
+        // Load block 0, dirty it, but do NOT call flush_buffer.
+        assert_eq!(
+            pool.request_page(1, t0).unwrap(),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
+        pool.complete_read(0).unwrap();
+        pool.write_byte(0, 0, 0xCD).unwrap();
+        assert!(pool.buffer_state(0).unwrap().dirty);
+        pool.unpin(1, 0).unwrap();
+
+        // Request block 1 — the single-frame pool must evict block 0.
+        // The eviction path should write the dirty page to disk.
+        assert_eq!(
+            pool.request_page(1, t1).unwrap(),
+            RequestPageResult::ReadIssued { buffer_id: 0 }
+        );
+        pool.complete_read(0).unwrap();
+
+        // Open a fresh smgr and verify block 0 has the written value.
+        let mut smgr2 = MdStorageManager::new(&base);
+        let mut buf = [0u8; PAGE_SIZE];
+        smgr2.read_block(smgr_rel(15), ForkNumber::Main, 0, &mut buf).unwrap();
+        assert_eq!(
+            buf[0], 0xCD,
+            "eviction must flush dirty page even without explicit heap_flush"
+        );
+    }
+
     #[test]
     fn integ_multiple_blocks_no_aliasing() {
         let base = temp_dir("no_aliasing");
@@ -891,7 +980,7 @@ mod tests {
         for block in 0..nblocks {
             let t = smgr_tag(6, block);
             assert!(matches!(
-                pool.request_page(1, t),
+                pool.request_page(1, t).unwrap(),
                 RequestPageResult::ReadIssued { .. }
             ));
             pool.complete_read(block as usize).unwrap();
@@ -916,7 +1005,7 @@ mod tests {
         for block in 0..2u32 {
             let t = smgr_tag(7, block);
             assert!(matches!(
-                pool.request_page(1, t),
+                pool.request_page(1, t).unwrap(),
                 RequestPageResult::ReadIssued { .. }
             ));
             pool.complete_read(block as usize).unwrap();
@@ -927,7 +1016,7 @@ mod tests {
 
         let t = smgr_tag(7, 0);
         assert!(matches!(
-            pool.request_page(1, t),
+            pool.request_page(1, t).unwrap(),
             RequestPageResult::ReadIssued { .. }
         ));
     }
