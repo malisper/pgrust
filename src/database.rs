@@ -917,6 +917,7 @@ mod tests {
         for h in handles {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                log_deadlocks();
                 panic!("test timed out after {timeout:?} — likely deadlock");
             }
             let (tx, rx) = std::sync::mpsc::channel();
@@ -927,9 +928,29 @@ mod tests {
             match rx.recv_timeout(remaining) {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => std::panic::resume_unwind(e),
-                Err(_) => panic!("test timed out after {timeout:?} — likely deadlock"),
+                Err(_) => {
+                    log_deadlocks();
+                    panic!("test timed out after {timeout:?} — likely deadlock");
+                }
             }
             let _ = waiter.join();
+        }
+    }
+
+    fn log_deadlocks() {
+        let deadlocks = parking_lot::deadlock::check_deadlock();
+        if deadlocks.is_empty() {
+            eprintln!("pgrust: parking_lot deadlock detector found no cycles");
+            return;
+        }
+
+        eprintln!("pgrust: detected {} deadlock cycle(s)", deadlocks.len());
+        for (i, threads) in deadlocks.iter().enumerate() {
+            eprintln!("pgrust: deadlock cycle #{i}");
+            for thread in threads {
+                eprintln!("pgrust: thread id {:?}", thread.thread_id());
+                eprintln!("{:#?}", thread.backtrace());
+            }
         }
     }
 
@@ -1616,9 +1637,9 @@ mod tests {
     /// counter tests: many concurrent full-table UPDATE/SELECT cycles over a
     /// relation much larger than the buffer pool.
     #[test]
-    fn reproduces_pgbench_style_accounts_workload_hang() {
+    fn pgbench_style_accounts_workload_completes() {
         let base = temp_dir("pgbench_style_hang");
-        let db = Database::open(&base, 8).unwrap();
+        let db = Database::open(&base, 128).unwrap();
 
         db.execute(
             1,

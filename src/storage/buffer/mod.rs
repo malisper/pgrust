@@ -243,8 +243,18 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         };
 
         let frame = &self.frames[buffer_id];
-        let mut inner = frame.inner.lock();
         let mut lookup = self.lookup.write();
+        let mut inner = frame.inner.lock();
+
+        // Re-check: while we were waiting for the mapping lock, another
+        // reader that already held a shared lookup lock could have pinned
+        // this candidate buffer. In that case, restart victim selection.
+        if inner.pin_count > 0 || inner.io_in_progress {
+            drop(inner);
+            drop(lookup);
+            drop(strategy);
+            return self.request_page(client_id, tag);
+        }
 
         // Re-check: another thread may have inserted this tag while we waited.
         if let Some(&existing_id) = lookup.get(&tag) {
