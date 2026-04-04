@@ -102,7 +102,7 @@ fn main() {
 
             // Cache miss → smgr reads from disk into the frame.
             assert_eq!(
-                pool.request_page(1, t),
+                pool.request_page(1, t).unwrap(),
                 RequestPageResult::ReadIssued {
                     buffer_id: block as usize
                 }
@@ -178,7 +178,7 @@ fn main() {
 
         // Load block 0 into the single frame.
         assert_eq!(
-            pool.request_page(1, tag(0)),
+            pool.request_page(1, tag(0)).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -196,7 +196,7 @@ fn main() {
 
         // Load block 1 — must evict block 0's frame.
         assert_eq!(
-            pool.request_page(1, tag(1)),
+            pool.request_page(1, tag(1)).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -224,7 +224,7 @@ fn main() {
 
         // First access: miss.
         assert_eq!(
-            pool.request_page(1, tag(2)),
+            pool.request_page(1, tag(2)).unwrap(),
             RequestPageResult::ReadIssued { buffer_id: 0 }
         );
         pool.complete_read(0).unwrap();
@@ -233,7 +233,7 @@ fn main() {
 
         // Second access: hit.
         assert_eq!(
-            pool.request_page(2, tag(2)),
+            pool.request_page(2, tag(2)).unwrap(),
             RequestPageResult::Hit { buffer_id: 0 }
         );
         info("second request for block 2: Hit (cache hit, no disk I/O)");
