@@ -458,9 +458,16 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         match result {
             Ok(r) => {
-                // Flush WAL before recording the commit. This guarantees that
-                // all page modifications made by this transaction are durable
-                // on disk before any other session can observe the commit.
+                // Write commit record to WAL, then flush. The commit record
+                // ensures recovery can mark this transaction committed in the
+                // CLOG even if we crash before updating it on disk.
+                self.pool.write_wal_commit(xid).map_err(|e| {
+                    ExecError::Heap(crate::access::heap::am::HeapError::Storage(
+                        crate::storage::smgr::SmgrError::Io(
+                            std::io::Error::new(std::io::ErrorKind::Other, e)
+                        )
+                    ))
+                })?;
                 self.pool.flush_wal().map_err(|e| {
                     ExecError::Heap(crate::access::heap::am::HeapError::Storage(
                         crate::storage::smgr::SmgrError::Io(
@@ -555,6 +562,23 @@ impl Session {
                 for rel in &txn.held_table_locks {
                     db.table_locks.unlock_table(*rel, self.client_id);
                 }
+                // Write commit record to WAL, then flush, then update CLOG.
+                db.pool.write_wal_commit(txn.xid).map_err(|e| {
+                    ExecError::Heap(crate::access::heap::am::HeapError::Storage(
+                        crate::storage::smgr::SmgrError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e,
+                        )),
+                    ))
+                })?;
+                db.pool.flush_wal().map_err(|e| {
+                    ExecError::Heap(crate::access::heap::am::HeapError::Storage(
+                        crate::storage::smgr::SmgrError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e,
+                        )),
+                    ))
+                })?;
                 db.txns.write().commit(txn.xid).map_err(|e| {
                     ExecError::Heap(crate::access::heap::am::HeapError::Mvcc(e))
                 })?;
@@ -905,6 +929,14 @@ impl Session {
             }
             match result {
                 Ok(n) => {
+                    db.pool.write_wal_commit(txn.xid).map_err(|e| {
+                        ExecError::Heap(crate::access::heap::am::HeapError::Storage(
+                            crate::storage::smgr::SmgrError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                e,
+                            )),
+                        ))
+                    })?;
                     db.pool.flush_wal().map_err(|e| {
                         ExecError::Heap(crate::access::heap::am::HeapError::Storage(
                             crate::storage::smgr::SmgrError::Io(std::io::Error::new(
