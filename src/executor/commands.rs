@@ -87,7 +87,7 @@ pub(crate) fn execute_drop_table(
         })?;
 
     let _ = ctx.pool.invalidate_relation(entry.rel);
-    ctx.pool.storage_mut().smgr.unlink(entry.rel, None, false);
+    ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
     Ok(StatementResult::AffectedRows(0))
 }
 

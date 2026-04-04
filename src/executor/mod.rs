@@ -24,7 +24,7 @@ use expr::{compare_order_by_keys, compare_order_values};
 use commands::*;
 
 pub struct ExecutorContext<'a> {
-    pub pool: &'a mut BufferPool<SmgrStorageBackend>,
+    pub pool: &'a BufferPool<SmgrStorageBackend>,
     pub txns: &'a TransactionManager,
     pub snapshot: Snapshot,
     pub client_id: ClientId,

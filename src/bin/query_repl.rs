@@ -368,7 +368,7 @@ fn ensure_default_people_table(catalog_store: &mut DurableCatalog) -> Result<(),
 }
 
 fn seed_if_empty(
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     catalog: &Catalog,
     txns: &mut TransactionManager,
 ) -> Result<(), ExecError> {
@@ -377,7 +377,7 @@ fn seed_if_empty(
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable("people".into())))?
         .rel;
 
-    if pool.storage_mut().smgr.exists(rel, ForkNumber::Main) {
+    if pool.with_storage_mut(|s| s.smgr.exists(rel, ForkNumber::Main)) {
         return Ok(());
     }
 
@@ -396,7 +396,7 @@ fn seed_if_empty(
 
 fn run_statement(
     sql: &str,
-    pool: &mut BufferPool<SmgrStorageBackend>,
+    pool: &BufferPool<SmgrStorageBackend>,
     txns: &mut TransactionManager,
     catalog_store: &mut DurableCatalog,
 ) -> Result<StatementResult, ExecError> {
@@ -589,8 +589,8 @@ fn main() -> Result<(), String> {
     ensure_default_people_table(&mut catalog_store)?;
 
     let smgr = MdStorageManager::new(&base_dir);
-    let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-    seed_if_empty(&mut pool, catalog_store.catalog(), &mut txns).map_err(|e| format!("{e:?}"))?;
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+    seed_if_empty(&pool, catalog_store.catalog(), &mut txns).map_err(|e| format!("{e:?}"))?;
 
     println!("PGRUST SQL REPL");
     println!("BASE DIRECTORY: {}", base_dir.display());
@@ -627,7 +627,7 @@ fn main() -> Result<(), String> {
         }
 
         let sql = input.trim_end_matches(';').trim();
-        match run_statement(sql, &mut pool, &mut txns, &mut catalog_store) {
+        match run_statement(sql, &pool, &mut txns, &mut catalog_store) {
             Ok(result) => print_result(result),
             Err(err) => eprintln!("ERROR: {}", render_exec_error(&err)),
         }

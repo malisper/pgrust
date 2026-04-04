@@ -95,7 +95,7 @@ fn main() {
     header("Step 1: modify pages through buffer pool, flush to disk");
     {
         let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
 
         for block in 0..4u32 {
             let t = tag(block);
@@ -174,7 +174,7 @@ fn main() {
     header("Step 2: eviction forces dirty frame to disk");
     {
         let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 1);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 1);
 
         // Load block 0 into the single frame.
         assert_eq!(
@@ -220,7 +220,7 @@ fn main() {
     header("Step 3: cache hit — same frame, no disk I/O");
     {
         let smgr = MdStorageManager::new(&base);
-        let mut pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
 
         // First access: miss.
         assert_eq!(
