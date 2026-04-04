@@ -99,6 +99,7 @@ pub enum Expr {
     Column(usize),
     Const(Value),
     Add(Box<Expr>, Box<Expr>),
+    Negate(Box<Expr>),
     Eq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
@@ -110,6 +111,7 @@ pub enum Expr {
     IsDistinctFrom(Box<Expr>, Box<Expr>),
     IsNotDistinctFrom(Box<Expr>, Box<Expr>),
     Random,
+    CurrentTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

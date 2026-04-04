@@ -66,7 +66,8 @@ That means the implementation is effectively append-only with one probe:
 
 - it does not search older pages for free space
 - it does not use a free space map
-- it does not consider fillfactor
+- it does not consider fillfactor, even if `CREATE TABLE ... WITH
+  (fillfactor=...)` is accepted by the SQL layer
 - it does not prune before deciding a page is full
 - it does not coordinate page selection across concurrent inserters
 
@@ -84,6 +85,8 @@ that are not modeled here yet:
 - visibility / MVCC-aware tuple state transitions
 - WAL integration
 - fillfactor and page-full heuristics
+  Today this is still only a parser-level compatibility knob; the heap access
+  method does not reserve free space based on the configured fillfactor yet.
 - concurrency and locking behavior around page choice
 
 ## Heap API shape is also simplified

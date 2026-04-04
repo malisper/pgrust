@@ -60,6 +60,8 @@ pub enum Statement {
     ShowTables,
     CreateTable(CreateTableStatement),
     DropTable(DropTableStatement),
+    TruncateTable(TruncateTableStatement),
+    Vacuum(VacuumStatement),
     Insert(InsertStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
@@ -129,7 +131,18 @@ pub struct CreateTableStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropTableStatement {
-    pub table_name: String,
+    pub if_exists: bool,
+    pub table_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateTableStatement {
+    pub table_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VacuumStatement {
+    pub table_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +157,8 @@ pub enum SqlType {
     Int4,
     Text,
     Bool,
+    Timestamp,
+    Char,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +185,7 @@ pub enum SqlExpr {
     Column(String),
     Const(Value),
     Add(Box<SqlExpr>, Box<SqlExpr>),
+    Negate(Box<SqlExpr>),
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),
     Gt(Box<SqlExpr>, Box<SqlExpr>),
@@ -185,4 +201,5 @@ pub enum SqlExpr {
         arg: Option<Box<SqlExpr>>,
     },
     Random,
+    CurrentTimestamp,
 }

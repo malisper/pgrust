@@ -189,6 +189,7 @@ impl Database {
         use crate::executor::execute_readonly_statement;
         use crate::executor::commands::{
             execute_create_table, execute_delete_with_waiter, execute_drop_table,
+            execute_truncate_table,
             execute_insert, execute_update_with_waiter,
         };
         use crate::parser::{
@@ -322,15 +323,16 @@ impl Database {
             }
 
             Statement::DropTable(ref drop_stmt) => {
-                let rel = {
+                let rels = {
                     let catalog_guard = self.catalog.read();
-                    catalog_guard
-                        .catalog()
-                        .get(&drop_stmt.table_name)
-                        .map(|e| e.rel)
+                    drop_stmt
+                        .table_names
+                        .iter()
+                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .collect::<Vec<_>>()
                 };
-                if let Some(rel) = rel {
-                    self.table_locks.lock_table(rel, TableLockMode::AccessExclusive, client_id);
+                for rel in &rels {
+                    self.table_locks.lock_table(*rel, TableLockMode::AccessExclusive, client_id);
                 }
 
                 let mut catalog_guard = self.catalog.write();
@@ -348,11 +350,45 @@ impl Database {
                 }
                 drop(ctx);
                 drop(catalog_guard);
-                if let Some(rel) = rel {
+                for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
                 }
                 result
             }
+
+            Statement::TruncateTable(ref truncate_stmt) => {
+                let rels = {
+                    let catalog_guard = self.catalog.read();
+                    truncate_stmt
+                        .table_names
+                        .iter()
+                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .collect::<Vec<_>>()
+                };
+                for rel in &rels {
+                    self.table_locks.lock_table(*rel, TableLockMode::AccessExclusive, client_id);
+                }
+
+                let catalog_guard = self.catalog.read();
+                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
+                let mut ctx = ExecutorContext {
+                    pool: &self.pool,
+                    txns: self.txns.clone(),
+                    snapshot,
+                    client_id,
+                    next_command_id: 0,
+                };
+                let result =
+                    execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx);
+                drop(ctx);
+                drop(catalog_guard);
+                for rel in rels {
+                    self.table_locks.unlock_table(rel, client_id);
+                }
+                result
+            }
+
+            Statement::Vacuum(_) => Ok(StatementResult::AffectedRows(0)),
 
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Ok(StatementResult::AffectedRows(0))
@@ -548,7 +584,7 @@ impl Session {
         use crate::executor::execute_readonly_statement;
         use crate::executor::commands::{
             execute_create_table, execute_delete_with_waiter, execute_drop_table,
-            execute_insert, execute_update_with_waiter,
+            execute_insert, execute_truncate_table, execute_update_with_waiter,
         };
         use crate::parser::{
             Statement, bind_delete, bind_insert, bind_update,
@@ -656,11 +692,15 @@ impl Session {
             }
 
             Statement::DropTable(ref drop_stmt) => {
-                let rel = {
+                let rels = {
                     let catalog_guard = db.catalog.read();
-                    catalog_guard.catalog().get(&drop_stmt.table_name).map(|e| e.rel)
+                    drop_stmt
+                        .table_names
+                        .iter()
+                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .collect::<Vec<_>>()
                 };
-                if let Some(rel) = rel {
+                for rel in rels {
                     let txn = self.active_txn.as_mut().unwrap();
                     if !txn.held_table_locks.contains(&rel) {
                         db.table_locks.lock_table(rel, TableLockMode::AccessExclusive, client_id);
@@ -683,9 +723,178 @@ impl Session {
                 result
             }
 
+            Statement::TruncateTable(ref truncate_stmt) => {
+                let rels = {
+                    let catalog_guard = db.catalog.read();
+                    truncate_stmt
+                        .table_names
+                        .iter()
+                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .collect::<Vec<_>>()
+                };
+                for rel in rels {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    if !txn.held_table_locks.contains(&rel) {
+                        db.table_locks.lock_table(rel, TableLockMode::AccessExclusive, client_id);
+                        txn.held_table_locks.push(rel);
+                    }
+                }
+                let catalog_guard = db.catalog.read();
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let mut ctx = ExecutorContext {
+                    pool: &db.pool,
+                    txns: db.txns.clone(),
+                    snapshot,
+                    client_id,
+                    next_command_id: cid,
+                };
+                execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx)
+            }
+
+            Statement::Vacuum(_) => Ok(StatementResult::AffectedRows(0)),
+
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 unreachable!("handled in Session::execute")
             }
+        }
+    }
+
+    pub fn copy_from_rows(
+        &mut self,
+        db: &Database,
+        table_name: &str,
+        rows: &[Vec<String>],
+    ) -> Result<usize, ExecError> {
+        use crate::executor::nodes::{ScalarType, Value};
+
+        let started_txn = if self.active_txn.is_none() {
+            let xid = db.txns.write().begin();
+            self.active_txn = Some(ActiveTransaction {
+                xid,
+                failed: false,
+                held_table_locks: Vec::new(),
+                next_command_id: 0,
+            });
+            true
+        } else {
+            false
+        };
+
+        let txn = self.active_txn.as_mut().unwrap();
+        let xid = txn.xid;
+        let cid = txn.next_command_id;
+        txn.next_command_id = txn.next_command_id.saturating_add(1);
+
+        let (rel, desc) = {
+            let catalog_guard = db.catalog.read();
+            let entry = catalog_guard
+                .catalog()
+                .get(table_name)
+                .ok_or_else(|| {
+                    ExecError::Parse(crate::parser::ParseError::UnknownTable(
+                        table_name.to_string(),
+                    ))
+                })?;
+            (entry.rel, entry.desc.clone())
+        };
+
+        if !txn.held_table_locks.contains(&rel) {
+            db.table_locks
+                .lock_table(rel, TableLockMode::RowExclusive, self.client_id);
+            txn.held_table_locks.push(rel);
+        }
+
+        let parsed_rows = rows
+            .iter()
+            .map(|row| {
+                if row.len() != desc.columns.len() {
+                    return Err(ExecError::Parse(
+                        crate::parser::ParseError::InvalidInsertTargetCount {
+                            expected: desc.columns.len(),
+                            actual: row.len(),
+                        },
+                    ));
+                }
+
+                row.iter()
+                    .zip(desc.columns.iter())
+                    .map(|(raw, column)| {
+                        if raw == "\\N" {
+                            return Ok(Value::Null);
+                        }
+                        match column.ty {
+                            ScalarType::Int32 => raw
+                                .parse::<i32>()
+                                .map(Value::Int32)
+                                .map_err(|_| {
+                                    ExecError::Parse(crate::parser::ParseError::InvalidInteger(
+                                        raw.clone(),
+                                    ))
+                                }),
+                            ScalarType::Text => Ok(Value::Text(raw.clone())),
+                            ScalarType::Bool => match raw.as_str() {
+                                "t" | "true" | "1" => Ok(Value::Bool(true)),
+                                "f" | "false" | "0" => Ok(Value::Bool(false)),
+                                _ => Err(ExecError::TypeMismatch {
+                                    op: "copy assignment",
+                                    left: Value::Null,
+                                    right: Value::Text(raw.clone()),
+                                }),
+                            },
+                        }
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()
+            })
+            .collect::<Result<Vec<_>, ExecError>>();
+
+        let result = parsed_rows.and_then(|parsed_rows| {
+            let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+            let mut ctx = ExecutorContext {
+                pool: &db.pool,
+                txns: db.txns.clone(),
+                snapshot,
+                client_id: self.client_id,
+                next_command_id: cid,
+            };
+            crate::executor::commands::execute_insert_values(
+                rel,
+                &desc,
+                &parsed_rows,
+                &mut ctx,
+                xid,
+                cid,
+            )
+        });
+
+        if started_txn {
+            let txn = self.active_txn.take().unwrap();
+            for rel in &txn.held_table_locks {
+                db.table_locks.unlock_table(*rel, self.client_id);
+            }
+            match result {
+                Ok(n) => {
+                    db.pool.flush_wal().map_err(|e| {
+                        ExecError::Heap(crate::access::heap::am::HeapError::Storage(
+                            crate::storage::smgr::SmgrError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                e,
+                            )),
+                        ))
+                    })?;
+                    db.txns.write().commit(txn.xid).map_err(|e| {
+                        ExecError::Heap(crate::access::heap::am::HeapError::Mvcc(e))
+                    })?;
+                    db.txn_waiter.notify();
+                    Ok(n)
+                }
+                Err(e) => {
+                    let _ = db.txns.write().abort(txn.xid);
+                    db.txn_waiter.notify();
+                    Err(e)
+                }
+            }
+        } else {
+            result
         }
     }
 }
@@ -753,6 +962,111 @@ mod tests {
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0], vec![Value::Int32(1), Value::Text("alpha".into())]);
                 assert_eq!(rows[1], vec![Value::Int32(2), Value::Text("beta".into())]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn copy_from_rows_inserts_typed_rows() {
+        let base = temp_dir("copy_from_rows");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        db.execute(
+            1,
+            "create table pgbench_branches (bid int not null, bbalance int not null, filler text)",
+        )
+        .unwrap();
+
+        let inserted = session
+            .copy_from_rows(
+                &db,
+                "pgbench_branches",
+                &[
+                    vec!["1".into(), "0".into(), "\\N".into()],
+                    vec!["2".into(), "5".into(), "branch".into()],
+                ],
+            )
+            .unwrap();
+        assert_eq!(inserted, 2);
+
+        match db
+            .execute(
+                1,
+                "select bid, bbalance, filler from pgbench_branches order by bid",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1), Value::Int32(0), Value::Null],
+                        vec![
+                            Value::Int32(2),
+                            Value::Int32(5),
+                            Value::Text("branch".into()),
+                        ],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn copy_from_rows_respects_active_transaction() {
+        let base = temp_dir("copy_from_rows_txn");
+        let db = Database::open(&base, 16).unwrap();
+        let mut writer = Session::new(1);
+        let mut reader = Session::new(2);
+
+        db.execute(
+            1,
+            "create table pgbench_tellers (tid int not null, bid int not null, tbalance int not null, filler text)",
+        )
+        .unwrap();
+
+        writer.execute(&db, "begin").unwrap();
+        let inserted = writer
+            .copy_from_rows(
+                &db,
+                "pgbench_tellers",
+                &[vec!["10".into(), "1".into(), "0".into(), "\\N".into()]],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+
+        match reader
+            .execute(&db, "select count(*) from pgbench_tellers")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(0)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        writer.execute(&db, "commit").unwrap();
+
+        match reader
+            .execute(
+                &db,
+                "select tid, bid, tbalance, filler from pgbench_tellers",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int32(10),
+                        Value::Int32(1),
+                        Value::Int32(0),
+                        Value::Null,
+                    ]]
+                );
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1296,6 +1610,67 @@ mod tests {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+    }
+
+    /// Reproduces the pgbench benchmark hang more closely than the simple
+    /// counter tests: many concurrent full-table UPDATE/SELECT cycles over a
+    /// relation much larger than the buffer pool.
+    #[test]
+    fn reproduces_pgbench_style_accounts_workload_hang() {
+        let base = temp_dir("pgbench_style_hang");
+        let db = Database::open(&base, 8).unwrap();
+
+        db.execute(
+            1,
+            "create table pgbench_accounts (aid int4 not null, bid int4 not null, abalance int4 not null, filler text)",
+        )
+        .unwrap();
+
+        for aid in 1..=5000 {
+            db.execute(
+                1,
+                &format!(
+                    "insert into pgbench_accounts (aid, bid, abalance, filler) values ({aid}, 1, 0, 'x')"
+                ),
+            )
+            .unwrap();
+        }
+
+        let num_threads = 10;
+        let ops_per_thread = 10;
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let db = db.clone();
+                thread::spawn(move || {
+                    for i in 0..ops_per_thread {
+                        let aid = ((t * 997 + i * 389) % 5000) + 1;
+                        db.execute(
+                            (t + 2100) as ClientId,
+                            &format!(
+                                "update pgbench_accounts set abalance = abalance + -1 where aid = {aid}"
+                            ),
+                        )
+                        .unwrap();
+                        match db
+                            .execute(
+                                (t + 2200) as ClientId,
+                                &format!(
+                                    "select abalance from pgbench_accounts where aid = {aid}"
+                                ),
+                            )
+                            .unwrap()
+                        {
+                            StatementResult::Query { rows, .. } => {
+                                assert_eq!(rows.len(), 1);
+                            }
+                            other => panic!("expected query result, got {:?}", other),
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        join_all_with_timeout(handles, TEST_TIMEOUT);
     }
 
     #[test]

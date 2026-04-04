@@ -10,8 +10,9 @@ use crate::catalog::Catalog;
 use crate::database::TransactionWaiter;
 use crate::parser::{
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, DropTableStatement,
-    ExplainStatement, ParseError, Statement, bind_create_table, build_plan,
+    ExplainStatement, ParseError, Statement, TruncateTableStatement, bind_create_table, build_plan,
 };
+use crate::storage::smgr::ForkNumber;
 use crate::storage::smgr::StorageManager;
 
 use super::nodes::*;
@@ -79,18 +80,45 @@ pub fn execute_drop_table(
     catalog: &mut Catalog,
     ctx: &mut ExecutorContext<'_>,
 ) -> Result<StatementResult, ExecError> {
-    let entry = catalog
-        .drop_table(&stmt.table_name)
-        .map_err(|err| match err {
-            crate::catalog::CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
-            other => ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "droppable table",
-                actual: format!("{other:?}"),
-            }),
-        })?;
+    let mut dropped = 0;
+    for table_name in stmt.table_names {
+        match catalog.drop_table(&table_name) {
+            Ok(entry) => {
+                let _ = ctx.pool.invalidate_relation(entry.rel);
+                ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                dropped += 1;
+            }
+            Err(crate::catalog::CatalogError::UnknownTable(name)) if stmt.if_exists => {
+                let _ = name;
+            }
+            Err(crate::catalog::CatalogError::UnknownTable(name)) => {
+                return Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
+            }
+            Err(other) => {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "droppable table",
+                    actual: format!("{other:?}"),
+                }));
+            }
+        }
+    }
+    Ok(StatementResult::AffectedRows(dropped))
+}
 
-    let _ = ctx.pool.invalidate_relation(entry.rel);
-    ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+pub fn execute_truncate_table(
+    stmt: TruncateTableStatement,
+    catalog: &Catalog,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<StatementResult, ExecError> {
+    for table_name in stmt.table_names {
+        let entry = catalog
+            .get(&table_name)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
+        let _ = ctx.pool.invalidate_relation(entry.rel);
+        ctx.pool
+            .with_storage_mut(|s| s.smgr.truncate(entry.rel, ForkNumber::Main, 0))
+            .map_err(HeapError::Storage)?;
+    }
     Ok(StatementResult::AffectedRows(0))
 }
 
@@ -100,27 +128,47 @@ pub fn execute_insert(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
-    let column_names: Vec<String> = stmt.desc.columns.iter().map(|c| c.name.clone()).collect();
+    let values = stmt
+        .values
+        .iter()
+        .map(|row| {
+            let column_names: Vec<String> =
+                stmt.desc.columns.iter().map(|c| c.name.clone()).collect();
+            let mut slot =
+                TupleSlot::virtual_row(column_names, vec![Value::Null; stmt.desc.columns.len()]);
+            let mut values = vec![Value::Null; stmt.desc.columns.len()];
+            for (column_index, expr) in stmt.target_indexes.iter().zip(row.iter()) {
+                values[*column_index] = eval_expr(expr, &mut slot)?;
+            }
+            Ok(values)
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
+
+    let inserted = execute_insert_values(stmt.rel, &stmt.desc, &values, ctx, xid, cid)?;
+    Ok(StatementResult::AffectedRows(inserted))
+}
+
+pub fn execute_insert_values(
+    rel: crate::storage::smgr::RelFileLocator,
+    desc: &RelationDesc,
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<usize, ExecError> {
     let mut touched_blocks = std::collections::BTreeSet::new();
 
-    for row in &stmt.values {
-        let mut slot =
-            TupleSlot::virtual_row(column_names.clone(), vec![Value::Null; stmt.desc.columns.len()]);
-        let mut values = vec![Value::Null; stmt.desc.columns.len()];
-        for (column_index, expr) in stmt.target_indexes.iter().zip(row.iter()) {
-            values[*column_index] = eval_expr(expr, &mut slot)?;
-        }
-
-        let tuple = tuple_from_values(&stmt.desc, &values)?;
-        let tid = heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, stmt.rel, xid, cid, &tuple)?;
+    for values in rows {
+        let tuple = tuple_from_values(desc, values)?;
+        let tid = heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
         touched_blocks.insert(tid.block_number);
     }
 
     for block_number in touched_blocks {
-        heap_flush(ctx.pool, ctx.client_id, stmt.rel, block_number)?;
+        heap_flush(ctx.pool, ctx.client_id, rel, block_number)?;
     }
 
-    Ok(StatementResult::AffectedRows(stmt.values.len()))
+    Ok(rows.len())
 }
 
 pub(crate) fn execute_update(

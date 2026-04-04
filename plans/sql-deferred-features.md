@@ -20,13 +20,16 @@ The current code supports:
 - aggregate functions: `COUNT(*)`, `COUNT(expr)`, `SUM`, `AVG`, `MIN`, `MAX`
 - boolean operators: `AND`, `OR`, `NOT`
 - comparison operators: `=`, `<`, `>`
-- arithmetic: `+`
+- arithmetic: `+`, unary `-`
 - null predicates: `IS NULL`, `IS NOT NULL`, `IS DISTINCT FROM`,
   `IS NOT DISTINCT FROM`
 - three scalar types: `INT4`, `TEXT`, `BOOL`
 - durable catalog (schema persisted to disk)
 - durable transaction status (persisted to disk)
 - wire protocol server (psql-compatible)
+- `TRUNCATE` and `TRUNCATE TABLE`
+- `VACUUM` accepted as a no-op compatibility shim
+- limited `COPY FROM STDIN` compatibility for pgbench-style data loading
 
 ## Data types
 
@@ -53,11 +56,11 @@ storage format, and the expression evaluator for each new type.
 
 ## Comparison and arithmetic operators
 
-Only `=`, `<`, `>`, and `+` are supported. Missing operators include:
+Only `=`, `<`, `>`, `+`, and unary `-` are supported. Missing operators include:
 
 - `!=` / `<>`
 - `<=`, `>=`
-- `-`, `*`, `/`, `%`
+- binary `-`, `*`, `/`, `%`
 - `||` (string concatenation)
 - `LIKE`, `ILIKE`
 - `SIMILAR TO`
@@ -206,15 +209,36 @@ transaction, `E` for failed transaction).
 
 ## VACUUM and dead space reclamation
 
-Dead tuple versions from updates and deletes are never reclaimed. The heap
-grows monotonically.
+`VACUUM` is accepted only as a compatibility no-op. Dead tuple versions from
+updates and deletes are never reclaimed, and the heap grows monotonically.
 
-**To add:** `VACUUM` command, tuple pruning during scans, free space map
+**To add:** real `VACUUM` execution, tuple pruning during scans, free space map
 integration, and eventually autovacuum.
 
-## TRUNCATE
+## COPY
 
-`TRUNCATE TABLE` is not implemented.
+`COPY FROM STDIN` is not implemented as a real bulk-load path.
+
+Current status:
+
+- the wire protocol has enough copy-in support for pgbench-style client-side
+  initialization
+- incoming copy rows are buffered and then executed row-by-row as ordinary
+  `INSERT INTO ... VALUES (...)` statements through the existing SQL/executor
+  path
+
+What is still missing:
+
+- no direct tuple-loading path that bypasses SQL parsing/execution
+- no efficient batched heap insert path
+- no server-side `COPY TO`
+- no binary `COPY`
+- no general SQL-level `COPY` implementation beyond the narrow compatibility
+  shim used by the wire server
+
+**To add:** Parse and execute `COPY` as a first-class command, decode rows
+directly into tuples, and insert them in bulk inside a dedicated load path
+rather than reissuing one SQL insert per row.
 
 ## Sequences
 

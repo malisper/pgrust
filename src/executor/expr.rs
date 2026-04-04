@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::nodes::*;
 use super::ExecError;
@@ -14,6 +15,7 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
             .ok_or(ExecError::InvalidColumn(*index)),
         Expr::Const(value) => Ok(value.clone()),
         Expr::Add(left, right) => add_values(eval_expr(left, slot)?, eval_expr(right, slot)?),
+        Expr::Negate(inner) => negate_value(eval_expr(inner, slot)?),
         Expr::Eq(left, right) => {
             compare_values("=", eval_expr(left, slot)?, eval_expr(right, slot)?)
         }
@@ -47,6 +49,7 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
             &eval_expr(right, slot)?,
         ))),
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
+        Expr::CurrentTimestamp => Ok(Value::Text(render_current_timestamp())),
     }
 }
 
@@ -66,6 +69,13 @@ pub(crate) fn compare_order_by_keys(
         }
     }
     Ordering::Equal
+}
+
+fn render_current_timestamp() -> String {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(dur) => format!("{}.{:06}+00", dur.as_secs(), dur.subsec_micros()),
+        Err(_) => "0.000000+00".to_string(),
+    }
 }
 
 pub(crate) fn compare_order_values(
@@ -257,6 +267,18 @@ fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
             op: "+",
             left,
             right,
+        }),
+    }
+}
+
+fn negate_value(value: Value) -> Result<Value, ExecError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int32(v) => Ok(Value::Int32(-v)),
+        other => Err(ExecError::TypeMismatch {
+            op: "unary -",
+            left: other,
+            right: Value::Null,
         }),
     }
 }
