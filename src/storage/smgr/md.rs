@@ -52,6 +52,8 @@ pub struct MdStorageManager {
     pub in_recovery: bool,
     /// Cache of opened relations — avoids mkdir/create_dir_all per insert.
     opened_rels: HashSet<RelFileLocator>,
+    /// Cache of created forks — avoids create_new syscall per insert.
+    created_forks: HashSet<(RelFileLocator, ForkNumber)>,
     /// Cache of block counts — avoids stat() per insert. Updated on extend.
     nblocks_cache: HashMap<(RelFileLocator, ForkNumber), BlockNumber>,
 }
@@ -63,6 +65,7 @@ impl MdStorageManager {
             open_segs: HashMap::new(),
             in_recovery: false,
             opened_rels: HashSet::new(),
+            created_forks: HashSet::new(),
             nblocks_cache: HashMap::new(),
         }
     }
@@ -73,6 +76,7 @@ impl MdStorageManager {
             open_segs: HashMap::new(),
             in_recovery: true,
             opened_rels: HashSet::new(),
+            created_forks: HashSet::new(),
             nblocks_cache: HashMap::new(),
         }
     }
@@ -243,6 +247,10 @@ impl StorageManager for MdStorageManager {
         fork: ForkNumber,
         is_redo: bool,
     ) -> Result<(), SmgrError> {
+        if !is_redo && self.created_forks.contains(&(rel, fork)) {
+            return Err(SmgrError::AlreadyExists { rel, fork });
+        }
+
         if !self.opened_rels.contains(&rel) {
             let dir = self.db_dir(rel);
             fs::create_dir_all(&dir)?;
@@ -275,6 +283,7 @@ impl StorageManager for MdStorageManager {
             segno: 0,
         };
         self.open_segs.insert(key, OpenSeg { file, segno: 0 });
+        self.created_forks.insert((rel, fork));
 
         Ok(())
     }
@@ -299,6 +308,7 @@ impl StorageManager for MdStorageManager {
 
         for f in &forks {
             self.nblocks_cache.remove(&(rel, *f));
+            self.created_forks.remove(&(rel, *f));
         }
         self.opened_rels.remove(&rel);
         for f in forks {
