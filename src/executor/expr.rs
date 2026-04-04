@@ -204,18 +204,19 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
 
 /// Decode all values from raw on-page tuple bytes in a single pass.
 /// This fuses deform + decode, avoiding the intermediate Vec<Option<&[u8]>>.
+#[inline]
 pub(crate) fn decode_tuple_from_bytes(
     tuple_bytes: &[u8],
     desc: &RelationDesc,
     attr_descs: &[crate::access::heap::tuple::AttributeDesc],
 ) -> Result<Vec<Value>, ExecError> {
-    use crate::access::heap::tuple::{HEAP_HASNULL, HEAP_NATTS_MASK, SIZEOF_HEAP_TUPLE_HEADER};
+    use crate::access::heap::tuple::{HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
 
     if tuple_bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
         return Err(ExecError::Tuple(crate::access::heap::tuple::TupleError::HeaderTooShort));
     }
     let hoff = tuple_bytes[22];
-    let infomask2 = u16::from_le_bytes([tuple_bytes[18], tuple_bytes[19]]);
+    let _infomask2 = u16::from_le_bytes([tuple_bytes[18], tuple_bytes[19]]);
     let infomask = u16::from_le_bytes([tuple_bytes[20], tuple_bytes[21]]);
     let has_null = infomask & HEAP_HASNULL != 0;
     let null_bitmap = if has_null {
