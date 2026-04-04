@@ -57,6 +57,33 @@ pub struct OrderByEntry {
     pub nulls_first: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl AggFunc {
+    pub fn name(&self) -> &'static str {
+        match self {
+            AggFunc::Count => "count",
+            AggFunc::Sum => "sum",
+            AggFunc::Avg => "avg",
+            AggFunc::Min => "min",
+            AggFunc::Max => "max",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggAccum {
+    pub func: AggFunc,
+    pub arg: Option<Expr>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Column(usize),
@@ -103,6 +130,13 @@ pub enum Plan {
         input: Box<Plan>,
         targets: Vec<TargetEntry>,
     },
+    Aggregate {
+        input: Box<Plan>,
+        group_by: Vec<Expr>,
+        accumulators: Vec<AggAccum>,
+        having: Option<Expr>,
+        output_columns: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +174,7 @@ pub enum PlanState {
     OrderBy(OrderByState),
     Limit(LimitState),
     Projection(ProjectionState),
+    Aggregate(AggregateState),
 }
 
 #[derive(Debug)]
@@ -198,6 +233,116 @@ pub struct LimitState {
     skipped: usize,
     returned: usize,
     stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct AggregateState {
+    input: Box<PlanState>,
+    group_by: Vec<Expr>,
+    accumulators: Vec<AggAccum>,
+    having: Option<Expr>,
+    output_columns: Vec<String>,
+    result_rows: Option<Vec<TupleSlot>>,
+    next_index: usize,
+    stats: NodeExecStats,
+}
+
+#[derive(Debug, Clone)]
+enum AccumState {
+    Count { count: i64 },
+    Sum { sum: Option<i64> },
+    Avg { sum: Option<i64>, count: i64 },
+    Min { min: Option<Value> },
+    Max { max: Option<Value> },
+}
+
+impl AccumState {
+    fn new(func: AggFunc) -> Self {
+        match func {
+            AggFunc::Count => AccumState::Count { count: 0 },
+            AggFunc::Sum => AccumState::Sum { sum: None },
+            AggFunc::Avg => AccumState::Avg { sum: None, count: 0 },
+            AggFunc::Min => AccumState::Min { min: None },
+            AggFunc::Max => AccumState::Max { max: None },
+        }
+    }
+
+    fn accumulate(&mut self, value: &Value, is_count_star: bool) {
+        match self {
+            AccumState::Count { count } => {
+                if is_count_star || !matches!(value, Value::Null) {
+                    *count += 1;
+                }
+            }
+            AccumState::Sum { sum } => {
+                if let Value::Int32(v) = value {
+                    *sum = Some(sum.unwrap_or(0) + *v as i64);
+                }
+            }
+            AccumState::Avg { sum, count } => {
+                if let Value::Int32(v) = value {
+                    *sum = Some(sum.unwrap_or(0) + *v as i64);
+                    *count += 1;
+                }
+            }
+            AccumState::Min { min } => {
+                if !matches!(value, Value::Null) {
+                    *min = Some(match min.take() {
+                        None => value.clone(),
+                        Some(current) => {
+                            if compare_order_values(value, &current, None, false) == Ordering::Less {
+                                value.clone()
+                            } else {
+                                current
+                            }
+                        }
+                    });
+                }
+            }
+            AccumState::Max { max } => {
+                if !matches!(value, Value::Null) {
+                    *max = Some(match max.take() {
+                        None => value.clone(),
+                        Some(current) => {
+                            if compare_order_values(value, &current, None, false) == Ordering::Greater {
+                                value.clone()
+                            } else {
+                                current
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    fn finalize(&self) -> Value {
+        match self {
+            AccumState::Count { count } => Value::Int32(*count as i32),
+            AccumState::Sum { sum } => match sum {
+                Some(v) => Value::Int32(*v as i32),
+                None => Value::Null,
+            },
+            AccumState::Avg { sum, count } => {
+                if *count == 0 {
+                    Value::Null
+                } else {
+                    match sum {
+                        Some(v) => Value::Int32((*v / *count) as i32),
+                        None => Value::Null,
+                    }
+                }
+            }
+            AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
+            AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AggGroup {
+    key_values: Vec<Value>,
+    accum_states: Vec<AccumState>,
 }
 
 pub struct ExecutorContext<'a> {
@@ -371,6 +516,22 @@ pub fn executor_start(plan: Plan) -> PlanState {
             targets,
             stats: NodeExecStats::default(),
         }),
+        Plan::Aggregate {
+            input,
+            group_by,
+            accumulators,
+            having,
+            output_columns,
+        } => PlanState::Aggregate(AggregateState {
+            input: Box::new(executor_start(*input)),
+            group_by,
+            accumulators,
+            having,
+            output_columns,
+            result_rows: None,
+            next_index: 0,
+            stats: NodeExecStats::default(),
+        }),
     }
 }
 
@@ -534,6 +695,7 @@ pub fn exec_next(
         PlanState::OrderBy(order_by) => exec_order_by(order_by, ctx),
         PlanState::Limit(limit) => exec_limit(limit, ctx),
         PlanState::Projection(projection) => exec_projection(projection, ctx),
+        PlanState::Aggregate(aggregate) => exec_aggregate(aggregate, ctx),
     };
     let elapsed = started_at.elapsed();
     if let Ok(slot) = &result {
@@ -712,6 +874,96 @@ fn exec_limit(
     Ok(next)
 }
 
+fn exec_aggregate(
+    state: &mut AggregateState,
+    ctx: &mut ExecutorContext<'_>,
+) -> Result<Option<TupleSlot>, ExecError> {
+    if state.result_rows.is_none() {
+        let mut groups: Vec<AggGroup> = Vec::new();
+
+        while let Some(mut slot) = exec_next(&mut state.input, ctx)? {
+            let key_values: Vec<Value> = state
+                .group_by
+                .iter()
+                .map(|expr| eval_expr(expr, &mut slot))
+                .collect::<Result<_, _>>()?;
+
+            let group_idx = groups
+                .iter()
+                .position(|g| g.key_values == key_values)
+                .unwrap_or_else(|| {
+                    let accum_states = state
+                        .accumulators
+                        .iter()
+                        .map(|a| AccumState::new(a.func))
+                        .collect();
+                    groups.push(AggGroup {
+                        key_values: key_values.clone(),
+                        accum_states,
+                    });
+                    groups.len() - 1
+                });
+
+            let group = &mut groups[group_idx];
+            for (i, accum) in state.accumulators.iter().enumerate() {
+                let is_count_star = accum.func == AggFunc::Count && accum.arg.is_none();
+                let value = if let Some(arg) = &accum.arg {
+                    eval_expr(arg, &mut slot)?
+                } else {
+                    Value::Null
+                };
+                group.accum_states[i].accumulate(&value, is_count_star);
+            }
+        }
+
+        if groups.is_empty() && state.group_by.is_empty() {
+            let accum_states = state
+                .accumulators
+                .iter()
+                .map(|a| AccumState::new(a.func))
+                .collect();
+            groups.push(AggGroup {
+                key_values: Vec::new(),
+                accum_states,
+            });
+        }
+
+        let mut result_rows = Vec::new();
+        for group in &groups {
+            let mut row_values = group.key_values.clone();
+            for accum_state in &group.accum_states {
+                row_values.push(accum_state.finalize());
+            }
+
+            if let Some(having) = &state.having {
+                let mut having_slot =
+                    TupleSlot::virtual_row(state.output_columns.clone(), row_values.clone());
+                match eval_expr(having, &mut having_slot)? {
+                    Value::Bool(true) => {}
+                    Value::Bool(false) | Value::Null => continue,
+                    other => return Err(ExecError::NonBoolQual(other)),
+                }
+            }
+
+            result_rows.push(TupleSlot::virtual_row(
+                state.output_columns.clone(),
+                row_values,
+            ));
+        }
+
+        state.result_rows = Some(result_rows);
+    }
+
+    let rows = state.result_rows.as_ref().unwrap();
+    if state.next_index >= rows.len() {
+        return Ok(None);
+    }
+
+    let slot = rows[state.next_index].clone();
+    state.next_index += 1;
+    Ok(Some(slot))
+}
+
 fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecError> {
     let left = left;
     let right = right;
@@ -731,6 +983,7 @@ fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
         PlanState::OrderBy(order_by) => &mut order_by.stats,
         PlanState::Limit(limit) => &mut limit.stats,
         PlanState::Projection(projection) => &mut projection.stats,
+        PlanState::Aggregate(aggregate) => &mut aggregate.stats,
     }
 }
 
@@ -743,6 +996,7 @@ fn node_stats(state: &PlanState) -> &NodeExecStats {
         PlanState::OrderBy(order_by) => &order_by.stats,
         PlanState::Limit(limit) => &limit.stats,
         PlanState::Projection(projection) => &projection.stats,
+        PlanState::Aggregate(aggregate) => &aggregate.stats,
     }
 }
 
@@ -779,6 +1033,9 @@ fn format_explain_lines(
         PlanState::Projection(projection) => {
             format_explain_lines(&projection.input, indent + 1, analyze, lines)
         }
+        PlanState::Aggregate(aggregate) => {
+            format_explain_lines(&aggregate.input, indent + 1, analyze, lines)
+        }
     }
 }
 
@@ -791,6 +1048,7 @@ fn node_label(state: &PlanState) -> String {
         PlanState::OrderBy(_) => "Sort".into(),
         PlanState::Limit(_) => "Limit".into(),
         PlanState::Projection(_) => "Projection".into(),
+        PlanState::Aggregate(_) => "Aggregate".into(),
     }
 }
 
@@ -2217,6 +2475,394 @@ mod tests {
                 assert_eq!(
                     rows,
                     vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn count_star_without_group_by() {
+        let base = temp_dir("count_star");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["count"]);
+                assert_eq!(rows, vec![vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn count_star_on_empty_table() {
+        let base = temp_dir("count_star_empty");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*) from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(0)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn group_by_with_count() {
+        let base = temp_dir("group_by_count");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select note, count(*) from people group by note order by note",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["note", "count"]);
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Text("a".into()), Value::Int32(2)],
+                        vec![Value::Text("b".into()), Value::Int32(1)],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sum_avg_min_max_aggregates() {
+        let base = temp_dir("sum_avg_min_max");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', 'b'), (30, 'carol', 'c')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select sum(id), avg(id), min(id), max(id) from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["sum", "avg", "min", "max"]);
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int32(60),
+                        Value::Int32(20),
+                        Value::Int32(10),
+                        Value::Int32(30),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn having_filters_groups() {
+        let base = temp_dir("having_filter");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select note, count(*) from people group by note having count(*) > 1",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Text("a".into()), Value::Int32(2)]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn count_expr_skips_nulls() {
+        let base = temp_dir("count_expr_nulls");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(note) from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sum_of_all_nulls_returns_null() {
+        let base = temp_dir("sum_all_nulls");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', null)",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select min(note), max(note) from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn null_group_by_keys_are_grouped_together() {
+        let base = temp_dir("null_group_keys");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', 'a'), (3, 'carol', null), (4, 'dave', 'a')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select note, count(*) from people group by note order by note",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0], vec![Value::Text("a".into()), Value::Int32(2)]);
+                assert_eq!(rows[1], vec![Value::Null, Value::Int32(2)]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sum_and_avg_skip_nulls() {
+        let base = temp_dir("sum_avg_skip_nulls");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*), count(note), sum(id), avg(id), min(id), max(id) from people",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(
+                    column_names,
+                    vec!["count", "count", "sum", "avg", "min", "max"]
+                );
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int32(3),  // COUNT(*) counts all rows including NULLs
+                        Value::Int32(2),  // COUNT(note) skips the NULL
+                        Value::Int32(60), // SUM(id) includes all non-NULL ids
+                        Value::Int32(20), // AVG(id) = 60/3
+                        Value::Int32(10),
+                        Value::Int32(30),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ungrouped_column_is_rejected() {
+        let base = temp_dir("ungrouped_column");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        let result = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select name, count(*) from people",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn aggregate_in_where_is_rejected() {
+        let base = temp_dir("agg_in_where");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        let result = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select name from people where count(*) > 1",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn explain_shows_aggregate_node() {
+        let base = temp_dir("explain_agg");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "explain select note, count(*) from people group by note",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                let rendered = rows
+                    .into_iter()
+                    .map(|row| match &row[0] {
+                        Value::Text(text) => text.clone(),
+                        other => panic!("expected text, got {:?}", other),
+                    })
+                    .collect::<Vec<_>>();
+                assert!(rendered.iter().any(|line| line.contains("Aggregate")));
+                assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn group_by_with_order_by_and_limit() {
+        let base = temp_dir("group_by_order_limit");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y'), (3, 'carol', 'x'), (4, 'dave', 'y'), (5, 'eve', 'z')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select note, count(*) from people group by note order by count(*) desc limit 2",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Text("x".into()), Value::Int32(2)],
+                        vec![Value::Text("y".into()), Value::Int32(2)],
+                    ]
                 );
             }
             other => panic!("expected query result, got {:?}", other),

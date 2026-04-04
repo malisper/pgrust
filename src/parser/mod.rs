@@ -2,7 +2,7 @@ pub use crate::catalog::{Catalog, CatalogEntry};
 
 use crate::RelFileLocator;
 use crate::catalog::column_desc;
-use crate::executor::{ColumnDesc, Expr, Plan, RelationDesc, TargetEntry, Value};
+use crate::executor::{AggAccum, AggFunc, ColumnDesc, Expr, Plan, RelationDesc, TargetEntry, Value};
 use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
@@ -31,6 +31,8 @@ pub enum ParseError {
     TableAlreadyExists(String),
     TableDoesNotExist(String),
     UnsupportedType(String),
+    UngroupedColumn(String),
+    AggInWhere,
 }
 
 impl fmt::Display for ParseError {
@@ -52,6 +54,12 @@ impl fmt::Display for ParseError {
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
             ParseError::UnsupportedType(name) => write!(f, "unsupported type: {name}"),
+            ParseError::UngroupedColumn(name) => {
+                write!(f, "column \"{name}\" must appear in the GROUP BY clause or be used in an aggregate function")
+            }
+            ParseError::AggInWhere => {
+                write!(f, "aggregate functions are not allowed in WHERE")
+            }
         }
     }
 }
@@ -80,6 +88,8 @@ pub struct SelectStatement {
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
+    pub group_by: Vec<SqlExpr>,
+    pub having: Option<SqlExpr>,
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -178,6 +188,10 @@ pub enum SqlExpr {
     IsNotNull(Box<SqlExpr>),
     IsDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
+    AggCall {
+        func: AggFunc,
+        arg: Option<Box<SqlExpr>>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +280,12 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         )
     };
 
+    if let Some(predicate) = &stmt.where_clause {
+        if expr_contains_agg(predicate) {
+            return Err(ParseError::AggInWhere);
+        }
+    }
+
     let mut plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
             input: Box::new(base),
@@ -275,35 +295,153 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         base
     };
 
-    if !stmt.order_by.is_empty() {
-        plan = Plan::OrderBy {
+    let needs_agg = !stmt.group_by.is_empty()
+        || targets_contain_agg(&stmt.targets)
+        || stmt.having.is_some();
+
+    if needs_agg {
+        let mut aggs: Vec<(AggFunc, Option<SqlExpr>)> = Vec::new();
+        for target in &stmt.targets {
+            collect_aggs(&target.expr, &mut aggs);
+        }
+        if let Some(having) = &stmt.having {
+            collect_aggs(having, &mut aggs);
+        }
+
+        let group_keys: Vec<Expr> = stmt
+            .group_by
+            .iter()
+            .map(|e| bind_expr(e, &scope))
+            .collect::<Result<_, _>>()?;
+
+        let accumulators: Vec<AggAccum> = aggs
+            .iter()
+            .map(|(func, arg)| {
+                Ok(AggAccum {
+                    func: *func,
+                    arg: arg.as_ref().map(|e| bind_expr(e, &scope)).transpose()?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+
+        let n_keys = group_keys.len();
+        let mut output_columns = Vec::new();
+        for gk in &stmt.group_by {
+            output_columns.push(sql_expr_name(gk));
+        }
+        for (func, _) in &aggs {
+            output_columns.push(func.name().to_string());
+        }
+
+        let having = stmt
+            .having
+            .as_ref()
+            .map(|e| bind_agg_output_expr(e, &stmt.group_by, &scope, &aggs, n_keys))
+            .transpose()?;
+
+        plan = Plan::Aggregate {
             input: Box::new(plan),
-            items: stmt
-                .order_by
+            group_by: group_keys,
+            accumulators,
+            having,
+            output_columns: output_columns.clone(),
+        };
+
+        if !stmt.order_by.is_empty() {
+            plan = Plan::OrderBy {
+                input: Box::new(plan),
+                items: stmt
+                    .order_by
+                    .iter()
+                    .map(|item| {
+                        Ok(crate::executor::OrderByEntry {
+                            expr: bind_agg_output_expr(
+                                &item.expr,
+                                &stmt.group_by,
+                                &scope,
+                                &aggs,
+                                n_keys,
+                            )?,
+                            descending: item.descending,
+                            nulls_first: item.nulls_first,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+            };
+        }
+
+        if stmt.limit.is_some() || stmt.offset.is_some() {
+            plan = Plan::Limit {
+                input: Box::new(plan),
+                limit: stmt.limit,
+                offset: stmt.offset.unwrap_or(0),
+            };
+        }
+
+        let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
+            && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
+        {
+            output_columns
+                .iter()
+                .enumerate()
+                .map(|(i, name)| TargetEntry {
+                    name: name.clone(),
+                    expr: Expr::Column(i),
+                })
+                .collect()
+        } else {
+            stmt.targets
                 .iter()
                 .map(|item| {
-                    Ok(crate::executor::OrderByEntry {
-                        expr: bind_expr(&item.expr, &scope)?,
-                        descending: item.descending,
-                        nulls_first: item.nulls_first,
+                    Ok(TargetEntry {
+                        name: item.output_name.clone(),
+                        expr: bind_agg_output_expr(
+                            &item.expr,
+                            &stmt.group_by,
+                            &scope,
+                            &aggs,
+                            n_keys,
+                        )?,
                     })
                 })
-                .collect::<Result<Vec<_>, ParseError>>()?,
+                .collect::<Result<_, _>>()?
         };
-    }
 
-    if stmt.limit.is_some() || stmt.offset.is_some() {
-        plan = Plan::Limit {
+        Ok(Plan::Projection {
             input: Box::new(plan),
-            limit: stmt.limit,
-            offset: stmt.offset.unwrap_or(0),
-        };
-    }
+            targets,
+        })
+    } else {
+        if !stmt.order_by.is_empty() {
+            plan = Plan::OrderBy {
+                input: Box::new(plan),
+                items: stmt
+                    .order_by
+                    .iter()
+                    .map(|item| {
+                        Ok(crate::executor::OrderByEntry {
+                            expr: bind_expr(&item.expr, &scope)?,
+                            descending: item.descending,
+                            nulls_first: item.nulls_first,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?,
+            };
+        }
 
-    Ok(Plan::Projection {
-        input: Box::new(plan),
-        targets: bind_select_targets(&stmt.targets, &scope)?,
-    })
+        if stmt.limit.is_some() || stmt.offset.is_some() {
+            plan = Plan::Limit {
+                input: Box::new(plan),
+                limit: stmt.limit,
+                offset: stmt.offset.unwrap_or(0),
+            };
+        }
+
+        Ok(Plan::Projection {
+            input: Box::new(plan),
+            targets: bind_select_targets(&stmt.targets, &scope)?,
+        })
+    }
 }
 
 fn bind_select_targets(
@@ -372,6 +510,12 @@ fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
             Box::new(bind_expr(left, scope)?),
             Box::new(bind_expr(right, scope)?),
         ),
+        SqlExpr::AggCall { .. } => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "non-aggregate expression",
+                actual: "aggregate function".into(),
+            })
+        }
     })
 }
 
@@ -652,6 +796,146 @@ fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScope {
     BoundScope { desc, columns }
 }
 
+fn expr_contains_agg(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::AggCall { .. } => true,
+        SqlExpr::Column(_) | SqlExpr::Const(_) => false,
+        SqlExpr::Add(l, r)
+        | SqlExpr::Eq(l, r)
+        | SqlExpr::Lt(l, r)
+        | SqlExpr::Gt(l, r)
+        | SqlExpr::And(l, r)
+        | SqlExpr::Or(l, r)
+        | SqlExpr::IsDistinctFrom(l, r)
+        | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
+        SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => {
+            expr_contains_agg(inner)
+        }
+    }
+}
+
+fn targets_contain_agg(targets: &[SelectItem]) -> bool {
+    targets.iter().any(|t| expr_contains_agg(&t.expr))
+}
+
+fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>)>) {
+    match expr {
+        SqlExpr::AggCall { func, arg } => {
+            let entry = (*func, arg.as_deref().cloned());
+            if !aggs.contains(&entry) {
+                aggs.push(entry);
+            }
+        }
+        SqlExpr::Column(_) | SqlExpr::Const(_) => {}
+        SqlExpr::Add(l, r)
+        | SqlExpr::Eq(l, r)
+        | SqlExpr::Lt(l, r)
+        | SqlExpr::Gt(l, r)
+        | SqlExpr::And(l, r)
+        | SqlExpr::Or(l, r)
+        | SqlExpr::IsDistinctFrom(l, r)
+        | SqlExpr::IsNotDistinctFrom(l, r) => {
+            collect_aggs(l, aggs);
+            collect_aggs(r, aggs);
+        }
+        SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => {
+            collect_aggs(inner, aggs);
+        }
+    }
+}
+
+fn sql_expr_name(expr: &SqlExpr) -> String {
+    match expr {
+        SqlExpr::Column(name) => name.clone(),
+        SqlExpr::AggCall { func, .. } => func.name().to_string(),
+        _ => "?column?".to_string(),
+    }
+}
+
+fn bind_agg_output_expr(
+    expr: &SqlExpr,
+    group_by_exprs: &[SqlExpr],
+    input_scope: &BoundScope,
+    agg_list: &[(AggFunc, Option<SqlExpr>)],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    for (i, gk) in group_by_exprs.iter().enumerate() {
+        if gk == expr {
+            return Ok(Expr::Column(i));
+        }
+    }
+
+    match expr {
+        SqlExpr::AggCall { func, arg } => {
+            let entry = (*func, arg.as_deref().cloned());
+            for (i, agg) in agg_list.iter().enumerate() {
+                if *agg == entry {
+                    return Ok(Expr::Column(n_keys + i));
+                }
+            }
+            Err(ParseError::UnexpectedToken {
+                expected: "known aggregate",
+                actual: format!("{}(...)", func.name()),
+            })
+        }
+        SqlExpr::Column(name) => {
+            let col_index = resolve_column(input_scope, name)?;
+            for (i, gk) in group_by_exprs.iter().enumerate() {
+                if let SqlExpr::Column(gk_name) = gk {
+                    if let Ok(gk_index) = resolve_column(input_scope, gk_name) {
+                        if gk_index == col_index {
+                            return Ok(Expr::Column(i));
+                        }
+                    }
+                }
+            }
+            Err(ParseError::UngroupedColumn(name.clone()))
+        }
+        SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
+        SqlExpr::Add(l, r) => Ok(Expr::Add(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+        SqlExpr::Eq(l, r) => Ok(Expr::Eq(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+        SqlExpr::Lt(l, r) => Ok(Expr::Lt(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+        SqlExpr::Gt(l, r) => Ok(Expr::Gt(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+        SqlExpr::And(l, r) => Ok(Expr::And(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+        SqlExpr::Or(l, r) => Ok(Expr::Or(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+        SqlExpr::Not(inner) => Ok(Expr::Not(Box::new(bind_agg_output_expr(
+            inner, group_by_exprs, input_scope, agg_list, n_keys,
+        )?))),
+        SqlExpr::IsNull(inner) => Ok(Expr::IsNull(Box::new(bind_agg_output_expr(
+            inner, group_by_exprs, input_scope, agg_list, n_keys,
+        )?))),
+        SqlExpr::IsNotNull(inner) => Ok(Expr::IsNotNull(Box::new(bind_agg_output_expr(
+            inner, group_by_exprs, input_scope, agg_list, n_keys,
+        )?))),
+        SqlExpr::IsDistinctFrom(l, r) => Ok(Expr::IsDistinctFrom(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+        SqlExpr::IsNotDistinctFrom(l, r) => Ok(Expr::IsNotDistinctFrom(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?),
+        )),
+    }
+}
+
 fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
     use pest::error::ErrorVariant;
 
@@ -712,6 +996,8 @@ fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
+    let mut group_by = Vec::new();
+    let mut having = None;
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
@@ -720,6 +1006,8 @@ fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
             Rule::select_list => targets = Some(build_select_list(part)?),
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::group_by_clause => group_by = build_group_by_clause(part)?,
+            Rule::having_clause => having = Some(build_having_clause(part)?),
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -730,10 +1018,27 @@ fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
+        group_by,
+        having,
         order_by,
         limit,
         offset,
     })
+}
+
+fn build_group_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::expr)
+        .map(build_expr)
+        .collect()
+}
+
+fn build_having_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let expr = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::expr)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_expr(expr)
 }
 
 fn build_order_by_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, ParseError> {
@@ -945,23 +1250,25 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     let mut items = Vec::new();
     {
         let expr = build_expr(first)?;
-        let output_name = match &expr {
-            SqlExpr::Column(name) => name.clone(),
-            _ => format!("expr{}", items.len() + 1),
-        };
+        let output_name = select_item_name(&expr, items.len());
         items.push(SelectItem { output_name, expr });
     }
 
     for expr_pair in inner {
         let expr = build_expr(expr_pair)?;
-        let output_name = match &expr {
-            SqlExpr::Column(name) => name.clone(),
-            _ => format!("expr{}", items.len() + 1),
-        };
+        let output_name = select_item_name(&expr, items.len());
         items.push(SelectItem { output_name, expr });
     }
 
     Ok(items)
+}
+
+fn select_item_name(expr: &SqlExpr, index: usize) -> String {
+    match expr {
+        SqlExpr::Column(name) => name.clone(),
+        SqlExpr::AggCall { func, .. } => func.name().to_string(),
+        _ => format!("expr{}", index + 1),
+    }
 }
 
 fn build_values_row(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
@@ -1048,6 +1355,7 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             }
         }
         Rule::primary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
+        Rule::agg_call => build_agg_call(pair),
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::integer => pair
             .as_str()
@@ -1063,6 +1371,43 @@ fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             actual: pair.as_str().into(),
         }),
     }
+}
+
+fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut func = None;
+    let mut arg = None;
+    let mut is_star = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::agg_func => {
+                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                func = Some(match inner.as_rule() {
+                    Rule::kw_count => AggFunc::Count,
+                    Rule::kw_sum => AggFunc::Sum,
+                    Rule::kw_avg => AggFunc::Avg,
+                    Rule::kw_min => AggFunc::Min,
+                    Rule::kw_max => AggFunc::Max,
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "aggregate function",
+                            actual: inner.as_str().into(),
+                        })
+                    }
+                });
+            }
+            Rule::star => is_star = true,
+            Rule::expr => arg = Some(build_expr(part)?),
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::AggCall {
+        func: func.ok_or(ParseError::UnexpectedEof)?,
+        arg: if is_star {
+            None
+        } else {
+            Some(Box::new(arg.ok_or(ParseError::UnexpectedEof)?))
+        },
+    })
 }
 
 fn build_null_predicate(
@@ -1472,6 +1817,62 @@ mod tests {
         assert!(matches!(
             parse_statement("show tables").unwrap(),
             Statement::ShowTables
+        ));
+    }
+
+    #[test]
+    fn parse_aggregate_select() {
+        let stmt = parse_select("select count(*) from people").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert!(matches!(
+            stmt.targets[0].expr,
+            SqlExpr::AggCall { func: AggFunc::Count, arg: None }
+        ));
+        assert_eq!(stmt.targets[0].output_name, "count");
+    }
+
+    #[test]
+    fn parse_group_by_and_having() {
+        let stmt = parse_select(
+            "select name, count(*) from people group by name having count(*) > 1",
+        )
+        .unwrap();
+        assert_eq!(stmt.group_by.len(), 1);
+        assert!(matches!(stmt.group_by[0], SqlExpr::Column(ref name) if name == "name"));
+        assert!(stmt.having.is_some());
+    }
+
+    #[test]
+    fn build_plan_with_aggregate() {
+        let stmt =
+            parse_select("select name, count(*) from people group by name").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].name, "name");
+                assert_eq!(targets[1].name, "count");
+                assert!(matches!(*input, Plan::Aggregate { .. }));
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ungrouped_column_rejected_at_plan_time() {
+        let stmt = parse_select("select name, count(*) from people").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UngroupedColumn(name)) if name == "name"
+        ));
+    }
+
+    #[test]
+    fn aggregate_in_where_rejected() {
+        let stmt = parse_select("select name from people where count(*) > 1").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::AggInWhere)
         ));
     }
 }

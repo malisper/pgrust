@@ -5,8 +5,10 @@ stmt = _{ explain_stmt | select_stmt | show_tables_stmt | create_table_stmt | dr
 
 explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
 explain_option = { kw_analyze | kw_buffers }
-select_stmt = { kw_select ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
+select_stmt = { kw_select ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
 empty_select_list = { &kw_from }
+group_by_clause = { kw_group ~ kw_by ~ expr ~ ("," ~ expr)* }
+having_clause = { kw_having ~ expr }
 order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }
 order_by_item = { expr ~ (kw_asc | kw_desc)? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
@@ -49,7 +51,9 @@ is_not_null_suffix = { kw_is ~ kw_not ~ kw_null }
 is_distinct_suffix = { kw_is ~ kw_distinct ~ kw_from ~ add_expr }
 is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 comp_op = { "=" | "<" | ">" }
-primary_expr = { kw_null | kw_true | kw_false | identifier | integer | string_literal | "(" ~ expr ~ ")" }
+primary_expr = { kw_null | kw_true | kw_false | agg_call | identifier | integer | string_literal | "(" ~ expr ~ ")" }
+agg_call = { agg_func ~ "(" ~ (star | expr) ~ ")" }
+agg_func = { kw_count | kw_sum | kw_avg | kw_min | kw_max }
 
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
 keyword_end = _{ !ident_cont }
@@ -90,6 +94,13 @@ kw_false = { kw_false_atom }
 kw_is = { kw_is_atom }
 kw_and = { kw_and_atom }
 kw_or = { kw_or_atom }
+kw_group = _{ kw_group_atom }
+kw_having = _{ kw_having_atom }
+kw_count = { kw_count_atom }
+kw_sum = { kw_sum_atom }
+kw_avg = { kw_avg_atom }
+kw_min = { kw_min_atom }
+kw_max = { kw_max_atom }
 
 kw_int4 = { kw_int4_atom }
 kw_int = { kw_int_atom }
@@ -134,6 +145,13 @@ kw_false_atom = @{ ^"false" ~ keyword_end }
 kw_is_atom = @{ ^"is" ~ keyword_end }
 kw_and_atom = @{ ^"and" ~ keyword_end }
 kw_or_atom = @{ ^"or" ~ keyword_end }
+kw_group_atom = @{ ^"group" ~ keyword_end }
+kw_having_atom = @{ ^"having" ~ keyword_end }
+kw_count_atom = @{ ^"count" ~ keyword_end }
+kw_sum_atom = @{ ^"sum" ~ keyword_end }
+kw_avg_atom = @{ ^"avg" ~ keyword_end }
+kw_min_atom = @{ ^"min" ~ keyword_end }
+kw_max_atom = @{ ^"max" ~ keyword_end }
 
 kw_int4_atom = @{ ^"int4" ~ keyword_end }
 kw_int_atom = @{ ^"int" ~ keyword_end }
