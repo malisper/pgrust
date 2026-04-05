@@ -496,6 +496,12 @@ impl Database {
     }
 }
 
+impl Drop for Database {
+    fn drop(&mut self) {
+        self.txns.write().flush_clog();
+    }
+}
+
 struct ActiveTransaction {
     xid: TransactionId,
     failed: bool,

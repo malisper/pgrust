@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::access::heap::tuple::HeapTuple;
 
@@ -39,10 +39,16 @@ pub struct Snapshot {
 pub struct TransactionManager {
     next_xid: TransactionId,
     statuses: BTreeMap<TransactionId, TransactionStatus>,
+    /// Dense list of currently in-progress transaction IDs.
+    /// Maintained alongside `statuses` so snapshot creation is O(active_txns)
+    /// instead of O(all_txns).
+    in_progress: Vec<TransactionId>,
     status_path: Option<PathBuf>,
-    /// Open file handle for single-byte status writes.
-    /// Avoids open/close per commit — just seek + write 1 byte.
+    /// Open file handle for CLOG flushes.
     status_file: Option<File>,
+    /// In-memory CLOG page buffer, matching PostgreSQL's SLRU approach.
+    /// All reads/writes go through this buffer; flushed to disk on checkpoint.
+    clog_buf: Vec<u8>,
 }
 
 impl Clone for TransactionManager {
@@ -50,13 +56,21 @@ impl Clone for TransactionManager {
         Self {
             next_xid: self.next_xid,
             statuses: self.statuses.clone(),
+            in_progress: self.in_progress.clone(),
             status_path: self.status_path.clone(),
             status_file: self.status_file.as_ref().and_then(|f| f.try_clone().ok()),
+            clog_buf: self.clog_buf.clone(),
         }
     }
 }
 
-fn status_to_byte(status: TransactionStatus) -> u8 {
+// 2 bits per transaction, matching PostgreSQL's CLOG format.
+// 4 transactions per byte. Status values: 0=unused, 1=in_progress, 2=committed, 3=aborted.
+const CLOG_BITS_PER_XACT: u32 = 2;
+const CLOG_XACTS_PER_BYTE: u32 = 4;
+const CLOG_XACT_BITMASK: u8 = (1 << CLOG_BITS_PER_XACT) - 1;
+
+fn status_to_bits(status: TransactionStatus) -> u8 {
     match status {
         TransactionStatus::InProgress => 1,
         TransactionStatus::Committed => 2,
@@ -64,8 +78,8 @@ fn status_to_byte(status: TransactionStatus) -> u8 {
     }
 }
 
-fn byte_to_status(b: u8) -> Option<TransactionStatus> {
-    match b {
+fn bits_to_status(bits: u8) -> Option<TransactionStatus> {
+    match bits & CLOG_XACT_BITMASK {
         1 => Some(TransactionStatus::InProgress),
         2 => Some(TransactionStatus::Committed),
         3 => Some(TransactionStatus::Aborted),
@@ -81,7 +95,13 @@ impl TransactionManager {
         }
 
         if path.exists() {
-            let (next_xid, statuses) = load_status_file(&path)?;
+            let raw = fs::read(&path).map_err(|e| MvccError::Io(e.to_string()))?;
+            let (next_xid, statuses) = load_status_file_from_bytes(&raw)?;
+            let in_progress = statuses
+                .iter()
+                .filter(|(_, s)| **s == TransactionStatus::InProgress)
+                .map(|(xid, _)| *xid)
+                .collect();
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -90,25 +110,27 @@ impl TransactionManager {
             Ok(Self {
                 next_xid,
                 statuses,
+                in_progress,
                 status_path: Some(path),
                 status_file: Some(file),
+                clog_buf: raw,
             })
         } else {
-            let mut file = OpenOptions::new()
+            let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .open(&path)
                 .map_err(|e| MvccError::Io(e.to_string()))?;
-            // Write header: next_xid = 0
-            file.write_all(&INVALID_TRANSACTION_ID.to_le_bytes())
-                .map_err(|e| MvccError::Io(e.to_string()))?;
+            let clog_buf = INVALID_TRANSACTION_ID.to_le_bytes().to_vec();
             Ok(Self {
                 next_xid: INVALID_TRANSACTION_ID,
                 statuses: BTreeMap::new(),
+                in_progress: Vec::new(),
                 status_path: Some(path),
                 status_file: Some(file),
+                clog_buf,
             })
         }
     }
@@ -117,7 +139,8 @@ impl TransactionManager {
         self.next_xid += 1;
         let xid = self.next_xid;
         self.statuses.insert(xid, TransactionStatus::InProgress);
-        self.write_status_byte(xid, TransactionStatus::InProgress);
+        self.in_progress.push(xid);
+        self.write_status_bits(xid, TransactionStatus::InProgress);
         self.write_next_xid();
         xid
     }
@@ -126,7 +149,8 @@ impl TransactionManager {
         match self.statuses.get_mut(&xid) {
             Some(status @ TransactionStatus::InProgress) => {
                 *status = TransactionStatus::Committed;
-                self.write_status_byte(xid, TransactionStatus::Committed);
+                self.in_progress.retain(|&x| x != xid);
+                self.write_status_bits(xid, TransactionStatus::Committed);
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -138,7 +162,8 @@ impl TransactionManager {
         match self.statuses.get_mut(&xid) {
             Some(status @ TransactionStatus::InProgress) => {
                 *status = TransactionStatus::Aborted;
-                self.write_status_byte(xid, TransactionStatus::Aborted);
+                self.in_progress.retain(|&x| x != xid);
+                self.write_status_bits(xid, TransactionStatus::Aborted);
                 Ok(())
             }
             Some(_) => Err(MvccError::TransactionNotInProgress(xid)),
@@ -164,15 +189,9 @@ impl TransactionManager {
         }
 
         let mut in_progress = BTreeSet::new();
-        for (&xid, &status) in &self.statuses {
-            match status {
-                TransactionStatus::Committed => {}
-                TransactionStatus::InProgress => {
-                    if xid != current_xid {
-                        in_progress.insert(xid);
-                    }
-                }
-                TransactionStatus::Aborted => {}
+        for &xid in &self.in_progress {
+            if xid != current_xid {
+                in_progress.insert(xid);
             }
         }
 
@@ -197,19 +216,40 @@ impl TransactionManager {
         base_dir.join("pg_xact").join("status")
     }
 
-    /// Write one status byte at offset `HEADER_SIZE + xid`. No fsync.
-    fn write_status_byte(&mut self, xid: TransactionId, status: TransactionStatus) {
-        let Some(ref mut file) = self.status_file else { return };
-        let offset = STATUS_FILE_HEADER_SIZE as u64 + xid as u64;
-        let _ = file.seek(SeekFrom::Start(offset));
-        let _ = file.write_all(&[status_to_byte(status)]);
+    /// Write 2-bit status for `xid` into the in-memory CLOG buffer.
+    /// No disk I/O — flushed to disk on checkpoint via `flush_clog()`.
+    fn write_status_bits(&mut self, xid: TransactionId, status: TransactionStatus) {
+        let byte_idx = STATUS_FILE_HEADER_SIZE + (xid / CLOG_XACTS_PER_BYTE) as usize;
+        let bshift = (xid % CLOG_XACTS_PER_BYTE) * CLOG_BITS_PER_XACT;
+
+        // Extend buffer if needed.
+        if byte_idx >= self.clog_buf.len() {
+            self.clog_buf.resize(byte_idx + 1, 0);
+        }
+
+        self.clog_buf[byte_idx] &= !(CLOG_XACT_BITMASK << bshift);
+        self.clog_buf[byte_idx] |= status_to_bits(status) << bshift;
     }
 
-    /// Update next_xid in the header (first 4 bytes).
+    /// Update next_xid in the in-memory CLOG header.
     fn write_next_xid(&mut self) {
+        if self.clog_buf.len() < STATUS_FILE_HEADER_SIZE {
+            self.clog_buf.resize(STATUS_FILE_HEADER_SIZE, 0);
+        }
+        self.clog_buf[0..4].copy_from_slice(&self.next_xid.to_le_bytes());
+    }
+
+    /// Flush in-memory CLOG buffer to disk (like PostgreSQL's SLRU writeback).
+    pub fn flush_clog(&mut self) {
         let Some(ref mut file) = self.status_file else { return };
         let _ = file.seek(SeekFrom::Start(0));
-        let _ = file.write_all(&self.next_xid.to_le_bytes());
+        let _ = file.write_all(&self.clog_buf);
+    }
+}
+
+impl Drop for TransactionManager {
+    fn drop(&mut self) {
+        self.flush_clog();
     }
 }
 
@@ -390,12 +430,11 @@ impl Snapshot {
     }
 }
 
-/// Load status file: header is next_xid (4 bytes), then 1 byte per xid
-/// at offset HEADER_SIZE + xid.
-fn load_status_file(
-    path: &Path,
+/// Load status file: header is next_xid (4 bytes), then 2 bits per xid
+/// packed 4 per byte starting at offset HEADER_SIZE.
+fn load_status_file_from_bytes(
+    bytes: &[u8],
 ) -> Result<(TransactionId, BTreeMap<TransactionId, TransactionStatus>), MvccError> {
-    let bytes = fs::read(path).map_err(|e| MvccError::Io(e.to_string()))?;
     if bytes.len() < STATUS_FILE_HEADER_SIZE {
         return Err(MvccError::CorruptStatusFile("header too short"));
     }
@@ -403,9 +442,13 @@ fn load_status_file(
     let next_xid = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
 
     let mut statuses = BTreeMap::new();
-    for (i, &b) in bytes[STATUS_FILE_HEADER_SIZE..].iter().enumerate() {
-        if let Some(status) = byte_to_status(b) {
-            statuses.insert(i as TransactionId, status);
+    for (byte_idx, &b) in bytes[STATUS_FILE_HEADER_SIZE..].iter().enumerate() {
+        for slot in 0..CLOG_XACTS_PER_BYTE {
+            let xid = (byte_idx as u32) * CLOG_XACTS_PER_BYTE + slot;
+            let bits = (b >> (slot * CLOG_BITS_PER_XACT)) & CLOG_XACT_BITMASK;
+            if let Some(status) = bits_to_status(bits) {
+                statuses.insert(xid, status);
+            }
         }
     }
 
@@ -461,6 +504,101 @@ mod tests {
 
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert!(!snapshot.tuple_visible(&txns, &tuple));
+    }
+
+    /// The in_progress Vec must stay in sync with statuses after a
+    /// sequence of begin/commit/abort operations.
+    #[test]
+    fn in_progress_vec_tracks_statuses() {
+        let mut txns = TransactionManager::default();
+
+        let a = txns.begin();
+        let b = txns.begin();
+        let c = txns.begin();
+        assert_eq!(txns.in_progress, vec![a, b, c]);
+
+        txns.commit(b).unwrap();
+        assert_eq!(txns.in_progress, vec![a, c]);
+
+        txns.abort(a).unwrap();
+        assert_eq!(txns.in_progress, vec![c]);
+
+        let d = txns.begin();
+        assert_eq!(txns.in_progress, vec![c, d]);
+
+        txns.commit(c).unwrap();
+        txns.commit(d).unwrap();
+        assert!(txns.in_progress.is_empty());
+    }
+
+    /// Snapshot after many committed transactions should be O(active)
+    /// not O(total). Verify correctness at scale.
+    #[test]
+    fn snapshot_correct_after_many_committed_transactions() {
+        let mut txns = TransactionManager::default();
+
+        // Commit 1000 transactions to build up history.
+        for _ in 0..1000 {
+            let xid = txns.begin();
+            txns.commit(xid).unwrap();
+        }
+
+        let inserter = txns.begin();
+        txns.commit(inserter).unwrap();
+
+        let updater = txns.begin();
+        txns.commit(updater).unwrap();
+
+        let mut old_tuple = HeapTuple::new_raw(1, b"old".to_vec());
+        old_tuple.header.xmin = inserter;
+        old_tuple.header.xmax = updater;
+
+        let mut new_tuple = HeapTuple::new_raw(2, b"new".to_vec());
+        new_tuple.header.xmin = updater;
+
+        let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+        assert!(!snapshot.tuple_visible(&txns, &old_tuple),
+            "old tuple invisible after 1000+ txns");
+        assert!(snapshot.tuple_visible(&txns, &new_tuple),
+            "new tuple visible after 1000+ txns");
+    }
+
+    /// 2-bit CLOG format: durable status survives reopen and correctly
+    /// packs 4 transactions per byte.
+    #[test]
+    fn clog_2bit_format_roundtrips() {
+        let base = temp_dir("clog_2bit");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+        // Create 8 transactions (2 full bytes) with mixed statuses.
+        let xids: Vec<_> = (0..8).map(|_| txns.begin()).collect();
+        txns.commit(xids[0]).unwrap();
+        txns.abort(xids[1]).unwrap();
+        // xids[2] stays in progress
+        txns.commit(xids[3]).unwrap();
+        txns.commit(xids[4]).unwrap();
+        txns.abort(xids[5]).unwrap();
+        txns.commit(xids[6]).unwrap();
+        // xids[7] stays in progress
+        drop(txns);
+
+        // Reopen and verify all statuses survived.
+        let txns2 = TransactionManager::new_durable(&base).unwrap();
+        assert_eq!(txns2.status(xids[0]), Some(TransactionStatus::Committed));
+        assert_eq!(txns2.status(xids[1]), Some(TransactionStatus::Aborted));
+        assert_eq!(txns2.status(xids[2]), Some(TransactionStatus::InProgress));
+        assert_eq!(txns2.status(xids[3]), Some(TransactionStatus::Committed));
+        assert_eq!(txns2.status(xids[4]), Some(TransactionStatus::Committed));
+        assert_eq!(txns2.status(xids[5]), Some(TransactionStatus::Aborted));
+        assert_eq!(txns2.status(xids[6]), Some(TransactionStatus::Committed));
+        assert_eq!(txns2.status(xids[7]), Some(TransactionStatus::InProgress));
+
+        // in_progress should be rebuilt from the file.
+        let mut expected_in_progress = vec![xids[2], xids[7]];
+        expected_in_progress.sort();
+        let mut actual = txns2.in_progress.clone();
+        actual.sort();
+        assert_eq!(actual, expected_in_progress);
     }
 
     #[test]
