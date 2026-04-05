@@ -803,7 +803,10 @@ fn pin_existing_block<'a>(
     let buffer_id = match pool.request_page(client_id, tag)? {
         RequestPageResult::Hit { buffer_id } => buffer_id,
         RequestPageResult::ReadIssued { buffer_id } => {
-            pool.complete_read(buffer_id)?;
+            if let Err(e) = pool.complete_read(buffer_id) {
+                let _ = pool.fail_read(buffer_id);
+                return Err(e.into());
+            }
             buffer_id
         }
         RequestPageResult::WaitingOnRead { buffer_id } => {
