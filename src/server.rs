@@ -639,7 +639,6 @@ fn send_row_description(w: &mut impl Write, columns: &[String]) -> io::Result<()
 }
 
 fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<u8>) -> io::Result<()> {
-    use std::io::Write as _;
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
     for val in values {
@@ -648,16 +647,18 @@ fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<u8>) -> io:
                 buf.extend_from_slice(&(-1_i32).to_be_bytes());
             }
             Value::Int32(v) => {
-                // Format i32 directly into buf without allocating a String.
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes()); // length placeholder
-                write!(buf, "{v}").unwrap();
+                let mut itoa_buf = itoa::Buffer::new();
+                let written = itoa_buf.format(*v);
+                buf.extend_from_slice(written.as_bytes());
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }
             Value::Float64(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
+                use std::io::Write as _;
                 write!(buf, "{v}").unwrap();
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
