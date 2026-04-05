@@ -79,6 +79,13 @@ const BM_VALID: u32 = 1 << 18;
 const BM_DIRTY: u32 = 1 << 19;
 const BM_IO_IN_PROGRESS: u32 = 1 << 20;
 const BM_IO_ERROR: u32 = 1 << 21;
+const BM_LOCKED: u32 = 1 << 22;
+
+// Public aliases for use in mod.rs (matching PostgreSQL naming).
+pub const BM_VALID_PUB: u32 = BM_VALID;
+pub const BM_IO_IN_PROGRESS_PUB: u32 = BM_IO_IN_PROGRESS;
+pub const BM_IO_ERROR_PUB: u32 = BM_IO_ERROR;
+pub const BM_LOCKED_PUB: u32 = BM_LOCKED;
 
 /// Atomic buffer frame state. All metadata (pin count, usage count, flags)
 /// packed into a single u32 for lock-free access.
@@ -121,6 +128,27 @@ impl BufferState {
 
     pub fn is_io_error(&self) -> bool {
         self.load() & BM_IO_ERROR != 0
+    }
+
+    // --- Spinlock on buffer header (matches PostgreSQL's LockBufHdr) ---
+
+    /// Acquire the buffer header spinlock. Spins until the BM_LOCKED bit
+    /// is clear, then atomically sets it. Returns the state (with BM_LOCKED set).
+    pub fn lock_header(&self) -> u32 {
+        loop {
+            let old = self.0.fetch_or(BM_LOCKED, Ordering::Acquire);
+            if old & BM_LOCKED == 0 {
+                return old | BM_LOCKED;
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Release the buffer header spinlock by storing a new state value.
+    /// The caller must ensure BM_LOCKED is NOT set in `new_state`.
+    pub fn unlock_header(&self, new_state: u32) {
+        debug_assert!(new_state & BM_LOCKED == 0, "must clear BM_LOCKED before unlock");
+        self.0.store(new_state, Ordering::Release);
     }
 
     // --- Atomic pin operations ---

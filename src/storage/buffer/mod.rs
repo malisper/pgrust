@@ -353,11 +353,25 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             let mut guard = frame.content_lock.write();
             *guard = page;
         }
-        frame.state.set_valid();
-        frame.state.clear_io_in_progress();
-        frame.state.clear_io_error();
 
-        frame.io_complete.notify_all();
+        // Clear IO flags under the header spinlock, matching PostgreSQL's
+        // TerminateBufferIO.
+        {
+            let mut buf_state = frame.state.lock_header();
+            buf_state &= !types::BM_LOCKED_PUB;
+            buf_state |= types::BM_VALID_PUB;
+            buf_state &= !types::BM_IO_IN_PROGRESS_PUB;
+            buf_state &= !types::BM_IO_ERROR_PUB;
+            frame.state.unlock_header(buf_state);
+        }
+
+        // Notify under the tag mutex to prevent lost wakeups.
+        // wait_for_io holds this mutex across its flag check and condvar
+        // wait, so the notify cannot slip between them.
+        {
+            let _tag_guard = frame.tag.lock();
+            frame.io_complete.notify_all();
+        }
         self.stats_read.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -371,11 +385,19 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             return Err(Error::WrongIoOp);
         }
 
-        frame.state.clear_valid();
-        frame.state.clear_io_in_progress();
-        frame.state.set_io_error();
+        {
+            let mut buf_state = frame.state.lock_header();
+            buf_state &= !types::BM_LOCKED_PUB;
+            buf_state &= !types::BM_VALID_PUB;
+            buf_state &= !types::BM_IO_IN_PROGRESS_PUB;
+            buf_state |= types::BM_IO_ERROR_PUB;
+            frame.state.unlock_header(buf_state);
+        }
 
-        frame.io_complete.notify_all();
+        {
+            let _tag_guard = frame.tag.lock();
+            frame.io_complete.notify_all();
+        }
         Ok(())
     }
 
@@ -646,10 +668,19 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     }
 
     /// Wait until I/O completes on the given buffer.
+    /// Matches PostgreSQL's WaitIO: check the flag under the header spinlock,
+    /// then sleep on the condvar if I/O is still in progress.
     pub fn wait_for_io(&self, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
         let mut guard = frame.tag.lock();
-        while frame.state.is_io_in_progress() {
+        loop {
+            // Check under header spinlock, matching complete_read/fail_read
+            // which clear the flag under the same spinlock.
+            let buf_state = frame.state.lock_header();
+            frame.state.unlock_header(buf_state & !types::BM_LOCKED_PUB);
+            if buf_state & types::BM_IO_IN_PROGRESS_PUB == 0 {
+                break;
+            }
             frame.io_complete.wait(&mut guard);
         }
         if frame.state.is_io_error() {
