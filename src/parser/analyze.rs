@@ -332,8 +332,53 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
 pub struct BoundInsertStatement {
     pub rel: RelFileLocator,
     pub desc: RelationDesc,
-    pub target_indexes: Vec<usize>,
+    pub target_columns: Vec<usize>,
     pub values: Vec<Vec<Expr>>,
+}
+
+/// A pre-bound insert plan that can be executed repeatedly with different
+/// parameter values, avoiding re-parsing and re-binding on each call.
+#[derive(Debug, Clone)]
+pub struct PreparedInsert {
+    pub rel: RelFileLocator,
+    pub desc: RelationDesc,
+    pub target_columns: Vec<usize>,
+    pub num_params: usize,
+}
+
+pub fn bind_insert_prepared(
+    table_name: &str,
+    columns: Option<&[String]>,
+    num_params: usize,
+    catalog: &Catalog,
+) -> Result<PreparedInsert, ParseError> {
+    let entry = catalog
+        .get(table_name)
+        .ok_or_else(|| ParseError::UnknownTable(table_name.to_string()))?;
+
+    let target_columns = if let Some(columns) = columns {
+        let scope = scope_for_relation(table_name, &entry.desc, false);
+        columns
+            .iter()
+            .map(|column| resolve_column(&scope, column))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        (0..entry.desc.columns.len()).collect()
+    };
+
+    if target_columns.len() != num_params {
+        return Err(ParseError::InvalidInsertTargetCount {
+            expected: target_columns.len(),
+            actual: num_params,
+        });
+    }
+
+    Ok(PreparedInsert {
+        rel: entry.rel,
+        desc: entry.desc.clone(),
+        target_columns,
+        num_params,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,7 +411,7 @@ pub fn bind_insert(
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
     let scope = scope_for_relation(&stmt.table_name, &entry.desc, false);
 
-    let target_indexes = if let Some(columns) = &stmt.columns {
+    let target_columns = if let Some(columns) = &stmt.columns {
         columns
             .iter()
             .map(|column| resolve_column(&scope, column))
@@ -376,9 +421,9 @@ pub fn bind_insert(
     };
 
     for row in &stmt.values {
-        if target_indexes.len() != row.len() {
+        if target_columns.len() != row.len() {
             return Err(ParseError::InvalidInsertTargetCount {
-                expected: target_indexes.len(),
+                expected: target_columns.len(),
                 actual: row.len(),
             });
         }
@@ -387,7 +432,7 @@ pub fn bind_insert(
     Ok(BoundInsertStatement {
         rel: entry.rel,
         desc: entry.desc.clone(),
-        target_indexes,
+        target_columns,
         values: stmt
             .values
             .iter()

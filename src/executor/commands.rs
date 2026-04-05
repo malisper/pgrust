@@ -3,7 +3,7 @@ use std::rc::Rc;
 use parking_lot::RwLock;
 
 use crate::access::heap::am::{
-    HeapError, heap_delete_with_waiter, heap_fetch, heap_flush, heap_insert_mvcc_with_cid,
+    HeapError, heap_delete_with_waiter, heap_fetch, heap_insert_mvcc_with_cid,
     heap_scan_begin_visible, heap_scan_next_visible, heap_update_with_waiter,
 };
 use crate::access::heap::mvcc::{TransactionId, TransactionManager};
@@ -139,7 +139,7 @@ pub fn execute_insert(
             let mut slot =
                 TupleSlot::virtual_row(column_names.into(), vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
-            for (column_index, expr) in stmt.target_indexes.iter().zip(row.iter()) {
+            for (column_index, expr) in stmt.target_columns.iter().zip(row.iter()) {
                 values[*column_index] = eval_expr(expr, &mut slot)?;
             }
             Ok(values)
@@ -158,19 +158,30 @@ pub fn execute_insert_values(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<usize, ExecError> {
-    let mut touched_blocks = std::collections::BTreeSet::new();
-
     for values in rows {
         let tuple = tuple_from_values(desc, values)?;
-        let tid = heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
-        touched_blocks.insert(tid.block_number);
-    }
-
-    for block_number in touched_blocks {
-        heap_flush(ctx.pool, ctx.client_id, rel, block_number)?;
+        heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
     }
 
     Ok(rows.len())
+}
+
+/// Execute a single-row insert from a prepared insert plan and parameter values.
+/// This skips parsing, binding, and expression evaluation entirely.
+pub fn execute_prepared_insert_row(
+    prepared: &crate::parser::PreparedInsert,
+    params: &[Value],
+    ctx: &mut ExecutorContext<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<(), ExecError> {
+    let mut values = vec![Value::Null; prepared.desc.columns.len()];
+    for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
+        values[*column_index] = param.clone();
+    }
+    let tuple = tuple_from_values(&prepared.desc, &values)?;
+    heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, prepared.rel, xid, cid, &tuple)?;
+    Ok(())
 }
 
 pub(crate) fn execute_update(
@@ -229,10 +240,7 @@ pub fn execute_update_with_waiter(
                 waiter,
             ) {
                 Ok(new_tid) => {
-                    heap_flush(ctx.pool, ctx.client_id, stmt.rel, current_tid.block_number)?;
-                    if new_tid.block_number != current_tid.block_number {
-                        heap_flush(ctx.pool, ctx.client_id, stmt.rel, new_tid.block_number)?;
-                    }
+                    let _ = new_tid;
                     affected_rows += 1;
                     break;
                 }
@@ -308,7 +316,6 @@ pub fn execute_delete_with_waiter(
 
     for tid in &targets {
         heap_delete_with_waiter(ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, *tid, waiter)?;
-        heap_flush(ctx.pool, ctx.client_id, stmt.rel, tid.block_number)?;
     }
 
     Ok(StatementResult::AffectedRows(targets.len()))
