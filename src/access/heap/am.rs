@@ -65,7 +65,6 @@ impl From<MvccError> for HeapError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleHeapScan {
     scan: HeapScan,
     snapshot: Snapshot,
@@ -73,6 +72,27 @@ pub struct VisibleHeapScan {
     /// tuples on the same page to avoid per-tuple pin/unpin overhead.
     /// The content lock is NOT held — only re-acquired briefly per tuple.
     pinned_buffer: Option<(u32, usize)>,  // (block_number, buffer_id)
+    /// Pool and client needed to unpin on drop.
+    pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
+    client_id: ClientId,
+}
+
+impl std::fmt::Debug for VisibleHeapScan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisibleHeapScan")
+            .field("scan", &self.scan)
+            .field("snapshot", &self.snapshot)
+            .field("pinned_buffer", &self.pinned_buffer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for VisibleHeapScan {
+    fn drop(&mut self) {
+        if let Some((_, bid)) = self.pinned_buffer.take() {
+            let _ = self.pool.unpin(self.client_id, bid);
+        }
+    }
 }
 
 pub fn heap_scan_begin(
@@ -129,7 +149,8 @@ pub fn heap_scan_next(
 }
 
 pub fn heap_scan_begin_visible(
-    pool: &BufferPool<SmgrStorageBackend>,
+    pool: &std::sync::Arc<BufferPool<SmgrStorageBackend>>,
+    client_id: ClientId,
     rel: RelFileLocator,
     snapshot: Snapshot,
 ) -> Result<VisibleHeapScan, HeapError> {
@@ -137,6 +158,8 @@ pub fn heap_scan_begin_visible(
         scan: heap_scan_begin(pool, rel)?,
         snapshot,
         pinned_buffer: None,
+        pool: std::sync::Arc::clone(pool),
+        client_id,
     })
 }
 
@@ -872,11 +895,11 @@ mod tests {
         snapshot: Snapshot,
     ) -> Vec<Vec<u8>> {
         let smgr = crate::storage::smgr::MdStorageManager::new(base);
-        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
-        let mut scan = heap_scan_begin_visible(&pool, rel, snapshot).unwrap();
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 4));
+        let mut scan = heap_scan_begin_visible(&pool, 1, rel, snapshot).unwrap();
         let mut rows = Vec::new();
         while let Some((_tid, tuple)) =
-            heap_scan_next_visible(&pool, 1, txns, &mut scan).unwrap()
+            heap_scan_next_visible(&*pool, 1, txns, &mut scan).unwrap()
         {
             rows.push(tuple.data);
         }
@@ -1102,13 +1125,13 @@ mod tests {
         let base = temp_dir("mvcc_scan");
         let rel = rel(5007);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-        create_fork(&pool, rel);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        create_fork(&*pool, rel);
         let mut txns = TransactionManager::default();
 
         let xid1 = txns.begin();
         let tid1 = heap_insert_mvcc(
-            &pool,
+            &*pool,
             1,
             rel,
             xid1,
@@ -1119,7 +1142,7 @@ mod tests {
 
         let xid2 = txns.begin();
         let _tid2 = heap_update(
-            &pool,
+            &*pool,
             2,
             rel,
             &txns,
@@ -1131,10 +1154,10 @@ mod tests {
         txns.commit(xid2).unwrap();
 
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
-        let mut scan = heap_scan_begin_visible(&pool, rel, snapshot).unwrap();
+        let mut scan = heap_scan_begin_visible(&pool, 3, rel, snapshot).unwrap();
         let mut rows = Vec::new();
         while let Some((_tid, tuple)) =
-            heap_scan_next_visible(&pool, 3, &txns, &mut scan).unwrap()
+            heap_scan_next_visible(&*pool, 3, &txns, &mut scan).unwrap()
         {
             rows.push(tuple.data);
         }
@@ -1147,13 +1170,13 @@ mod tests {
         let base = temp_dir("mvcc_buffer_cache");
         let rel = rel(5008);
         let smgr = crate::storage::smgr::MdStorageManager::new(&base);
-        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-        create_fork(&pool, rel);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        create_fork(&*pool, rel);
         let mut txns = TransactionManager::default();
 
         let insert_xid = txns.begin();
         let original_tid = heap_insert_mvcc(
-            &pool,
+            &*pool,
             1,
             rel,
             insert_xid,
@@ -1161,7 +1184,7 @@ mod tests {
         )
         .unwrap();
         txns.commit(insert_xid).unwrap();
-        heap_flush(&pool, 1, rel, original_tid.block_number).unwrap();
+        heap_flush(&*pool, 1, rel, original_tid.block_number).unwrap();
 
         let committed_snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         assert_eq!(
@@ -1171,7 +1194,7 @@ mod tests {
 
         let update_xid = txns.begin();
         let updated_tid = heap_update(
-            &pool,
+            &*pool,
             1,
             rel,
             &txns,
@@ -1183,13 +1206,13 @@ mod tests {
         txns.commit(update_xid).unwrap();
 
         let delete_xid = txns.begin();
-        heap_delete(&pool, 1, rel, &txns, delete_xid, updated_tid).unwrap();
+        heap_delete(&*pool, 1, rel, &txns, delete_xid, updated_tid).unwrap();
         txns.commit(delete_xid).unwrap();
 
         // The writer's pool sees both committed changes immediately because it is
         // reading the dirty page out of shared buffers, not reloading from disk.
         let writer_view = heap_fetch_visible(
-            &pool,
+            &*pool,
             2,
             rel,
             original_tid,
@@ -1201,12 +1224,13 @@ mod tests {
 
         let mut writer_scan = heap_scan_begin_visible(
             &pool,
+            2,
             rel,
             txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         )
         .unwrap();
         assert!(
-            heap_scan_next_visible(&pool, 2, &txns, &mut writer_scan)
+            heap_scan_next_visible(&*pool, 2, &txns, &mut writer_scan)
                 .unwrap()
                 .is_none()
         );

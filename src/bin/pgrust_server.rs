@@ -23,7 +23,7 @@ fn main() -> Result<(), String> {
     let pool_size = std::env::args()
         .nth(3)
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(128);
+        .unwrap_or(16384);
 
     eprintln!("pgrust: data directory: {}", base_dir.display());
     eprintln!("pgrust: buffer pool size: {pool_size}");

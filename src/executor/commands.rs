@@ -25,7 +25,7 @@ use super::{ExecError, ExecutorContext, StatementResult, execute_plan_internal, 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
     catalog: &Catalog,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     let Statement::Select(select) = *stmt.statement else {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -80,7 +80,7 @@ pub fn execute_create_table(
 pub fn execute_drop_table(
     stmt: DropTableStatement,
     catalog: &mut Catalog,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     let mut dropped = 0;
     for table_name in stmt.table_names {
@@ -110,7 +110,7 @@ pub fn execute_drop_table(
 pub fn execute_truncate_table(
     stmt: TruncateTableStatement,
     catalog: &Catalog,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     for table_name in stmt.table_names {
         let entry = catalog
@@ -126,7 +126,7 @@ pub fn execute_truncate_table(
 
 pub fn execute_insert(
     stmt: BoundInsertStatement,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
@@ -154,13 +154,13 @@ pub fn execute_insert_values(
     rel: crate::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
     rows: &[Vec<Value>],
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<usize, ExecError> {
     for values in rows {
         let tuple = tuple_from_values(desc, values)?;
-        heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
+        heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
     }
 
     Ok(rows.len())
@@ -171,7 +171,7 @@ pub fn execute_insert_values(
 pub fn execute_prepared_insert_row(
     prepared: &crate::parser::PreparedInsert,
     params: &[Value],
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<(), ExecError> {
@@ -180,13 +180,13 @@ pub fn execute_prepared_insert_row(
         values[*column_index] = param.clone();
     }
     let tuple = tuple_from_values(&prepared.desc, &values)?;
-    heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, prepared.rel, xid, cid, &tuple)?;
+    heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, prepared.rel, xid, cid, &tuple)?;
     Ok(())
 }
 
 pub(crate) fn execute_update(
     stmt: BoundUpdateStatement,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
@@ -195,17 +195,17 @@ pub(crate) fn execute_update(
 
 pub fn execute_update_with_waiter(
     stmt: BoundUpdateStatement,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
-    let mut scan = heap_scan_begin_visible(ctx.pool, stmt.rel, ctx.snapshot.clone())?;
+    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
     while let Some((tid, tuple)) = {
         let txns_guard = ctx.txns.read();
-        heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
+        heap_scan_next_visible(&*ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
     } {
         let desc = Rc::new(stmt.desc.clone());
         let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -229,7 +229,7 @@ pub fn execute_update_with_waiter(
         let mut current_replacement = replacement;
         loop {
             match heap_update_with_waiter(
-                ctx.pool,
+                &*ctx.pool,
                 ctx.client_id,
                 stmt.rel,
                 &ctx.txns,
@@ -245,7 +245,7 @@ pub fn execute_update_with_waiter(
                     break;
                 }
                 Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
-                    let new_tuple = heap_fetch(ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                    let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
                     let desc = Rc::new(stmt.desc.clone());
                     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
                     let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -285,7 +285,7 @@ pub fn execute_update_with_waiter(
 
 pub(crate) fn execute_delete(
     stmt: BoundDeleteStatement,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
     execute_delete_with_waiter(stmt, ctx, xid, None)
@@ -293,16 +293,16 @@ pub(crate) fn execute_delete(
 
 pub fn execute_delete_with_waiter(
     stmt: BoundDeleteStatement,
-    ctx: &mut ExecutorContext<'_>,
+    ctx: &mut ExecutorContext,
     xid: TransactionId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
-    let mut scan = heap_scan_begin_visible(ctx.pool, stmt.rel, ctx.snapshot.clone())?;
+    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();
 
     while let Some((tid, tuple)) = {
         let txns_guard = ctx.txns.read();
-        heap_scan_next_visible(ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
+        heap_scan_next_visible(&*ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
     } {
         let desc = Rc::new(stmt.desc.clone());
         let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -315,7 +315,7 @@ pub fn execute_delete_with_waiter(
     }
 
     for tid in &targets {
-        heap_delete_with_waiter(ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, *tid, waiter)?;
+        heap_delete_with_waiter(&*ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, *tid, waiter)?;
     }
 
     Ok(StatementResult::AffectedRows(targets.len()))

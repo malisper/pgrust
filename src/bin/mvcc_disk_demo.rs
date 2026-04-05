@@ -110,12 +110,12 @@ fn print_visible_rows(
     label: &str,
 ) {
     let smgr = MdStorageManager::new(base_dir);
-    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
-    let mut scan = heap_scan_begin_visible(&pool, rel(), snapshot).unwrap();
+    let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+    let mut scan = heap_scan_begin_visible(&pool, 99, rel(), snapshot).unwrap();
 
     println!("  visible rows for {}:", label);
     let mut saw_any = false;
-    while let Some((tid, tuple)) = heap_scan_next_visible(&pool, 99, txns, &mut scan).unwrap() {
+    while let Some((tid, tuple)) = heap_scan_next_visible(&*pool, 99, txns, &mut scan).unwrap() {
         saw_any = true;
         println!(
             "    ({},{}) {}",

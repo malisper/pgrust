@@ -371,7 +371,7 @@ fn ensure_default_people_table(catalog_store: &mut DurableCatalog) -> Result<(),
 }
 
 fn seed_if_empty(
-    pool: &BufferPool<SmgrStorageBackend>,
+    pool: &std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     catalog: &Catalog,
     txns: &Arc<RwLock<TransactionManager>>,
 ) -> Result<(), ExecError> {
@@ -390,8 +390,8 @@ fn seed_if_empty(
         tuple(2, "bob", None),
         tuple(3, "carol", Some("storage")),
     ] {
-        let tid = heap_insert_mvcc(pool, 1, rel, xid, &row)?;
-        heap_flush(pool, 1, rel, tid.block_number)?;
+        let tid = heap_insert_mvcc(&**pool, 1, rel, xid, &row)?;
+        heap_flush(&**pool, 1, rel, tid.block_number)?;
     }
     txns.write().commit(xid)?;
     Ok(())
@@ -399,7 +399,7 @@ fn seed_if_empty(
 
 fn run_statement(
     sql: &str,
-    pool: &BufferPool<SmgrStorageBackend>,
+    pool: &std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     txns: &Arc<RwLock<TransactionManager>>,
     catalog_store: &mut DurableCatalog,
 ) -> Result<StatementResult, ExecError> {
@@ -410,7 +410,7 @@ fn run_statement(
     let result = match stmt {
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
-                pool,
+                pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -425,7 +425,7 @@ fn run_statement(
         }
         Statement::Select(stmt) => {
             let mut ctx = ExecutorContext {
-                pool,
+                pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -440,7 +440,7 @@ fn run_statement(
         }
         Statement::ShowTables => {
             let mut ctx = ExecutorContext {
-                pool,
+                pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -455,7 +455,7 @@ fn run_statement(
         }
         Statement::CreateTable(stmt) => {
             let mut ctx = ExecutorContext {
-                pool,
+                pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -470,7 +470,7 @@ fn run_statement(
         }
         Statement::DropTable(stmt) => {
             let mut ctx = ExecutorContext {
-                pool,
+                pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -485,7 +485,7 @@ fn run_statement(
         }
         Statement::TruncateTable(stmt) => {
             let mut ctx = ExecutorContext {
-                pool,
+                pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -500,7 +500,7 @@ fn run_statement(
         }
         Statement::Vacuum(stmt) => {
             let mut ctx = ExecutorContext {
-                pool,
+                pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
@@ -517,7 +517,7 @@ fn run_statement(
             let xid = txns.write().begin();
             let result = {
                 let mut ctx = ExecutorContext {
-                    pool,
+                    pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
@@ -545,7 +545,7 @@ fn run_statement(
             let xid = txns.write().begin();
             let result = {
                 let mut ctx = ExecutorContext {
-                    pool,
+                    pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
@@ -573,7 +573,7 @@ fn run_statement(
             let xid = txns.write().begin();
             let result = {
                 let mut ctx = ExecutorContext {
-                    pool,
+                    pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
@@ -628,7 +628,7 @@ fn main() -> Result<(), String> {
     ensure_default_people_table(&mut catalog_store)?;
 
     let smgr = MdStorageManager::new(&base_dir);
-    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 8);
+    let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
     seed_if_empty(&pool, catalog_store.catalog(), &txns).map_err(|e| format!("{e:?}"))?;
 
     println!("PGRUST SQL REPL");
