@@ -369,7 +369,7 @@ impl StorageManager for MdStorageManager {
         }
 
         if !skip_fsync {
-            seg.file.sync_data()?;
+            crate::storage::fsync_file(&seg.file)?;
         }
 
         Ok(())
@@ -393,7 +393,7 @@ impl StorageManager for MdStorageManager {
         for segno in first_seg..=last_seg {
             let key = SegKey { rel, fork, segno };
             if let Some(seg) = self.open_segs.get_mut(&key) {
-                seg.file.sync_data()?;
+                crate::storage::fsync_file(&seg.file)?;
             }
         }
 
@@ -482,7 +482,7 @@ impl StorageManager for MdStorageManager {
         }
 
         if !skip_fsync {
-            seg.file.sync_data()?;
+            crate::storage::fsync_file(&seg.file)?;
         }
 
         // Update nblocks cache.
@@ -579,7 +579,7 @@ impl StorageManager for MdStorageManager {
             }
 
             let seg = self.open_segs.get_mut(&key).unwrap();
-            seg.file.sync_all()?;
+            crate::storage::fsync_file(&seg.file)?;
         }
 
         Ok(())

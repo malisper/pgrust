@@ -124,7 +124,7 @@ impl Drop for WalWriter {
         // Flush the BufWriter so all buffered records reach the file.
         let mut guard = self.inner.lock().unwrap();
         let _ = guard.file.flush();
-        let _ = guard.file.get_ref().sync_all();
+        let _ = crate::storage::fsync_file(guard.file.get_ref());
     }
 }
 
@@ -367,7 +367,7 @@ impl WalWriter {
                 guard.file.flush()?;
                 guard.written_lsn = guard.insert_lsn;
             }
-            guard.file.get_ref().sync_data()?;
+            crate::storage::fsync_file(guard.file.get_ref())?;
             guard.flushed_lsn = guard.insert_lsn;
         }
         Ok(guard.flushed_lsn)
