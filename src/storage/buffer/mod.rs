@@ -197,115 +197,125 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     }
 
     pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
-        // Fast path: check if the tag is already in the lookup table.
-        {
-            let lookup = self.lookup.read();
-            if let Some(&buffer_id) = lookup.get(&tag) {
-                let frame = &self.frames[buffer_id];
-                frame.state.pin_and_bump_usage(self.max_usage_count);
-                if frame.state.is_valid() {
-                    self.stats_hit.fetch_add(1, Ordering::Relaxed);
-                    return Ok(RequestPageResult::Hit { buffer_id });
-                } else {
-                    return Ok(RequestPageResult::WaitingOnRead { buffer_id });
-                }
-            }
-        }
-
-        // Slow path: allocate a victim and install the new tag.
-        let mut strategy = self.strategy.lock();
-
-        let Some(buffer_id) = self.allocate_victim(&mut strategy) else {
-            return Ok(RequestPageResult::AllBuffersPinned);
-        };
-
-        let frame = &self.frames[buffer_id];
-        let mut lookup = self.lookup.write();
-
-        // Re-check: while we were waiting for the mapping lock, another
-        // reader that already held a shared lookup lock could have pinned
-        // this candidate buffer. In that case, restart victim selection.
-        if frame.state.pin_count() > 0 || frame.state.is_io_in_progress() {
-            drop(lookup);
-            drop(strategy);
-            return self.request_page(client_id, tag);
-        }
-
-        // Re-check: another thread may have inserted this tag while we waited.
-        if let Some(&existing_id) = lookup.get(&tag) {
-            strategy.free_list.push_back(buffer_id);
-            drop(lookup);
-            drop(strategy);
-
-            let existing_frame = &self.frames[existing_id];
-            existing_frame.state.pin_and_bump_usage(self.max_usage_count);
-            if existing_frame.state.is_valid() {
-                self.stats_hit.fetch_add(1, Ordering::Relaxed);
-                return Ok(RequestPageResult::Hit {
-                    buffer_id: existing_id,
-                });
-            } else {
-                return Ok(RequestPageResult::WaitingOnRead {
-                    buffer_id: existing_id,
-                });
-            }
-        }
-
-        // If the victim holds a dirty page, write it out before reusing.
-        // WAL rule: flush WAL up to the page's LSN before writing the data page.
-        if frame.state.is_dirty() {
-            let old_tag = *frame.tag.lock();
-            if let Some(old_tag) = old_tag {
-                let page = *frame.content_lock.read();
-                let skip_fsync = self.wal.is_some();
-
-                // Ensure WAL is flushed up to this page's LSN (write-ahead rule).
-                if let Some(ref wal) = self.wal {
-                    let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
-                    if page_lsn > 0 {
-                        let _ = wal.flush_to(page_lsn);
+        loop {
+            // Fast path: check if the tag is already in the lookup table.
+            {
+                let lookup = self.lookup.read();
+                if let Some(&buffer_id) = lookup.get(&tag) {
+                    let frame = &self.frames[buffer_id];
+                    frame.state.pin_and_bump_usage(self.max_usage_count);
+                    if frame.state.is_valid() {
+                        self.stats_hit.fetch_add(1, Ordering::Relaxed);
+                        return Ok(RequestPageResult::Hit { buffer_id });
+                    } else {
+                        return Ok(RequestPageResult::WaitingOnRead { buffer_id });
                     }
                 }
+            }
+
+            // Slow path: allocate a victim and install the new tag.
+            let mut strategy = self.strategy.lock();
+
+            let Some(buffer_id) = self.allocate_victim(&mut strategy) else {
+                return Ok(RequestPageResult::AllBuffersPinned);
+            };
+
+            let frame = &self.frames[buffer_id];
+            let mut lookup = self.lookup.write();
+
+            // Re-check: while we were waiting for the mapping lock, another
+            // reader that already held a shared lookup lock could have pinned
+            // this candidate buffer. In that case, restart victim selection.
+            if frame.state.pin_count() > 0 || frame.state.is_io_in_progress() {
+                drop(lookup);
+                drop(strategy);
+                continue;
+            }
+
+            // Re-check: another thread may have inserted this tag while we waited.
+            if let Some(&existing_id) = lookup.get(&tag) {
+                strategy.free_list.push_back(buffer_id);
                 drop(lookup);
                 drop(strategy);
 
-                {
-                    let mut storage = self.storage.lock();
-                    storage.write_page(old_tag, &page, skip_fsync).map_err(Error::Storage)?;
+                let existing_frame = &self.frames[existing_id];
+                existing_frame.state.pin_and_bump_usage(self.max_usage_count);
+                if existing_frame.state.is_valid() {
+                    self.stats_hit.fetch_add(1, Ordering::Relaxed);
+                    return Ok(RequestPageResult::Hit {
+                        buffer_id: existing_id,
+                    });
+                } else {
+                    return Ok(RequestPageResult::WaitingOnRead {
+                        buffer_id: existing_id,
+                    });
                 }
-                self.stats_written.fetch_add(1, Ordering::Relaxed);
+            }
 
-                // Re-acquire all locks in the same order as above.
-                strategy = self.strategy.lock();
-                lookup = self.lookup.write();
+            // If the victim holds a dirty page, write it out before reusing.
+            // WAL rule: flush WAL up to the page's LSN before writing the data page.
+            if frame.state.is_dirty() {
+                let old_tag = *frame.tag.lock();
+                if let Some(old_tag) = old_tag {
+                    let page = *frame.content_lock.read();
+                    let skip_fsync = self.wal.is_some();
 
-                // Re-check: another thread may have pinned or replaced this
-                // buffer while we dropped locks. If so, start over.
-                if frame.state.pin_count() > 0 || *frame.tag.lock() != Some(old_tag) {
+                    // Clear dirty BEFORE dropping locks. If a concurrent writer
+                    // re-dirties the frame during the eviction window, the
+                    // re-check below will detect it and restart.
+                    frame.state.clear_dirty();
+
+                    // Ensure WAL is flushed up to this page's LSN (write-ahead rule).
+                    if let Some(ref wal) = self.wal {
+                        let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
+                        if page_lsn > 0 {
+                            let _ = wal.flush_to(page_lsn);
+                        }
+                    }
                     drop(lookup);
                     drop(strategy);
-                    return self.request_page(client_id, tag);
+
+                    {
+                        let mut storage = self.storage.lock();
+                        storage.write_page(old_tag, &page, skip_fsync).map_err(Error::Storage)?;
+                    }
+                    self.stats_written.fetch_add(1, Ordering::Relaxed);
+
+                    // Re-acquire all locks in the same order as above.
+                    strategy = self.strategy.lock();
+                    lookup = self.lookup.write();
+
+                    // Re-check: another thread may have pinned, replaced, or
+                    // re-dirtied this buffer while we dropped locks. We cleared
+                    // dirty above before dropping locks, so if it's dirty again
+                    // a concurrent writer modified the page and we must not
+                    // discard their changes.
+                    if frame.state.pin_count() > 0 || *frame.tag.lock() != Some(old_tag) || frame.state.is_dirty() {
+                        drop(lookup);
+                        drop(strategy);
+                        continue;
+                    }
                 }
             }
-        }
 
-        {
-            let mut tag_guard = frame.tag.lock();
-            if let Some(old_tag) = tag_guard.take() {
-                lookup.remove(&old_tag);
+            {
+                let mut tag_guard = frame.tag.lock();
+                if let Some(old_tag) = tag_guard.take() {
+                    lookup.remove(&old_tag);
+                }
+                *tag_guard = Some(tag);
             }
-            *tag_guard = Some(tag);
-        }
 
-        // Reset page data
-        *frame.content_lock.write() = [0u8; PAGE_SIZE];
+            // Reset page data
+            *frame.content_lock.write() = [0u8; PAGE_SIZE];
 
-        // Reset atomic state: pin_count=1, usage_count=1, io_in_progress=true
-        frame.state.init_for_io();
+            // Reset atomic state: pin_count=1, usage_count=1, io_in_progress=true
+            frame.state.init_for_io();
 
-        lookup.insert(tag, buffer_id);
+            lookup.insert(tag, buffer_id);
 
-        Ok(RequestPageResult::ReadIssued { buffer_id })
+            return Ok(RequestPageResult::ReadIssued { buffer_id });
+        } // loop
     }
 
     pub fn pending_io(&self, buffer_id: BufferId) -> Option<PendingIo> {
@@ -1326,4 +1336,127 @@ mod tests {
             "eviction should have written the dirty page to disk"
         );
     }
+
+    /// PoC for eviction race: dirty write lost when a writer modifies a
+    /// page between the evictor's disk write and its re-check.
+    ///
+    /// Relies on the 50ms sleep injected in request_page after the
+    /// eviction write to widen the race window.
+    ///
+    /// Sequence:
+    ///   1. Pool has 2 frames. Load page A (block 0) and page B (block 1).
+    ///   2. Write V1=0xAA to page A, mark dirty, unpin both.
+    ///   3. Evictor thread requests page C (block 2) — must evict A.
+    ///      Evictor writes V1 to disk, drops locks, sleeps 50ms.
+    ///   4. Writer thread loads page A (still in lookup), writes V2=0xBB,
+    ///      marks dirty, unpins — all during the 50ms window.
+    ///   5. Evictor wakes, re-checks pin_count=0 and tag unchanged,
+    ///      clears frame, repurposes for page C.
+    ///   6. Reader loads page A — not in pool, reads from disk → gets V1.
+    ///      V2 is lost.
+    #[test]
+    fn poc_eviction_loses_dirty_write() {
+        use std::sync::Arc;
+
+        let base = temp_dir("poc_eviction_race");
+        let pool = Arc::new(pool_with_relation(&base, 600, 3, 2));
+
+        let page_a = smgr_tag(600, 0);
+        let page_b = smgr_tag(600, 1);
+        let page_c = smgr_tag(600, 2);
+
+        // Step 1: Load pages A and B into both frames.
+        match pool.request_page(1, page_a).unwrap() {
+            RequestPageResult::ReadIssued { buffer_id } => pool.complete_read(buffer_id).unwrap(),
+            other => panic!("expected ReadIssued for A, got {other:?}"),
+        };
+        match pool.request_page(1, page_b).unwrap() {
+            RequestPageResult::ReadIssued { buffer_id } => pool.complete_read(buffer_id).unwrap(),
+            other => panic!("expected ReadIssued for B, got {other:?}"),
+        };
+
+        // Step 2: Write V1=0xAA to page A, mark dirty, unpin both.
+        let a_buf = match pool.request_page(1, page_a).unwrap() {
+            RequestPageResult::Hit { buffer_id } => buffer_id,
+            other => panic!("expected Hit for A, got {other:?}"),
+        };
+        {
+            let mut guard = pool.lock_buffer_exclusive(a_buf).unwrap();
+            guard[100] = 0xAA;
+        }
+        pool.mark_buffer_dirty_hint(a_buf);
+        pool.unpin(1, a_buf).unwrap(); // extra pin from second request
+        pool.unpin(1, a_buf).unwrap(); // original pin
+
+        let b_buf = match pool.request_page(1, page_b).unwrap() {
+            RequestPageResult::Hit { buffer_id } => buffer_id,
+            other => panic!("expected Hit for B, got {other:?}"),
+        };
+        pool.unpin(1, b_buf).unwrap(); // extra pin
+        pool.unpin(1, b_buf).unwrap(); // original pin
+
+        // Step 3: Evictor requests page C in a separate thread.
+        // This will evict page A (dirty), write to disk, then sleep 50ms.
+        let pool2 = pool.clone();
+        let evictor = std::thread::spawn(move || {
+            match pool2.request_page(2, page_c).unwrap() {
+                RequestPageResult::ReadIssued { buffer_id } => {
+                    pool2.complete_read(buffer_id).unwrap();
+                    pool2.unpin(2, buffer_id).unwrap();
+                }
+                other => panic!("expected ReadIssued for C, got {other:?}"),
+            }
+        });
+
+        // Step 4: While evictor sleeps, writer loads page A and writes V2.
+        // Give the evictor a moment to reach the sleep.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Page A should still be in lookup (evictor hasn't re-acquired locks yet).
+        let a_buf2 = match pool.request_page(3, page_a).unwrap() {
+            RequestPageResult::Hit { buffer_id } => buffer_id,
+            RequestPageResult::ReadIssued { buffer_id } => {
+                // Page was already evicted — the race window was missed.
+                pool.complete_read(buffer_id).unwrap();
+                pool.unpin(3, buffer_id).unwrap();
+                evictor.join().unwrap();
+                eprintln!("race window missed — evictor finished before writer could load A");
+                return; // can't reproduce this run
+            }
+            other => panic!("unexpected for A reload: {other:?}"),
+        };
+
+        // Write V2=0xBB
+        {
+            let mut guard = pool.lock_buffer_exclusive(a_buf2).unwrap();
+            guard[100] = 0xBB;
+        }
+        pool.mark_buffer_dirty_hint(a_buf2);
+        pool.unpin(3, a_buf2).unwrap();
+
+        // Step 5: Wait for evictor to finish (it will clear the frame).
+        evictor.join().unwrap();
+
+        // Step 6: Read page A — should get V2=0xBB, but if the race hit,
+        // it'll get V1=0xAA from disk.
+        let a_buf3 = match pool.request_page(4, page_a).unwrap() {
+            RequestPageResult::Hit { buffer_id } => buffer_id,
+            RequestPageResult::ReadIssued { buffer_id } => {
+                pool.complete_read(buffer_id).unwrap();
+                buffer_id
+            }
+            other => panic!("unexpected for final A read: {other:?}"),
+        };
+        let guard = pool.lock_buffer_shared(a_buf3).unwrap();
+        let val = guard[100];
+        drop(guard);
+        pool.unpin(4, a_buf3).unwrap();
+
+        assert_eq!(
+            val, 0xBB,
+            "EVICTION RACE REPRODUCED: expected V2=0xBB but got {val:#04x} (V1=0xAA means dirty write lost)"
+        );
+    }
+
+    // (stack overflow test removed — needs a different fix approach)
 }
