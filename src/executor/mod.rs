@@ -410,14 +410,13 @@ fn exec_seq_scan(
     }
 
     let scan = state.scan.as_mut().unwrap();
-    let txns_guard = ctx.txns.read();
     let desc = Rc::clone(&state.desc);
     let attr_descs = Rc::clone(&state.attr_descs);
     let column_names = Rc::clone(&state.column_names);
     if let Some(slot) = heap_scan_next_visible_raw(
         ctx.pool,
         ctx.client_id,
-        &txns_guard,
+        &ctx.txns,
         scan,
         |_tid, tuple_bytes| -> Result<TupleSlot, ExecError> {
             let values = expr::decode_tuple_from_bytes(tuple_bytes, &desc, &attr_descs)?;
