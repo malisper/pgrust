@@ -171,6 +171,33 @@ impl TransactionManager {
         }
     }
 
+    /// Mark a transaction as committed during WAL replay.
+    /// Unlike `commit()`, this does not require a prior `begin()` — the
+    /// transaction may not be in our in-memory state if it was started
+    /// before the crash.
+    pub fn replay_commit(&mut self, xid: TransactionId) {
+        if xid >= self.next_xid {
+            self.next_xid = xid + 1;
+            self.write_next_xid();
+        }
+        self.statuses.insert(xid, TransactionStatus::Committed);
+        self.in_progress.retain(|&x| x != xid);
+        self.write_status_bits(xid, TransactionStatus::Committed);
+    }
+
+    /// Mark a transaction as aborted during WAL replay cleanup.
+    /// Called for any xid that appears in WAL records but has no
+    /// corresponding commit record.
+    pub fn replay_abort(&mut self, xid: TransactionId) {
+        if xid >= self.next_xid {
+            self.next_xid = xid + 1;
+            self.write_next_xid();
+        }
+        self.statuses.insert(xid, TransactionStatus::Aborted);
+        self.in_progress.retain(|&x| x != xid);
+        self.write_status_bits(xid, TransactionStatus::Aborted);
+    }
+
     pub fn status(&self, xid: TransactionId) -> Option<TransactionStatus> {
         self.statuses.get(&xid).copied()
     }

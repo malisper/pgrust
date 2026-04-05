@@ -162,11 +162,35 @@ impl Database {
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
 
-        let txns = TransactionManager::new_durable(&base_dir)?;
+        let mut txns = TransactionManager::new_durable(&base_dir)?;
         let catalog = DurableCatalog::load(&base_dir)?;
-        let smgr = MdStorageManager::new(&base_dir);
 
+        // --- WAL Recovery ---
         let wal_dir = base_dir.join("pg_wal");
+        if wal_dir.join("wal.log").exists() {
+            let mut recovery_smgr = MdStorageManager::new_in_recovery(&base_dir);
+            {
+                use crate::storage::smgr::{ForkNumber, StorageManager};
+                let cat = catalog.catalog();
+                for name in cat.table_names().collect::<Vec<_>>() {
+                    if let Some(entry) = cat.get(name) {
+                        let _ = recovery_smgr.open(entry.rel);
+                        let _ = recovery_smgr.create(entry.rel, ForkNumber::Main, false);
+                    }
+                }
+            }
+            let stats = crate::storage::wal::replay::perform_wal_recovery(
+                &wal_dir, &mut recovery_smgr, &mut txns,
+            ).map_err(DatabaseError::Wal)?;
+            if stats.records_replayed > 0 {
+                eprintln!(
+                    "WAL recovery: {} records ({} FPIs, {} inserts, {} commits, {} aborted)",
+                    stats.records_replayed, stats.fpis, stats.inserts, stats.commits, stats.aborted
+                );
+            }
+        }
+
+        let smgr = MdStorageManager::new(&base_dir);
         let wal = Arc::new(WalWriter::new(&wal_dir).map_err(DatabaseError::Wal)?);
 
         let pool = BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), pool_size, Arc::clone(&wal));
