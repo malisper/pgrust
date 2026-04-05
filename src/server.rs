@@ -453,10 +453,11 @@ fn execute_portal(
     session: &mut Session,
     portal: &BoundPortal,
 ) -> io::Result<()> {
+    let mut row_buf = Vec::new();
     if let Some((_columns, rows, tag)) = execute_special_query(db, &portal.sql, &portal.params) {
         // Extended protocol: Execute does not resend RowDescription (Describe already did).
         for row in &rows {
-            send_data_row(stream, row)?;
+            send_data_row(stream, row, &mut row_buf)?;
         }
         send_command_complete(stream, &tag)?;
         return Ok(());
@@ -467,7 +468,7 @@ fn execute_portal(
         Ok(StatementResult::Query { column_names: _, rows }) => {
             // Extended protocol: Execute sends DataRows + CommandComplete only.
             for row in &rows {
-                send_data_row(stream, row)?;
+                send_data_row(stream, row, &mut row_buf)?;
             }
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
         }
@@ -549,8 +550,9 @@ fn send_query_result(
     tag: &str,
 ) -> io::Result<()> {
     send_row_description(stream, column_names)?;
+    let mut row_buf = Vec::new();
     for row in rows {
-        send_data_row(stream, row)?;
+        send_data_row(stream, row, &mut row_buf)?;
     }
     send_command_complete(stream, tag)
 }
@@ -636,25 +638,48 @@ fn send_row_description(w: &mut impl Write, columns: &[String]) -> io::Result<()
     Ok(())
 }
 
-fn send_data_row(w: &mut impl Write, values: &[Value]) -> io::Result<()> {
-    let mut body = Vec::new();
-    body.extend_from_slice(&(values.len() as i16).to_be_bytes());
+fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<u8>) -> io::Result<()> {
+    use std::io::Write as _;
+    buf.clear();
+    buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
     for val in values {
         match val {
             Value::Null => {
-                body.extend_from_slice(&(-1_i32).to_be_bytes());
+                buf.extend_from_slice(&(-1_i32).to_be_bytes());
             }
-            _ => {
-                let text = render_value(val);
-                body.extend_from_slice(&(text.len() as i32).to_be_bytes());
-                body.extend_from_slice(text.as_bytes());
+            Value::Int32(v) => {
+                // Format i32 directly into buf without allocating a String.
+                let start = buf.len();
+                buf.extend_from_slice(&0_i32.to_be_bytes()); // length placeholder
+                write!(buf, "{v}").unwrap();
+                let text_len = (buf.len() - start - 4) as i32;
+                buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
+            }
+            Value::Float64(v) => {
+                let start = buf.len();
+                buf.extend_from_slice(&0_i32.to_be_bytes());
+                write!(buf, "{v}").unwrap();
+                let text_len = (buf.len() - start - 4) as i32;
+                buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
+            }
+            Value::Text(v) => {
+                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
+                buf.extend_from_slice(v.as_bytes());
+            }
+            Value::Bool(true) => {
+                buf.extend_from_slice(&1_i32.to_be_bytes());
+                buf.push(b't');
+            }
+            Value::Bool(false) => {
+                buf.extend_from_slice(&1_i32.to_be_bytes());
+                buf.push(b'f');
             }
         }
     }
 
     w.write_all(&[b'D'])?;
-    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
-    w.write_all(&body)?;
+    w.write_all(&((buf.len() + 4) as i32).to_be_bytes())?;
+    w.write_all(buf)?;
     Ok(())
 }
 
@@ -741,16 +766,6 @@ fn send_error(w: &mut impl Write, sqlstate: &str, message: &str) -> io::Result<(
     Ok(())
 }
 
-fn render_value(val: &Value) -> String {
-    match val {
-        Value::Int32(v) => v.to_string(),
-        Value::Float64(v) => v.to_string(),
-        Value::Text(v) => v.to_string(),
-        Value::Bool(true) => "t".to_string(),
-        Value::Bool(false) => "f".to_string(),
-        Value::Null => String::new(),
-    }
-}
 
 // ---- Wire protocol readers ----
 
