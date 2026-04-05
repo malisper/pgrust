@@ -272,6 +272,43 @@ impl Snapshot {
             && self.in_progress.contains(&xid)
     }
 
+    /// Try to determine visibility using only hint bits and snapshot-local data.
+    /// Returns `Some(visible)` if resolved without a CLOG lookup, `None` if
+    /// the slow path (requiring `TransactionManager`) is needed.
+    #[inline(always)]
+    pub fn tuple_bytes_try_visible_from_hints(&self, bytes: &[u8]) -> Option<bool> {
+        use crate::access::heap::tuple::{
+            HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
+            INFOMASK_OFFSET,
+        };
+        let infomask = u16::from_le_bytes([bytes[INFOMASK_OFFSET], bytes[INFOMASK_OFFSET + 1]]);
+        let xmin = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+
+        if infomask & HEAP_XMIN_COMMITTED != 0 {
+            if xmin >= self.xmax {
+                return Some(false);
+            }
+            if self.transaction_active_in_snapshot(xmin) {
+                return Some(false);
+            }
+            if infomask & HEAP_XMAX_INVALID != 0 {
+                return Some(true);
+            }
+            if infomask & HEAP_XMAX_COMMITTED != 0 {
+                let xmax = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                if xmax >= self.xmax {
+                    return Some(true); // deleter started after snapshot
+                }
+                return Some(self.transaction_active_in_snapshot(xmax));
+            }
+            return None; // xmax has no hint — need CLOG
+        }
+        if infomask & HEAP_XMIN_INVALID != 0 {
+            return Some(false);
+        }
+        None // no xmin hints — need CLOG
+    }
+
     /// Check visibility from raw on-page tuple bytes without parsing.
     #[inline(always)]
     pub fn tuple_bytes_visible(&self, txns: &TransactionManager, bytes: &[u8]) -> bool {
@@ -287,6 +324,9 @@ impl Snapshot {
         // in-progress set if it committed after our snapshot was taken).
         if infomask & HEAP_XMIN_COMMITTED != 0 {
             // xmin committed — but maybe not according to our snapshot.
+            if xmin >= self.xmax {
+                return false; // inserter started after our snapshot
+            }
             if self.transaction_active_in_snapshot(xmin) {
                 return false;
             }
@@ -295,6 +335,9 @@ impl Snapshot {
             }
             if infomask & HEAP_XMAX_COMMITTED != 0 {
                 let xmax = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                if xmax >= self.xmax {
+                    return true; // deleter started after our snapshot
+                }
                 // xmax committed — but maybe not according to our snapshot.
                 return self.transaction_active_in_snapshot(xmax);
             }
@@ -328,6 +371,9 @@ impl Snapshot {
         // still must check the snapshot (a committed xid might be in our
         // in-progress set if it committed after our snapshot was taken).
         if infomask & HEAP_XMIN_COMMITTED != 0 {
+            if xmin >= self.xmax {
+                return (false, 0); // inserter started after our snapshot
+            }
             if self.transaction_active_in_snapshot(xmin) {
                 return (false, 0);
             }
@@ -336,6 +382,9 @@ impl Snapshot {
             }
             if infomask & HEAP_XMAX_COMMITTED != 0 {
                 let xmax = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                if xmax >= self.xmax {
+                    return (true, 0); // deleter started after our snapshot
+                }
                 return (self.transaction_active_in_snapshot(xmax), 0);
             }
             // xmax has no hint — fall through to full check.
@@ -664,7 +713,10 @@ mod tests {
 
     #[test]
     fn hint_fast_path_xmin_committed_xmax_invalid_is_visible() {
-        let txns = TransactionManager::default();
+        let mut txns = TransactionManager::default();
+        // Begin and commit a transaction so that xmin=1 is within the snapshot's range.
+        let xid = txns.begin();
+        txns.commit(xid).unwrap();
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         let bytes = make_tuple_bytes(1, 0, 0,
             crate::access::heap::tuple::HEAP_XMIN_COMMITTED | crate::access::heap::tuple::HEAP_XMAX_INVALID);
@@ -1027,6 +1079,109 @@ mod tests {
         assert!(vis_old,
             "old snapshot must still see tuple whose xmax committed after snapshot was taken, \
              even if HEAP_XMAX_COMMITTED hint bit is set");
+    }
+
+    // ---- Tests for xmax >= snapshot.xmax in hint fast path ----
+
+    #[test]
+    fn hint_fast_path_xmax_committed_after_snapshot_still_visible() {
+        // Regression: if XMAX_COMMITTED is set but xmax >= snapshot.xmax,
+        // the deleter started after our snapshot. The tuple should still be
+        // visible. Without the xmax >= self.xmax check in the fast path,
+        // transaction_active_in_snapshot returns false (out of range) and the
+        // tuple is incorrectly hidden.
+        use crate::access::heap::tuple::{HEAP_XMIN_COMMITTED, HEAP_XMAX_COMMITTED};
+        let mut txns = TransactionManager::default();
+        let inserter = txns.begin(); // xid=1
+        txns.commit(inserter).unwrap();
+
+        // Take snapshot before any delete happens.
+        let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+
+        // A deleter starts AFTER the snapshot.
+        let deleter = txns.begin(); // xid=2, >= snapshot.xmax
+        txns.commit(deleter).unwrap();
+
+        // Another reader sets both XMIN_COMMITTED and XMAX_COMMITTED hints.
+        let bytes = make_tuple_bytes(inserter, deleter, 0,
+            HEAP_XMIN_COMMITTED | HEAP_XMAX_COMMITTED);
+
+        // The original snapshot should still see the tuple (delete not yet visible).
+        let result = snapshot.tuple_bytes_try_visible_from_hints(&bytes);
+        assert_eq!(result, Some(true),
+            "hint-only fast path must return visible when xmax >= snapshot.xmax");
+
+        let (visible, _) = snapshot.tuple_bytes_visible_with_hints(&txns, &bytes);
+        assert!(visible,
+            "full check must also return visible when xmax >= snapshot.xmax");
+    }
+
+    #[test]
+    fn hint_fast_path_xmin_after_snapshot_not_visible() {
+        // Regression: if XMIN_COMMITTED is set but xmin >= snapshot.xmax,
+        // the inserter started after our snapshot. The tuple should NOT be
+        // visible. Without the xmin >= self.xmax check, the fast path
+        // incorrectly returns visible when XMAX_INVALID is also set.
+        use crate::access::heap::tuple::{HEAP_XMIN_COMMITTED, HEAP_XMAX_INVALID};
+        let mut txns = TransactionManager::default();
+        let inserter = txns.begin(); // xid=1
+        txns.commit(inserter).unwrap();
+
+        // Take snapshot while xid=1 is committed (next_xid=1, xmax=2).
+        let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+
+        // A new transaction inserts AFTER the snapshot.
+        let new_inserter = txns.begin(); // xid=2, >= snapshot.xmax
+        txns.commit(new_inserter).unwrap();
+
+        // Another reader sets XMIN_COMMITTED on the new tuple.
+        let bytes = make_tuple_bytes(new_inserter, 0, 0,
+            HEAP_XMIN_COMMITTED | HEAP_XMAX_INVALID);
+
+        // The original snapshot must NOT see this tuple.
+        let result = snapshot.tuple_bytes_try_visible_from_hints(&bytes);
+        assert_eq!(result, Some(false),
+            "hint-only fast path must return not-visible when xmin >= snapshot.xmax");
+
+        let (visible, _) = snapshot.tuple_bytes_visible_with_hints(&txns, &bytes);
+        assert!(!visible,
+            "full check must also return not-visible when xmin >= snapshot.xmax");
+    }
+
+    #[test]
+    fn hint_only_path_resolves_common_cases() {
+        // Verify that tuple_bytes_try_visible_from_hints resolves visibility
+        // without needing a CLOG lookup for the common cases.
+        use crate::access::heap::tuple::{
+            HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
+        };
+        let mut txns = TransactionManager::default();
+        let xid1 = txns.begin();
+        txns.commit(xid1).unwrap();
+        let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+
+        // Case 1: XMIN_COMMITTED | XMAX_INVALID → visible (no CLOG needed)
+        let bytes = make_tuple_bytes(xid1, 0, 0, HEAP_XMIN_COMMITTED | HEAP_XMAX_INVALID);
+        assert_eq!(snapshot.tuple_bytes_try_visible_from_hints(&bytes), Some(true));
+
+        // Case 2: XMIN_COMMITTED | XMAX_COMMITTED → not visible (no CLOG needed)
+        let xid2 = txns.begin();
+        txns.commit(xid2).unwrap();
+        let snapshot2 = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+        let bytes = make_tuple_bytes(xid1, xid2, 0, HEAP_XMIN_COMMITTED | HEAP_XMAX_COMMITTED);
+        assert_eq!(snapshot2.tuple_bytes_try_visible_from_hints(&bytes), Some(false));
+
+        // Case 3: XMIN_INVALID → not visible (no CLOG needed)
+        let bytes = make_tuple_bytes(xid1, 0, 0, HEAP_XMIN_INVALID);
+        assert_eq!(snapshot.tuple_bytes_try_visible_from_hints(&bytes), Some(false));
+
+        // Case 4: No hint bits → needs CLOG (returns None)
+        let bytes = make_tuple_bytes(xid1, 0, 0, 0);
+        assert_eq!(snapshot.tuple_bytes_try_visible_from_hints(&bytes), None);
+
+        // Case 5: XMIN_COMMITTED but no xmax hint → needs CLOG for xmax
+        let bytes = make_tuple_bytes(xid1, xid2, 0, HEAP_XMIN_COMMITTED);
+        assert_eq!(snapshot2.tuple_bytes_try_visible_from_hints(&bytes), None);
     }
 
     // ---- Tests for update/delete AFTER hint bits are already set ----

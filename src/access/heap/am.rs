@@ -160,7 +160,7 @@ pub fn heap_scan_next_visible(
 pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
-    txns: &TransactionManager,
+    txns: &std::sync::Arc<RwLock<TransactionManager>>,
     scan: &mut VisibleHeapScan,
     mut process: impl FnMut(ItemPointerData, &[u8]) -> Result<T, E>,
 ) -> Result<Option<T>, E> {
@@ -203,7 +203,24 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
                 }
 
                 let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
-                let (visible, hints) = scan.snapshot.tuple_bytes_visible_with_hints(txns, tuple_bytes);
+
+                // Fast path: check hint bits without acquiring the txns lock.
+                if let Some(visible) = scan.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
+                    if !visible {
+                        continue;
+                    }
+                    let tid = ItemPointerData {
+                        block_number: block,
+                        offset_number: off,
+                    };
+                    return Ok(Some(process(tid, tuple_bytes)?));
+                }
+
+                // Slow path: need CLOG lookup — acquire the txns lock.
+                let (visible, hints) = {
+                    let txns_guard = txns.read();
+                    scan.snapshot.tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
+                };
 
                 if hints != 0 {
                     unsafe {
@@ -262,7 +279,7 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
 pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
     pool: &BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
-    txns: &TransactionManager,
+    txns: &std::sync::Arc<RwLock<TransactionManager>>,
     scan: &mut VisibleHeapScan,
     mut process: impl FnMut(&[u8]) -> Result<(), E>,
 ) -> Result<usize, E> {
@@ -291,7 +308,21 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
                 }
 
                 let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
-                let (visible, hints) = scan.snapshot.tuple_bytes_visible_with_hints(txns, tuple_bytes);
+
+                // Fast path: check hint bits without acquiring the txns lock.
+                if let Some(visible) = scan.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
+                    if visible {
+                        process(tuple_bytes)?;
+                        count += 1;
+                    }
+                    continue;
+                }
+
+                // Slow path: need CLOG lookup — acquire the txns lock.
+                let (visible, hints) = {
+                    let txns_guard = txns.read();
+                    scan.snapshot.tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
+                };
 
                 if hints != 0 {
                     unsafe {
@@ -305,12 +336,10 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
                     any_hints_written = true;
                 }
 
-                if !visible {
-                    continue;
+                if visible {
+                    process(tuple_bytes)?;
+                    count += 1;
                 }
-
-                process(tuple_bytes)?;
-                count += 1;
             }
             Ok(())
         })();
