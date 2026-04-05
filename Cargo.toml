@@ -19,3 +19,6 @@ pest = "2.7"
 pest_derive = "2.7"
 rand = "0.8"
 rustc-hash = "2.1.2"
+
+[profile.release]
+debug = true

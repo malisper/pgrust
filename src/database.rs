@@ -821,6 +821,64 @@ impl Session {
         }
     }
 
+    /// Prepare an insert statement for repeated execution with different
+    /// parameter values.  This parses and binds the table/column metadata once;
+    /// subsequent calls to `execute_prepared_insert` skip parsing entirely.
+    pub fn prepare_insert(
+        &self,
+        db: &Database,
+        table_name: &str,
+        columns: Option<&[String]>,
+        num_params: usize,
+    ) -> Result<crate::parser::PreparedInsert, ExecError> {
+        let catalog_guard = db.catalog.read();
+        Ok(crate::parser::bind_insert_prepared(
+            table_name,
+            columns,
+            num_params,
+            catalog_guard.catalog(),
+        )?)
+    }
+
+    /// Execute a single row insert using a previously prepared insert plan.
+    /// Must be called inside an active transaction (between BEGIN and COMMIT).
+    pub fn execute_prepared_insert(
+        &mut self,
+        db: &Database,
+        prepared: &crate::parser::PreparedInsert,
+        params: &[crate::executor::Value],
+    ) -> Result<(), ExecError> {
+        use crate::executor::commands::execute_prepared_insert_row;
+
+        let txn = self.active_txn.as_mut().ok_or_else(|| {
+            ExecError::Parse(crate::parser::ParseError::UnexpectedToken {
+                expected: "active transaction",
+                actual: "no active transaction for prepared insert".into(),
+            })
+        })?;
+        let xid = txn.xid;
+        let cid = txn.next_command_id;
+        txn.next_command_id = txn.next_command_id.saturating_add(1);
+        let client_id = self.client_id;
+
+        let rel = prepared.rel;
+        let txn = self.active_txn.as_mut().unwrap();
+        if !txn.held_table_locks.contains(&rel) {
+            db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+            txn.held_table_locks.push(rel);
+        }
+
+        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let mut ctx = ExecutorContext {
+            pool: &db.pool,
+            txns: db.txns.clone(),
+            snapshot,
+            client_id,
+            next_command_id: cid,
+        };
+        execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
+    }
+
     pub fn copy_from_rows(
         &mut self,
         db: &Database,

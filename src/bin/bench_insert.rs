@@ -6,7 +6,9 @@ static GLOBAL: MiMalloc = MiMalloc;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use pgrust::compact_string::CompactString;
 use pgrust::database::{Database, Session};
+use pgrust::executor::Value;
 
 fn main() -> Result<(), String> {
     let args = parse_args()?;
@@ -18,6 +20,16 @@ fn main() -> Result<(), String> {
     let mut session = Session::new(1);
 
     session.execute(&db, "create table insertbench (id int not null, payload text not null)")
+        .map_err(|e| format!("{e:?}"))?;
+
+    if args.wait {
+        eprintln!("READY pid={}", std::process::id());
+        unsafe { libc::raise(libc::SIGSTOP); }
+    }
+
+    let columns = vec!["id".to_string(), "payload".to_string()];
+    let prepared = session
+        .prepare_insert(&db, "insertbench", Some(&columns), 2)
         .map_err(|e| format!("{e:?}"))?;
 
     let started = Instant::now();
@@ -32,11 +44,13 @@ fn main() -> Result<(), String> {
     } else {
         session.execute(&db, "begin").map_err(|e| format!("{e:?}"))?;
         for i in 0..args.row_count {
-            session.execute(
-                &db,
-                &format!("insert into insertbench (id, payload) values ({i}, 'row-{i}')"),
-            )
-            .map_err(|e| format!("{e:?}"))?;
+            let params = [
+                Value::Int32(i as i32),
+                Value::Text(CompactString::from_owned(format!("row-{i}"))),
+            ];
+            session
+                .execute_prepared_insert(&db, &prepared, &params)
+                .map_err(|e| format!("{e:?}"))?;
         }
         session.execute(&db, "commit").map_err(|e| format!("{e:?}"))?;
     }
@@ -54,7 +68,6 @@ fn main() -> Result<(), String> {
         "inserts_per_sec: {:.0}",
         args.row_count as f64 / elapsed.as_secs_f64()
     );
-
     Ok(())
 }
 
@@ -63,14 +76,16 @@ struct Args {
     row_count: usize,
     pool_size: usize,
     autocommit: bool,
+    wait: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         base_dir: std::env::temp_dir().join("pgrust_insert_bench"),
-        row_count: 600_000,
+        row_count: 12_000_000,
         pool_size: 16384,
         autocommit: false,
+        wait: false,
     };
 
     let raw = std::env::args().skip(1).collect::<Vec<_>>();
@@ -79,6 +94,10 @@ fn parse_args() -> Result<Args, String> {
         match raw[i].as_str() {
             "--autocommit" => {
                 args.autocommit = true;
+                i += 1;
+            }
+            "--wait" => {
+                args.wait = true;
                 i += 1;
             }
             "--dir" => {

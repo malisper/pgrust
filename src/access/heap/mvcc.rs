@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Seek, SeekFrom, Write as _};
+use std::io::{Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::access::heap::tuple::HeapTuple;
