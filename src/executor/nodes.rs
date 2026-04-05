@@ -206,6 +206,7 @@ pub struct SeqScanState {
     pub(crate) attr_descs: Rc<[AttributeDesc]>,
     pub(crate) column_names: Rc<[String]>,
     pub(crate) scan: Option<VisibleHeapScan>,
+    pub(crate) decoder: super::tuple_decoder::CompiledTupleDecoder,
     pub(crate) stats: NodeExecStats,
 }
 

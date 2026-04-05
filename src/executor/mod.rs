@@ -1,5 +1,6 @@
 pub mod nodes;
 pub mod expr;
+pub(crate) mod tuple_decoder;
 mod explain;
 pub mod commands;
 
@@ -196,12 +197,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SeqScan { rel, desc } => {
             let column_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs: Rc<[AttributeDesc]> = desc.attribute_descs().into();
+            let decoder = tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs);
             PlanState::SeqScan(SeqScanState {
                 rel,
                 desc: Rc::new(desc),
                 attr_descs,
                 column_names,
                 scan: None,
+                decoder,
                 stats: NodeExecStats::default(),
             })
         }
@@ -411,8 +414,7 @@ fn exec_seq_scan(
     }
 
     let scan = state.scan.as_mut().unwrap();
-    let desc = Rc::clone(&state.desc);
-    let attr_descs = Rc::clone(&state.attr_descs);
+    let decoder = &state.decoder;
     let column_names = Rc::clone(&state.column_names);
     if let Some(slot) = heap_scan_next_visible_raw(
         &*ctx.pool,
@@ -420,7 +422,7 @@ fn exec_seq_scan(
         &ctx.txns,
         scan,
         |_tid, tuple_bytes| -> Result<TupleSlot, ExecError> {
-            let values = expr::decode_tuple_from_bytes(tuple_bytes, &desc, &attr_descs)?;
+            let values = decoder.decode(tuple_bytes)?;
             Ok(TupleSlot::virtual_row(column_names.clone(), values))
         },
     )? {
