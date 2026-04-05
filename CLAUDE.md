@@ -9,3 +9,8 @@ create them on the fly.
 Tests that use raw `BufferPool` instances (without going through `Database`) must
 call a test-only `create_fork()` helper to set up the fork before inserting.
 Fork creation code should only appear in test helpers, never on the hot insert path.
+
+## Running tests
+
+When running tests, redirect output to a file (e.g. `cargo test 2>&1 | tee test_output.txt`)
+so you can re-read the results without having to re-run the full test suite.
