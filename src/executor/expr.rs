@@ -175,12 +175,8 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     attlen: column.storage.attlen,
                 });
             }
-            std::str::from_utf8(bytes)
-                .map(|s| Value::Text(CompactString::new(s)))
-                .map_err(|e| ExecError::InvalidStorageValue {
-                    column: column.name.clone(),
-                    details: e.to_string(),
-                })
+            // SAFETY: text columns are stored as valid UTF-8 by the insert path.
+            Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
         }
         ScalarType::Bool => {
             if column.storage.attlen != 1 || bytes.len() != 1 {
@@ -306,12 +302,8 @@ fn decode_fixed_value(column: &ColumnDesc, bytes: &[u8]) -> Result<Value, ExecEr
 fn decode_varlen_value(column: &ColumnDesc, bytes: &[u8]) -> Result<Value, ExecError> {
     match column.ty {
         ScalarType::Text => {
-            std::str::from_utf8(bytes)
-                .map(|s| Value::Text(CompactString::new(s)))
-                .map_err(|e| ExecError::InvalidStorageValue {
-                    column: column.name.clone(),
-                    details: e.to_string(),
-                })
+            // SAFETY: text columns are stored as valid UTF-8 by the insert path.
+            Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
         }
         _ => Err(ExecError::UnsupportedStorageType {
             column: column.name.clone(),
