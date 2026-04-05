@@ -17,7 +17,14 @@ BEGIN { top = "" }
 END {
     for (fn in self_samples) printf "%6d %5.1f%%  %s\n", self_samples[fn], self_samples[fn]*100/total, fn
 }
-' "$FILE" | sort -rn | head -30
+' "$FILE" | sort -rn | head -30 | awk '
+BEGIN { cumulative = 0 }
+{
+    pct = $2
+    gsub(/%/, "", pct)
+    cumulative += pct
+    printf "%s %s  %7.1f%%  %s\n", $1, $2, cumulative, substr($0, index($0,$3))
+}' | awk '{ printf "%-8s %-8s %-10s %s\n", $1, $2, $3, $4 }'
 
 echo ""
 echo "=== Syscall callers ==="

@@ -235,12 +235,18 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             // Re-check: another thread may have inserted this tag while we waited.
             if let Some(&existing_id) = lookup.get(&tag) {
                 strategy.free_list.push_back(buffer_id);
+
+                // Pin the buffer WHILE still holding the write lock on lookup.
+                // This prevents another thread from evicting existing_id
+                // between now and when the caller uses it.
+                let existing_frame = &self.frames[existing_id];
+                existing_frame.state.pin_and_bump_usage(self.max_usage_count);
+                let valid = existing_frame.state.is_valid();
+
                 drop(lookup);
                 drop(strategy);
 
-                let existing_frame = &self.frames[existing_id];
-                existing_frame.state.pin_and_bump_usage(self.max_usage_count);
-                if existing_frame.state.is_valid() {
+                if valid {
                     self.stats_hit.fetch_add(1, Ordering::Relaxed);
                     return Ok(RequestPageResult::Hit {
                         buffer_id: existing_id,
@@ -355,7 +361,8 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         // Clear IO flags under the header spinlock, matching PostgreSQL's
-        // TerminateBufferIO.
+        // TerminateBufferIO.  Safe because pin_and_bump_usage/decrement_pin
+        // wait for BM_LOCKED to be clear before their CAS.
         {
             let mut buf_state = frame.state.lock_header();
             buf_state &= !types::BM_LOCKED_PUB;
@@ -605,9 +612,16 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             storage.write_page(tag, &page, skip_fsync).map_err(Error::Storage)?;
         }
 
-        frame.state.clear_dirty();
-        frame.state.clear_io_in_progress();
-        frame.state.clear_io_error();
+        // Terminate IO under the header spinlock, matching PostgreSQL's
+        // TerminateBufferIO.  Clears dirty (the write succeeded), IO flags.
+        {
+            let mut buf_state = frame.state.lock_header();
+            buf_state &= !types::BM_LOCKED_PUB;
+            buf_state &= !types::BM_IO_IN_PROGRESS_PUB;
+            buf_state &= !types::BM_IO_ERROR_PUB;
+            buf_state &= !types::BM_DIRTY_PUB;
+            frame.state.unlock_header(buf_state);
+        }
 
         frame.io_complete.notify_all();
         self.stats_written.fetch_add(1, Ordering::Relaxed);
@@ -623,9 +637,16 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             return Err(Error::WrongIoOp);
         }
 
-        frame.state.clear_io_in_progress();
-        frame.state.set_io_error();
-        frame.state.set_dirty();
+        // Terminate IO under the header spinlock.  Re-mark dirty so the
+        // write will be retried, and set IO_ERROR.
+        {
+            let mut buf_state = frame.state.lock_header();
+            buf_state &= !types::BM_LOCKED_PUB;
+            buf_state &= !types::BM_IO_IN_PROGRESS_PUB;
+            buf_state |= types::BM_IO_ERROR_PUB;
+            buf_state |= types::BM_DIRTY_PUB;
+            frame.state.unlock_header(buf_state);
+        }
 
         frame.io_complete.notify_all();
         Ok(())
@@ -633,7 +654,14 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     pub fn unpin(&self, _client_id: ClientId, buffer_id: BufferId) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-        debug_assert!(frame.state.pin_count() > 0, "unpin on buffer with pin_count=0");
+        let pc = frame.state.pin_count();
+        if pc == 0 {
+            let tag = *frame.tag.lock();
+            panic!(
+                "unpin: pin_count already 0 for buffer_id={buffer_id} tag={tag:?} state={:#010x}",
+                frame.state.load()
+            );
+        }
         frame.state.decrement_pin();
         Ok(())
     }

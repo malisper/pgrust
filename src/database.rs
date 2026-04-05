@@ -235,7 +235,7 @@ impl Database {
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let catalog_guard = self.catalog.read();
                 let mut ctx = ExecutorContext {
-                    pool: &self.pool,
+                    pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     snapshot,
                     client_id,
@@ -262,7 +262,7 @@ impl Database {
                 let xid = self.txns.write().begin();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
-                    pool: &self.pool,
+                    pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     snapshot,
                     client_id,
@@ -286,7 +286,7 @@ impl Database {
                 let xid = self.txns.write().begin();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
-                    pool: &self.pool,
+                    pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     snapshot,
                     client_id,
@@ -316,7 +316,7 @@ impl Database {
                 let xid = self.txns.write().begin();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
-                    pool: &self.pool,
+                    pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     snapshot,
                     client_id,
@@ -368,7 +368,7 @@ impl Database {
                 let mut catalog_guard = self.catalog.write();
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
-                    pool: &self.pool,
+                    pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     snapshot,
                     client_id,
@@ -402,7 +402,7 @@ impl Database {
                 let catalog_guard = self.catalog.read();
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
-                    pool: &self.pool,
+                    pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     snapshot,
                     client_id,
@@ -661,7 +661,7 @@ impl Session {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let catalog_guard = db.catalog.read();
                 let mut ctx = ExecutorContext {
-                    pool: &db.pool,
+                    pool: std::sync::Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     snapshot,
                     client_id,
@@ -683,7 +683,7 @@ impl Session {
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
-                    pool: &db.pool,
+                    pool: std::sync::Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     snapshot,
                     client_id,
@@ -705,7 +705,7 @@ impl Session {
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
-                    pool: &db.pool,
+                    pool: std::sync::Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     snapshot,
                     client_id,
@@ -730,7 +730,7 @@ impl Session {
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
-                    pool: &db.pool,
+                    pool: std::sync::Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     snapshot,
                     client_id,
@@ -778,7 +778,7 @@ impl Session {
                 let mut catalog_guard = db.catalog.write();
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
-                    pool: &db.pool,
+                    pool: std::sync::Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     snapshot,
                     client_id,
@@ -810,7 +810,7 @@ impl Session {
                 let catalog_guard = db.catalog.read();
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
-                    pool: &db.pool,
+                    pool: std::sync::Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     snapshot,
                     client_id,
@@ -876,7 +876,7 @@ impl Session {
 
         let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
         let mut ctx = ExecutorContext {
-            pool: &db.pool,
+            pool: std::sync::Arc::clone(&db.pool),
             txns: db.txns.clone(),
             snapshot,
             client_id,
@@ -976,7 +976,7 @@ impl Session {
         let result = parsed_rows.and_then(|parsed_rows| {
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
             let mut ctx = ExecutorContext {
-                pool: &db.pool,
+                pool: std::sync::Arc::clone(&db.pool),
                 txns: db.txns.clone(),
                 snapshot,
                 client_id: self.client_id,

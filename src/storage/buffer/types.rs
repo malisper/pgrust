@@ -83,6 +83,7 @@ const BM_LOCKED: u32 = 1 << 22;
 
 // Public aliases for use in mod.rs (matching PostgreSQL naming).
 pub const BM_VALID_PUB: u32 = BM_VALID;
+pub const BM_DIRTY_PUB: u32 = BM_DIRTY;
 pub const BM_IO_IN_PROGRESS_PUB: u32 = BM_IO_IN_PROGRESS;
 pub const BM_IO_ERROR_PUB: u32 = BM_IO_ERROR;
 pub const BM_LOCKED_PUB: u32 = BM_LOCKED;
@@ -151,27 +152,95 @@ impl BufferState {
         self.0.store(new_state, Ordering::Release);
     }
 
-    // --- Atomic pin operations ---
+    // --- Pin operations (CAS loops that respect BM_LOCKED) ---
+    //
+    // Since the buffer header spinlock holder (LockBufHdr/UnlockBufHdr) can
+    // update the state with a plain store, it is not safe to use simple
+    // atomic increment/decrement for pin count changes.  Instead we use CAS
+    // loops that wait for BM_LOCKED to be clear first, matching PostgreSQL's
+    // PinBuffer / UnpinBufferNoOwner.
+
+    /// Spin-wait until BM_LOCKED is clear, then return the observed state.
+    /// Matches PostgreSQL's WaitBufHdrUnlocked.
+    fn wait_unlocked(&self) -> u32 {
+        loop {
+            let state = self.load();
+            if state & BM_LOCKED == 0 {
+                return state;
+            }
+            std::hint::spin_loop();
+        }
+    }
 
     /// Atomically increment pin count. Returns previous state.
     pub fn increment_pin(&self) -> u32 {
-        // pin_count is in bits 0-13, so fetch_add(1) increments it directly.
-        self.0.fetch_add(1, Ordering::AcqRel)
+        let mut old = self.load();
+        loop {
+            if old & BM_LOCKED != 0 {
+                old = self.wait_unlocked();
+            }
+            let new = old + 1; // pin_count is in bits 0-13
+            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return old,
+                Err(current) => old = current,
+            }
+        }
     }
 
     /// Atomically decrement pin count. Returns previous state.
     pub fn decrement_pin(&self) -> u32 {
-        self.0.fetch_sub(1, Ordering::AcqRel)
+        let mut old = self.load();
+        loop {
+            if old & BM_LOCKED != 0 {
+                old = self.wait_unlocked();
+            }
+            if old & PIN_COUNT_MASK == 0 {
+                panic!("decrement_pin: pin_count already 0 (state={:#010x})", old);
+            }
+            let new = old - 1; // pin_count is in bits 0-13
+            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return old,
+                Err(current) => old = current,
+            }
+        }
     }
 
-    // --- Atomic flag operations ---
+    // --- Flag operations (CAS loops that respect BM_LOCKED) ---
+    //
+    // Like pin/unpin, flag modifications must wait for BM_LOCKED to be clear
+    // before CAS, because the spinlock holder can overwrite the entire state
+    // word with a plain store.  Matches PostgreSQL's MarkBufferDirty pattern.
 
-    pub fn set_flag(&self, flag: u32) {
-        self.0.fetch_or(flag, Ordering::Release);
+    /// Set one or more flag bits, waiting for BM_LOCKED.
+    fn set_flag(&self, flag: u32) {
+        let mut old = self.load();
+        loop {
+            if old & BM_LOCKED != 0 {
+                old = self.wait_unlocked();
+            }
+            let new = old | flag;
+            if new == old { return; }
+            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(current) => old = current,
+            }
+        }
     }
 
-    pub fn clear_flag(&self, flag: u32) {
-        self.0.fetch_and(!flag, Ordering::Release);
+    /// Clear one or more flag bits, waiting for BM_LOCKED.
+    fn clear_flag(&self, flag: u32) {
+        let mut old = self.load();
+        loop {
+            if old & BM_LOCKED != 0 {
+                old = self.wait_unlocked();
+            }
+            let new = old & !flag;
+            if new == old { return; }
+            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(current) => old = current,
+            }
+        }
     }
 
     pub fn set_valid(&self) { self.set_flag(BM_VALID); }
@@ -186,17 +255,22 @@ impl BufferState {
     // --- Combined operations ---
 
     /// Atomically increment pin count AND bump usage count (if below max) in
-    /// a single CAS, matching PostgreSQL's PinBuffer. Returns the old state.
+    /// a single CAS, matching PostgreSQL's PinBuffer. Waits for BM_LOCKED
+    /// to be clear before attempting the CAS. Returns the old state.
     pub fn pin_and_bump_usage(&self, max_usage: u8) -> u32 {
+        let mut old = self.load();
         loop {
-            let old = self.load();
+            if old & BM_LOCKED != 0 {
+                old = self.wait_unlocked();
+            }
             let mut new = old + 1; // increment pin_count (bits 0-13)
             let usage = ((new & USAGE_COUNT_MASK) >> USAGE_COUNT_SHIFT) as u8;
             if usage < max_usage {
                 new += 1 << USAGE_COUNT_SHIFT; // increment usage_count
             }
-            if self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                return old;
+            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return old,
+                Err(current) => old = current,
             }
         }
     }
@@ -412,8 +486,6 @@ mod state_tests {
         let s = BufferState::new();
         s.set_valid();
         s.set_dirty();
-        s.increment_pin();
-        s.increment_pin();
 
         s.init_for_io();
         assert_eq!(s.pin_count(), 1);
@@ -423,6 +495,7 @@ mod state_tests {
         assert!(!s.is_dirty());
         assert!(!s.is_io_error());
     }
+
 
     #[test]
     fn try_start_flush_succeeds_when_valid_dirty() {
