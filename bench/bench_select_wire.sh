@@ -14,6 +14,7 @@ ROWS=10000
 ITERATIONS=10
 CLIENTS=1
 SKIP_LOAD=false
+COUNT_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -25,6 +26,7 @@ while [[ $# -gt 0 ]]; do
         --iterations) ITERATIONS="$2"; shift 2 ;;
         --clients) CLIENTS="$2"; shift 2 ;;
         --skip-load) SKIP_LOAD=true; shift ;;
+        --count) COUNT_ONLY=true; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -76,25 +78,33 @@ for i in range(${ROWS}):
     fi
 fi
 
-# Build the query file: N iterations of SELECT * FROM scanbench
-QUERY_FILE=$(mktemp)
-trap "rm -f ${QUERY_FILE}" EXIT
-for ((i=0; i<ITERATIONS; i++)); do
-    echo "SELECT * FROM scanbench;" >> "${QUERY_FILE}"
-done
+if [[ "${COUNT_ONLY}" == "true" ]]; then
+    BENCH_QUERY="SELECT count(*) FROM scanbench;"
+else
+    BENCH_QUERY="SELECT * FROM scanbench;"
+fi
 
 TOTAL_ITERATIONS=$((ITERATIONS * CLIENTS))
 echo "Running benchmark (${ROWS} rows, ${ITERATIONS} iterations x ${CLIENTS} clients = ${TOTAL_ITERATIONS} total queries, port ${PORT})..."
 
-# Launch clients in parallel
-START_NS=$(python3 -c 'import time; print(int(time.time_ns()))')
+# Build the query file: N iterations of the benchmark query, with \timing
+QUERY_FILE=$(mktemp)
+LATENCY_DIR=$(mktemp -d)
+trap "rm -rf ${QUERY_FILE} ${LATENCY_DIR}" EXIT
+echo "\\timing on" > "${QUERY_FILE}"
+for ((i=0; i<ITERATIONS; i++)); do
+    echo "${BENCH_QUERY}" >> "${QUERY_FILE}"
+done
 
+# Launch clients in parallel — each runs psql with \timing and captures output.
 COMPLETED=0
 pids=()
 for ((c=0; c<CLIENTS; c++)); do
-    psql_cmd -q -t -A -f "${QUERY_FILE}" >/dev/null &
+    psql_cmd -q -t -A -f "${QUERY_FILE}" 2>&1 | grep "^Time:" > "${LATENCY_DIR}/client_${c}.txt" &
     pids+=($!)
 done
+
+START_NS=$(python3 -c 'import time; print(int(time.time_ns()))')
 
 # Wait for all clients, reporting as each finishes
 for pid in "${pids[@]}"; do
@@ -110,6 +120,7 @@ TOTAL_QUERIES=${TOTAL_ITERATIONS}
 TOTAL_ROWS=$((ROWS * TOTAL_QUERIES))
 
 python3 -c "
+import os, glob
 total_queries = ${TOTAL_QUERIES}
 total_rows = ${TOTAL_ROWS}
 rows_per_table = ${ROWS}
@@ -127,4 +138,25 @@ print(f'total_ms: {elapsed_ns / 1e6:.3f}')
 print(f'queries_per_sec: {total_queries / elapsed_s:.1f}')
 print(f'rows_per_sec: {total_rows / elapsed_s:.0f}')
 print(f'avg_ms_per_query: {elapsed_ns / 1e6 / total_queries:.3f}')
+
+# Print per-iteration latencies (averaged across clients)
+files = sorted(glob.glob('${LATENCY_DIR}/client_*.txt'))
+if files:
+    import re
+    all_latencies = []
+    for f in files:
+        with open(f) as fh:
+            lats = []
+            for line in fh:
+                m = re.search(r'Time:\s+([\d.]+)\s+ms', line)
+                if m:
+                    lats.append(float(m.group(1)))
+            all_latencies.append(lats)
+    if all_latencies and all_latencies[0]:
+        print()
+        print('=== Per-iteration latency (avg across clients) ===')
+        for i in range(iterations):
+            vals = [lat[i] for lat in all_latencies if i < len(lat)]
+            avg = sum(vals) / len(vals) if vals else 0
+            print(f'  iter {i+1:4d}: {avg:.1f} ms')
 "
