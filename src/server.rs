@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -70,25 +70,31 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
 }
 
 fn handle_connection(
-    mut stream: TcpStream,
+    stream: TcpStream,
     db: &Database,
     client_id: ClientId,
 ) -> io::Result<()> {
+    // Use a BufWriter for the write side so multiple small write_all calls
+    // (e.g. message tag + length + body) are batched into a single sendto
+    // syscall per flush. Reads go through the raw stream reference.
+    let mut reader = stream.try_clone()?;
+    let mut writer = BufWriter::new(stream);
+
     // Phase 1: SSL / startup negotiation.
     // The first message has no type byte — just length + payload.
     loop {
-        let len = read_i32(&mut stream)? as usize;
+        let len = read_i32(&mut reader)? as usize;
         if len < 4 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "startup packet too short"));
         }
         let mut payload = vec![0u8; len - 4];
-        stream.read_exact(&mut payload)?;
+        reader.read_exact(&mut payload)?;
 
         let code = i32::from_be_bytes(payload[0..4].try_into().unwrap());
         match code {
             SSL_REQUEST_CODE => {
-                stream.write_all(b"N")?;
-                stream.flush()?;
+                writer.write_all(b"N")?;
+                writer.flush()?;
                 continue;
             }
             PROTOCOL_VERSION_3_0 => {
@@ -96,24 +102,25 @@ fn handle_connection(
             }
             _ => {
                 let msg = format!("unsupported protocol version: {code}");
-                send_error(&mut stream, "08P01", &msg)?;
+                send_error(&mut writer, "08P01", &msg)?;
+                writer.flush()?;
                 return Ok(());
             }
         }
     }
 
     // Phase 2: send authentication OK + startup parameters.
-    send_auth_ok(&mut stream)?;
-    send_parameter_status(&mut stream, "server_version", "16.0")?;
-    send_parameter_status(&mut stream, "server_encoding", "UTF8")?;
-    send_parameter_status(&mut stream, "client_encoding", "UTF8")?;
-    send_parameter_status(&mut stream, "DateStyle", "ISO, MDY")?;
-    send_parameter_status(&mut stream, "TimeZone", "UTC")?;
-    send_parameter_status(&mut stream, "integer_datetimes", "on")?;
-    send_parameter_status(&mut stream, "standard_conforming_strings", "on")?;
-    send_backend_key_data(&mut stream, std::process::id() as i32, client_id as i32)?;
-    send_ready_for_query(&mut stream, b'I')?;
-    stream.flush()?;
+    send_auth_ok(&mut writer)?;
+    send_parameter_status(&mut writer, "server_version", "16.0")?;
+    send_parameter_status(&mut writer, "server_encoding", "UTF8")?;
+    send_parameter_status(&mut writer, "client_encoding", "UTF8")?;
+    send_parameter_status(&mut writer, "DateStyle", "ISO, MDY")?;
+    send_parameter_status(&mut writer, "TimeZone", "UTC")?;
+    send_parameter_status(&mut writer, "integer_datetimes", "on")?;
+    send_parameter_status(&mut writer, "standard_conforming_strings", "on")?;
+    send_backend_key_data(&mut writer, std::process::id() as i32, client_id as i32)?;
+    send_ready_for_query(&mut writer, b'I')?;
+    writer.flush()?;
 
     // Phase 3: query loop.
     let mut state = ConnectionState {
@@ -124,81 +131,81 @@ fn handle_connection(
     };
 
     loop {
-        let msg_type = match read_byte(&mut stream) {
+        let msg_type = match read_byte(&mut reader) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) => return Err(e),
         };
 
-        let len = read_i32(&mut stream)? as usize;
+        let len = read_i32(&mut reader)? as usize;
         if len < 4 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "message too short"));
         }
         let mut body = vec![0u8; len - 4];
-        stream.read_exact(&mut body)?;
+        reader.read_exact(&mut body)?;
 
         match msg_type {
             b'Q' => {
                 let sql = cstr_from_bytes(&body);
-                handle_query(&mut stream, db, &mut state, &sql)?;
-                stream.flush()?;
+                handle_query(&mut writer, db, &mut state, &sql)?;
+                writer.flush()?;
             }
             b'P' => {
-                handle_parse(&mut stream, &mut state, &body)?;
-                stream.flush()?;
+                handle_parse(&mut writer, &mut state, &body)?;
+                writer.flush()?;
             }
             b'B' => {
-                handle_bind(&mut stream, &mut state, &body)?;
-                stream.flush()?;
+                handle_bind(&mut writer, &mut state, &body)?;
+                writer.flush()?;
             }
             b'D' => {
-                handle_describe(&mut stream, db, &state, &body)?;
-                stream.flush()?;
+                handle_describe(&mut writer, db, &state, &body)?;
+                writer.flush()?;
             }
             b'E' => {
-                handle_execute(&mut stream, db, &mut state, &body)?;
-                stream.flush()?;
+                handle_execute(&mut writer, db, &mut state, &body)?;
+                writer.flush()?;
             }
             b'S' => {
-                send_ready_for_query(&mut stream, state.session.ready_status())?;
-                stream.flush()?;
+                send_ready_for_query(&mut writer, state.session.ready_status())?;
+                writer.flush()?;
             }
             b'C' => {
-                handle_close(&mut stream, &mut state, &body)?;
-                stream.flush()?;
+                handle_close(&mut writer, &mut state, &body)?;
+                writer.flush()?;
             }
             b'H' => {
-                stream.flush()?;
+                writer.flush()?;
             }
             b'd' => {
                 handle_copy_data(&mut state, &body)?;
             }
             b'c' => {
-                handle_copy_done(&mut stream, db, &mut state)?;
-                stream.flush()?;
+                handle_copy_done(&mut writer, db, &mut state)?;
+                writer.flush()?;
             }
             b'f' => {
-                handle_copy_fail(&mut stream, &mut state, &body)?;
-                stream.flush()?;
+                handle_copy_fail(&mut writer, &mut state, &body)?;
+                writer.flush()?;
             }
             b'X' => {
                 return Ok(());
             }
             _ => {
                 send_error(
-                    &mut stream,
+                    &mut writer,
                     "0A000",
                     &format!("unsupported message type: '{}'", msg_type as char),
                 )?;
-                send_ready_for_query(&mut stream, state.session.ready_status())?;
-                stream.flush()?;
+                send_ready_for_query(&mut writer, state.session.ready_status())?;
+                writer.flush()?;
             }
         }
     }
 }
 
 fn handle_query(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     db: &Database,
     state: &mut ConnectionState,
     sql: &str,
@@ -253,7 +260,7 @@ fn handle_copy_data(state: &mut ConnectionState, body: &[u8]) -> io::Result<()> 
 }
 
 fn handle_copy_done(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     db: &Database,
     state: &mut ConnectionState,
 ) -> io::Result<()> {
@@ -282,7 +289,7 @@ fn handle_copy_done(
 }
 
 fn handle_copy_fail(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
@@ -310,7 +317,7 @@ fn parse_copy_from_stdin(sql: &str) -> Option<String> {
 }
 
 fn handle_parse(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
@@ -328,7 +335,7 @@ fn handle_parse(
 }
 
 fn handle_bind(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
@@ -370,7 +377,7 @@ fn handle_bind(
 }
 
 fn handle_describe(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     db: &Database,
     state: &ConnectionState,
     body: &[u8],
@@ -402,7 +409,7 @@ fn handle_describe(
 }
 
 fn handle_execute(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     db: &Database,
     state: &mut ConnectionState,
     body: &[u8],
@@ -418,7 +425,7 @@ fn handle_execute(
 }
 
 fn handle_close(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
@@ -441,7 +448,7 @@ fn handle_close(
 }
 
 fn execute_portal(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     db: &Database,
     session: &mut Session,
     portal: &BoundPortal,
@@ -536,7 +543,7 @@ fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
 }
 
 fn send_query_result(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     column_names: &[String],
     rows: &[Vec<Value>],
     tag: &str,
