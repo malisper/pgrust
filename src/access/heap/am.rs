@@ -1233,6 +1233,7 @@ mod tests {
         reopened_txns.commit(deleting_xid).unwrap();
         heap_flush(&pool, 2, rel, tid.block_number).unwrap();
         drop(pool);
+        drop(reopened_txns);
 
         let final_txns = TransactionManager::new_durable(&base).unwrap();
         let final_snapshot = final_txns.snapshot(INVALID_TRANSACTION_ID).unwrap();

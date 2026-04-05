@@ -196,7 +196,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Some(f(&mut *guard))
     }
 
-    pub fn request_page(&self, client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
+    pub fn request_page(&self, _client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
         loop {
             // Fast path: check if the tag is already in the lookup table.
             {
