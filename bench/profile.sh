@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+cd "$(dirname "$0")/.."
 cargo build --release
 sudo rm -rf /tmp/pgrust_flamegraph_bench
 ./target/release/full_scan_bench --dir /tmp/pgrust_flamegraph_bench --rows 10000 --iterations 1 --pool-size 16384

@@ -41,6 +41,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+cd "$(dirname "$0")/.."
+
 cargo build --release
 
 # Cache sudo credentials up front.
@@ -90,5 +92,5 @@ trap - EXIT
 
 echo "Done. Output in ${OUT}"
 
-./analyze_profile.sh "${OUT}" > "${ANALYSIS_OUT}" 2>&1
+bench/analyze_profile.sh "${OUT}" > "${ANALYSIS_OUT}" 2>&1
 echo "Analysis saved to ${ANALYSIS_OUT}"
