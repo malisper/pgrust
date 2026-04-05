@@ -4,6 +4,8 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use pgrust::database::{Database, Session};
@@ -39,27 +41,73 @@ fn main() -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_secs(args.pause_before_scan_secs));
     }
 
-    let mut total_rows = 0usize;
-    let mut checksum = 0i64;
+    let total_rows = Arc::new(AtomicUsize::new(0));
+    let checksum = Arc::new(AtomicI64::new(0));
     db.pool.reset_usage_stats();
+    let db = Arc::new(db);
     let started = Instant::now();
-    for _ in 0..args.iterations {
-        let result = db
-            .execute(2, "select * from scanbench")
-            .map_err(|e| format!("{e:?}"))?;
-        let StatementResult::Query { rows, .. } = result else {
-            return Err("expected query result".into());
-        };
-        total_rows += rows.len();
-        checksum += rows.iter().map(|row| row_checksum(row)).sum::<i64>();
+
+    if args.clients <= 1 {
+        // Single-threaded path.
+        for _ in 0..args.iterations {
+            let result = db
+                .execute(2, "select * from scanbench")
+                .map_err(|e| format!("{e:?}"))?;
+            let StatementResult::Query { rows, .. } = result else {
+                return Err("expected query result".into());
+            };
+            total_rows.fetch_add(rows.len(), Ordering::Relaxed);
+            checksum.fetch_add(
+                rows.iter().map(|row| row_checksum(row)).sum::<i64>(),
+                Ordering::Relaxed,
+            );
+        }
+    } else {
+        // Multi-threaded: divide iterations across clients.
+        let iters_per_client = args.iterations / args.clients;
+        let remainder = args.iterations % args.clients;
+        let mut handles = Vec::new();
+
+        for client_idx in 0..args.clients {
+            let db = Arc::clone(&db);
+            let total_rows = Arc::clone(&total_rows);
+            let checksum = Arc::clone(&checksum);
+            let iters = iters_per_client + if client_idx < remainder { 1 } else { 0 };
+            let client_id = client_idx as u32 + 10; // offset to avoid collision with setup
+
+            handles.push(std::thread::spawn(move || -> Result<(), String> {
+                for _ in 0..iters {
+                    let result = db
+                        .execute(client_id, "select * from scanbench")
+                        .map_err(|e| format!("{e:?}"))?;
+                    let StatementResult::Query { rows, .. } = result else {
+                        return Err("expected query result".into());
+                    };
+                    total_rows.fetch_add(rows.len(), Ordering::Relaxed);
+                    checksum.fetch_add(
+                        rows.iter().map(|row| row_checksum(row)).sum::<i64>(),
+                        Ordering::Relaxed,
+                    );
+                }
+                Ok(())
+            }));
+        }
+
+        for h in handles {
+            h.join().map_err(|_| "thread panicked")??;
+        }
     }
+
     let elapsed = started.elapsed();
     let stats = db.pool.usage_stats();
+    let total_rows = total_rows.load(Ordering::Relaxed);
+    let checksum = checksum.load(Ordering::Relaxed);
 
     println!("engine: pgrust-direct");
     println!("base_dir: {}", args.base_dir.display());
     println!("rows: {}", args.row_count);
     println!("iterations: {}", args.iterations);
+    println!("clients: {}", args.clients);
     println!("total_rows_seen: {total_rows}");
     println!("checksum: {checksum}");
     println!("total_ms: {:.3}", elapsed.as_secs_f64() * 1000.0);
@@ -83,6 +131,7 @@ struct Args {
     row_count: usize,
     iterations: usize,
     pool_size: usize,
+    clients: usize,
     pause_before_scan_secs: u64,
     preserve_existing: bool,
     skip_load: bool,
@@ -94,6 +143,7 @@ fn parse_args() -> Result<Args, String> {
         row_count: 10_000,
         iterations: 100,
         pool_size: 16384, // 128MB at 8KB per page
+        clients: 1,
         pause_before_scan_secs: 0,
         preserve_existing: false,
         skip_load: false,
@@ -128,6 +178,11 @@ fn parse_args() -> Result<Args, String> {
                 args.pool_size = take_value(&raw, &mut i, "--pool-size")?
                     .parse()
                     .map_err(|_| "invalid --pool-size value".to_string())?;
+            }
+            "--clients" => {
+                args.clients = take_value(&raw, &mut i, "--clients")?
+                    .parse()
+                    .map_err(|_| "invalid --clients value".to_string())?;
             }
             "--pause" => {
                 args.pause_before_scan_secs = take_value(&raw, &mut i, "--pause")?
