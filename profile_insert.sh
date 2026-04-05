@@ -5,8 +5,25 @@
 # Must be run from a terminal with sudo available for dtrace.
 set -euo pipefail
 
-ROWS="${1:-2000000}"
-OUT="${2:-/tmp/dtrace_insert_stacks_$(date +%s).out}"
+AUTOCOMMIT=""
+ROWS=""
+OUT=""
+
+for arg in "$@"; do
+    case "${arg}" in
+        --autocommit) AUTOCOMMIT="--autocommit" ;;
+        *)
+            if [[ -z "${ROWS}" ]]; then
+                ROWS="${arg}"
+            elif [[ -z "${OUT}" ]]; then
+                OUT="${arg}"
+            fi
+            ;;
+    esac
+done
+
+ROWS="${ROWS:-2000000}"
+OUT="${OUT:-/tmp/dtrace_insert_stacks_$(date +%s).out}"
 ANALYSIS_OUT="${OUT%.out}_analysis.txt"
 
 BENCH_PID=""
@@ -30,7 +47,7 @@ cargo build --release
 sudo -v
 
 # Launch benchmark. It SIGSTOPs itself after setup when --wait is passed.
-./target/release/bench_insert --rows "${ROWS}" --wait &
+./target/release/bench_insert --rows "${ROWS}" ${AUTOCOMMIT} --wait &
 BENCH_PID=$!
 
 # Wait for it to stop after initialization.
