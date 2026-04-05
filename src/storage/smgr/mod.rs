@@ -110,6 +110,17 @@ pub enum ForkNumber {
 }
 
 impl ForkNumber {
+    /// Construct from the on-disk byte representation.
+    pub fn from_u8(n: u8) -> Self {
+        match n {
+            0 => ForkNumber::Main,
+            1 => ForkNumber::Fsm,
+            2 => ForkNumber::VisibilityMap,
+            3 => ForkNumber::Init,
+            other => ForkNumber::Other(other),
+        }
+    }
+
     /// Returns the canonical integer fork number used by PostgreSQL.
     pub fn as_u8(self) -> u8 {
         match self {

@@ -54,37 +54,208 @@ use crate::storage::buffer::{BufferTag, PAGE_SIZE};
 pub type Lsn = u64;
 pub const INVALID_LSN: Lsn = 0;
 
+pub mod replay;
+
 /// XLogRecord header: tot_len(4) + xid(4) + prev(8) + info(1) + rmid(1) + pad(2) + crc(4) = 24
-const XLOG_RECORD_HEADER: usize = 24;
+pub(crate) const XLOG_RECORD_HEADER: usize = 24;
 /// Block header: spc_oid(4) + db_oid(4) + rel_number(4) + fork(1) + pad(3) + block(4) = 20
-const BLOCK_HEADER: usize = 20;
-const WAL_RECORD_HEADER: usize = XLOG_RECORD_HEADER + BLOCK_HEADER; // 44
+pub(crate) const BLOCK_HEADER: usize = 20;
+pub(crate) const WAL_RECORD_HEADER: usize = XLOG_RECORD_HEADER + BLOCK_HEADER; // 44
 /// Maximum FPI record size (no hole compression). Used by tests.
 pub const WAL_RECORD_LEN: usize = WAL_RECORD_HEADER + FPI_HOLE_META + PAGE_SIZE;
 /// Hole metadata: hole_offset(2) + hole_length(2)
-const FPI_HOLE_META: usize = 4;
+pub(crate) const FPI_HOLE_META: usize = 4;
 /// Offset of the CRC field within the record.
-const CRC_OFFSET: usize = 20;
+pub(crate) const CRC_OFFSET: usize = 20;
 
 /// xl_info values
-const XLOG_FPI: u8 = 0;           // Full page image
-const XLOG_HEAP_INSERT: u8 = 1;   // Row-level insert delta
-const XLOG_XACT_COMMIT: u8 = 0;   // Transaction commit
+pub(crate) const XLOG_FPI: u8 = 0;           // Full page image
+pub(crate) const XLOG_HEAP_INSERT: u8 = 1;   // Row-level insert delta
+pub(crate) const XLOG_XACT_COMMIT: u8 = 0;   // Transaction commit
 
 /// xl_rmid values (resource manager IDs)
-const RM_HEAP_ID: u8 = 0;
-const RM_XACT_ID: u8 = 1;
+pub(crate) const RM_HEAP_ID: u8 = 0;
+pub(crate) const RM_XACT_ID: u8 = 1;
 
 #[derive(Debug)]
 pub enum WalError {
     Io(std::io::Error),
+    Corrupt(String),
 }
 
 impl std::fmt::Display for WalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             WalError::Io(e) => write!(f, "WAL I/O error: {e}"),
+            WalError::Corrupt(msg) => write!(f, "WAL corrupt: {msg}"),
         }
+    }
+}
+
+// --- WAL Reader (used by recovery/replay) ---
+
+use crate::storage::smgr::ForkNumber;
+use crate::storage::smgr::RelFileLocator;
+
+/// A parsed WAL record.
+#[derive(Debug)]
+pub enum WalRecord {
+    FullPageImage {
+        xid: u32,
+        tag: BufferTag,
+        page: Box<[u8; PAGE_SIZE]>,
+    },
+    HeapInsert {
+        xid: u32,
+        tag: BufferTag,
+        offset_number: u16,
+        tuple_data: Vec<u8>,
+    },
+    XactCommit {
+        xid: u32,
+    },
+}
+
+/// Sequential WAL file reader for recovery.
+pub struct WalReader {
+    file: std::io::BufReader<File>,
+    position: u64,
+    file_size: u64,
+}
+
+impl WalReader {
+    /// Open the WAL file for reading.
+    pub fn open(wal_dir: &Path) -> Result<Self, WalError> {
+        let path = wal_dir.join("wal.log");
+        let file = File::open(&path).map_err(WalError::Io)?;
+        let file_size = file.metadata().map_err(WalError::Io)?.len();
+        Ok(Self {
+            file: std::io::BufReader::new(file),
+            position: 0,
+            file_size,
+        })
+    }
+
+    /// Read the next WAL record. Returns None at end of file.
+    /// Returns None (not an error) for truncated/corrupt records at the
+    /// end of the file, matching PostgreSQL's behavior of treating the
+    /// last valid record as the end of WAL.
+    pub fn next_record(&mut self) -> Result<Option<(Lsn, WalRecord)>, WalError> {
+        use std::io::Read;
+
+        if self.position >= self.file_size {
+            return Ok(None);
+        }
+
+        // Read the fixed 24-byte XLogRecord header.
+        let remaining = self.file_size - self.position;
+        if remaining < XLOG_RECORD_HEADER as u64 {
+            return Ok(None); // truncated header
+        }
+
+        let mut header = [0u8; XLOG_RECORD_HEADER];
+        if let Err(_) = self.file.read_exact(&mut header) {
+            return Ok(None); // truncated
+        }
+
+        let xl_tot_len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let xl_xid = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let xl_info = header[16];
+        let xl_rmid = header[17];
+        let xl_crc = u32::from_le_bytes([header[20], header[21], header[22], header[23]]);
+
+        if xl_tot_len < XLOG_RECORD_HEADER || (self.position + xl_tot_len as u64) > self.file_size {
+            return Ok(None); // truncated record
+        }
+
+        // Read the rest of the record.
+        let mut record = vec![0u8; xl_tot_len];
+        record[..XLOG_RECORD_HEADER].copy_from_slice(&header);
+        if let Err(_) = self.file.read_exact(&mut record[XLOG_RECORD_HEADER..]) {
+            return Ok(None); // truncated
+        }
+
+        // Verify CRC: zero the crc field, compute, compare.
+        record[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&[0, 0, 0, 0]);
+        let computed_crc = crc32c::crc32c(&record);
+        if computed_crc != xl_crc {
+            // Corrupt record at end of WAL — treat as end of valid WAL.
+            return Ok(None);
+        }
+        // Restore CRC (not strictly needed, but keeps record intact).
+        record[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&xl_crc.to_le_bytes());
+
+        let record_lsn = self.position + xl_tot_len as u64;
+        self.position = record_lsn;
+
+        // Dispatch on (rmid, info).
+        let parsed = match (xl_rmid, xl_info) {
+            (RM_HEAP_ID, XLOG_FPI) => {
+                if xl_tot_len < WAL_RECORD_HEADER + FPI_HOLE_META {
+                    return Err(WalError::Corrupt("FPI record too short".into()));
+                }
+                let tag = parse_block_header(&record);
+                let hole_offset = u16::from_le_bytes([
+                    record[WAL_RECORD_HEADER], record[WAL_RECORD_HEADER + 1],
+                ]) as usize;
+                let hole_length = u16::from_le_bytes([
+                    record[WAL_RECORD_HEADER + 2], record[WAL_RECORD_HEADER + 3],
+                ]) as usize;
+
+                // Decompress: inverse of write_fpi (lines 322-329 of writer).
+                let compressed = &record[WAL_RECORD_HEADER + FPI_HOLE_META..];
+                let mut page = Box::new([0u8; PAGE_SIZE]);
+                if hole_length > 0 {
+                    let ho = hole_offset;
+                    page[..ho].copy_from_slice(&compressed[..ho]);
+                    // hole region stays zero
+                    page[ho + hole_length..].copy_from_slice(&compressed[ho..]);
+                } else {
+                    page.copy_from_slice(compressed);
+                }
+
+                WalRecord::FullPageImage { xid: xl_xid, tag, page }
+            }
+            (RM_HEAP_ID, XLOG_HEAP_INSERT) => {
+                if xl_tot_len < WAL_RECORD_HEADER + 4 {
+                    return Err(WalError::Corrupt("Insert record too short".into()));
+                }
+                let tag = parse_block_header(&record);
+                let offset_number = u16::from_le_bytes([
+                    record[WAL_RECORD_HEADER], record[WAL_RECORD_HEADER + 1],
+                ]);
+                let tuple_len = u16::from_le_bytes([
+                    record[WAL_RECORD_HEADER + 2], record[WAL_RECORD_HEADER + 3],
+                ]) as usize;
+                let tuple_data = record[WAL_RECORD_HEADER + 4..WAL_RECORD_HEADER + 4 + tuple_len].to_vec();
+
+                WalRecord::HeapInsert { xid: xl_xid, tag, offset_number, tuple_data }
+            }
+            (RM_XACT_ID, XLOG_XACT_COMMIT) => {
+                WalRecord::XactCommit { xid: xl_xid }
+            }
+            _ => {
+                return Err(WalError::Corrupt(format!(
+                    "unknown WAL record: rmid={xl_rmid} info={xl_info}"
+                )));
+            }
+        };
+
+        Ok(Some((record_lsn, parsed)))
+    }
+}
+
+/// Parse the block header from a WAL record (bytes 24-43).
+fn parse_block_header(record: &[u8]) -> BufferTag {
+    let spc_oid = u32::from_le_bytes([record[24], record[25], record[26], record[27]]);
+    let db_oid = u32::from_le_bytes([record[28], record[29], record[30], record[31]]);
+    let rel_number = u32::from_le_bytes([record[32], record[33], record[34], record[35]]);
+    let fork_byte = record[36];
+    let block = u32::from_le_bytes([record[40], record[41], record[42], record[43]]);
+    BufferTag {
+        rel: RelFileLocator { spc_oid, db_oid, rel_number },
+        fork: ForkNumber::from_u8(fork_byte),
+        block,
     }
 }
 
