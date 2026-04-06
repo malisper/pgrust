@@ -1939,6 +1939,63 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
     }
 
+    /// Regression: try_claim_tuple reads ctid before dropping the buffer lock,
+    /// then checks xmax status after dropping it. If the updater commits and
+    /// sets ctid between those two points, the stale ctid (== self) makes us
+    /// think the row was deleted rather than updated, losing the update.
+    ///
+    /// Uses a Barrier so all threads start simultaneously, maximizing the
+    /// chance of hitting the race window.
+    #[test]
+    fn no_lost_updates_under_heavy_contention() {
+        let base = temp_dir("no_lost_updates_heavy");
+        let db = Database::open(&base, 64).unwrap();
+
+        db.execute(1, "create table counter (id int4 not null, val int4 not null)")
+            .unwrap();
+        db.execute(1, "insert into counter (id, val) values (1, 0)")
+            .unwrap();
+
+        let num_threads = 4usize;
+        let increments_per_thread = 10;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..increments_per_thread {
+                        if let Err(e) = db.execute(
+                            (t + 5000) as ClientId,
+                            "update counter set val = val + 1 where id = 1",
+                        ) {
+                            panic!("thread {t} iteration {i}: {e:?}");
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        join_all_with_timeout(handles, Duration::from_secs(30));
+
+        let expected = num_threads * increments_per_thread;
+        match db.execute(1, "select val from counter where id = 1").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                let actual = match &rows[0][0] {
+                    Value::Int32(v) => *v,
+                    other => panic!("expected Int32, got {:?}", other),
+                };
+                assert_eq!(
+                    actual, expected as i32,
+                    "lost {} update(s): expected {expected}, got {actual}",
+                    expected as i32 - actual
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
     #[test]
     fn begin_commit_groups_statements() {
         let base = temp_dir("begin_commit");
@@ -2382,4 +2439,5 @@ mod tests {
 
         join_all_with_timeout(handles, TEST_TIMEOUT);
     }
+
 }
