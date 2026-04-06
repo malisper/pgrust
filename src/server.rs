@@ -226,21 +226,76 @@ fn handle_query(
         return Ok(());
     }
 
-    match state.session.execute(db, sql) {
-        Ok(StatementResult::Query { column_names, rows }) => {
-            send_query_result(stream, &column_names, &rows, &format!("SELECT {}", rows.len()))?;
+    // Parse once, then use the streaming path for SELECT queries — avoids
+    // materializing the entire result set before sending any rows.
+    let parsed = crate::parser::parse_statement(sql);
+    if let Ok(crate::parser::Statement::Select(ref select_stmt)) = parsed {
+        match state.session.execute_streaming(db, select_stmt) {
+            Ok(mut guard) => {
+                use crate::executor::exec_next;
+                let column_names = guard.column_names.clone();
+                let mut row_buf = Vec::new();
+                let mut row_count = 0usize;
+                let mut header_sent = false;
+                let mut err = None;
+
+                loop {
+                    match exec_next(&mut guard.state, &mut guard.ctx) {
+                        Ok(Some(mut slot)) => {
+                            if !header_sent {
+                                send_row_description(stream, &column_names)?;
+                                header_sent = true;
+                            }
+                            match slot.values() {
+                                Ok(values) => {
+                                    send_data_row(stream, values, &mut row_buf)?;
+                                    row_count += 1;
+                                }
+                                Err(e) => { err = Some(e); break; }
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => { err = Some(e); break; }
+                    }
+                }
+                drop(guard); // release table lock
+
+                if let Some(e) = err {
+                    let msg = format_exec_error(&e);
+                    send_error(stream, "XX000", &msg)?;
+                } else {
+                    if !header_sent {
+                        send_row_description(stream, &column_names)?;
+                    }
+                    send_command_complete(stream, &format!("SELECT {row_count}"))?;
+                }
+            }
+            Err(e) => {
+                let msg = format_exec_error(&e);
+                let sqlstate = match &e {
+                    ExecError::Parse(_) => "42601",
+                    _ => "XX000",
+                };
+                send_error(stream, sqlstate, &msg)?;
+            }
         }
-        Ok(StatementResult::AffectedRows(n)) => {
-            let tag = infer_command_tag(sql, n);
-            send_command_complete(stream, &tag)?;
-        }
-        Err(e) => {
-            let msg = format_exec_error(&e);
-            let sqlstate = match &e {
-                ExecError::Parse(_) => "42601",
-                _ => "XX000",
-            };
-            send_error(stream, sqlstate, &msg)?;
+    } else {
+        match state.session.execute(db, sql) {
+            Ok(StatementResult::Query { column_names, rows }) => {
+                send_query_result(stream, &column_names, &rows, &format!("SELECT {}", rows.len()))?;
+            }
+            Ok(StatementResult::AffectedRows(n)) => {
+                let tag = infer_command_tag(sql, n);
+                send_command_complete(stream, &tag)?;
+            }
+            Err(e) => {
+                let msg = format_exec_error(&e);
+                let sqlstate = match &e {
+                    ExecError::Parse(_) => "42601",
+                    _ => "XX000",
+                };
+                send_error(stream, sqlstate, &msg)?;
+            }
         }
     }
 
