@@ -135,17 +135,28 @@ impl CompiledTupleDecoder {
                     off = *data_offset + 1;
                 }
                 DecodeStep::VarlenText { align } => {
-                    off = align.align_offset(off);
-                    let total_len = u32::from_le_bytes([
-                        data[off], data[off + 1], data[off + 2], data[off + 3],
-                    ]) as usize;
-                    let start = off + 4;
-                    let end = off + total_len;
-                    // SAFETY: text columns are stored as valid UTF-8 by the insert path.
-                    values.push(Value::Text(CompactString::new(
-                        unsafe { std::str::from_utf8_unchecked(&data[start..end]) }
-                    )));
-                    off = end;
+                    if data[off] & 0x01 != 0 {
+                        // Short varlena: 1-byte header, no alignment.
+                        let total_len = (data[off] >> 1) as usize;
+                        let start = off + 1;
+                        let end = off + total_len;
+                        values.push(Value::Text(CompactString::new(
+                            unsafe { std::str::from_utf8_unchecked(&data[start..end]) }
+                        )));
+                        off = end;
+                    } else {
+                        off = align.align_offset(off);
+                        let raw = u32::from_le_bytes([
+                            data[off], data[off + 1], data[off + 2], data[off + 3],
+                        ]);
+                        let total_len = (raw >> 2) as usize;
+                        let start = off + 4;
+                        let end = off + total_len;
+                        values.push(Value::Text(CompactString::new(
+                            unsafe { std::str::from_utf8_unchecked(&data[start..end]) }
+                        )));
+                        off = end;
+                    }
                 }
                 DecodeStep::Generic { attlen, align, ty } => {
                     match *attlen {
@@ -166,18 +177,22 @@ impl CompiledTupleDecoder {
                             });
                         }
                         -1 => {
-                            off = align.align_offset(off);
-                            let total_len = u32::from_le_bytes([
-                                data[off], data[off + 1], data[off + 2], data[off + 3],
-                            ]) as usize;
-                            let start = off + 4;
-                            let end = off + total_len;
-                            let bytes = &data[start..end];
-                            off = end;
+                            let (bytes_slice, new_off) = if data[off] & 0x01 != 0 {
+                                let total_len = (data[off] >> 1) as usize;
+                                (&data[off + 1..off + total_len], off + total_len)
+                            } else {
+                                off = align.align_offset(off);
+                                let raw = u32::from_le_bytes([
+                                    data[off], data[off + 1], data[off + 2], data[off + 3],
+                                ]);
+                                let total_len = (raw >> 2) as usize;
+                                (&data[off + 4..off + total_len], off + total_len)
+                            };
+                            off = new_off;
                             match ty {
                                 ScalarType::Text => {
                                     values.push(Value::Text(CompactString::new(
-                                        unsafe { std::str::from_utf8_unchecked(bytes) }
+                                        unsafe { std::str::from_utf8_unchecked(bytes_slice) }
                                     )));
                                 }
                                 _ => values.push(Value::Null),
