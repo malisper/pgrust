@@ -180,7 +180,6 @@ pub struct TupleSlot {
     pub(crate) source: SlotSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SlotSource {
     Physical {
         desc: Rc<RelationDesc>,
@@ -192,7 +191,80 @@ pub(crate) enum SlotSource {
     Virtual {
         values: Vec<Value>,
     },
+    /// Zero-copy slot: holds a raw pointer to tuple bytes on a pinned buffer
+    /// page. User data on the page is immutable (heap_page_replace_tuple only
+    /// writes headers), and the pin prevents eviction.
+    ///
+    /// SAFETY: the pointer is valid as long as the buffer is pinned. The caller
+    /// must ensure the slot is consumed (or materialized) before the pin is
+    /// released.
+    BufferHeap {
+        tuple_ptr: *const u8,
+        tuple_len: usize,
+        buffer_id: usize,
+        decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
+        materialized: Option<Vec<Value>>,
+    },
 }
+
+impl std::fmt::Debug for SlotSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SlotSource::Physical { desc, tid, materialized, .. } => f
+                .debug_struct("Physical")
+                .field("desc_cols", &desc.columns.len())
+                .field("tid", tid)
+                .field("materialized", &materialized.is_some())
+                .finish(),
+            SlotSource::Virtual { values } => f
+                .debug_struct("Virtual")
+                .field("len", &values.len())
+                .finish(),
+            SlotSource::BufferHeap { tuple_len, buffer_id, materialized, .. } => f
+                .debug_struct("BufferHeap")
+                .field("tuple_len", tuple_len)
+                .field("buffer_id", buffer_id)
+                .field("materialized", &materialized.is_some())
+                .finish(),
+        }
+    }
+}
+
+impl Clone for SlotSource {
+    fn clone(&self) -> Self {
+        match self {
+            SlotSource::Physical { desc, attr_descs, tid, tuple, materialized } => {
+                SlotSource::Physical {
+                    desc: Rc::clone(desc),
+                    attr_descs: Rc::clone(attr_descs),
+                    tid: *tid,
+                    tuple: tuple.clone(),
+                    materialized: materialized.clone(),
+                }
+            }
+            SlotSource::Virtual { values } => SlotSource::Virtual { values: values.clone() },
+            SlotSource::BufferHeap { materialized: Some(values), .. } => {
+                // Cloning a BufferHeap forces materialization — the clone becomes
+                // a self-contained Virtual slot so it doesn't depend on the pin.
+                SlotSource::Virtual { values: values.clone() }
+            }
+            SlotSource::BufferHeap { .. } => {
+                panic!("cannot clone unmaterialized BufferHeap slot — call materialize() first")
+            }
+        }
+    }
+}
+
+impl PartialEq for SlotSource {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (SlotSource::Virtual { values: a }, SlotSource::Virtual { values: b }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SlotSource {}
 
 #[derive(Debug, Clone, Default)]
 pub struct NodeExecStats {
@@ -239,10 +311,7 @@ pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) column_names: Rc<[String]>,
     pub(crate) scan: Option<VisibleHeapScan>,
-    pub(crate) decoder: super::tuple_decoder::CompiledTupleDecoder,
-    /// Reusable buffer for decoded values — avoids per-row Vec allocation.
-    /// Analogous to PostgreSQL's TupleTableSlot Datum array.
-    pub(crate) values_buf: Vec<Value>,
+    pub(crate) decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -333,10 +402,60 @@ impl TupleSlot {
         &self.column_names
     }
 
+    /// Create a zero-copy slot that points directly at on-page tuple bytes.
+    ///
+    /// SAFETY: `tuple_ptr` must point to valid tuple bytes on a pinned buffer
+    /// page. The slot must be consumed or materialized before the pin is released.
+    pub(crate) unsafe fn from_buffer_heap(
+        column_names: Rc<[String]>,
+        tuple_ptr: *const u8,
+        tuple_len: usize,
+        buffer_id: usize,
+        decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
+    ) -> Self {
+        Self {
+            column_names,
+            source: SlotSource::BufferHeap {
+                tuple_ptr,
+                tuple_len,
+                buffer_id,
+                decoder,
+                materialized: None,
+            },
+        }
+    }
+
+    /// Convert to a self-contained Virtual slot, decoding from the raw pointer
+    /// if needed. Must be called while the buffer is still pinned.
+    pub fn materialize(mut self) -> Result<Self, super::ExecError> {
+        match &mut self.source {
+            SlotSource::Virtual { .. } | SlotSource::Physical { .. } => Ok(self),
+            SlotSource::BufferHeap { materialized: Some(_), .. } => {
+                // Already decoded — extract into Virtual.
+                let SlotSource::BufferHeap { materialized, .. } = self.source else { unreachable!() };
+                Ok(Self {
+                    column_names: self.column_names,
+                    source: SlotSource::Virtual { values: materialized.unwrap() },
+                })
+            }
+            SlotSource::BufferHeap { tuple_ptr, tuple_len, decoder, materialized, .. } => {
+                let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
+                let mut values = Vec::new();
+                decoder.decode_into(bytes, &mut values)?;
+                *materialized = Some(values);
+                let SlotSource::BufferHeap { materialized, .. } = self.source else { unreachable!() };
+                Ok(Self {
+                    column_names: self.column_names,
+                    source: SlotSource::Virtual { values: materialized.unwrap() },
+                })
+            }
+        }
+    }
+
     pub fn tid(&self) -> Option<ItemPointerData> {
         match &self.source {
             SlotSource::Physical { tid, .. } => Some(*tid),
-            SlotSource::Virtual { .. } => None,
+            SlotSource::Virtual { .. } | SlotSource::BufferHeap { .. } => None,
         }
     }
 
@@ -360,16 +479,28 @@ impl TupleSlot {
                 }
                 Ok(materialized.as_ref().unwrap().as_slice())
             }
+            SlotSource::BufferHeap { tuple_ptr, tuple_len, decoder, materialized, .. } => {
+                if materialized.is_none() {
+                    // SAFETY: pointer is valid because the buffer is pinned
+                    // and user data is immutable on the page.
+                    let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
+                    let mut values = Vec::new();
+                    decoder.decode_into(bytes, &mut values)?;
+                    *materialized = Some(values);
+                }
+                Ok(materialized.as_ref().unwrap().as_slice())
+            }
         }
     }
 
     pub fn into_values(mut self) -> Result<Vec<Value>, super::ExecError> {
-        // Materialize if needed
         self.values()?;
         match self.source {
             SlotSource::Virtual { values } => Ok(values),
             SlotSource::Physical { materialized: Some(values), .. } => Ok(values),
             SlotSource::Physical { materialized: None, .. } => unreachable!("values() just materialized"),
+            SlotSource::BufferHeap { materialized: Some(values), .. } => Ok(values),
+            SlotSource::BufferHeap { materialized: None, .. } => unreachable!("values() just materialized"),
         }
     }
 }

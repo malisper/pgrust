@@ -212,13 +212,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SeqScan { rel, desc } => {
             let column_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs = desc.attribute_descs();
-            let decoder = tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs);
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs));
             make_plan_state(PlanStateKind::SeqScan(SeqScanState {
                 rel,
                 column_names,
                 scan: None,
                 decoder,
-                values_buf: Vec::new(),
                 stats: NodeExecStats::default(),
             }))
         }
@@ -453,7 +452,6 @@ fn exec_seq_scan(
 
     let scan = state.scan.as_mut().unwrap();
     let decoder = &state.decoder;
-    let values_buf = &mut state.values_buf;
     let column_names = Rc::clone(&state.column_names);
 
     loop {
@@ -465,10 +463,18 @@ fn exec_seq_scan(
             let page = &*guard;
 
             if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
-                decoder.decode_into(tuple_bytes, values_buf)?;
-                let values = std::mem::take(values_buf);
+                let ptr = tuple_bytes.as_ptr();
+                let len = tuple_bytes.len();
                 drop(guard);
-                return Ok(Some(TupleSlot::virtual_row(column_names, values)));
+                // SAFETY: the buffer is pinned by the VisibleHeapScan for the
+                // duration of this page. User data is immutable on the page
+                // (heap_page_replace_tuple only writes headers). The slot will
+                // be consumed before the next page's prepare_next_page unpins.
+                return Ok(Some(unsafe {
+                    TupleSlot::from_buffer_heap(
+                        column_names, ptr, len, buffer_id, Rc::clone(decoder),
+                    )
+                }));
             }
             drop(guard);
         }
@@ -508,7 +514,7 @@ fn exec_nested_loop_join(
     if state.right_rows.is_none() {
         let mut rows = Vec::new();
         while let Some(slot) = exec_next(&mut state.right, ctx)? {
-            rows.push(slot);
+            rows.push(slot.materialize()?);
         }
         state.right_rows = Some(rows);
     }
@@ -516,7 +522,8 @@ fn exec_nested_loop_join(
     let right_rows = state.right_rows.as_ref().unwrap();
     loop {
         if state.current_left.is_none() {
-            state.current_left = exec_next(&mut state.left, ctx)?;
+            state.current_left = exec_next(&mut state.left, ctx)?
+                .map(|s| s.materialize()).transpose()?;
             state.right_index = 0;
         }
 
@@ -564,7 +571,7 @@ fn exec_order_by(
     if state.rows.is_none() {
         let mut rows = Vec::new();
         while let Some(slot) = exec_next(&mut state.input, ctx)? {
-            rows.push(slot);
+            rows.push(slot.materialize()?);
         }
 
         let mut keyed_rows = Vec::with_capacity(rows.len());
