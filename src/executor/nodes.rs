@@ -201,8 +201,9 @@ pub struct NodeExecStats {
     pub total_time: Duration,
 }
 
+/// The inner enum holding node-specific state.
 #[derive(Debug)]
-pub enum PlanState {
+pub enum PlanStateKind {
     Result(ResultState),
     SeqScan(SeqScanState),
     NestedLoopJoin(NestedLoopJoinState),
@@ -211,6 +212,20 @@ pub enum PlanState {
     Limit(LimitState),
     Projection(ProjectionState),
     Aggregate(AggregateState),
+}
+
+/// Executor node state. The function pointer avoids per-tuple match dispatch,
+/// like PostgreSQL's `ExecProcNode`.
+pub struct PlanState {
+    pub kind: PlanStateKind,
+    /// Direct function pointer for this node type — set once at plan init.
+    pub(crate) exec_proc_node: fn(&mut PlanState, &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError>,
+}
+
+impl std::fmt::Debug for PlanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.kind.fmt(f)
+    }
 }
 
 #[derive(Debug)]
