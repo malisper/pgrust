@@ -96,7 +96,9 @@ pub(crate) fn compare_order_values(
         }
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
-        (Value::Text(a), Value::Text(b)) => a.cmp(b),
+        (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
+            a.as_text().unwrap().cmp(b.as_text().unwrap())
+        }
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         _ => Ordering::Equal,
     }
@@ -134,7 +136,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
             }
         }
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Text, Value::Text(v)) => Ok(TupleValue::Bytes(v.as_str().as_bytes().to_vec())),
+        (ScalarType::Text, v) if v.as_text().is_some() => Ok(TupleValue::Bytes(v.as_text().unwrap().as_bytes().to_vec())),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(*v)])),
         (_, other) => Err(ExecError::TypeMismatch {
             op: "assignment",
@@ -235,7 +237,7 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
     match (&left, &right) {
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(l.to_bits() == r.to_bits())),
-        (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(l == r)),
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(l.as_text() == r.as_text())),
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
@@ -247,7 +249,7 @@ fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Null, _) | (_, Value::Null) => true,
         (Value::Int32(l), Value::Int32(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => l.to_bits() != r.to_bits(),
-        (Value::Text(l), Value::Text(r)) => l != r,
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
         _ => true,
     }
@@ -293,9 +295,9 @@ where
             ">" => l > r,
             _ => unreachable!(),
         })),
-        (Value::Text(l), Value::Text(r)) => Ok(Value::Bool(match op {
-            "<" => l < r,
-            ">" => l > r,
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(match op {
+            "<" => l.as_text().unwrap() < r.as_text().unwrap(),
+            ">" => l.as_text().unwrap() > r.as_text().unwrap(),
             _ => unreachable!(),
         })),
         _ => Err(ExecError::TypeMismatch { op, left, right }),

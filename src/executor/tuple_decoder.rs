@@ -138,9 +138,7 @@ impl CompiledTupleDecoder {
                         let total_len = (data[off] >> 1) as usize;
                         let start = off + 1;
                         let end = off + total_len;
-                        values.push(Value::Text(CompactString::new(
-                            unsafe { std::str::from_utf8_unchecked(&data[start..end]) }
-                        )));
+                        values.push(Value::TextRef(data[start..end].as_ptr(), (end - start) as u32));
                         off = end;
                     } else {
                         off = align.align_offset(off);
@@ -150,9 +148,7 @@ impl CompiledTupleDecoder {
                         let total_len = (raw >> 2) as usize;
                         let start = off + 4;
                         let end = off + total_len;
-                        values.push(Value::Text(CompactString::new(
-                            unsafe { std::str::from_utf8_unchecked(&data[start..end]) }
-                        )));
+                        values.push(Value::TextRef(data[start..end].as_ptr(), (end - start) as u32));
                         off = end;
                     }
                 }
@@ -189,9 +185,7 @@ impl CompiledTupleDecoder {
                             off = new_off;
                             match ty {
                                 ScalarType::Text => {
-                                    values.push(Value::Text(CompactString::new(
-                                        unsafe { std::str::from_utf8_unchecked(bytes_slice) }
-                                    )));
+                                    values.push(Value::TextRef(bytes_slice.as_ptr(), bytes_slice.len() as u32));
                                 }
                                 _ => values.push(Value::Null),
                             }
@@ -205,9 +199,7 @@ impl CompiledTupleDecoder {
                             off = end + 1;
                             match ty {
                                 ScalarType::Text => {
-                                    values.push(Value::Text(CompactString::new(
-                                        unsafe { std::str::from_utf8_unchecked(bytes) }
-                                    )));
+                                    values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
                                 }
                                 _ => values.push(Value::Null),
                             }
