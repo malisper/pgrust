@@ -189,26 +189,40 @@ pub enum StatementResult {
     AffectedRows(usize),
 }
 
+fn make_plan_state(kind: PlanStateKind) -> PlanState {
+    let exec_proc_node = match &kind {
+        PlanStateKind::Result(_) => exec_result_node as fn(&mut PlanState, &mut ExecutorContext) -> _,
+        PlanStateKind::SeqScan(_) => exec_seq_scan_node,
+        PlanStateKind::NestedLoopJoin(_) => exec_nested_loop_join_node,
+        PlanStateKind::Filter(_) => exec_filter_node,
+        PlanStateKind::OrderBy(_) => exec_order_by_node,
+        PlanStateKind::Limit(_) => exec_limit_node,
+        PlanStateKind::Projection(_) => exec_projection_node,
+        PlanStateKind::Aggregate(_) => exec_aggregate_node,
+    };
+    PlanState { kind, exec_proc_node }
+}
+
 pub fn executor_start(plan: Plan) -> PlanState {
     match plan {
-        Plan::Result => PlanState::Result(ResultState {
+        Plan::Result => make_plan_state(PlanStateKind::Result(ResultState {
             emitted: false,
             stats: NodeExecStats::default(),
-        }),
+        })),
         Plan::SeqScan { rel, desc } => {
             let column_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs = desc.attribute_descs();
             let decoder = tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs);
-            PlanState::SeqScan(SeqScanState {
+            make_plan_state(PlanStateKind::SeqScan(SeqScanState {
                 rel,
                 column_names,
                 scan: None,
                 decoder,
                 values_buf: Vec::new(),
                 stats: NodeExecStats::default(),
-            })
+            }))
         }
-        Plan::NestedLoopJoin { left, right, on } => PlanState::NestedLoopJoin(NestedLoopJoinState {
+        Plan::NestedLoopJoin { left, right, on } => make_plan_state(PlanStateKind::NestedLoopJoin(NestedLoopJoinState {
             left: Box::new(executor_start(*left)),
             right: Box::new(executor_start(*right)),
             on,
@@ -216,43 +230,43 @@ pub fn executor_start(plan: Plan) -> PlanState {
             current_left: None,
             right_index: 0,
             stats: NodeExecStats::default(),
-        }),
-        Plan::Filter { input, predicate } => PlanState::Filter(FilterState {
+        })),
+        Plan::Filter { input, predicate } => make_plan_state(PlanStateKind::Filter(FilterState {
             input: Box::new(executor_start(*input)),
             predicate,
             stats: NodeExecStats::default(),
-        }),
-        Plan::OrderBy { input, items } => PlanState::OrderBy(OrderByState {
+        })),
+        Plan::OrderBy { input, items } => make_plan_state(PlanStateKind::OrderBy(OrderByState {
             input: Box::new(executor_start(*input)),
             items,
             rows: None,
             next_index: 0,
             stats: NodeExecStats::default(),
-        }),
+        })),
         Plan::Limit {
             input,
             limit,
             offset,
-        } => PlanState::Limit(LimitState {
+        } => make_plan_state(PlanStateKind::Limit(LimitState {
             input: Box::new(executor_start(*input)),
             limit,
             offset,
             skipped: 0,
             returned: 0,
             stats: NodeExecStats::default(),
-        }),
-        Plan::Projection { input, targets } => PlanState::Projection(ProjectionState {
+        })),
+        Plan::Projection { input, targets } => make_plan_state(PlanStateKind::Projection(ProjectionState {
             input: Box::new(executor_start(*input)),
             targets,
             stats: NodeExecStats::default(),
-        }),
+        })),
         Plan::Aggregate {
             input,
             group_by,
             accumulators,
             having,
             output_columns,
-        } => PlanState::Aggregate(AggregateState {
+        } => make_plan_state(PlanStateKind::Aggregate(AggregateState {
             input: Box::new(executor_start(*input)),
             group_by,
             accumulators,
@@ -261,7 +275,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             result_rows: None,
             next_index: 0,
             stats: NodeExecStats::default(),
-        }),
+        })),
     }
 }
 
@@ -368,16 +382,7 @@ pub(crate) fn exec_next_inner(
     timed: bool,
 ) -> Result<Option<TupleSlot>, ExecError> {
     let started_at = if timed { Some(Instant::now()) } else { None };
-    let result = match state {
-        PlanState::Result(result) => exec_result(result),
-        PlanState::SeqScan(scan) => exec_seq_scan(scan, ctx),
-        PlanState::NestedLoopJoin(join) => exec_nested_loop_join(join, ctx),
-        PlanState::Filter(filter) => exec_filter(filter, ctx),
-        PlanState::OrderBy(order_by) => exec_order_by(order_by, ctx),
-        PlanState::Limit(limit) => exec_limit(limit, ctx),
-        PlanState::Projection(projection) => exec_projection(projection, ctx),
-        PlanState::Aggregate(aggregate) => exec_aggregate(aggregate, ctx),
-    };
+    let result = (state.exec_proc_node)(state, ctx);
     if let Ok(slot) = &result {
         let stats = node_stats_mut(state);
         stats.loops += 1;
@@ -389,6 +394,41 @@ pub(crate) fn exec_next_inner(
         }
     }
     result
+}
+
+// Thin wrappers that extract the inner state from PlanState and call the
+// real exec function. These are stored as function pointers in PlanState.
+fn exec_result_node(state: &mut PlanState, _ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::Result(inner) = &mut state.kind else { unreachable!() };
+    exec_result(inner)
+}
+fn exec_seq_scan_node(state: &mut PlanState, ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::SeqScan(inner) = &mut state.kind else { unreachable!() };
+    exec_seq_scan(inner, ctx)
+}
+fn exec_nested_loop_join_node(state: &mut PlanState, ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::NestedLoopJoin(inner) = &mut state.kind else { unreachable!() };
+    exec_nested_loop_join(inner, ctx)
+}
+fn exec_filter_node(state: &mut PlanState, ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::Filter(inner) = &mut state.kind else { unreachable!() };
+    exec_filter(inner, ctx)
+}
+fn exec_order_by_node(state: &mut PlanState, ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::OrderBy(inner) = &mut state.kind else { unreachable!() };
+    exec_order_by(inner, ctx)
+}
+fn exec_limit_node(state: &mut PlanState, ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::Limit(inner) = &mut state.kind else { unreachable!() };
+    exec_limit(inner, ctx)
+}
+fn exec_projection_node(state: &mut PlanState, ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::Projection(inner) = &mut state.kind else { unreachable!() };
+    exec_projection(inner, ctx)
+}
+fn exec_aggregate_node(state: &mut PlanState, ctx: &mut ExecutorContext) -> Result<Option<TupleSlot>, ExecError> {
+    let PlanStateKind::Aggregate(inner) = &mut state.kind else { unreachable!() };
+    exec_aggregate(inner, ctx)
 }
 
 fn exec_result(state: &mut ResultState) -> Result<Option<TupleSlot>, ExecError> {
@@ -679,15 +719,15 @@ fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecErr
 }
 
 fn node_stats_mut(state: &mut PlanState) -> &mut NodeExecStats {
-    match state {
-        PlanState::Result(result) => &mut result.stats,
-        PlanState::SeqScan(scan) => &mut scan.stats,
-        PlanState::NestedLoopJoin(join) => &mut join.stats,
-        PlanState::Filter(filter) => &mut filter.stats,
-        PlanState::OrderBy(order_by) => &mut order_by.stats,
-        PlanState::Limit(limit) => &mut limit.stats,
-        PlanState::Projection(projection) => &mut projection.stats,
-        PlanState::Aggregate(aggregate) => &mut aggregate.stats,
+    match &mut state.kind {
+        PlanStateKind::Result(result) => &mut result.stats,
+        PlanStateKind::SeqScan(scan) => &mut scan.stats,
+        PlanStateKind::NestedLoopJoin(join) => &mut join.stats,
+        PlanStateKind::Filter(filter) => &mut filter.stats,
+        PlanStateKind::OrderBy(order_by) => &mut order_by.stats,
+        PlanStateKind::Limit(limit) => &mut limit.stats,
+        PlanStateKind::Projection(projection) => &mut projection.stats,
+        PlanStateKind::Aggregate(aggregate) => &mut aggregate.stats,
     }
 }
 

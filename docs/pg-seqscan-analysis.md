@@ -97,6 +97,12 @@ calls which were ~5% of profile samples.
 Result: 0.585ms -> 0.454ms per 10k-row scan (22% faster).
 EXPLAIN ANALYZE 1M rows: 64.35ms -> 59.11ms (ratio vs PG: 1.42x -> 1.27x).
 
+### 2. Function pointer dispatch (DONE)
+Replace per-tuple match on 8-arm PlanState enum with a function pointer
+stored at plan init time, like PostgreSQL's ExecProcNode.
+
+Result: 0.454ms -> 0.416ms per 10k-row scan (8% faster).
+
 ## Remaining optimization opportunities
 
 1. **Lazy/zero-copy slot** -- store pointer to on-page bytes in TupleSlot

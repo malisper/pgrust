@@ -1,4 +1,4 @@
-use super::nodes::*;
+use super::nodes::{*, PlanStateKind};
 use crate::BufferUsageStats;
 
 pub(crate) fn format_explain_lines(
@@ -21,48 +21,48 @@ pub(crate) fn format_explain_lines(
         lines.push(format!("{prefix}{label}"));
     }
 
-    match state {
-        PlanState::Result(_) => {}
-        PlanState::SeqScan(_) => {}
-        PlanState::NestedLoopJoin(join) => {
+    match &state.kind {
+        PlanStateKind::Result(_) => {}
+        PlanStateKind::SeqScan(_) => {}
+        PlanStateKind::NestedLoopJoin(join) => {
             format_explain_lines(&join.left, indent + 1, analyze, lines);
             format_explain_lines(&join.right, indent + 1, analyze, lines);
         }
-        PlanState::Filter(filter) => format_explain_lines(&filter.input, indent + 1, analyze, lines),
-        PlanState::OrderBy(order_by) => format_explain_lines(&order_by.input, indent + 1, analyze, lines),
-        PlanState::Limit(limit) => format_explain_lines(&limit.input, indent + 1, analyze, lines),
-        PlanState::Projection(projection) => {
+        PlanStateKind::Filter(filter) => format_explain_lines(&filter.input, indent + 1, analyze, lines),
+        PlanStateKind::OrderBy(order_by) => format_explain_lines(&order_by.input, indent + 1, analyze, lines),
+        PlanStateKind::Limit(limit) => format_explain_lines(&limit.input, indent + 1, analyze, lines),
+        PlanStateKind::Projection(projection) => {
             format_explain_lines(&projection.input, indent + 1, analyze, lines)
         }
-        PlanState::Aggregate(aggregate) => {
+        PlanStateKind::Aggregate(aggregate) => {
             format_explain_lines(&aggregate.input, indent + 1, analyze, lines)
         }
     }
 }
 
 fn node_label(state: &PlanState) -> String {
-    match state {
-        PlanState::Result(_) => "Result".into(),
-        PlanState::SeqScan(scan) => format!("Seq Scan on rel {}", scan.rel.rel_number),
-        PlanState::NestedLoopJoin(_) => "Nested Loop".into(),
-        PlanState::Filter(_) => "Filter".into(),
-        PlanState::OrderBy(_) => "Sort".into(),
-        PlanState::Limit(_) => "Limit".into(),
-        PlanState::Projection(_) => "Projection".into(),
-        PlanState::Aggregate(_) => "Aggregate".into(),
+    match &state.kind {
+        PlanStateKind::Result(_) => "Result".into(),
+        PlanStateKind::SeqScan(scan) => format!("Seq Scan on rel {}", scan.rel.rel_number),
+        PlanStateKind::NestedLoopJoin(_) => "Nested Loop".into(),
+        PlanStateKind::Filter(_) => "Filter".into(),
+        PlanStateKind::OrderBy(_) => "Sort".into(),
+        PlanStateKind::Limit(_) => "Limit".into(),
+        PlanStateKind::Projection(_) => "Projection".into(),
+        PlanStateKind::Aggregate(_) => "Aggregate".into(),
     }
 }
 
 fn node_stats(state: &PlanState) -> &NodeExecStats {
-    match state {
-        PlanState::Result(result) => &result.stats,
-        PlanState::SeqScan(scan) => &scan.stats,
-        PlanState::NestedLoopJoin(join) => &join.stats,
-        PlanState::Filter(filter) => &filter.stats,
-        PlanState::OrderBy(order_by) => &order_by.stats,
-        PlanState::Limit(limit) => &limit.stats,
-        PlanState::Projection(projection) => &projection.stats,
-        PlanState::Aggregate(aggregate) => &aggregate.stats,
+    match &state.kind {
+        PlanStateKind::Result(result) => &result.stats,
+        PlanStateKind::SeqScan(scan) => &scan.stats,
+        PlanStateKind::NestedLoopJoin(join) => &join.stats,
+        PlanStateKind::Filter(filter) => &filter.stats,
+        PlanStateKind::OrderBy(order_by) => &order_by.stats,
+        PlanStateKind::Limit(limit) => &limit.stats,
+        PlanStateKind::Projection(projection) => &projection.stats,
+        PlanStateKind::Aggregate(aggregate) => &aggregate.stats,
     }
 }
 
