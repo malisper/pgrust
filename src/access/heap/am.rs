@@ -11,7 +11,8 @@ use crate::database::TransactionWaiter;
 use crate::storage::page::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number};
 use crate::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::storage::buffer::Page;
-use crate::{BufferPool, ClientId, Error, PinnedBuffer, RequestPageResult, SmgrStorageBackend};
+use crate::{BufferPool, ClientId, Error, OwnedBufferPin, PinnedBuffer, RequestPageResult, SmgrStorageBackend};
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub enum HeapError {
@@ -71,13 +72,14 @@ const MAX_HEAP_TUPLES_PER_PAGE: usize = 291;
 pub struct VisibleHeapScan {
     pub(crate) scan: HeapScan,
     pub(crate) snapshot: Snapshot,
-    /// Buffer ID of the currently pinned page, if any. Kept pinned across
-    /// tuples on the same page to avoid per-tuple pin/unpin overhead.
-    /// The content lock is NOT held — only re-acquired briefly per tuple.
-    pinned_buffer: Option<(u32, usize)>,  // (block_number, buffer_id)
-    /// Pool and client needed to unpin on drop.
+    /// Shared pin on the currently pinned page, if any. The scan and any
+    /// outstanding `BufferHeap` tuple slots share this pin via `Rc`. The
+    /// buffer is unpinned only when the last reference is dropped — so a
+    /// slot returned to the caller keeps the page alive even after the scan
+    /// advances.
+    pinned_buffer: Option<(u32, Rc<OwnedBufferPin<SmgrStorageBackend>>)>,
+    /// Pool needed for wrapping pins.
     pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
-    client_id: ClientId,
     /// Page-mode visibility: offsets of visible tuples on the current page.
     /// Populated once per page by `prepare_page_tuples`, then iterated without
     /// further visibility checks (like PostgreSQL's rs_vistuples).
@@ -94,7 +96,12 @@ impl VisibleHeapScan {
 
     /// Return the buffer_id of the currently pinned page, if any.
     pub fn pinned_buffer_id(&self) -> Option<usize> {
-        self.pinned_buffer.map(|(_, bid)| bid)
+        self.pinned_buffer.as_ref().map(|(_, pin)| pin.buffer_id())
+    }
+
+    /// Return a clone of the current page's shared pin (cheap Rc clone).
+    pub fn pinned_buffer_rc(&self) -> Option<Rc<OwnedBufferPin<SmgrStorageBackend>>> {
+        self.pinned_buffer.as_ref().map(|(_, pin)| Rc::clone(pin))
     }
 }
 
@@ -108,13 +115,8 @@ impl std::fmt::Debug for VisibleHeapScan {
     }
 }
 
-impl Drop for VisibleHeapScan {
-    fn drop(&mut self) {
-        if let Some((_, bid)) = self.pinned_buffer.take() {
-            let _ = self.pool.unpin(self.client_id, bid);
-        }
-    }
-}
+// No manual Drop needed: the Rc<OwnedBufferPin> unpins the buffer when
+// the last reference (scan or slot) is dropped.
 
 pub fn heap_scan_begin(
     pool: &BufferPool<SmgrStorageBackend>,
@@ -171,7 +173,7 @@ pub fn heap_scan_next(
 
 pub fn heap_scan_begin_visible(
     pool: &std::sync::Arc<BufferPool<SmgrStorageBackend>>,
-    client_id: ClientId,
+    _client_id: ClientId,
     rel: RelFileLocator,
     snapshot: Snapshot,
 ) -> Result<VisibleHeapScan, HeapError> {
@@ -180,7 +182,6 @@ pub fn heap_scan_begin_visible(
         snapshot,
         pinned_buffer: None,
         pool: std::sync::Arc::clone(pool),
-        client_id,
         vis_tuples: [0; MAX_HEAP_TUPLES_PER_PAGE],
         vis_count: 0,
         vis_index: 0,
@@ -217,16 +218,17 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
         let block = scan.scan.current_block;
 
         // Reuse pinned buffer if we're still on the same page.
-        let buffer_id = match scan.pinned_buffer {
-            Some((pinned_block, bid)) if pinned_block == block => bid,
+        let buffer_id = match &scan.pinned_buffer {
+            Some((pinned_block, pin)) if *pinned_block == block => pin.buffer_id(),
             _ => {
-                // Unpin previous buffer if any.
-                if let Some((_, old_bid)) = scan.pinned_buffer.take() {
-                    pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
-                }
+                // Drop previous pin (Rc<OwnedBufferPin> handles unpin).
+                drop(scan.pinned_buffer.take());
                 let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
                 let bid = pin.into_raw();
-                scan.pinned_buffer = Some((block, bid));
+                let owned = OwnedBufferPin::wrap_existing(
+                    std::sync::Arc::clone(&scan.pool), bid,
+                );
+                scan.pinned_buffer = Some((block, Rc::new(owned)));
                 bid
             }
         };
@@ -304,18 +306,14 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
             return Ok(Some(result));
         }
 
-        // Page exhausted — unpin and move to next block.
-        if let Some((_, old_bid)) = scan.pinned_buffer.take() {
-            pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
-        }
+        // Page exhausted — drop pin and move to next block.
+        drop(scan.pinned_buffer.take());
         scan.scan.current_block += 1;
         scan.scan.current_offset = 1;
     }
 
-    // Scan complete — unpin any remaining buffer.
-    if let Some((_, old_bid)) = scan.pinned_buffer.take() {
-        pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
-    }
+    // Scan complete — drop any remaining pin.
+    drop(scan.pinned_buffer.take());
 
     Ok(None)
 }
@@ -333,9 +331,9 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
 ) -> Result<Option<usize>, E> {
     use crate::access::heap::tuple::INFOMASK_OFFSET;
 
-    // Unpin previous page and advance to next block.
-    if let Some((_, old_bid)) = scan.pinned_buffer.take() {
-        pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
+    // Drop previous pin and advance to next block.
+    if scan.pinned_buffer.is_some() {
+        drop(scan.pinned_buffer.take());
         scan.scan.current_block += 1;
     }
     // If no pinned buffer, this is the first call — start at current_block (0).
@@ -344,7 +342,10 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
         let block = scan.scan.current_block;
         let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
         let buffer_id = pin.into_raw();
-        scan.pinned_buffer = Some((block, buffer_id));
+        let owned = OwnedBufferPin::wrap_existing(
+            std::sync::Arc::clone(&scan.pool), buffer_id,
+        );
+        scan.pinned_buffer = Some((block, Rc::new(owned)));
 
         // Collect visible tuple offsets under a single lock.
         let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
@@ -402,10 +403,8 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
             return Ok(Some(buffer_id));
         }
 
-        // Empty page — unpin and try next.
-        if let Some((_, old_bid)) = scan.pinned_buffer.take() {
-            pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
-        }
+        // Empty page — drop pin and try next.
+        drop(scan.pinned_buffer.take());
         scan.scan.current_block += 1;
     }
 
@@ -433,15 +432,13 @@ pub fn heap_scan_page_next_tuple<'a>(
     Some((tid, tuple_bytes))
 }
 
-/// Clean up a pagemode scan — unpin any remaining buffer.
+/// Clean up a pagemode scan — drop any remaining pin.
 pub fn heap_scan_end<E: From<HeapError>>(
-    pool: &BufferPool<SmgrStorageBackend>,
-    client_id: ClientId,
+    _pool: &BufferPool<SmgrStorageBackend>,
+    _client_id: ClientId,
     scan: &mut VisibleHeapScan,
 ) -> Result<(), E> {
-    if let Some((_, old_bid)) = scan.pinned_buffer.take() {
-        pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
-    }
+    drop(scan.pinned_buffer.take());
     Ok(())
 }
 

@@ -466,13 +466,14 @@ fn exec_seq_scan(
                 let ptr = tuple_bytes.as_ptr();
                 let len = tuple_bytes.len();
                 drop(guard);
-                // SAFETY: the buffer is pinned by the VisibleHeapScan for the
-                // duration of this page. User data is immutable on the page
-                // (heap_page_replace_tuple only writes headers). The slot will
-                // be consumed before the next page's prepare_next_page unpins.
+                // Share the scan's pin via Rc — no extra atomic pin/unpin.
+                // The buffer stays pinned as long as any Rc ref (scan or slot)
+                // is alive.
+                let pin = scan.pinned_buffer_rc()
+                    .expect("buffer must be pinned");
                 return Ok(Some(unsafe {
                     TupleSlot::from_buffer_heap(
-                        column_names, ptr, len, buffer_id, Rc::clone(decoder),
+                        column_names, ptr, len, pin, Rc::clone(decoder),
                     )
                 }));
             }
