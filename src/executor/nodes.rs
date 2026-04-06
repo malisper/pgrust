@@ -37,8 +37,51 @@ pub enum Value {
     Int32(i32),
     Float64(f64),
     Text(CompactString),
+    /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned
+    /// (the slot's `Rc<OwnedBufferPin>` keeps the pin alive). User data on the
+    /// page is immutable after insertion.
+    TextRef(*const u8, u32),
     Bool(bool),
     Null,
+}
+
+impl Value {
+    /// Get text content as `&str`, works for both `Text` and `TextRef`.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Value::Text(s) => Some(s.as_str()),
+            Value::TextRef(ptr, len) => Some(unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
+            }),
+            _ => None,
+        }
+    }
+
+    /// Convert to an owned `Value`. `TextRef` becomes `Text(CompactString)`;
+    /// other variants are cloned cheaply.
+    pub fn to_owned_value(&self) -> Value {
+        match self {
+            Value::TextRef(ptr, len) => {
+                let s = unsafe {
+                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
+                };
+                Value::Text(CompactString::new(s))
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Convert all `TextRef` values in a slice to owned `Text` in place.
+    pub fn materialize_all(values: &mut Vec<Value>) {
+        for v in values.iter_mut() {
+            if let Value::TextRef(ptr, len) = *v {
+                let s = unsafe {
+                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
+                };
+                *v = Value::Text(CompactString::new(s));
+            }
+        }
+    }
 }
 
 impl PartialEq for Value {
@@ -46,15 +89,23 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
-            (Value::Text(a), Value::Text(b)) => a.as_str() == b.as_str(),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
+            (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
+                a.as_text().unwrap() == b.as_text().unwrap()
+            }
             _ => false,
         }
     }
 }
 
 impl Eq for Value {}
+
+// SAFETY: TextRef points to immutable user data on a pinned buffer page.
+// The pin (via Rc<OwnedBufferPin>) ensures the page stays alive. The data
+// is never written after insertion (heap_page_replace_tuple only writes headers).
+unsafe impl Send for Value {}
+unsafe impl Sync for Value {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetEntry {
@@ -205,6 +256,16 @@ pub(crate) enum SlotSource {
         decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
         materialized: Option<Vec<Value>>,
     },
+    /// Zero-allocation slot: references a pre-allocated values buffer owned by
+    /// SeqScanState. The buffer contains decoded Values (which may include
+    /// TextRef pointers to on-page bytes). The pin keeps the page alive for
+    /// any TextRef values. The values_ptr is valid until the next exec_seq_scan
+    /// call, which only happens after the caller consumes/drops this slot.
+    ScanBuf {
+        values_ptr: *const Value,
+        values_len: usize,
+        pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
+    },
 }
 
 impl std::fmt::Debug for SlotSource {
@@ -225,6 +286,11 @@ impl std::fmt::Debug for SlotSource {
                 .field("tuple_len", tuple_len)
                 .field("buffer_id", &pin.buffer_id())
                 .field("materialized", &materialized.is_some())
+                .finish(),
+            SlotSource::ScanBuf { values_len, pin, .. } => f
+                .debug_struct("ScanBuf")
+                .field("values_len", values_len)
+                .field("buffer_id", &pin.buffer_id())
                 .finish(),
         }
     }
@@ -250,6 +316,13 @@ impl Clone for SlotSource {
             }
             SlotSource::BufferHeap { .. } => {
                 panic!("cannot clone unmaterialized BufferHeap slot — call materialize() first")
+            }
+            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
+                // Clone must materialize — the clone may outlive the values buffer.
+                let slice = unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) };
+                SlotSource::Virtual {
+                    values: slice.iter().map(Value::to_owned_value).collect(),
+                }
             }
         }
     }
@@ -312,6 +385,9 @@ pub struct SeqScanState {
     pub(crate) column_names: Rc<[String]>,
     pub(crate) scan: Option<VisibleHeapScan>,
     pub(crate) decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
+    /// Pre-allocated values buffer, reused across tuples. Contains TextRef
+    /// pointers to on-page bytes (valid while pinned).
+    pub(crate) values_buf: Vec<Value>,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -434,22 +510,33 @@ impl TupleSlot {
         match &mut self.source {
             SlotSource::Virtual { .. } | SlotSource::Physical { .. } => Ok(self),
             SlotSource::BufferHeap { materialized: Some(_), .. } => {
-                // Already decoded — extract into Virtual.
                 let SlotSource::BufferHeap { materialized, .. } = self.source else { unreachable!() };
+                let mut values = materialized.unwrap();
+                Value::materialize_all(&mut values);
                 Ok(Self {
                     column_names: self.column_names,
-                    source: SlotSource::Virtual { values: materialized.unwrap() },
+                    source: SlotSource::Virtual { values },
                 })
             }
             SlotSource::BufferHeap { tuple_ptr, tuple_len, decoder, materialized, .. } => {
                 let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
                 let mut values = Vec::new();
                 decoder.decode_into(bytes, &mut values)?;
+                Value::materialize_all(&mut values);
                 *materialized = Some(values);
                 let SlotSource::BufferHeap { materialized, .. } = self.source else { unreachable!() };
                 Ok(Self {
                     column_names: self.column_names,
                     source: SlotSource::Virtual { values: materialized.unwrap() },
+                })
+            }
+            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
+                let slice = unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) };
+                Ok(Self {
+                    column_names: self.column_names,
+                    source: SlotSource::Virtual {
+                        values: slice.iter().map(Value::to_owned_value).collect(),
+                    },
                 })
             }
         }
@@ -458,7 +545,9 @@ impl TupleSlot {
     pub fn tid(&self) -> Option<ItemPointerData> {
         match &self.source {
             SlotSource::Physical { tid, .. } => Some(*tid),
-            SlotSource::Virtual { .. } | SlotSource::BufferHeap { .. } => None,
+            SlotSource::Virtual { .. }
+            | SlotSource::BufferHeap { .. }
+            | SlotSource::ScanBuf { .. } => None,
         }
     }
 
@@ -484,8 +573,6 @@ impl TupleSlot {
             }
             SlotSource::BufferHeap { tuple_ptr, tuple_len, decoder, materialized, .. } => {
                 if materialized.is_none() {
-                    // SAFETY: pointer is valid because the OwnedBufferPin keeps
-                    // the buffer pinned, and user data is immutable on the page.
                     let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
                     let mut values = Vec::new();
                     decoder.decode_into(bytes, &mut values)?;
@@ -493,17 +580,34 @@ impl TupleSlot {
                 }
                 Ok(materialized.as_ref().unwrap().as_slice())
             }
+            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
+                Ok(unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) })
+            }
         }
     }
 
     pub fn into_values(mut self) -> Result<Vec<Value>, super::ExecError> {
+        match &self.source {
+            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
+                let slice = unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) };
+                return Ok(slice.iter().map(Value::to_owned_value).collect());
+            }
+            _ => {}
+        }
         self.values()?;
         match self.source {
             SlotSource::Virtual { values } => Ok(values),
-            SlotSource::Physical { materialized: Some(values), .. } => Ok(values),
+            SlotSource::Physical { materialized: Some(mut values), .. } => {
+                Value::materialize_all(&mut values);
+                Ok(values)
+            }
             SlotSource::Physical { materialized: None, .. } => unreachable!("values() just materialized"),
-            SlotSource::BufferHeap { materialized: Some(values), .. } => Ok(values),
+            SlotSource::BufferHeap { materialized: Some(mut values), .. } => {
+                Value::materialize_all(&mut values);
+                Ok(values)
+            }
             SlotSource::BufferHeap { materialized: None, .. } => unreachable!("values() just materialized"),
+            SlotSource::ScanBuf { .. } => unreachable!("handled above"),
         }
     }
 }

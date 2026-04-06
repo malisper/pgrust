@@ -213,11 +213,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let column_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs = desc.attribute_descs();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs));
+            let ncols = desc.columns.len();
             make_plan_state(PlanStateKind::SeqScan(SeqScanState {
                 rel,
                 column_names,
                 scan: None,
                 decoder,
+                values_buf: Vec::with_capacity(ncols),
                 stats: NodeExecStats::default(),
             }))
         }
@@ -451,7 +453,6 @@ fn exec_seq_scan(
     }
 
     let scan = state.scan.as_mut().unwrap();
-    let decoder = &state.decoder;
     let column_names = Rc::clone(&state.column_names);
 
     loop {
@@ -463,18 +464,29 @@ fn exec_seq_scan(
             let page = &*guard;
 
             if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
-                let ptr = tuple_bytes.as_ptr();
-                let len = tuple_bytes.len();
+                // Capture raw pointer — safe because page is pinned and user
+                // data is immutable.
+                let raw_ptr = tuple_bytes.as_ptr();
+                let raw_len = tuple_bytes.len();
                 drop(guard);
-                // Share the scan's pin via Rc — no extra atomic pin/unpin.
-                // The buffer stays pinned as long as any Rc ref (scan or slot)
-                // is alive.
+
+                // Get shared pin (Rc clone, keeps page alive for TextRef pointers)
                 let pin = scan.pinned_buffer_rc()
                     .expect("buffer must be pinned");
-                return Ok(Some(unsafe {
-                    TupleSlot::from_buffer_heap(
-                        column_names, ptr, len, pin, Rc::clone(decoder),
-                    )
+
+                // Decode into reusable buffer. TextRef values point at the
+                // still-pinned page. The pin Rc in the slot keeps it alive.
+                state.values_buf.clear();
+                let raw_bytes = unsafe { std::slice::from_raw_parts(raw_ptr, raw_len) };
+                state.decoder.decode_into(raw_bytes, &mut state.values_buf)?;
+
+                return Ok(Some(TupleSlot {
+                    column_names,
+                    source: SlotSource::ScanBuf {
+                        values_ptr: state.values_buf.as_ptr(),
+                        values_len: state.values_buf.len(),
+                        pin,
+                    },
                 }));
             }
             drop(guard);

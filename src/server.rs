@@ -722,6 +722,11 @@ fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<u8>) -> io:
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
                 buf.extend_from_slice(v.as_bytes());
             }
+            Value::TextRef(_, _) => {
+                let s = val.as_text().unwrap();
+                buf.extend_from_slice(&(s.len() as i32).to_be_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
             Value::Bool(true) => {
                 buf.extend_from_slice(&1_i32.to_be_bytes());
                 buf.push(b't');
