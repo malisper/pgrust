@@ -154,6 +154,26 @@ pub enum Plan {
     },
 }
 
+impl Plan {
+    /// Extract output column names from the plan tree.
+    pub fn column_names(&self) -> Vec<String> {
+        match self {
+            Plan::Result => vec![],
+            Plan::SeqScan { desc, .. } => desc.columns.iter().map(|c| c.name.clone()).collect(),
+            Plan::Filter { input, .. } | Plan::OrderBy { input, .. } | Plan::Limit { input, .. } => {
+                input.column_names()
+            }
+            Plan::Projection { targets, .. } => targets.iter().map(|t| t.name.clone()).collect(),
+            Plan::Aggregate { output_columns, .. } => output_columns.clone(),
+            Plan::NestedLoopJoin { left, right, .. } => {
+                let mut names = left.column_names();
+                names.extend(right.column_names());
+                names
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TupleSlot {
     pub(crate) column_names: Rc<[String]>,
@@ -202,11 +222,12 @@ pub struct ResultState {
 #[derive(Debug)]
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
-    pub(crate) desc: Rc<RelationDesc>,
-    pub(crate) attr_descs: Rc<[AttributeDesc]>,
     pub(crate) column_names: Rc<[String]>,
     pub(crate) scan: Option<VisibleHeapScan>,
     pub(crate) decoder: super::tuple_decoder::CompiledTupleDecoder,
+    /// Reusable buffer for decoded values — avoids per-row Vec allocation.
+    /// Analogous to PostgreSQL's TupleTableSlot Datum array.
+    pub(crate) values_buf: Vec<Value>,
     pub(crate) stats: NodeExecStats,
 }
 
