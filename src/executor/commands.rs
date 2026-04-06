@@ -4,7 +4,7 @@ use parking_lot::RwLock;
 
 use crate::access::heap::am::{
     HeapError, heap_delete_with_waiter, heap_fetch, heap_insert_mvcc_with_cid,
-    heap_scan_begin_visible, heap_scan_next_visible, heap_update_with_waiter,
+    heap_scan_begin_visible, heap_scan_next, heap_update_with_waiter,
 };
 use crate::access::heap::mvcc::{TransactionId, TransactionManager};
 use crate::access::heap::mvcc::CommandId;
@@ -203,10 +203,24 @@ pub fn execute_update_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
-    while let Some((tid, tuple)) = {
-        let txns_guard = ctx.txns.read();
-        heap_scan_next_visible(&*ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
-    } {
+    // Scan tuples without holding txns.read(), then check visibility
+    // separately. This avoids a lock-ordering deadlock: heap_scan_next
+    // acquires buffer content_lock (via read_page), and the SELECT path
+    // (heap_scan_next_visible_raw) acquires content_lock before txns.read().
+    // Holding txns.read() across heap_scan_next would invert that order.
+    loop {
+        let (tid, tuple) = match heap_scan_next(&*ctx.pool, ctx.client_id, &mut scan.scan)? {
+            Some(t) => t,
+            None => break,
+        };
+        let visible = {
+            let txns_guard = ctx.txns.read();
+            scan.snapshot.tuple_visible(&txns_guard, &tuple)
+        };
+        if !visible {
+            continue;
+        }
+
         let desc = Rc::new(stmt.desc.clone());
         let attr_descs: Rc<[_]> = desc.attribute_descs().into();
         let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -300,10 +314,21 @@ pub fn execute_delete_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();
 
-    while let Some((tid, tuple)) = {
-        let txns_guard = ctx.txns.read();
-        heap_scan_next_visible(&*ctx.pool, ctx.client_id, &txns_guard, &mut scan)?
-    } {
+    // Same lock-ordering fix as execute_update_with_waiter: acquire
+    // content_lock (via heap_scan_next) and txns.read() separately.
+    loop {
+        let (tid, tuple) = match heap_scan_next(&*ctx.pool, ctx.client_id, &mut scan.scan)? {
+            Some(t) => t,
+            None => break,
+        };
+        let visible = {
+            let txns_guard = ctx.txns.read();
+            scan.snapshot.tuple_visible(&txns_guard, &tuple)
+        };
+        if !visible {
+            continue;
+        }
+
         let desc = Rc::new(stmt.desc.clone());
         let attr_descs: Rc<[_]> = desc.attribute_descs().into();
         let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();

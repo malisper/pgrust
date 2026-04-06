@@ -66,8 +66,8 @@ impl From<MvccError> for HeapError {
 }
 
 pub struct VisibleHeapScan {
-    scan: HeapScan,
-    snapshot: Snapshot,
+    pub(crate) scan: HeapScan,
+    pub(crate) snapshot: Snapshot,
     /// Buffer ID of the currently pinned page, if any. Kept pinned across
     /// tuples on the same page to avoid per-tuple pin/unpin overhead.
     /// The content lock is NOT held — only re-acquired briefly per tuple.

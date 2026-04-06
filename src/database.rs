@@ -2265,4 +2265,56 @@ mod tests {
             other => panic!("expected query result, got {:?}", other),
         }
     }
+
+    /// Reproduces a lock-ordering deadlock between the write-preferring
+    /// `txns` RwLock and the write-preferring buffer `content_lock` RwLock.
+    ///
+    /// The SELECT path acquires content_lock(shared) → txns.read(),
+    /// while the UPDATE scan path acquires txns.read() → content_lock(shared).
+    /// With pending exclusive waiters on both locks, this creates a cycle.
+    ///
+    /// Many readers + writers on a single-row table maximises the chance
+    /// that all four roles (R, W, R2, WW) overlap on the same page.
+    #[test]
+    fn lock_ordering_deadlock_repro() {
+        let base = temp_dir("lock_ordering_deadlock");
+        let db = Database::open(&base, 16).unwrap();
+
+        db.execute(1, "create table locktest (id int4 not null, val int4 not null)")
+            .unwrap();
+        db.execute(1, "insert into locktest (id, val) values (1, 0)")
+            .unwrap();
+
+        let num_readers = 8;
+        let num_writers = 4;
+        let mut handles = Vec::new();
+
+        for t in 0..num_writers {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..50 {
+                    db.execute(
+                        (t + 2000) as ClientId,
+                        "update locktest set val = val + 1 where id = 1",
+                    )
+                    .unwrap();
+                }
+            }));
+        }
+
+        for t in 0..num_readers {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..200 {
+                    let _ = db.execute(
+                        (t + 3000) as ClientId,
+                        "select val from locktest where id = 1",
+                    )
+                    .unwrap();
+                }
+            }));
+        }
+
+        join_all_with_timeout(handles, TEST_TIMEOUT);
+    }
 }
