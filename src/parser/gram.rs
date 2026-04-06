@@ -63,14 +63,20 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
+    let mut timing = true; // default on, like PostgreSQL
     let mut statement = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::kw_analyze => analyze = true,
-            Rule::explain_option => match part.into_inner().next().ok_or(ParseError::UnexpectedEof)? {
-                opt if opt.as_rule() == Rule::kw_analyze => analyze = true,
-                opt if opt.as_rule() == Rule::kw_buffers => buffers = true,
-                _ => {}
+            Rule::explain_option => {
+                let mut inner = part.into_inner();
+                let opt = inner.next().ok_or(ParseError::UnexpectedEof)?;
+                match opt.as_rule() {
+                    Rule::kw_analyze => analyze = true,
+                    Rule::kw_buffers => buffers = true,
+                    Rule::kw_timing => timing = false, // TIMING OFF
+                    _ => {}
+                }
             },
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
             _ => {}
@@ -79,6 +85,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     Ok(ExplainStatement {
         analyze,
         buffers,
+        timing,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })
 }

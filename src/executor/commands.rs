@@ -41,7 +41,7 @@ pub(crate) fn execute_explain(
         let mut state = executor_start(plan);
         let mut row_count: u64 = 0;
         let started_at = std::time::Instant::now();
-        while let Some(_slot) = exec_next_inner(&mut state, ctx, true)? {
+        while let Some(_slot) = exec_next_inner(&mut state, ctx, stmt.timing)? {
             row_count += 1;
         }
         let elapsed = started_at.elapsed();

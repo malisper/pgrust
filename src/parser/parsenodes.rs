@@ -74,6 +74,7 @@ pub enum Statement {
 pub struct ExplainStatement {
     pub analyze: bool,
     pub buffers: bool,
+    pub timing: bool,
     pub statement: Box<Statement>,
 }
 
