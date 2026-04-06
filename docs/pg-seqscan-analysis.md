@@ -105,9 +105,40 @@ Result: 0.454ms -> 0.416ms per 10k-row scan (8% faster).
 
 ## Remaining optimization opportunities
 
-1. **Lazy/zero-copy slot** -- store pointer to on-page bytes in TupleSlot
-   instead of eagerly decoding into Values. Only decode when values are accessed.
-   Expected savings: ~8-12% from eliminating per-tuple decode + allocation.
+### 1. Compiled query execution (push-based / fused loops)
+Instead of the Volcano pull model where each tuple returns up through the
+executor tree, "compile" the plan into a fused loop at plan time. Similar
+to how CompiledTupleDecoder precomputes decode steps, a compiled plan would
+fuse scan + filter + projection + decode into a single tight loop with no
+per-tuple function calls, TupleSlot allocation, or return/re-enter overhead.
 
-2. **Function pointer dispatch** -- replace match enum with function pointer.
-   Expected savings: ~3-5% from eliminating per-tuple branch prediction misses.
+For a bare `SELECT * FROM t`, the compiled form would be:
+```
+loop over pages:
+    prepare_page (batch visibility)
+    lock page
+    loop over visible tuples:
+        decode bytes directly into output buffer
+    unlock page
+```
+
+For `SELECT col FROM t WHERE pred`, fuse filter + projection into the inner
+loop — never allocate intermediate TupleSlots:
+```
+loop over visible tuples:
+    decode only needed columns
+    evaluate predicate inline
+    if passes: emit projected row
+```
+
+This is the "data-centric compilation" approach from HyPer/Umbra. The key
+insight: tuples never "return" up the tree; the producer pushes data directly
+into the consumer's logic. Expected savings: ~25-30% from eliminating
+execute_plan loop (10%), function pointer dispatch (15%), and TupleSlot
+indirection (8.5%) on the hot scan path.
+
+### 2. Lazy/zero-copy slot
+Store pointer to on-page bytes in TupleSlot instead of eagerly decoding
+into Values. Only decode when values are accessed. For SELECT * going
+straight to the wire protocol, may never need to deform individual columns.
+Expected savings: ~8-12% from eliminating per-tuple decode + allocation.
