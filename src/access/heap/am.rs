@@ -65,6 +65,9 @@ impl From<MvccError> for HeapError {
     }
 }
 
+/// Maximum tuples per 8kB page: 8160 usable / 28 min per tuple = 291.
+const MAX_HEAP_TUPLES_PER_PAGE: usize = 291;
+
 pub struct VisibleHeapScan {
     pub(crate) scan: HeapScan,
     pub(crate) snapshot: Snapshot,
@@ -75,6 +78,24 @@ pub struct VisibleHeapScan {
     /// Pool and client needed to unpin on drop.
     pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     client_id: ClientId,
+    /// Page-mode visibility: offsets of visible tuples on the current page.
+    /// Populated once per page by `prepare_page_tuples`, then iterated without
+    /// further visibility checks (like PostgreSQL's rs_vistuples).
+    vis_tuples: [u16; MAX_HEAP_TUPLES_PER_PAGE],
+    vis_count: u16,
+    vis_index: u16,
+}
+
+impl VisibleHeapScan {
+    /// True if there are remaining visible tuples on the current page.
+    pub fn has_page_tuples(&self) -> bool {
+        self.vis_index < self.vis_count
+    }
+
+    /// Return the buffer_id of the currently pinned page, if any.
+    pub fn pinned_buffer_id(&self) -> Option<usize> {
+        self.pinned_buffer.map(|(_, bid)| bid)
+    }
 }
 
 impl std::fmt::Debug for VisibleHeapScan {
@@ -160,6 +181,9 @@ pub fn heap_scan_begin_visible(
         pinned_buffer: None,
         pool: std::sync::Arc::clone(pool),
         client_id,
+        vis_tuples: [0; MAX_HEAP_TUPLES_PER_PAGE],
+        vis_count: 0,
+        vis_index: 0,
     })
 }
 
@@ -294,6 +318,129 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
     }
 
     Ok(None)
+}
+
+/// Advance to the next page and collect visible tuple offsets. The caller
+/// must hold no lock; this function acquires the shared lock, runs visibility
+/// checks, records offsets in `scan.vis_tuples[]`, and releases the lock.
+/// Returns the buffer_id of the pinned page (for the caller to lock), or
+/// None if the scan is complete.
+pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    txns: &std::sync::Arc<RwLock<TransactionManager>>,
+    scan: &mut VisibleHeapScan,
+) -> Result<Option<usize>, E> {
+    use crate::access::heap::tuple::INFOMASK_OFFSET;
+
+    // Unpin previous page and advance to next block.
+    if let Some((_, old_bid)) = scan.pinned_buffer.take() {
+        pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        scan.scan.current_block += 1;
+    }
+    // If no pinned buffer, this is the first call — start at current_block (0).
+
+    while scan.scan.current_block < scan.scan.nblocks {
+        let block = scan.scan.current_block;
+        let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+        let buffer_id = pin.into_raw();
+        scan.pinned_buffer = Some((block, buffer_id));
+
+        // Collect visible tuple offsets under a single lock.
+        let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let page: &Page = &*guard;
+        let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+
+        let mut ntup: u16 = 0;
+        let mut any_hints_written = false;
+
+        for off in 1..=max_offset {
+            let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+            if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
+                continue;
+            }
+
+            let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+
+            let visible = if let Some(vis) = scan.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
+                vis
+            } else {
+                let (vis, hints) = {
+                    let txns_guard = txns.read();
+                    scan.snapshot.tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
+                };
+                if hints != 0 {
+                    unsafe {
+                        let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
+                        let page_ptr = page as *const Page as *mut u8;
+                        let current = u16::from_le_bytes([*page_ptr.add(hint_off), *page_ptr.add(hint_off + 1)]);
+                        let updated = (current | hints).to_le_bytes();
+                        *page_ptr.add(hint_off) = updated[0];
+                        *page_ptr.add(hint_off + 1) = updated[1];
+                    }
+                    any_hints_written = true;
+                }
+                vis
+            };
+
+            if visible {
+                scan.vis_tuples[ntup as usize] = off;
+                ntup += 1;
+            }
+        }
+
+        if any_hints_written {
+            pool.mark_buffer_dirty_hint(buffer_id);
+        }
+        drop(guard);
+
+        scan.vis_count = ntup;
+        scan.vis_index = 0;
+
+        if ntup > 0 {
+            return Ok(Some(buffer_id));
+        }
+
+        // Empty page — unpin and try next.
+        if let Some((_, old_bid)) = scan.pinned_buffer.take() {
+            pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        }
+        scan.scan.current_block += 1;
+    }
+
+    Ok(None)
+}
+
+/// Return the next visible tuple on the current page. The caller must hold
+/// the shared content lock on the page (via `pool.lock_buffer_shared`).
+/// Returns None when all visible tuples on this page have been consumed.
+pub fn heap_scan_page_next_tuple<'a>(
+    page: &'a Page,
+    scan: &mut VisibleHeapScan,
+) -> Result<Option<(ItemPointerData, &'a [u8])>, HeapError> {
+    if scan.vis_index >= scan.vis_count {
+        return Ok(None);
+    }
+    let off = scan.vis_tuples[scan.vis_index as usize];
+    scan.vis_index += 1;
+    let tuple_bytes = page_get_item(page, off).map_err(|e| HeapError::Tuple(TupleError::from(e)))?;
+    let tid = ItemPointerData {
+        block_number: scan.scan.current_block,
+        offset_number: off,
+    };
+    Ok(Some((tid, tuple_bytes)))
+}
+
+/// Clean up a pagemode scan — unpin any remaining buffer.
+pub fn heap_scan_end<E: From<HeapError>>(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    scan: &mut VisibleHeapScan,
+) -> Result<(), E> {
+    if let Some((_, old_bid)) = scan.pinned_buffer.take() {
+        pool.unpin(client_id, old_bid).map_err(|e| E::from(HeapError::Buffer(e)))?;
+    }
+    Ok(())
 }
 
 /// Scan ALL remaining visible tuples, calling `process` for each one.

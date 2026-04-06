@@ -302,7 +302,6 @@ impl Snapshot {
     /// Try to determine visibility using only hint bits and snapshot-local data.
     /// Returns `Some(visible)` if resolved without a CLOG lookup, `None` if
     /// the slow path (requiring `TransactionManager`) is needed.
-    #[inline(always)]
     pub fn tuple_bytes_try_visible_from_hints(&self, bytes: &[u8]) -> Option<bool> {
         use crate::access::heap::tuple::{
             HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
@@ -337,7 +336,6 @@ impl Snapshot {
     }
 
     /// Check visibility from raw on-page tuple bytes without parsing.
-    #[inline(always)]
     pub fn tuple_bytes_visible(&self, txns: &TransactionManager, bytes: &[u8]) -> bool {
         use crate::access::heap::tuple::{
             HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
@@ -384,7 +382,6 @@ impl Snapshot {
     /// Following PostgreSQL's approach: hint bits are set based on the
     /// *definitive* transaction status (committed or aborted), never for
     /// in-progress or snapshot-relative decisions.
-    #[inline(always)]
     pub fn tuple_bytes_visible_with_hints(&self, txns: &TransactionManager, bytes: &[u8]) -> (bool, u16) {
         use crate::access::heap::tuple::{
             HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
@@ -466,7 +463,6 @@ impl Snapshot {
         self.check_visibility(txns, tuple.header.xmin, tuple.header.xmax, tuple.header.cid_or_xvac)
     }
 
-    #[inline(always)]
     fn check_visibility(&self, txns: &TransactionManager, xmin: u32, xmax: u32, cid: u32) -> bool {
         if xmin == INVALID_TRANSACTION_ID {
             return true;

@@ -8,7 +8,8 @@ pub use nodes::*;
 pub use expr::eval_expr;
 
 use crate::access::heap::am::{
-    HeapError, heap_scan_begin_visible, heap_scan_next_visible_raw,
+    HeapError, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible_raw,
+    heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
 use crate::access::heap::tuple::TupleError;
@@ -416,26 +417,34 @@ fn exec_seq_scan(
     let decoder = &state.decoder;
     let values_buf = &mut state.values_buf;
     let column_names = Rc::clone(&state.column_names);
-    if let Some(slot) = heap_scan_next_visible_raw(
-        &*ctx.pool,
-        ctx.client_id,
-        &ctx.txns,
-        scan,
-        |_tid, tuple_bytes| -> Result<TupleSlot, ExecError> {
-            // Decode into the reusable buffer, then take ownership.
-            // After take, values_buf is empty (0 len, 0 cap). On the next
-            // call, decode_into clears and refills it. If the caller drops
-            // the returned Vec before the next exec_next call (as the
-            // streaming path does), we could recapture it — but even without
-            // that, we save the Vec::with_capacity overhead.
-            decoder.decode_into(tuple_bytes, values_buf)?;
-            let values = std::mem::take(values_buf);
-            Ok(TupleSlot::virtual_row(column_names.clone(), values))
-        },
-    )? {
-        Ok(Some(slot))
-    } else {
-        Ok(None)
+
+    loop {
+        // Try to get the next tuple from the current page's visibility list.
+        if scan.has_page_tuples() {
+            let buffer_id = scan.pinned_buffer_id().expect("buffer must be pinned");
+            let guard = ctx.pool.lock_buffer_shared(buffer_id)
+                .map_err(|e| ExecError::Heap(HeapError::Buffer(e)))?;
+            let page = &*guard;
+
+            if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan)
+                .map_err(ExecError::Heap)?
+            {
+                decoder.decode_into(tuple_bytes, values_buf)?;
+                let values = std::mem::take(values_buf);
+                drop(guard);
+                return Ok(Some(TupleSlot::virtual_row(column_names, values)));
+            }
+            drop(guard);
+        }
+
+        // Current page exhausted — prepare the next page (collects visible offsets).
+        let next: Result<Option<usize>, ExecError> =
+            heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, scan);
+        if next?.is_none() {
+            heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
+            return Ok(None);
+        }
+        // Loop back to read tuples from the newly prepared page.
     }
 }
 
