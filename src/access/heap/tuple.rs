@@ -503,24 +503,22 @@ pub fn heap_page_get_tuple(
     Ok(HeapTuple::parse(page_get_item(page, offset)?)?)
 }
 
+/// Rewrite only the header portion of a tuple on the page.
+///
+/// All callers modify only header fields (xmax, ctid, infomask), never user
+/// data. Writing only bytes `0..hoff` keeps user data immutable on the page,
+/// which is the safety prerequisite for zero-copy tuple slots.
 pub fn heap_page_replace_tuple(
     page: &mut [u8; BLCKSZ],
     offset: OffsetNumber,
     tuple: &HeapTuple,
 ) -> Result<(), TupleError> {
     let item_id = page_get_item_id(page, offset)?;
-    let expected = usize::from(item_id.lp_len);
-    let rewritten = tuple.serialize();
-    if rewritten.len() != expected {
-        return Err(TupleError::LengthMismatch {
-            expected,
-            actual: rewritten.len(),
-        });
-    }
-
     let start = usize::from(item_id.lp_off);
-    let end = start + expected;
-    page[start..end].copy_from_slice(&rewritten);
+    let on_page_hoff = page[start + 22] as usize;
+    let header_bytes = tuple.header.serialize();
+    debug_assert_eq!(header_bytes.len(), on_page_hoff);
+    page[start..start + on_page_hoff].copy_from_slice(&header_bytes);
     Ok(())
 }
 
@@ -667,5 +665,31 @@ mod tests {
         assert_eq!(deformed[0], Some(&[1, 2, 3, 4][..]));
         assert_eq!(deformed[1], None);
         assert_eq!(deformed[2], Some(&[9, 10, 11, 12][..]));
+    }
+
+    #[test]
+    fn replace_tuple_only_writes_header_preserves_user_data() {
+        let mut page = [0u8; BLCKSZ];
+        heap_page_init(&mut page);
+
+        let tuple = HeapTuple::new_raw(2, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+        let off = heap_page_add_tuple(&mut page, 0, &tuple).unwrap();
+
+        // Read back and verify original data.
+        let original = heap_page_get_tuple(&page, off).unwrap();
+        assert_eq!(original.data, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(original.header.xmax, 0);
+
+        // Modify only header fields and replace.
+        let mut modified = original.clone();
+        modified.header.xmax = 42;
+        modified.header.infomask |= 0x0400; // set some flag
+        heap_page_replace_tuple(&mut page, off, &modified).unwrap();
+
+        // Read back: header fields changed, user data untouched.
+        let after = heap_page_get_tuple(&page, off).unwrap();
+        assert_eq!(after.header.xmax, 42);
+        assert_eq!(after.header.infomask & 0x0400, 0x0400);
+        assert_eq!(after.data, vec![0xAA, 0xBB, 0xCC, 0xDD]);
     }
 }
