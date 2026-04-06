@@ -88,9 +88,18 @@ impl CompiledTupleDecoder {
         }
     }
 
-    /// Decode all values from raw on-page tuple bytes.
+    /// Decode into an existing Vec, reusing its heap allocation.
+    /// The Vec is cleared and refilled. Callers keep the Vec across
+    /// iterations to avoid per-row allocation (like PostgreSQL's
+    /// TupleTableSlot Datum array).
     #[inline]
-    pub fn decode(&self, tuple_bytes: &[u8]) -> Result<Vec<Value>, ExecError> {
+    pub fn decode_into(&self, tuple_bytes: &[u8], values: &mut Vec<Value>) -> Result<(), ExecError> {
+        values.clear();
+        self.decode_inner(tuple_bytes, values)
+    }
+
+    #[inline]
+    fn decode_inner(&self, tuple_bytes: &[u8], values: &mut Vec<Value>) -> Result<(), ExecError> {
         if tuple_bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
             return Err(ExecError::Tuple(crate::access::heap::tuple::TupleError::HeaderTooShort));
         }
@@ -104,7 +113,7 @@ impl CompiledTupleDecoder {
         };
         let data = &tuple_bytes[hoff..];
 
-        let mut values = Vec::with_capacity(self.ncols);
+        values.reserve(self.ncols.saturating_sub(values.capacity()));
         let mut off = 0usize;
 
         for (i, step) in self.steps.iter().enumerate() {
@@ -196,6 +205,6 @@ impl CompiledTupleDecoder {
             }
         }
 
-        Ok(values)
+        Ok(())
     }
 }

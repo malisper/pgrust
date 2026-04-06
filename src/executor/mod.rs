@@ -11,7 +11,7 @@ use crate::access::heap::am::{
     HeapError, heap_scan_begin_visible, heap_scan_next_visible_raw,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
-use crate::access::heap::tuple::{AttributeDesc, TupleError};
+use crate::access::heap::tuple::TupleError;
 use crate::catalog::Catalog;
 use crate::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, parse_statement,
@@ -196,15 +196,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
         }),
         Plan::SeqScan { rel, desc } => {
             let column_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
-            let attr_descs: Rc<[AttributeDesc]> = desc.attribute_descs().into();
+            let attr_descs = desc.attribute_descs();
             let decoder = tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs);
             PlanState::SeqScan(SeqScanState {
                 rel,
-                desc: Rc::new(desc),
-                attr_descs,
                 column_names,
                 scan: None,
                 decoder,
+                values_buf: Vec::new(),
                 stats: NodeExecStats::default(),
             })
         }
@@ -362,7 +361,7 @@ pub fn exec_next(
     exec_next_inner(state, ctx, false)
 }
 
-fn exec_next_inner(
+pub(crate) fn exec_next_inner(
     state: &mut PlanState,
     ctx: &mut ExecutorContext,
     timed: bool,
@@ -415,6 +414,7 @@ fn exec_seq_scan(
 
     let scan = state.scan.as_mut().unwrap();
     let decoder = &state.decoder;
+    let values_buf = &mut state.values_buf;
     let column_names = Rc::clone(&state.column_names);
     if let Some(slot) = heap_scan_next_visible_raw(
         &*ctx.pool,
@@ -422,7 +422,14 @@ fn exec_seq_scan(
         &ctx.txns,
         scan,
         |_tid, tuple_bytes| -> Result<TupleSlot, ExecError> {
-            let values = decoder.decode(tuple_bytes)?;
+            // Decode into the reusable buffer, then take ownership.
+            // After take, values_buf is empty (0 len, 0 cap). On the next
+            // call, decode_into clears and refills it. If the caller drops
+            // the returned Vec before the next exec_next call (as the
+            // streaming path does), we could recapture it — but even without
+            // that, we save the Vec::with_capacity overhead.
+            decoder.decode_into(tuple_bytes, values_buf)?;
+            let values = std::mem::take(values_buf);
             Ok(TupleSlot::virtual_row(column_names.clone(), values))
         },
     )? {

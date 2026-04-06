@@ -20,7 +20,7 @@ use crate::storage::smgr::StorageManager;
 use super::nodes::*;
 use super::expr::{eval_expr, predicate_matches, tuple_from_values};
 use super::explain::{format_buffer_usage, format_explain_lines};
-use super::{ExecError, ExecutorContext, StatementResult, execute_plan_internal, executor_start};
+use super::{ExecError, ExecutorContext, StatementResult, exec_next_inner, executor_start};
 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
@@ -38,16 +38,20 @@ pub(crate) fn execute_explain(
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
-        let (result, state, elapsed) = execute_plan_internal(plan, ctx, true)?;
+        let mut state = executor_start(plan);
+        let mut row_count: u64 = 0;
+        let started_at = std::time::Instant::now();
+        while let Some(_slot) = exec_next_inner(&mut state, ctx, true)? {
+            row_count += 1;
+        }
+        let elapsed = started_at.elapsed();
         format_explain_lines(&state, 0, true, &mut lines);
         lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
         if stmt.buffers {
             let stats = ctx.pool.usage_stats();
             lines.push(format_buffer_usage(stats));
         }
-        if let StatementResult::Query { rows, .. } = result {
-            lines.push(format!("Result Rows: {}", rows.len()));
-        }
+        lines.push(format!("Result Rows: {}", row_count));
     } else {
         let state = executor_start(plan);
         format_explain_lines(&state, 0, false, &mut lines);
