@@ -377,14 +377,16 @@ pub(crate) fn exec_next_inner(
     ctx: &mut ExecutorContext,
     timed: bool,
 ) -> Result<Option<TupleSlot>, ExecError> {
-    let started_at = if timed { Some(Instant::now()) } else { None };
+    if !timed {
+        return (state.exec_proc_node)(state, ctx);
+    }
+    // EXPLAIN ANALYZE path: record per-node timing like PG's InstrStartNode/InstrStopNode.
+    let started_at = Instant::now();
     let result = (state.exec_proc_node)(state, ctx);
     if let Ok(slot) = &result {
         let stats = node_stats_mut(state);
         stats.loops += 1;
-        if let Some(started_at) = started_at {
-            stats.total_time += started_at.elapsed();
-        }
+        stats.total_time += started_at.elapsed();
         if slot.is_some() {
             stats.rows += 1;
         }
