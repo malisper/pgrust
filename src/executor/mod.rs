@@ -291,20 +291,16 @@ pub(crate) fn execute_plan_internal(
     ctx: &mut ExecutorContext,
     timed: bool,
 ) -> Result<(StatementResult, PlanState, Duration), ExecError> {
+    let column_names = plan.column_names();
     let mut state = executor_start(plan);
-
     let mut rows = Vec::new();
-    let mut column_names = None;
     let started_at = Instant::now();
     while let Some(slot) = exec_next_inner(&mut state, ctx, timed)? {
-        if column_names.is_none() {
-            column_names = Some(Rc::clone(slot.column_names()));
-        }
         rows.push(slot.into_values()?);
     }
     Ok((
         StatementResult::Query {
-            column_names: column_names.map(|rc| rc.to_vec()).unwrap_or_default(),
+            column_names,
             rows,
         },
         state,
