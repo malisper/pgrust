@@ -200,6 +200,17 @@ pub fn page_get_item_id(
     ItemIdData::decode([page[idx], page[idx + 1], page[idx + 2], page[idx + 3]])
 }
 
+/// Like `page_get_item` but skips the bounds check on the offset number.
+/// The caller must guarantee that `offset` is a valid offset on this page
+/// (e.g. it came from a prior `page_get_max_offset_number` iteration).
+pub fn page_get_item_unchecked(page: &[u8; BLCKSZ], offset: OffsetNumber) -> &[u8] {
+    let idx = max_align(SIZE_OF_PAGE_HEADER_DATA) + (usize::from(offset) - 1) * ITEM_ID_SIZE;
+    let lp_raw = u32::from_le_bytes([page[idx], page[idx + 1], page[idx + 2], page[idx + 3]]);
+    let lp_off = (lp_raw & 0x7FFF) as usize;
+    let lp_len = ((lp_raw >> 17) & 0x7FFF) as usize;
+    &page[lp_off..lp_off + lp_len]
+}
+
 pub fn page_add_item(page: &mut [u8; BLCKSZ], item: &[u8]) -> Result<OffsetNumber, PageError> {
     let mut header = page_header(page)?;
     let aligned_len = max_align(item.len());

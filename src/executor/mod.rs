@@ -462,9 +462,7 @@ fn exec_seq_scan(
                 .map_err(|e| ExecError::Heap(HeapError::Buffer(e)))?;
             let page = &*guard;
 
-            if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan)
-                .map_err(ExecError::Heap)?
-            {
+            if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
                 decoder.decode_into(tuple_bytes, values_buf)?;
                 let values = std::mem::take(values_buf);
                 drop(guard);
