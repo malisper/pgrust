@@ -284,6 +284,7 @@ impl Database {
                 self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
 
                 let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -295,6 +296,7 @@ impl Database {
                 let result = execute_insert(bound, &mut ctx, xid, 0);
                 drop(ctx);
                 let result = self.finish_txn(xid, result);
+                guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
             }
@@ -308,6 +310,7 @@ impl Database {
                 self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
 
                 let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -325,6 +328,7 @@ impl Database {
                 );
                 drop(ctx);
                 let result = self.finish_txn(xid, result);
+                guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
             }
@@ -338,6 +342,7 @@ impl Database {
                 self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
 
                 let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -354,6 +359,7 @@ impl Database {
                 );
                 drop(ctx);
                 let result = self.finish_txn(xid, result);
+                guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
             }
@@ -523,6 +529,35 @@ impl Database {
 impl Drop for Database {
     fn drop(&mut self) {
         self.txns.write().flush_clog();
+    }
+}
+
+/// RAII guard that aborts a transaction if dropped without being disarmed.
+/// Prevents leaked in-progress transactions when a thread panics during
+/// auto-commit execution.
+struct AutoCommitGuard<'a> {
+    txns: &'a Arc<RwLock<TransactionManager>>,
+    txn_waiter: &'a TransactionWaiter,
+    xid: TransactionId,
+    committed: bool,
+}
+
+impl<'a> AutoCommitGuard<'a> {
+    fn new(txns: &'a Arc<RwLock<TransactionManager>>, txn_waiter: &'a TransactionWaiter, xid: TransactionId) -> Self {
+        Self { txns, txn_waiter, xid, committed: false }
+    }
+
+    fn disarm(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AutoCommitGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.txns.write().abort(self.xid);
+            self.txn_waiter.notify();
+        }
     }
 }
 
@@ -1068,6 +1103,35 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// Start a background thread that periodically checks for deadlocks
+    /// using parking_lot's deadlock detector.  Called once via `Once`.
+    #[cfg(feature = "deadlock_detection")]
+    fn start_deadlock_checker() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            thread::Builder::new()
+                .name("deadlock-checker".into())
+                .spawn(|| loop {
+                    thread::sleep(Duration::from_secs(1));
+                    let deadlocks = parking_lot::deadlock::check_deadlock();
+                    if !deadlocks.is_empty() {
+                        eprintln!("=== DEADLOCK DETECTED ({} cycle(s)) ===", deadlocks.len());
+                        for (i, threads) in deadlocks.iter().enumerate() {
+                            eprintln!("--- cycle {i} ---");
+                            for t in threads {
+                                eprintln!("thread {:?}:\n{:#?}", t.thread_id(), t.backtrace());
+                            }
+                        }
+                        // Don't panic here — just log. The test timeout will handle it.
+                    }
+                })
+                .unwrap();
+        });
+    }
+
+    #[cfg(not(feature = "deadlock_detection"))]
+    fn start_deadlock_checker() {}
+
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
     /// Run a test body with a timeout. If it doesn't complete within the
@@ -1090,6 +1154,7 @@ mod tests {
     }
 
     fn join_all_with_timeout(handles: Vec<thread::JoinHandle<()>>, timeout: Duration) {
+        start_deadlock_checker();
         let deadline = Instant::now() + timeout;
         for h in handles {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1720,12 +1785,13 @@ mod tests {
         for t in 0..num_writers {
             let db = db.clone();
             handles.push(thread::spawn(move || {
-                for _ in 0..20 {
-                    db.execute(
+                for i in 0..20 {
+                    if let Err(e) = db.execute(
                         (t + 1100) as ClientId,
                         "update rwtest set val = val + 1 where id = 1",
-                    )
-                    .unwrap();
+                    ) {
+                        panic!("writer {t} iteration {i} failed: {e:?}");
+                    }
                 }
             }));
         }
@@ -1733,22 +1799,21 @@ mod tests {
         for t in 0..num_readers {
             let db = db.clone();
             handles.push(thread::spawn(move || {
-                for _ in 0..50 {
-                    match db
-                        .execute(
-                            (t + 1200) as ClientId,
-                            "select val from rwtest where id = 1",
-                        )
-                        .unwrap()
-                    {
-                        StatementResult::Query { rows, .. } => {
+                for i in 0..50 {
+                    let result = db.execute(
+                        (t + 1200) as ClientId,
+                        "select val from rwtest where id = 1",
+                    );
+                    match result {
+                        Err(e) => panic!("reader {t} iteration {i} failed: {e:?}"),
+                        Ok(StatementResult::Query { rows, .. }) => {
                             assert_eq!(rows.len(), 1, "should always see exactly one row");
                             match &rows[0][0] {
                                 Value::Int32(v) => assert!(*v >= 0, "val should never be negative"),
                                 other => panic!("expected Int32, got {:?}", other),
                             }
                         }
-                        other => panic!("expected query result, got {:?}", other),
+                        Ok(other) => panic!("expected query result, got {:?}", other),
                     }
                 }
             }));
