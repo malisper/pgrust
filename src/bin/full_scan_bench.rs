@@ -135,6 +135,7 @@ struct Args {
     pause_before_scan_secs: u64,
     preserve_existing: bool,
     skip_load: bool,
+    wal_replay: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -147,6 +148,7 @@ fn parse_args() -> Result<Args, String> {
         pause_before_scan_secs: 0,
         preserve_existing: false,
         skip_load: false,
+        wal_replay: false,
     };
 
     let raw = std::env::args().skip(1).collect::<Vec<_>>();
@@ -159,6 +161,10 @@ fn parse_args() -> Result<Args, String> {
             }
             "--skip-load" => {
                 args.skip_load = true;
+                i += 1;
+            }
+            "--wal-replay" => {
+                args.wal_replay = true;
                 i += 1;
             }
             "--dir" => {

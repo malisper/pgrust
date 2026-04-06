@@ -158,6 +158,10 @@ pub struct Database {
 
 impl Database {
     pub fn open(base_dir: impl Into<PathBuf>, pool_size: usize) -> Result<Self, DatabaseError> {
+        Self::open_with_options(base_dir, pool_size, false)
+    }
+
+    pub fn open_with_options(base_dir: impl Into<PathBuf>, pool_size: usize, wal_replay: bool) -> Result<Self, DatabaseError> {
         let base_dir = base_dir.into();
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
@@ -167,7 +171,7 @@ impl Database {
 
         // --- WAL Recovery ---
         let wal_dir = base_dir.join("pg_wal");
-        if wal_dir.join("wal.log").exists() {
+        if wal_replay && wal_dir.join("wal.log").exists() {
             let mut recovery_smgr = MdStorageManager::new_in_recovery(&base_dir);
             {
                 use crate::storage::smgr::{ForkNumber, StorageManager};
