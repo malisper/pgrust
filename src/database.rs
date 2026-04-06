@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use parking_lot::{Condvar, Mutex, RwLock};
 
-use crate::access::heap::mvcc::{MvccError, TransactionId, TransactionManager};
+use crate::access::heap::mvcc::{CommandId, MvccError, TransactionId, TransactionManager};
 use crate::catalog::{CatalogError, DurableCatalog};
 use crate::executor::{ExecError, ExecutorContext, StatementResult};
 use crate::storage::smgr::{MdStorageManager, RelFileLocator};
@@ -456,6 +456,80 @@ impl Database {
         }
     }
 
+    /// Set up a SELECT query for streaming: lock, snapshot, plan, but do NOT
+    /// execute.  Returns a `SelectGuard` that the caller can drive with
+    /// `exec_next` one row at a time.  The guard releases the table lock on
+    /// drop.
+    ///
+    /// If `txn_ctx` is provided, the snapshot is taken within that
+    /// transaction (Read Committed: fresh snapshot per statement, but
+    /// aware of the transaction's own writes via xid/cid).
+    pub fn execute_streaming(
+        &self,
+        client_id: ClientId,
+        select_stmt: &crate::parser::SelectStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+    ) -> Result<SelectGuard<'_>, ExecError> {
+        use crate::access::heap::mvcc::INVALID_TRANSACTION_ID;
+        use crate::parser::build_plan;
+        use crate::executor::executor_start;
+
+        let (plan, table_rel) = {
+            let catalog_guard = self.catalog.read();
+            let catalog = catalog_guard.catalog();
+            let stmt = crate::parser::Statement::Select(select_stmt.clone());
+            let table_rel = extract_table_rel(&stmt, catalog);
+            let plan = build_plan(select_stmt, catalog)?;
+            (plan, table_rel)
+        };
+
+        if let Some(rel) = table_rel {
+            self.table_locks.lock_table(rel, TableLockMode::AccessShare, client_id);
+        }
+
+        let (snapshot, command_id) = match txn_ctx {
+            Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
+            None => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
+        };
+        let column_names = plan.column_names();
+        let state = executor_start(plan);
+        let ctx = ExecutorContext {
+            pool: std::sync::Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            snapshot,
+            client_id,
+            next_command_id: command_id,
+        };
+
+        Ok(SelectGuard {
+            state,
+            ctx,
+            column_names,
+            table_rel,
+            table_locks: &self.table_locks,
+            client_id,
+        })
+    }
+
+}
+
+/// Guard returned by `Database::execute_streaming`.  Holds the executor
+/// state and releases the table lock on drop.
+pub struct SelectGuard<'a> {
+    pub state: crate::executor::nodes::PlanState,
+    pub ctx: ExecutorContext,
+    pub column_names: Vec<String>,
+    table_rel: Option<RelFileLocator>,
+    table_locks: &'a TableLockManager,
+    client_id: ClientId,
+}
+
+impl Drop for SelectGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(rel) = self.table_rel {
+            self.table_locks.unlock_table(rel, self.client_id);
+        }
+    }
 }
 
 fn extract_table_rel(
@@ -693,6 +767,24 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Streaming SELECT — delegates to Database::execute_streaming.
+    /// Works both inside and outside explicit transactions.
+    pub fn execute_streaming<'a>(
+        &mut self,
+        db: &'a Database,
+        select_stmt: &crate::parser::SelectStatement,
+    ) -> Result<SelectGuard<'a>, ExecError> {
+        let txn_ctx = if let Some(ref mut txn) = self.active_txn {
+            let xid = txn.xid;
+            let cid = txn.next_command_id;
+            txn.next_command_id = txn.next_command_id.saturating_add(1);
+            Some((xid, cid))
+        } else {
+            None
+        };
+        db.execute_streaming(self.client_id, select_stmt, txn_ctx)
     }
 
     fn execute_in_transaction(
