@@ -8,7 +8,7 @@ use crate::access::heap::tuple::{
     heap_page_init, heap_page_replace_tuple,
 };
 use crate::database::TransactionWaiter;
-use crate::storage::page::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_item_unchecked, page_get_max_offset_number};
+use crate::storage::page::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number};
 use crate::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::storage::buffer::Page;
 use crate::{BufferPool, ClientId, Error, PinnedBuffer, RequestPageResult, SmgrStorageBackend};
@@ -355,12 +355,13 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
         let mut any_hints_written = false;
 
         for off in 1..=max_offset {
-            let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+            // Safe: off is in 1..=max_offset from page_get_max_offset_number.
+            let item_id = page_get_item_id_unchecked(page, off);
             if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
                 continue;
             }
 
-            let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+            let tuple_bytes = page_get_item_unchecked(page, off);
 
             let visible = if let Some(vis) = scan.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
                 vis

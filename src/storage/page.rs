@@ -36,6 +36,12 @@ impl ItemIdFlags {
             _ => Err(PageError::InvalidItemId),
         }
     }
+
+    /// Transmute from a 2-bit value. All 4 values (0-3) are valid variants.
+    fn from_bits_unchecked(bits: u8) -> Self {
+        debug_assert!(bits <= 3);
+        unsafe { std::mem::transmute(bits) }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +204,18 @@ pub fn page_get_item_id(
     }
     let idx = max_align(SIZE_OF_PAGE_HEADER_DATA) + (usize::from(offset) - 1) * ITEM_ID_SIZE;
     ItemIdData::decode([page[idx], page[idx + 1], page[idx + 2], page[idx + 3]])
+}
+
+/// Like `page_get_item_id` but skips the `page_get_max_offset_number` bounds
+/// check. The caller must guarantee `offset` is valid.
+pub fn page_get_item_id_unchecked(page: &[u8; BLCKSZ], offset: OffsetNumber) -> ItemIdData {
+    let idx = max_align(SIZE_OF_PAGE_HEADER_DATA) + (usize::from(offset) - 1) * ITEM_ID_SIZE;
+    let raw = u32::from_le_bytes([page[idx], page[idx + 1], page[idx + 2], page[idx + 3]]);
+    ItemIdData {
+        lp_off: (raw & 0x7fff) as u16,
+        lp_flags: ItemIdFlags::from_bits_unchecked(((raw >> 15) & 0x3) as u8),
+        lp_len: ((raw >> 17) & 0x7fff) as u16,
+    }
 }
 
 /// Like `page_get_item` but skips the bounds check on the offset number.
