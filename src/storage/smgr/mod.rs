@@ -321,7 +321,6 @@ pub(crate) fn segment_path(
 
 /// Return the segment number and the block offset within that segment for a
 /// given absolute block number.
-#[inline]
 pub(crate) fn seg_for_block(block: BlockNumber) -> (u32, u32) {
     (block / RELSEG_SIZE, block % RELSEG_SIZE)
 }
