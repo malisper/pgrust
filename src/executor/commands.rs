@@ -45,7 +45,7 @@ pub(crate) fn execute_explain(
             row_count += 1;
         }
         let elapsed = started_at.elapsed();
-        format_explain_lines(&state, 0, true, &mut lines);
+        format_explain_lines(state.as_ref(), 0, true, &mut lines);
         lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
         if stmt.buffers {
             let stats = ctx.pool.usage_stats();
@@ -54,7 +54,7 @@ pub(crate) fn execute_explain(
         lines.push(format!("Result Rows: {}", row_count));
     } else {
         let state = executor_start(plan);
-        format_explain_lines(&state, 0, false, &mut lines);
+        format_explain_lines(state.as_ref(), 0, false, &mut lines);
     }
 
     Ok(StatementResult::Query {

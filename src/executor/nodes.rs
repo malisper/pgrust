@@ -346,32 +346,25 @@ pub struct NodeExecStats {
     pub total_time: Duration,
 }
 
-/// The inner enum holding node-specific state.
-#[derive(Debug)]
-pub enum PlanStateKind {
-    Result(ResultState),
-    SeqScan(SeqScanState),
-    NestedLoopJoin(NestedLoopJoinState),
-    Filter(FilterState),
-    OrderBy(OrderByState),
-    Limit(LimitState),
-    Projection(ProjectionState),
-    Aggregate(AggregateState),
+/// Trait for executor plan nodes, like PostgreSQL's ExecProcNode vtable.
+/// Each node type implements this trait, and dispatch is via trait object.
+pub trait PlanNode: std::fmt::Debug {
+    fn exec_proc_node(
+        &mut self,
+        ctx: &mut super::ExecutorContext,
+    ) -> Result<Option<TupleSlot>, super::ExecError>;
+
+    fn node_stats(&self) -> &NodeExecStats;
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats;
+    fn node_label(&self) -> String;
+
+    /// Format children for EXPLAIN output. The node itself is formatted by
+    /// the caller; this method handles child nodes.
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>);
 }
 
-/// Executor node state. The function pointer avoids per-tuple match dispatch,
-/// like PostgreSQL's `ExecProcNode`.
-pub struct PlanState {
-    pub kind: PlanStateKind,
-    /// Direct function pointer for this node type — set once at plan init.
-    pub(crate) exec_proc_node: fn(&mut PlanState, &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError>,
-}
-
-impl std::fmt::Debug for PlanState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.kind.fmt(f)
-    }
-}
+/// Executor plan state — a trait object for dynamic dispatch.
+pub type PlanState = Box<dyn PlanNode>;
 
 #[derive(Debug)]
 pub struct ResultState {
@@ -393,15 +386,15 @@ pub struct SeqScanState {
 
 #[derive(Debug)]
 pub struct FilterState {
-    pub(crate) input: Box<PlanState>,
+    pub(crate) input: PlanState,
     pub(crate) predicate: Expr,
     pub(crate) stats: NodeExecStats,
 }
 
 #[derive(Debug)]
 pub struct NestedLoopJoinState {
-    pub(crate) left: Box<PlanState>,
-    pub(crate) right: Box<PlanState>,
+    pub(crate) left: PlanState,
+    pub(crate) right: PlanState,
     pub(crate) on: Expr,
     pub(crate) right_rows: Option<Vec<TupleSlot>>,
     pub(crate) current_left: Option<TupleSlot>,
@@ -411,14 +404,14 @@ pub struct NestedLoopJoinState {
 
 #[derive(Debug)]
 pub struct ProjectionState {
-    pub(crate) input: Box<PlanState>,
+    pub(crate) input: PlanState,
     pub(crate) targets: Vec<TargetEntry>,
     pub(crate) stats: NodeExecStats,
 }
 
 #[derive(Debug)]
 pub struct OrderByState {
-    pub(crate) input: Box<PlanState>,
+    pub(crate) input: PlanState,
     pub(crate) items: Vec<OrderByEntry>,
     pub(crate) rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
@@ -427,7 +420,7 @@ pub struct OrderByState {
 
 #[derive(Debug)]
 pub struct LimitState {
-    pub(crate) input: Box<PlanState>,
+    pub(crate) input: PlanState,
     pub(crate) limit: Option<usize>,
     pub(crate) offset: usize,
     pub(crate) skipped: usize,
@@ -437,7 +430,7 @@ pub struct LimitState {
 
 #[derive(Debug)]
 pub struct AggregateState {
-    pub(crate) input: Box<PlanState>,
+    pub(crate) input: PlanState,
     pub(crate) group_by: Vec<Expr>,
     pub(crate) accumulators: Vec<AggAccum>,
     pub(crate) having: Option<Expr>,
@@ -445,6 +438,101 @@ pub struct AggregateState {
     pub(crate) result_rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
     pub(crate) stats: NodeExecStats,
+}
+
+// --- PlanNode trait implementations ---
+
+impl PlanNode for ResultState {
+    fn exec_proc_node(&mut self, _ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_result(self)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Result".into() }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for SeqScanState {
+    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_seq_scan(self, ctx)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { format!("Seq Scan on rel {}", self.rel.rel_number) }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for FilterState {
+    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_filter(self, ctx)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Filter".into() }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for NestedLoopJoinState {
+    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_nested_loop_join(self, ctx)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Nested Loop".into() }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        super::explain::format_explain_lines(&*self.left, indent, analyze, lines);
+        super::explain::format_explain_lines(&*self.right, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for OrderByState {
+    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_order_by(self, ctx)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Sort".into() }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for LimitState {
+    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_limit(self, ctx)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Limit".into() }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for ProjectionState {
+    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_projection(self, ctx)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Projection".into() }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for AggregateState {
+    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+        super::exec_aggregate(self, ctx)
+    }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Aggregate".into() }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
+    }
 }
 
 impl TupleSlot {
