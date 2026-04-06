@@ -688,6 +688,19 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
     }
 
+    /// Increment the pin count on an already-pinned buffer, matching
+    /// PostgreSQL's `IncrBufferRefCount`. The buffer must already have
+    /// pin_count > 0 (i.e., the caller holds an existing pin).
+    ///
+    /// This is cheap: just an atomic CAS on the shared state word.
+    /// (PostgreSQL makes this even cheaper with a process-local
+    /// `PrivateRefCount`, but for now the shared atomic is sufficient.)
+    pub fn increment_buffer_pin(&self, buffer_id: BufferId) {
+        let frame = &self.frames[buffer_id];
+        debug_assert!(frame.state.pin_count() > 0, "increment_buffer_pin: buffer must already be pinned");
+        frame.state.increment_pin();
+    }
+
     /// Unpin the buffer without consuming the guard (for manual control).
     fn unpin_raw(&self, buffer_id: BufferId) {
         if let Some(frame) = self.frames.get(buffer_id) {
@@ -825,6 +838,67 @@ impl<S: StorageBackend + Send> Drop for PinnedBuffer<'_, S> {
         if !self.released {
             self.pool.unpin_raw(self.buffer_id);
         }
+    }
+}
+
+/// Owned buffer pin that can outlive any borrow of the pool.
+///
+/// Like PostgreSQL's `BufferHeapTupleTableSlot.buffer` field: holds an
+/// independent pin on the buffer so the tuple pointer remains valid even
+/// after the scan advances to the next page. The pin is released when this
+/// value is dropped.
+///
+/// Cloning takes an additional pin on the same buffer (cheap atomic CAS).
+pub struct OwnedBufferPin<S: StorageBackend + Send> {
+    pool: Arc<BufferPool<S>>,
+    buffer_id: BufferId,
+}
+
+impl<S: StorageBackend + Send> OwnedBufferPin<S> {
+    /// Take an additional pin on `buffer_id` (which must already be pinned)
+    /// and return an owned guard that will release it on drop.
+    pub fn new(pool: Arc<BufferPool<S>>, buffer_id: BufferId) -> Self {
+        pool.increment_buffer_pin(buffer_id);
+        Self { pool, buffer_id }
+    }
+
+    /// Adopt an existing pin without incrementing the pin count. The caller
+    /// transfers ownership of one pin to this guard — the pin will be released
+    /// when this value (or the last `Rc`/`Arc` wrapping it) is dropped.
+    pub fn wrap_existing(pool: Arc<BufferPool<S>>, buffer_id: BufferId) -> Self {
+        debug_assert!(
+            pool.frames[buffer_id].state.pin_count() > 0,
+            "wrap_existing: buffer must already be pinned"
+        );
+        Self { pool, buffer_id }
+    }
+
+    pub fn buffer_id(&self) -> BufferId {
+        self.buffer_id
+    }
+}
+
+impl<S: StorageBackend + Send> Clone for OwnedBufferPin<S> {
+    fn clone(&self) -> Self {
+        self.pool.increment_buffer_pin(self.buffer_id);
+        Self {
+            pool: Arc::clone(&self.pool),
+            buffer_id: self.buffer_id,
+        }
+    }
+}
+
+impl<S: StorageBackend + Send> Drop for OwnedBufferPin<S> {
+    fn drop(&mut self) {
+        self.pool.unpin_raw(self.buffer_id);
+    }
+}
+
+impl<S: StorageBackend + Send> std::fmt::Debug for OwnedBufferPin<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedBufferPin")
+            .field("buffer_id", &self.buffer_id)
+            .finish()
     }
 }
 

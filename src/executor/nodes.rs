@@ -1,7 +1,7 @@
 use crate::access::heap::am::VisibleHeapScan;
 use crate::access::heap::tuple::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::compact_string::CompactString;
-use crate::RelFileLocator;
+use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -192,16 +192,16 @@ pub(crate) enum SlotSource {
         values: Vec<Value>,
     },
     /// Zero-copy slot: holds a raw pointer to tuple bytes on a pinned buffer
-    /// page. User data on the page is immutable (heap_page_replace_tuple only
-    /// writes headers), and the pin prevents eviction.
+    /// page, plus an owned pin that keeps the buffer alive. User data on the
+    /// page is immutable (heap_page_replace_tuple only writes headers).
     ///
-    /// SAFETY: the pointer is valid as long as the buffer is pinned. The caller
-    /// must ensure the slot is consumed (or materialized) before the pin is
-    /// released.
+    /// The `OwnedBufferPin` is an independent pin taken via
+    /// `increment_buffer_pin`, so the slot remains valid even after the scan
+    /// advances to the next page and releases its own pin.
     BufferHeap {
         tuple_ptr: *const u8,
         tuple_len: usize,
-        buffer_id: usize,
+        pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
         decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
         materialized: Option<Vec<Value>>,
     },
@@ -220,10 +220,10 @@ impl std::fmt::Debug for SlotSource {
                 .debug_struct("Virtual")
                 .field("len", &values.len())
                 .finish(),
-            SlotSource::BufferHeap { tuple_len, buffer_id, materialized, .. } => f
+            SlotSource::BufferHeap { tuple_len, pin, materialized, .. } => f
                 .debug_struct("BufferHeap")
                 .field("tuple_len", tuple_len)
-                .field("buffer_id", buffer_id)
+                .field("buffer_id", &pin.buffer_id())
                 .field("materialized", &materialized.is_some())
                 .finish(),
         }
@@ -404,13 +404,16 @@ impl TupleSlot {
 
     /// Create a zero-copy slot that points directly at on-page tuple bytes.
     ///
-    /// SAFETY: `tuple_ptr` must point to valid tuple bytes on a pinned buffer
-    /// page. The slot must be consumed or materialized before the pin is released.
+    /// Takes an independent pin on the buffer via `OwnedBufferPin`, so the
+    /// slot remains valid even after the scan releases its own pin on the page.
+    ///
+    /// SAFETY: `tuple_ptr` must point to valid tuple bytes on the given
+    /// buffer page, and the buffer must currently be pinned by the caller.
     pub(crate) unsafe fn from_buffer_heap(
         column_names: Rc<[String]>,
         tuple_ptr: *const u8,
         tuple_len: usize,
-        buffer_id: usize,
+        pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
         decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
     ) -> Self {
         Self {
@@ -418,7 +421,7 @@ impl TupleSlot {
             source: SlotSource::BufferHeap {
                 tuple_ptr,
                 tuple_len,
-                buffer_id,
+                pin,
                 decoder,
                 materialized: None,
             },
@@ -426,7 +429,7 @@ impl TupleSlot {
     }
 
     /// Convert to a self-contained Virtual slot, decoding from the raw pointer
-    /// if needed. Must be called while the buffer is still pinned.
+    /// if needed. Releases the buffer pin when done.
     pub fn materialize(mut self) -> Result<Self, super::ExecError> {
         match &mut self.source {
             SlotSource::Virtual { .. } | SlotSource::Physical { .. } => Ok(self),
@@ -481,8 +484,8 @@ impl TupleSlot {
             }
             SlotSource::BufferHeap { tuple_ptr, tuple_len, decoder, materialized, .. } => {
                 if materialized.is_none() {
-                    // SAFETY: pointer is valid because the buffer is pinned
-                    // and user data is immutable on the page.
+                    // SAFETY: pointer is valid because the OwnedBufferPin keeps
+                    // the buffer pinned, and user data is immutable on the page.
                     let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
                     let mut values = Vec::new();
                     decoder.decode_into(bytes, &mut values)?;
