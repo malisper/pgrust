@@ -8,7 +8,7 @@ use crate::access::heap::tuple::{
     heap_page_init, heap_page_replace_tuple,
 };
 use crate::database::TransactionWaiter;
-use crate::storage::page::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_max_offset_number};
+use crate::storage::page::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_item_unchecked, page_get_max_offset_number};
 use crate::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::storage::buffer::Page;
 use crate::{BufferPool, ClientId, Error, PinnedBuffer, RequestPageResult, SmgrStorageBackend};
@@ -417,18 +417,19 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
 pub fn heap_scan_page_next_tuple<'a>(
     page: &'a Page,
     scan: &mut VisibleHeapScan,
-) -> Result<Option<(ItemPointerData, &'a [u8])>, HeapError> {
+) -> Option<(ItemPointerData, &'a [u8])> {
     if scan.vis_index >= scan.vis_count {
-        return Ok(None);
+        return None;
     }
     let off = scan.vis_tuples[scan.vis_index as usize];
     scan.vis_index += 1;
-    let tuple_bytes = page_get_item(page, off).map_err(|e| HeapError::Tuple(TupleError::from(e)))?;
+    // Safe: offset was validated during heap_scan_prepare_next_page.
+    let tuple_bytes = page_get_item_unchecked(page, off);
     let tid = ItemPointerData {
         block_number: scan.scan.current_block,
         offset_number: off,
     };
-    Ok(Some((tid, tuple_bytes)))
+    Some((tid, tuple_bytes))
 }
 
 /// Clean up a pagemode scan — unpin any remaining buffer.
