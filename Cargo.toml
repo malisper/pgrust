@@ -8,6 +8,7 @@ name = "pgrust"
 path = "src/lib.rs"
 
 [features]
+default = ["deadlock_detection"]
 deadlock_detection = ["parking_lot/deadlock_detection"]
 
 [dependencies]
