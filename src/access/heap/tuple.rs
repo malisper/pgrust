@@ -266,13 +266,21 @@ impl HeapTuple {
                         }
                         -1 => {
                             infomask |= HEAP_HASVARWIDTH;
-                            let aligned = attr.attalign.align_offset(data.len());
-                            if aligned > data.len() {
-                                data.resize(aligned, 0);
+                            let total_len_1b = 1 + bytes.len();
+                            if total_len_1b <= 127 {
+                                // Short varlena: 1-byte header, no alignment needed.
+                                data.push((total_len_1b as u8) << 1 | 0x01);
+                                data.extend_from_slice(bytes);
+                            } else {
+                                let aligned = attr.attalign.align_offset(data.len());
+                                if aligned > data.len() {
+                                    data.resize(aligned, 0);
+                                }
+                                let total_len = (4 + bytes.len()) as u32;
+                                // 4-byte varlena: low 2 bits are 0 (big varlena tag).
+                                data.extend_from_slice(&(total_len << 2).to_le_bytes());
+                                data.extend_from_slice(bytes);
                             }
-                            let total_len = 4 + bytes.len();
-                            data.extend_from_slice(&(total_len as u32).to_le_bytes());
-                            data.extend_from_slice(bytes);
                         }
                         -2 => {
                             infomask |= HEAP_HASVARWIDTH;
@@ -329,17 +337,27 @@ impl HeapTuple {
                     off = end;
                 }
                 -1 => {
-                    off = attr.attalign.align_offset(off);
-                    let total_len = u32::from_le_bytes([
-                        self.data[off],
-                        self.data[off + 1],
-                        self.data[off + 2],
-                        self.data[off + 3],
-                    ]) as usize;
-                    let start = off + 4;
-                    let end = off + total_len;
-                    values.push(Some(&self.data[start..end]));
-                    off = end;
+                    if self.data[off] & 0x01 != 0 {
+                        // Short varlena: 1-byte header, no alignment.
+                        let total_len = (self.data[off] >> 1) as usize;
+                        let start = off + 1;
+                        let end = off + total_len;
+                        values.push(Some(&self.data[start..end]));
+                        off = end;
+                    } else {
+                        off = attr.attalign.align_offset(off);
+                        let raw = u32::from_le_bytes([
+                            self.data[off],
+                            self.data[off + 1],
+                            self.data[off + 2],
+                            self.data[off + 3],
+                        ]);
+                        let total_len = (raw >> 2) as usize;
+                        let start = off + 4;
+                        let end = off + total_len;
+                        values.push(Some(&self.data[start..end]));
+                        off = end;
+                    }
                 }
                 -2 => {
                     let mut end = off;
@@ -408,17 +426,27 @@ pub fn deform_raw<'a>(bytes: &'a [u8], desc: &[AttributeDesc]) -> Result<Vec<Opt
                 off = end;
             }
             -1 => {
-                off = attr.attalign.align_offset(off);
-                let total_len = u32::from_le_bytes([
-                    data[off],
-                    data[off + 1],
-                    data[off + 2],
-                    data[off + 3],
-                ]) as usize;
-                let start = off + 4;
-                let end = off + total_len;
-                values.push(Some(&data[start..end]));
-                off = end;
+                if data[off] & 0x01 != 0 {
+                    // Short varlena: 1-byte header, no alignment.
+                    let total_len = (data[off] >> 1) as usize;
+                    let start = off + 1;
+                    let end = off + total_len;
+                    values.push(Some(&data[start..end]));
+                    off = end;
+                } else {
+                    off = attr.attalign.align_offset(off);
+                    let raw = u32::from_le_bytes([
+                        data[off],
+                        data[off + 1],
+                        data[off + 2],
+                        data[off + 3],
+                    ]);
+                    let total_len = (raw >> 2) as usize;
+                    let start = off + 4;
+                    let end = off + total_len;
+                    values.push(Some(&data[start..end]));
+                    off = end;
+                }
             }
             -2 => {
                 let mut end = off;
@@ -586,11 +614,12 @@ mod tests {
         assert_eq!(tuple.header.infomask2 & HEAP_NATTS_MASK, 3);
         assert_eq!(tuple.header.null_bitmap, Vec::<u8>::new());
 
-        // a at offset 0, b aligned to 4, c aligned to 8 with 4-byte varlena len.
+        // a at offset 0, b aligned to 4, c is short varlena (1-byte header, no alignment).
         assert_eq!(&tuple.data[0..2], &[0x11, 0x22]);
         assert_eq!(&tuple.data[4..8], &[0x33, 0x44, 0x55, 0x66]);
-        assert_eq!(u32::from_le_bytes(tuple.data[8..12].try_into().unwrap()), 9);
-        assert_eq!(&tuple.data[12..17], b"hello");
+        // Short varlena: header byte = (total_len << 1) | 0x01 = (6 << 1) | 1 = 0x0D
+        assert_eq!(tuple.data[8], 0x0D);
+        assert_eq!(&tuple.data[9..14], b"hello");
 
         let deformed = tuple.deform(&desc).unwrap();
         assert_eq!(deformed[0], Some(&[0x11, 0x22][..]));
