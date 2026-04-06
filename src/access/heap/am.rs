@@ -634,7 +634,6 @@ fn try_claim_tuple(
     }
 
     let xmax = tuple.header.xmax;
-    let ctid = tuple.header.ctid;
 
     drop(guard);
     drop(pin);
@@ -673,10 +672,24 @@ fn try_claim_tuple(
             Ok((ClaimResult::Claimed, target_tid))
         }
         Some(TransactionStatus::Committed) => {
-            if ctid == target_tid {
+            // Re-read the tuple to get the current ctid. The ctid captured
+            // before we dropped the lock may be stale: the committer writes
+            // ctid (pointing to the new version) AFTER setting xmax but
+            // BEFORE committing. If we read the tuple before ctid was
+            // written, we'd see ctid == self and incorrectly return Deleted
+            // instead of Updated.
+            let pin2 = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
+            let buffer_id2 = pin2.buffer_id();
+            let guard = pool.lock_buffer_shared(buffer_id2)?;
+            let page = *guard;
+            drop(guard);
+            drop(pin2);
+            let current = heap_page_get_tuple(&page, target_tid.offset_number)?;
+            let current_ctid = current.header.ctid;
+            if current_ctid == target_tid {
                 Ok((ClaimResult::Deleted, target_tid))
             } else {
-                Ok((ClaimResult::Updated { new_ctid: ctid }, target_tid))
+                Ok((ClaimResult::Updated { new_ctid: current_ctid }, target_tid))
             }
         }
     }
@@ -1301,4 +1314,5 @@ mod tests {
                 .is_none()
         );
     }
+
 }
