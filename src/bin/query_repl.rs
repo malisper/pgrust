@@ -416,6 +416,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                timed: false,
             };
             execute_statement(
                 Statement::Explain(stmt),
@@ -431,6 +432,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                timed: false,
             };
             execute_statement(
                 Statement::Select(stmt),
@@ -446,6 +448,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                timed: false,
             };
             execute_statement(
                 Statement::ShowTables,
@@ -461,6 +464,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                timed: false,
             };
             execute_statement(
                 Statement::CreateTable(stmt),
@@ -476,6 +480,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                timed: false,
             };
             execute_statement(
                 Statement::DropTable(stmt),
@@ -491,6 +496,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                timed: false,
             };
             execute_statement(
                 Statement::TruncateTable(stmt),
@@ -506,6 +512,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                timed: false,
             };
             execute_statement(
                 Statement::Vacuum(stmt),
@@ -523,6 +530,7 @@ fn run_statement(
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
+                    timed: false,
                 };
                 execute_statement(
                     Statement::Insert(stmt),
@@ -551,6 +559,7 @@ fn run_statement(
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
+                    timed: false,
                 };
                 execute_statement(
                     Statement::Update(stmt),
@@ -579,6 +588,7 @@ fn run_statement(
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
+                    timed: false,
                 };
                 execute_statement(
                     Statement::Delete(stmt),

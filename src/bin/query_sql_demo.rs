@@ -140,6 +140,7 @@ fn main() -> Result<(), ExecError> {
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 11,
         next_command_id: 0,
+        timed: false,
     };
 
     match execute_sql(&sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)? {

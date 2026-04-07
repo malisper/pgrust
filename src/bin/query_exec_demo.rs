@@ -152,12 +152,13 @@ fn main() -> Result<(), ExecError> {
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
         next_command_id: 0,
+        timed: false,
     };
 
+    let names = state.column_names().to_vec();
     println!("=== Output Rows ===");
     while let Some(slot) = exec_next(&mut state, &mut ctx)? {
-        let names = slot.column_names().to_vec();
-        let values = slot.into_values()?;
+        let values: Vec<_> = slot.values()?.iter().map(|v| v.to_owned_value()).collect();
         let rendered = names
             .iter()
             .zip(values.iter())

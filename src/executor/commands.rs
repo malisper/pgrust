@@ -20,7 +20,7 @@ use crate::storage::smgr::StorageManager;
 use super::nodes::*;
 use super::expr::{eval_expr, predicate_matches, tuple_from_values};
 use super::explain::{format_buffer_usage, format_explain_lines};
-use super::{ExecError, ExecutorContext, StatementResult, exec_next_inner, executor_start};
+use super::{ExecError, ExecutorContext, StatementResult, executor_start};
 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
@@ -38,12 +38,14 @@ pub(crate) fn execute_explain(
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
+        ctx.timed = stmt.timing;
         let mut state = executor_start(plan);
         let mut row_count: u64 = 0;
         let started_at = std::time::Instant::now();
-        while let Some(_slot) = exec_next_inner(&mut state, ctx, stmt.timing)? {
+        while let Some(_slot) = state.exec_proc_node(ctx)? {
             row_count += 1;
         }
+        ctx.timed = false;
         let elapsed = started_at.elapsed();
         format_explain_lines(state.as_ref(), 0, true, &mut lines);
         lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
@@ -138,10 +140,7 @@ pub fn execute_insert(
         .values
         .iter()
         .map(|row| {
-            let column_names: Vec<String> =
-                stmt.desc.columns.iter().map(|c| c.name.clone()).collect();
-            let mut slot =
-                TupleSlot::virtual_row(column_names.into(), vec![Value::Null; stmt.desc.columns.len()]);
+            let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
             for (column_index, expr) in stmt.target_columns.iter().zip(row.iter()) {
                 values[*column_index] = eval_expr(expr, &mut slot)?;
@@ -227,16 +226,12 @@ pub fn execute_update_with_waiter(
 
         let desc = Rc::new(stmt.desc.clone());
         let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
-        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, Rc::clone(&col_names), tid, tuple);
+        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
         if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
             continue;
         }
         let original_values = slot.into_values()?;
-        let mut eval_slot = TupleSlot::virtual_row(
-            col_names,
-            original_values.clone(),
-        );
+        let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
         let mut values = original_values;
         for assignment in &stmt.assignments {
             values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot)?;
@@ -266,22 +261,12 @@ pub fn execute_update_with_waiter(
                     let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
                     let desc = Rc::new(stmt.desc.clone());
                     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-                    let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
-                    let mut new_slot = TupleSlot::from_heap_tuple(
-                        desc,
-                        attr_descs,
-                        Rc::clone(&col_names),
-                        new_ctid,
-                        new_tuple,
-                    );
+                    let mut new_slot = TupleSlot::from_heap_tuple(desc, attr_descs, new_ctid, new_tuple);
                     if !predicate_matches(stmt.predicate.as_ref(), &mut new_slot)? {
                         break;
                     }
                     let new_values_base = new_slot.into_values()?;
-                    let mut eval_slot = TupleSlot::virtual_row(
-                        col_names,
-                        new_values_base.clone(),
-                    );
+                    let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
                     let mut new_values = new_values_base;
                     for assignment in &stmt.assignments {
                         new_values[assignment.column_index] =
@@ -335,8 +320,7 @@ pub fn execute_delete_with_waiter(
 
         let desc = Rc::new(stmt.desc.clone());
         let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
-        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, col_names, tid, tuple);
+        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
         if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
             continue;
         }

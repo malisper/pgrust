@@ -9,11 +9,10 @@ extern crate rand;
 
 pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
     match expr {
-        Expr::Column(index) => slot
-            .values()?
-            .get(*index)
-            .cloned()
-            .ok_or(ExecError::InvalidColumn(*index)),
+        Expr::Column(index) => {
+            let val = slot.get_attr(*index)?;
+            Ok(val.clone())
+        }
         Expr::Const(value) => Ok(value.clone()),
         Expr::Add(left, right) => add_values(eval_expr(left, slot)?, eval_expr(right, slot)?),
         Expr::Negate(inner) => negate_value(eval_expr(inner, slot)?),

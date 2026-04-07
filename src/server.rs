@@ -241,7 +241,7 @@ fn handle_query(
 
                 loop {
                     match exec_next(&mut guard.state, &mut guard.ctx) {
-                        Ok(Some(mut slot)) => {
+                        Ok(Some(slot)) => {
                             if !header_sent {
                                 send_row_description(stream, &column_names)?;
                                 header_sent = true;
