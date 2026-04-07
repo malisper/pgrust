@@ -8,7 +8,7 @@ pub use nodes::*;
 pub use expr::eval_expr;
 
 use crate::access::heap::am::{
-    HeapError, heap_scan_begin_visible, heap_scan_end, heap_scan_next_visible_raw,
+    HeapError, heap_scan_begin_visible, heap_scan_end,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::access::heap::mvcc::{CommandId, MvccError, Snapshot, TransactionId, TransactionManager};
@@ -21,7 +21,7 @@ use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 use std::cmp::Ordering;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use expr::{compare_order_by_keys, compare_order_values};
 use commands::*;
@@ -32,6 +32,8 @@ pub struct ExecutorContext {
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,
+    /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
+    pub timed: bool,
 }
 
 #[derive(Debug)]
@@ -193,10 +195,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
     match plan {
         Plan::Result => Box::new(ResultState {
             emitted: false,
+            slot: TupleSlot::empty(0),
             stats: NodeExecStats::default(),
         }),
         Plan::SeqScan { rel, desc } => {
-            let column_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs = desc.attribute_descs();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs));
             let ncols = desc.columns.len();
@@ -205,19 +208,27 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 column_names,
                 scan: None,
                 decoder,
-                values_buf: Vec::with_capacity(ncols),
+                slot: TupleSlot::empty(ncols),
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::NestedLoopJoin { left, right, on } => Box::new(NestedLoopJoinState {
-            left: executor_start(*left),
-            right: executor_start(*right),
-            on,
-            right_rows: None,
-            current_left: None,
-            right_index: 0,
-            stats: NodeExecStats::default(),
-        }),
+        Plan::NestedLoopJoin { left, right, on } => {
+            let combined_names: Vec<String> = left.column_names().into_iter()
+                .chain(right.column_names())
+                .collect();
+            let ncols = combined_names.len();
+            Box::new(NestedLoopJoinState {
+                left: executor_start(*left),
+                right: executor_start(*right),
+                on,
+                combined_names,
+                right_rows: None,
+                current_left: None,
+                right_index: 0,
+                slot: TupleSlot::empty(ncols),
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::Filter { input, predicate } => Box::new(FilterState {
             input: executor_start(*input),
             predicate,
@@ -242,11 +253,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
             returned: 0,
             stats: NodeExecStats::default(),
         }),
-        Plan::Projection { input, targets } => Box::new(ProjectionState {
-            input: executor_start(*input),
-            targets,
-            stats: NodeExecStats::default(),
-        }),
+        Plan::Projection { input, targets } => {
+            let column_names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+            let ncols = column_names.len();
+            Box::new(ProjectionState {
+                input: executor_start(*input),
+                targets,
+                column_names,
+                slot: TupleSlot::empty(ncols),
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::Aggregate {
             input,
             group_by,
@@ -270,29 +287,13 @@ pub fn execute_plan(
     plan: Plan,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
-    Ok(execute_plan_internal(plan, ctx, false)?.0)
-}
-
-pub(crate) fn execute_plan_internal(
-    plan: Plan,
-    ctx: &mut ExecutorContext,
-    timed: bool,
-) -> Result<(StatementResult, PlanState, Duration), ExecError> {
     let column_names = plan.column_names();
     let mut state = executor_start(plan);
     let mut rows = Vec::new();
-    let started_at = Instant::now();
-    while let Some(slot) = exec_next_inner(&mut state, ctx, timed)? {
-        rows.push(slot.into_values()?);
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        rows.push(slot.values()?.iter().map(|v| v.to_owned_value()).collect());
     }
-    Ok((
-        StatementResult::Query {
-            column_names,
-            rows,
-        },
-        state,
-        started_at.elapsed(),
-    ))
+    Ok(StatementResult::Query { column_names, rows })
 }
 
 pub fn execute_sql(
@@ -352,48 +353,29 @@ pub fn execute_readonly_statement(
     }
 }
 
-pub fn exec_next(
-    state: &mut PlanState,
+pub fn exec_next<'a>(
+    state: &'a mut PlanState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
-    exec_next_inner(state, ctx, false)
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    state.exec_proc_node(ctx)
 }
 
-pub(crate) fn exec_next_inner(
-    state: &mut PlanState,
-    ctx: &mut ExecutorContext,
-    timed: bool,
-) -> Result<Option<TupleSlot>, ExecError> {
-    if !timed {
-        return state.exec_proc_node(ctx);
-    }
-    // EXPLAIN ANALYZE path: record per-node timing like PG's InstrStartNode/InstrStopNode.
-    let started_at = Instant::now();
-    let result = state.exec_proc_node(ctx);
-    if let Ok(slot) = &result {
-        let stats = state.node_stats_mut();
-        stats.loops += 1;
-        stats.total_time += started_at.elapsed();
-        if slot.is_some() {
-            stats.rows += 1;
-        }
-    }
-    result
-}
-
-fn exec_result(state: &mut ResultState) -> Result<Option<TupleSlot>, ExecError> {
+fn exec_result<'a>(state: &'a mut ResultState) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if state.emitted {
         Ok(None)
     } else {
         state.emitted = true;
-        Ok(Some(TupleSlot::virtual_row(Rc::from(Vec::<String>::new()), Vec::new())))
+        state.slot.kind = SlotKind::Virtual;
+        state.slot.tts_values.clear();
+        state.slot.tts_nvalid = 0;
+        Ok(Some(&mut state.slot))
     }
 }
 
-fn exec_seq_scan(
-    state: &mut SeqScanState,
+fn exec_seq_scan<'a>(
+    state: &'a mut SeqScanState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if state.scan.is_none() {
         state.scan = Some(heap_scan_begin_visible(
             &ctx.pool,
@@ -403,10 +385,13 @@ fn exec_seq_scan(
         )?);
     }
 
-    let scan = state.scan.as_mut().unwrap();
-    let column_names = Rc::clone(&state.column_names);
+    let start = if ctx.timed { Some(Instant::now()) } else { None };
 
     loop {
+        // Reborrow scan each iteration so the borrow checker can see that
+        // state.slot is a separate field.
+        let scan = state.scan.as_mut().unwrap();
+
         // Try to get the next tuple from the current page's visibility list.
         if scan.has_page_tuples() {
             let buffer_id = scan.pinned_buffer_id().expect("buffer must be pinned");
@@ -415,92 +400,127 @@ fn exec_seq_scan(
             let page = &*guard;
 
             if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
-                // Capture raw pointer — safe because page is pinned and user
-                // data is immutable.
                 let raw_ptr = tuple_bytes.as_ptr();
                 let raw_len = tuple_bytes.len();
                 drop(guard);
 
-                // Get shared pin (Rc clone, keeps page alive for TextRef pointers)
                 let pin = scan.pinned_buffer_rc()
                     .expect("buffer must be pinned");
 
-                // Decode into reusable buffer. TextRef values point at the
-                // still-pinned page. The pin Rc in the slot keeps it alive.
-                state.values_buf.clear();
-                let raw_bytes = unsafe { std::slice::from_raw_parts(raw_ptr, raw_len) };
-                state.decoder.decode_into(raw_bytes, &mut state.values_buf)?;
+                // Reset slot for new tuple (like PG's ExecStoreBufferHeapTuple)
+                state.slot.kind = SlotKind::BufferHeapTuple {
+                    tuple_ptr: raw_ptr,
+                    tuple_len: raw_len,
+                    pin,
+                    decoder: Rc::clone(&state.decoder),
+                };
+                state.slot.tts_nvalid = 0;
+                state.slot.tts_values.clear();
+                state.slot.decode_offset = 0;
 
-                return Ok(Some(TupleSlot {
-                    column_names,
-                    source: SlotSource::ScanBuf {
-                        values_ptr: state.values_buf.as_ptr(),
-                        values_len: state.values_buf.len(),
-                        pin,
-                    },
-                }));
+                if let Some(s) = start {
+                    state.stats.loops += 1;
+                    state.stats.total_time += s.elapsed();
+                    state.stats.rows += 1;
+                }
+                return Ok(Some(&mut state.slot));
             }
             drop(guard);
         }
 
-        // Current page exhausted — prepare the next page (collects visible offsets).
+        // Current page exhausted — prepare the next page.
         let next: Result<Option<usize>, ExecError> =
             heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, scan);
         if next?.is_none() {
             heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
+            if let Some(s) = start {
+                state.stats.loops += 1;
+                state.stats.total_time += s.elapsed();
+            }
             return Ok(None);
         }
-        // Loop back to read tuples from the newly prepared page.
     }
 }
 
-fn exec_filter(
-    state: &mut FilterState,
+fn exec_filter<'a>(
+    state: &'a mut FilterState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    let start = if ctx.timed { Some(Instant::now()) } else { None };
     loop {
-        let Some(mut slot) = exec_next(&mut state.input, ctx)? else {
-            return Ok(None);
+        let slot = match state.input.exec_proc_node(ctx)? {
+            Some(s) => s,
+            None => {
+                if let Some(s) = start {
+                    state.stats.loops += 1;
+                    state.stats.total_time += s.elapsed();
+                }
+                return Ok(None);
+            }
         };
 
-        match eval_expr(&state.predicate, &mut slot)? {
-            Value::Bool(true) => return Ok(Some(slot)),
+        match eval_expr(&state.predicate, slot)? {
+            Value::Bool(true) => {
+                if let Some(s) = start {
+                    state.stats.loops += 1;
+                    state.stats.total_time += s.elapsed();
+                    state.stats.rows += 1;
+                }
+                // Re-borrow the child's slot via current_slot().
+                // The previous `slot` borrow is no longer used, so
+                // the borrow checker allows re-borrowing state.input.
+                return Ok(state.input.current_slot());
+            }
             Value::Bool(false) | Value::Null => continue,
             other => return Err(ExecError::NonBoolQual(other)),
         }
     }
 }
 
-fn exec_nested_loop_join(
-    state: &mut NestedLoopJoinState,
+fn exec_nested_loop_join<'a>(
+    state: &'a mut NestedLoopJoinState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if state.right_rows.is_none() {
         let mut rows = Vec::new();
-        while let Some(slot) = exec_next(&mut state.right, ctx)? {
-            rows.push(slot.materialize()?);
+        while let Some(slot) = state.right.exec_proc_node(ctx)? {
+            let values = slot.values()?.iter().map(|v| v.to_owned_value()).collect();
+            rows.push(TupleSlot::virtual_row(values));
         }
         state.right_rows = Some(rows);
     }
 
-    let right_rows = state.right_rows.as_ref().unwrap();
     loop {
         if state.current_left.is_none() {
-            state.current_left = exec_next(&mut state.left, ctx)?
-                .map(|s| s.materialize()).transpose()?;
-            state.right_index = 0;
+            match state.left.exec_proc_node(ctx)? {
+                Some(slot) => {
+                    let values = slot.values()?.iter().map(|v| v.to_owned_value()).collect();
+                    state.current_left = Some(TupleSlot::virtual_row(values));
+                    state.right_index = 0;
+                }
+                None => return Ok(None),
+            }
         }
 
-        let Some(left_slot) = state.current_left.as_ref() else {
-            return Ok(None);
-        };
+        let right_rows = state.right_rows.as_ref().unwrap();
 
         while state.right_index < right_rows.len() {
-            let joined = combine_slots(left_slot.clone(), right_rows[state.right_index].clone())?;
+            let ri = state.right_index;
             state.right_index += 1;
-            let mut eval_slot = joined.clone();
-            match eval_expr(&state.on, &mut eval_slot)? {
-                Value::Bool(true) => return Ok(Some(joined)),
+
+            // Build combined slot from materialized left + right
+            let left = state.current_left.as_ref().unwrap();
+            let right = &right_rows[ri];
+            let mut combined_values: Vec<Value> = left.tts_values.clone();
+            combined_values.extend(right.tts_values.iter().cloned());
+            let nvalid = combined_values.len();
+            state.slot.tts_values = combined_values;
+            state.slot.tts_nvalid = nvalid;
+            state.slot.kind = SlotKind::Virtual;
+            state.slot.decode_offset = 0;
+
+            match eval_expr(&state.on, &mut state.slot)? {
+                Value::Bool(true) => return Ok(Some(&mut state.slot)),
                 Value::Bool(false) | Value::Null => {}
                 other => return Err(ExecError::NonBoolQual(other)),
             }
@@ -510,32 +530,40 @@ fn exec_nested_loop_join(
     }
 }
 
-fn exec_projection(
-    state: &mut ProjectionState,
+fn exec_projection<'a>(
+    state: &'a mut ProjectionState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
-    let Some(mut input) = exec_next(&mut state.input, ctx)? else {
-        return Ok(None);
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    let input_slot = match state.input.exec_proc_node(ctx)? {
+        Some(s) => s,
+        None => return Ok(None),
     };
 
+    // Evaluate projection targets. Materialize TextRef values since they
+    // reference the input slot's page which may be overwritten on the next call.
     let mut values = Vec::with_capacity(state.targets.len());
-    let mut names = Vec::with_capacity(state.targets.len());
     for target in &state.targets {
-        values.push(eval_expr(&target.expr, &mut input)?);
-        names.push(target.name.clone());
+        values.push(eval_expr(&target.expr, input_slot)?.to_owned_value());
     }
 
-    Ok(Some(TupleSlot::virtual_row(names.into(), values)))
+    // Store in projection's own slot
+    let nvalid = values.len();
+    state.slot.tts_values = values;
+    state.slot.tts_nvalid = nvalid;
+    state.slot.kind = SlotKind::Virtual;
+    state.slot.decode_offset = 0;
+    Ok(Some(&mut state.slot))
 }
 
-fn exec_order_by(
-    state: &mut OrderByState,
+fn exec_order_by<'a>(
+    state: &'a mut OrderByState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if state.rows.is_none() {
         let mut rows = Vec::new();
-        while let Some(slot) = exec_next(&mut state.input, ctx)? {
-            rows.push(slot.materialize()?);
+        while let Some(slot) = state.input.exec_proc_node(ctx)? {
+            let values = slot.values()?.iter().map(|v| v.to_owned_value()).collect();
+            rows.push(TupleSlot::virtual_row(values));
         }
 
         let mut keyed_rows = Vec::with_capacity(rows.len());
@@ -553,20 +581,20 @@ fn exec_order_by(
         state.rows = Some(keyed_rows.into_iter().map(|(_, row)| row).collect());
     }
 
-    let rows = state.rows.as_ref().unwrap();
+    let rows = state.rows.as_mut().unwrap();
     if state.next_index >= rows.len() {
         return Ok(None);
     }
 
-    let slot = rows[state.next_index].clone();
+    let idx = state.next_index;
     state.next_index += 1;
-    Ok(Some(slot))
+    Ok(Some(&mut rows[idx]))
 }
 
-fn exec_limit(
-    state: &mut LimitState,
+fn exec_limit<'a>(
+    state: &'a mut LimitState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if let Some(limit) = state.limit {
         if state.returned >= limit {
             return Ok(None);
@@ -574,32 +602,31 @@ fn exec_limit(
     }
 
     while state.skipped < state.offset {
-        if exec_next(&mut state.input, ctx)?.is_none() {
+        if state.input.exec_proc_node(ctx)?.is_none() {
             return Ok(None);
         }
         state.skipped += 1;
     }
 
-    let next = exec_next(&mut state.input, ctx)?;
-    if next.is_some() {
+    let slot = state.input.exec_proc_node(ctx)?;
+    if slot.is_some() {
         state.returned += 1;
     }
-    Ok(next)
+    Ok(slot)
 }
 
-fn exec_aggregate(
-    state: &mut AggregateState,
+fn exec_aggregate<'a>(
+    state: &'a mut AggregateState,
     ctx: &mut ExecutorContext,
-) -> Result<Option<TupleSlot>, ExecError> {
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
     if state.result_rows.is_none() {
         let mut groups: Vec<AggGroup> = Vec::new();
 
-        while let Some(mut slot) = exec_next(&mut state.input, ctx)? {
-            let key_values: Vec<Value> = state
-                .group_by
-                .iter()
-                .map(|expr| eval_expr(expr, &mut slot))
-                .collect::<Result<_, _>>()?;
+        while let Some(slot) = state.input.exec_proc_node(ctx)? {
+            let mut key_values = Vec::with_capacity(state.group_by.len());
+            for expr in &state.group_by {
+                key_values.push(eval_expr(expr, slot)?);
+            }
 
             let group_idx = groups
                 .iter()
@@ -621,7 +648,7 @@ fn exec_aggregate(
             for (i, accum) in state.accumulators.iter().enumerate() {
                 let is_count_star = accum.func == AggFunc::Count && accum.arg.is_none();
                 let value = if let Some(arg) = &accum.arg {
-                    eval_expr(arg, &mut slot)?
+                    eval_expr(arg, slot)?
                 } else {
                     Value::Null
                 };
@@ -649,8 +676,7 @@ fn exec_aggregate(
             }
 
             if let Some(having) = &state.having {
-                let mut having_slot =
-                    TupleSlot::virtual_row(state.output_columns.clone().into(), row_values.clone());
+                let mut having_slot = TupleSlot::virtual_row(row_values.clone());
                 match eval_expr(having, &mut having_slot)? {
                     Value::Bool(true) => {}
                     Value::Bool(false) | Value::Null => continue,
@@ -658,31 +684,20 @@ fn exec_aggregate(
                 }
             }
 
-            result_rows.push(TupleSlot::virtual_row(
-                state.output_columns.clone().into(),
-                row_values,
-            ));
+            result_rows.push(TupleSlot::virtual_row(row_values));
         }
 
         state.result_rows = Some(result_rows);
     }
 
-    let rows = state.result_rows.as_ref().unwrap();
+    let rows = state.result_rows.as_mut().unwrap();
     if state.next_index >= rows.len() {
         return Ok(None);
     }
 
-    let slot = rows[state.next_index].clone();
+    let idx = state.next_index;
     state.next_index += 1;
-    Ok(Some(slot))
-}
-
-fn combine_slots(left: TupleSlot, right: TupleSlot) -> Result<TupleSlot, ExecError> {
-    let mut names: Vec<String> = left.column_names().to_vec();
-    names.extend_from_slice(right.column_names());
-    let mut values = left.into_values()?;
-    values.extend(right.into_values()?);
-    Ok(TupleSlot::virtual_row(names.into(), values))
+    Ok(Some(&mut rows[idx]))
 }
 
 
@@ -898,11 +913,13 @@ mod tests {
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
             client_id: 42,
             next_command_id: 0,
+            timed: false,
         };
 
+        let names = state.column_names().to_vec();
         let mut rows = Vec::new();
         while let Some(slot) = exec_next(&mut state, &mut ctx)? {
-            rows.push((slot.column_names().to_vec(), slot.into_values()?));
+            rows.push((names.clone(), slot.values()?.iter().map(|v| v.to_owned_value()).collect()));
         }
         Ok(rows)
     }
@@ -937,16 +954,14 @@ mod tests {
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
             next_command_id: 0,
+            timed: false,
         };
         execute_sql(sql, &mut catalog, &mut ctx, xid)
     }
 
     #[test]
     fn expr_eval_obeys_null_semantics() {
-        let desc = relation_desc();
-        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
         let mut slot = TupleSlot::virtual_row(
-            col_names,
             vec![Value::Int32(7), Value::Text("alice".into()), Value::Null],
         );
         assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Int32(7)))), &mut slot).unwrap(), Value::Bool(true));
@@ -963,11 +978,9 @@ mod tests {
         use crate::access::heap::tuple::ItemPointerData;
         let desc = Rc::new(relation_desc());
         let attr_descs: Rc<[AttributeDesc]> = desc.attribute_descs().into();
-        let col_names: Rc<[String]> = desc.columns.iter().map(|c| c.name.clone()).collect();
         let mut slot = TupleSlot::from_heap_tuple(
             desc,
             attr_descs,
-            col_names,
             ItemPointerData { block_number: 0, offset_number: 1 },
             tuple(1, "alice", None),
         );

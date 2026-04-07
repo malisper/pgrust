@@ -268,6 +268,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    timed: false,
                 };
                 let result = execute_readonly_statement(plan_or_stmt, catalog_guard.catalog(), &mut ctx);
                 drop(ctx);
@@ -296,6 +297,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    timed: false,
                 };
                 let result = execute_insert(bound, &mut ctx, xid, 0);
                 drop(ctx);
@@ -322,6 +324,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    timed: false,
                 };
                 let result = execute_update_with_waiter(
                     bound,
@@ -354,6 +357,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    timed: false,
                 };
                 let result = execute_delete_with_waiter(
                     bound,
@@ -407,6 +411,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    timed: false,
                 };
                 let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
                 if result.is_ok() {
@@ -441,6 +446,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    timed: false,
                 };
                 let result =
                     execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx);
@@ -503,6 +509,7 @@ impl Database {
             snapshot,
             client_id,
             next_command_id: command_id,
+            timed: false,
         };
 
         Ok(SelectGuard {
@@ -821,6 +828,7 @@ impl Session {
                     snapshot,
                     client_id,
                     next_command_id: cid,
+                    timed: false,
                 };
                 execute_readonly_statement(stmt, catalog_guard.catalog(), &mut ctx)
             }
@@ -843,6 +851,7 @@ impl Session {
                     snapshot,
                     client_id,
                     next_command_id: cid,
+                    timed: false,
                 };
                 execute_insert(bound, &mut ctx, xid, cid)
             }
@@ -865,6 +874,7 @@ impl Session {
                     snapshot,
                     client_id,
                     next_command_id: cid,
+                    timed: false,
                 };
                 execute_update_with_waiter(
                     bound, &mut ctx, xid, cid,
@@ -890,6 +900,7 @@ impl Session {
                     snapshot,
                     client_id,
                     next_command_id: cid,
+                    timed: false,
                 };
                 execute_delete_with_waiter(
                     bound, &mut ctx, xid,
@@ -938,6 +949,7 @@ impl Session {
                     snapshot,
                     client_id,
                     next_command_id: cid,
+                    timed: false,
                 };
                 let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
                 if result.is_ok() {
@@ -970,6 +982,7 @@ impl Session {
                     snapshot,
                     client_id,
                     next_command_id: cid,
+                    timed: false,
                 };
                 execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx)
             }
@@ -1036,6 +1049,7 @@ impl Session {
             snapshot,
             client_id,
             next_command_id: cid,
+            timed: false,
         };
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
     }
@@ -1136,6 +1150,7 @@ impl Session {
                 snapshot,
                 client_id: self.client_id,
                 next_command_id: cid,
+                timed: false,
             };
             crate::executor::commands::execute_insert_values(
                 rel,

@@ -2,8 +2,6 @@
 //! per-tuple type dispatch, alignment computation, and branch overhead.
 
 use crate::access::heap::tuple::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
-use crate::compact_string::CompactString;
-
 use super::nodes::{RelationDesc, ScalarType, Value};
 use super::ExecError;
 
@@ -88,16 +86,40 @@ impl CompiledTupleDecoder {
         }
     }
 
+    pub(crate) fn ncols(&self) -> usize {
+        self.ncols
+    }
+
     /// Decode into an existing Vec, reusing its heap allocation.
     /// The Vec is cleared and refilled. Callers keep the Vec across
     /// iterations to avoid per-row allocation (like PostgreSQL's
     /// TupleTableSlot Datum array).
     pub fn decode_into(&self, tuple_bytes: &[u8], values: &mut Vec<Value>) -> Result<(), ExecError> {
         values.clear();
-        self.decode_inner(tuple_bytes, values)
+        let mut offset = 0;
+        self.decode_range(tuple_bytes, values, 0, self.ncols, &mut offset)
     }
 
-    fn decode_inner(&self, tuple_bytes: &[u8], values: &mut Vec<Value>) -> Result<(), ExecError> {
+    /// Incrementally decode columns `start_attr..end_attr` into `values`,
+    /// resuming from `byte_offset` in the tuple data area.
+    ///
+    /// Like PostgreSQL's `slot_deform_heap_tuple`: only decodes the columns
+    /// that haven't been decoded yet. Fixed-offset columns jump directly to
+    /// their precomputed offset; variable-width columns resume from
+    /// `byte_offset`.
+    pub fn decode_range(
+        &self,
+        tuple_bytes: &[u8],
+        values: &mut Vec<Value>,
+        start_attr: usize,
+        end_attr: usize,
+        byte_offset: &mut usize,
+    ) -> Result<(), ExecError> {
+        let end_attr = end_attr.min(self.ncols);
+        if start_attr >= end_attr {
+            return Ok(());
+        }
+
         if tuple_bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
             return Err(ExecError::Tuple(crate::access::heap::tuple::TupleError::HeaderTooShort));
         }
@@ -111,10 +133,11 @@ impl CompiledTupleDecoder {
         };
         let data = &tuple_bytes[hoff..];
 
-        values.reserve(self.ncols.saturating_sub(values.capacity()));
-        let mut off = 0usize;
+        let mut off = *byte_offset;
 
-        for (i, step) in self.steps.iter().enumerate() {
+        for i in start_attr..end_attr {
+            let step = &self.steps[i];
+
             if has_null && crate::access::heap::tuple::att_isnull(i, null_bitmap) {
                 values.push(Value::Null);
                 continue;
@@ -210,6 +233,7 @@ impl CompiledTupleDecoder {
             }
         }
 
+        *byte_offset = off;
         Ok(())
     }
 }

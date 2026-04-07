@@ -225,119 +225,118 @@ impl Plan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TupleSlot {
-    pub(crate) column_names: Rc<[String]>,
-    pub(crate) source: SlotSource,
+    pub(crate) kind: SlotKind,
+    /// Decoded column values, like PG's tts_values[]. Reused across tuples
+    /// to avoid per-tuple allocation.
+    pub(crate) tts_values: Vec<Value>,
+    /// Number of columns decoded so far (0..ncols). Like PG's tts_nvalid.
+    pub(crate) tts_nvalid: usize,
+    /// Byte offset in the tuple data area after the last decoded column,
+    /// used to resume incremental decode for variable-width columns.
+    pub(crate) decode_offset: usize,
 }
 
-pub(crate) enum SlotSource {
-    Physical {
+/// Describes how the slot's underlying tuple data is stored.
+/// Like PG's TTS_FLAG_* / BufferHeapTupleTableSlot vs VirtualTupleTableSlot.
+pub(crate) enum SlotKind {
+    /// No tuple stored. Initial state before first scan tuple.
+    Empty,
+    /// tts_values is authoritative (no backing tuple to decode from).
+    Virtual,
+    /// Owned heap tuple from a heap fetch (used by UPDATE/DELETE path).
+    HeapTuple {
         desc: Rc<RelationDesc>,
         attr_descs: Rc<[AttributeDesc]>,
         tid: ItemPointerData,
         tuple: HeapTuple,
-        materialized: Option<Vec<Value>>,
     },
-    Virtual {
-        values: Vec<Value>,
-    },
-    /// Zero-copy slot: holds a raw pointer to tuple bytes on a pinned buffer
-    /// page, plus an owned pin that keeps the buffer alive. User data on the
-    /// page is immutable (heap_page_replace_tuple only writes headers).
-    ///
-    /// The `OwnedBufferPin` is an independent pin taken via
-    /// `increment_buffer_pin`, so the slot remains valid even after the scan
-    /// advances to the next page and releases its own pin.
-    BufferHeap {
+    /// Zero-copy reference to tuple bytes on a pinned buffer page.
+    /// Decoded lazily into tts_values via CompiledTupleDecoder::decode_range.
+    BufferHeapTuple {
         tuple_ptr: *const u8,
         tuple_len: usize,
         pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
         decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
-        materialized: Option<Vec<Value>>,
-    },
-    /// Zero-allocation slot: references a pre-allocated values buffer owned by
-    /// SeqScanState. The buffer contains decoded Values (which may include
-    /// TextRef pointers to on-page bytes). The pin keeps the page alive for
-    /// any TextRef values. The values_ptr is valid until the next exec_seq_scan
-    /// call, which only happens after the caller consumes/drops this slot.
-    ScanBuf {
-        values_ptr: *const Value,
-        values_len: usize,
-        pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
     },
 }
 
-impl std::fmt::Debug for SlotSource {
+impl std::fmt::Debug for SlotKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SlotSource::Physical { desc, tid, materialized, .. } => f
-                .debug_struct("Physical")
-                .field("desc_cols", &desc.columns.len())
-                .field("tid", tid)
-                .field("materialized", &materialized.is_some())
-                .finish(),
-            SlotSource::Virtual { values } => f
-                .debug_struct("Virtual")
-                .field("len", &values.len())
-                .finish(),
-            SlotSource::BufferHeap { tuple_len, pin, materialized, .. } => f
-                .debug_struct("BufferHeap")
+            SlotKind::Empty => write!(f, "Empty"),
+            SlotKind::Virtual => write!(f, "Virtual"),
+            SlotKind::HeapTuple { tid, .. } => f.debug_struct("HeapTuple").field("tid", tid).finish(),
+            SlotKind::BufferHeapTuple { tuple_len, pin, .. } => f
+                .debug_struct("BufferHeapTuple")
                 .field("tuple_len", tuple_len)
                 .field("buffer_id", &pin.buffer_id())
-                .field("materialized", &materialized.is_some())
-                .finish(),
-            SlotSource::ScanBuf { values_len, pin, .. } => f
-                .debug_struct("ScanBuf")
-                .field("values_len", values_len)
-                .field("buffer_id", &pin.buffer_id())
                 .finish(),
         }
     }
 }
 
-impl Clone for SlotSource {
+impl Clone for SlotKind {
     fn clone(&self) -> Self {
         match self {
-            SlotSource::Physical { desc, attr_descs, tid, tuple, materialized } => {
-                SlotSource::Physical {
-                    desc: Rc::clone(desc),
-                    attr_descs: Rc::clone(attr_descs),
-                    tid: *tid,
-                    tuple: tuple.clone(),
-                    materialized: materialized.clone(),
-                }
-            }
-            SlotSource::Virtual { values } => SlotSource::Virtual { values: values.clone() },
-            SlotSource::BufferHeap { materialized: Some(values), .. } => {
-                // Cloning a BufferHeap forces materialization — the clone becomes
-                // a self-contained Virtual slot so it doesn't depend on the pin.
-                SlotSource::Virtual { values: values.clone() }
-            }
-            SlotSource::BufferHeap { .. } => {
-                panic!("cannot clone unmaterialized BufferHeap slot — call materialize() first")
-            }
-            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
-                // Clone must materialize — the clone may outlive the values buffer.
-                let slice = unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) };
-                SlotSource::Virtual {
-                    values: slice.iter().map(Value::to_owned_value).collect(),
-                }
+            SlotKind::Empty => SlotKind::Empty,
+            SlotKind::Virtual => SlotKind::Virtual,
+            SlotKind::HeapTuple { desc, attr_descs, tid, tuple } => SlotKind::HeapTuple {
+                desc: Rc::clone(desc),
+                attr_descs: Rc::clone(attr_descs),
+                tid: *tid,
+                tuple: tuple.clone(),
+            },
+            SlotKind::BufferHeapTuple { .. } => {
+                panic!("cannot clone BufferHeapTuple — call materialize() first")
             }
         }
     }
 }
 
-impl PartialEq for SlotSource {
+impl PartialEq for SlotKind {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (SlotSource::Virtual { values: a }, SlotSource::Virtual { values: b }) => a == b,
+            (SlotKind::Empty, SlotKind::Empty) => true,
+            (SlotKind::Virtual, SlotKind::Virtual) => true,
             _ => false,
         }
     }
 }
 
-impl Eq for SlotSource {}
+impl Eq for SlotKind {}
+
+impl std::fmt::Debug for TupleSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TupleSlot")
+            .field("kind", &self.kind)
+            .field("tts_nvalid", &self.tts_nvalid)
+            .field("ncols", &self.ncols())
+            .finish()
+    }
+}
+
+impl Clone for TupleSlot {
+    fn clone(&self) -> Self {
+        Self {
+            kind: match &self.kind {
+                SlotKind::BufferHeapTuple { .. } => SlotKind::Virtual,
+                other => other.clone(),
+            },
+            tts_values: self.tts_values.iter().map(|v| v.to_owned_value()).collect(),
+            tts_nvalid: self.tts_nvalid,
+            decode_offset: 0,
+        }
+    }
+}
+
+impl PartialEq for TupleSlot {
+    fn eq(&self, other: &Self) -> bool {
+        self.tts_values == other.tts_values
+    }
+}
+
+impl Eq for TupleSlot {}
 
 #[derive(Debug, Clone, Default)]
 pub struct NodeExecStats {
@@ -348,11 +347,23 @@ pub struct NodeExecStats {
 
 /// Trait for executor plan nodes, like PostgreSQL's ExecProcNode vtable.
 /// Each node type implements this trait, and dispatch is via trait object.
+///
+/// `exec_proc_node` returns a borrowed `&mut TupleSlot` owned by the node.
+/// Like PG's ExecProcNode, the caller must consume the slot before the next
+/// call (the borrow checker enforces this).
 pub trait PlanNode: std::fmt::Debug {
-    fn exec_proc_node(
-        &mut self,
+    fn exec_proc_node<'a>(
+        &'a mut self,
         ctx: &mut super::ExecutorContext,
-    ) -> Result<Option<TupleSlot>, super::ExecError>;
+    ) -> Result<Option<&'a mut TupleSlot>, super::ExecError>;
+
+    /// Re-borrow the slot from the last exec_proc_node call.
+    /// Used by filter to return a reference to the child's slot
+    /// after evaluating the predicate.
+    fn current_slot(&mut self) -> Option<&mut TupleSlot>;
+
+    /// Output column names for this node. Fixed for the lifetime of the query.
+    fn column_names(&self) -> &[String];
 
     fn node_stats(&self) -> &NodeExecStats;
     fn node_stats_mut(&mut self) -> &mut NodeExecStats;
@@ -369,18 +380,19 @@ pub type PlanState = Box<dyn PlanNode>;
 #[derive(Debug)]
 pub struct ResultState {
     pub(crate) emitted: bool,
+    pub(crate) slot: TupleSlot,
     pub(crate) stats: NodeExecStats,
 }
 
 #[derive(Debug)]
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
-    pub(crate) column_names: Rc<[String]>,
+    pub(crate) column_names: Vec<String>,
     pub(crate) scan: Option<VisibleHeapScan>,
     pub(crate) decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
-    /// Pre-allocated values buffer, reused across tuples. Contains TextRef
-    /// pointers to on-page bytes (valid while pinned).
-    pub(crate) values_buf: Vec<Value>,
+    /// Reusable slot, like PG's ss_ScanTupleSlot. Holds BufferHeapTuple
+    /// with lazy decode into tts_values.
+    pub(crate) slot: TupleSlot,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -396,9 +408,11 @@ pub struct NestedLoopJoinState {
     pub(crate) left: PlanState,
     pub(crate) right: PlanState,
     pub(crate) on: Expr,
+    pub(crate) combined_names: Vec<String>,
     pub(crate) right_rows: Option<Vec<TupleSlot>>,
     pub(crate) current_left: Option<TupleSlot>,
     pub(crate) right_index: usize,
+    pub(crate) slot: TupleSlot,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -406,6 +420,8 @@ pub struct NestedLoopJoinState {
 pub struct ProjectionState {
     pub(crate) input: PlanState,
     pub(crate) targets: Vec<TargetEntry>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) slot: TupleSlot,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -443,9 +459,11 @@ pub struct AggregateState {
 // --- PlanNode trait implementations ---
 
 impl PlanNode for ResultState {
-    fn exec_proc_node(&mut self, _ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, _ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_result(self)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
+    fn column_names(&self) -> &[String] { &[] }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Result".into() }
@@ -453,9 +471,11 @@ impl PlanNode for ResultState {
 }
 
 impl PlanNode for SeqScanState {
-    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_seq_scan(self, ctx)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
+    fn column_names(&self) -> &[String] { &self.column_names }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { format!("Seq Scan on rel {}", self.rel.rel_number) }
@@ -463,9 +483,11 @@ impl PlanNode for SeqScanState {
 }
 
 impl PlanNode for FilterState {
-    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_filter(self, ctx)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> { self.input.current_slot() }
+    fn column_names(&self) -> &[String] { self.input.column_names() }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Filter".into() }
@@ -475,9 +497,11 @@ impl PlanNode for FilterState {
 }
 
 impl PlanNode for NestedLoopJoinState {
-    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_nested_loop_join(self, ctx)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
+    fn column_names(&self) -> &[String] { &self.combined_names }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Nested Loop".into() }
@@ -488,9 +512,15 @@ impl PlanNode for NestedLoopJoinState {
 }
 
 impl PlanNode for OrderByState {
-    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_order_by(self, ctx)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+    fn column_names(&self) -> &[String] { self.input.column_names() }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Sort".into() }
@@ -500,9 +530,11 @@ impl PlanNode for OrderByState {
 }
 
 impl PlanNode for LimitState {
-    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_limit(self, ctx)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> { self.input.current_slot() }
+    fn column_names(&self) -> &[String] { self.input.column_names() }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Limit".into() }
@@ -512,9 +544,11 @@ impl PlanNode for LimitState {
 }
 
 impl PlanNode for ProjectionState {
-    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_projection(self, ctx)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
+    fn column_names(&self) -> &[String] { &self.column_names }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Projection".into() }
@@ -524,9 +558,15 @@ impl PlanNode for ProjectionState {
 }
 
 impl PlanNode for AggregateState {
-    fn exec_proc_node(&mut self, ctx: &mut super::ExecutorContext) -> Result<Option<TupleSlot>, super::ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut super::ExecutorContext) -> Result<Option<&'a mut TupleSlot>, super::ExecError> {
         super::exec_aggregate(self, ctx)
     }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.result_rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+    fn column_names(&self) -> &[String] { &self.output_columns }
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Aggregate".into() }
@@ -539,163 +579,117 @@ impl TupleSlot {
     pub fn from_heap_tuple(
         desc: Rc<RelationDesc>,
         attr_descs: Rc<[AttributeDesc]>,
-        column_names: Rc<[String]>,
         tid: ItemPointerData,
         tuple: HeapTuple,
     ) -> Self {
+        let ncols = desc.columns.len();
         Self {
-            column_names,
-            source: SlotSource::Physical {
-                desc,
-                attr_descs,
-                tid,
-                tuple,
-                materialized: None,
-            },
+            kind: SlotKind::HeapTuple { desc, attr_descs, tid, tuple },
+            tts_values: Vec::with_capacity(ncols),
+            tts_nvalid: 0,
+            decode_offset: 0,
         }
     }
 
-    pub fn virtual_row(column_names: Rc<[String]>, values: Vec<Value>) -> Self {
+    pub fn virtual_row(values: Vec<Value>) -> Self {
+        let nvalid = values.len();
         Self {
-            column_names,
-            source: SlotSource::Virtual { values },
+            kind: SlotKind::Virtual,
+            tts_values: values,
+            tts_nvalid: nvalid,
+            decode_offset: 0,
         }
     }
 
-    pub fn column_names(&self) -> &Rc<[String]> {
-        &self.column_names
-    }
-
-    /// Create a zero-copy slot that points directly at on-page tuple bytes.
-    ///
-    /// Takes an independent pin on the buffer via `OwnedBufferPin`, so the
-    /// slot remains valid even after the scan releases its own pin on the page.
-    ///
-    /// SAFETY: `tuple_ptr` must point to valid tuple bytes on the given
-    /// buffer page, and the buffer must currently be pinned by the caller.
-    pub(crate) unsafe fn from_buffer_heap(
-        column_names: Rc<[String]>,
-        tuple_ptr: *const u8,
-        tuple_len: usize,
-        pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
-        decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
-    ) -> Self {
+    pub(crate) fn empty(ncols: usize) -> Self {
         Self {
-            column_names,
-            source: SlotSource::BufferHeap {
-                tuple_ptr,
-                tuple_len,
-                pin,
-                decoder,
-                materialized: None,
-            },
+            kind: SlotKind::Empty,
+            tts_values: Vec::with_capacity(ncols),
+            tts_nvalid: 0,
+            decode_offset: 0,
         }
     }
 
-    /// Convert to a self-contained Virtual slot, decoding from the raw pointer
-    /// if needed. Releases the buffer pin when done.
+    /// Number of columns in this slot.
+    pub(crate) fn ncols(&self) -> usize {
+        match &self.kind {
+            SlotKind::HeapTuple { desc, .. } => desc.columns.len(),
+            SlotKind::BufferHeapTuple { decoder, .. } => decoder.ncols(),
+            SlotKind::Virtual | SlotKind::Empty => self.tts_values.len(),
+        }
+    }
+
+    /// Convert to a self-contained Virtual slot, decoding all columns and
+    /// materializing TextRef → owned Text. Releases the buffer pin.
     pub fn materialize(mut self) -> Result<Self, super::ExecError> {
-        match &mut self.source {
-            SlotSource::Virtual { .. } | SlotSource::Physical { .. } => Ok(self),
-            SlotSource::BufferHeap { materialized: Some(_), .. } => {
-                let SlotSource::BufferHeap { materialized, .. } = self.source else { unreachable!() };
-                let mut values = materialized.unwrap();
-                Value::materialize_all(&mut values);
-                Ok(Self {
-                    column_names: self.column_names,
-                    source: SlotSource::Virtual { values },
-                })
-            }
-            SlotSource::BufferHeap { tuple_ptr, tuple_len, decoder, materialized, .. } => {
-                let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
-                let mut values = Vec::new();
-                decoder.decode_into(bytes, &mut values)?;
-                Value::materialize_all(&mut values);
-                *materialized = Some(values);
-                let SlotSource::BufferHeap { materialized, .. } = self.source else { unreachable!() };
-                Ok(Self {
-                    column_names: self.column_names,
-                    source: SlotSource::Virtual { values: materialized.unwrap() },
-                })
-            }
-            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
-                let slice = unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) };
-                Ok(Self {
-                    column_names: self.column_names,
-                    source: SlotSource::Virtual {
-                        values: slice.iter().map(Value::to_owned_value).collect(),
-                    },
-                })
-            }
-        }
+        self.values()?;
+        Value::materialize_all(&mut self.tts_values);
+        Ok(Self {
+            kind: SlotKind::Virtual,
+            tts_values: self.tts_values,
+            tts_nvalid: self.tts_nvalid,
+            decode_offset: 0,
+        })
     }
 
     pub fn tid(&self) -> Option<ItemPointerData> {
-        match &self.source {
-            SlotSource::Physical { tid, .. } => Some(*tid),
-            SlotSource::Virtual { .. }
-            | SlotSource::BufferHeap { .. }
-            | SlotSource::ScanBuf { .. } => None,
+        match &self.kind {
+            SlotKind::HeapTuple { tid, .. } => Some(*tid),
+            _ => None,
         }
     }
 
+    /// Decode all columns. Like PG's slot_getallattrs().
     pub fn values(&mut self) -> Result<&[Value], super::ExecError> {
-        match &mut self.source {
-            SlotSource::Virtual { values } => Ok(values.as_slice()),
-            SlotSource::Physical {
-                desc,
-                attr_descs,
-                tuple,
-                materialized,
-                ..
-            } => {
-                if materialized.is_none() {
-                    let raw = tuple.deform(attr_descs)?;
-                    let mut values = Vec::with_capacity(desc.columns.len());
-                    for (column, datum) in desc.columns.iter().zip(raw.into_iter()) {
-                        values.push(decode_value(column, datum)?);
-                    }
-                    *materialized = Some(values);
-                }
-                Ok(materialized.as_ref().unwrap().as_slice())
+        let ncols = self.ncols();
+        self.slot_getsomeattrs(ncols)
+    }
+
+    /// Decode columns 0..natts. Like PG's slot_getsomeattrs(slot, natts).
+    /// Columns already decoded (< tts_nvalid) are skipped.
+    pub fn slot_getsomeattrs(&mut self, natts: usize) -> Result<&[Value], super::ExecError> {
+        if self.tts_nvalid >= natts {
+            return Ok(&self.tts_values[..natts]);
+        }
+        match &self.kind {
+            SlotKind::Virtual => {
+                // Virtual: tts_values is authoritative
+                Ok(&self.tts_values[..natts])
             }
-            SlotSource::BufferHeap { tuple_ptr, tuple_len, decoder, materialized, .. } => {
-                if materialized.is_none() {
-                    let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
-                    let mut values = Vec::new();
-                    decoder.decode_into(bytes, &mut values)?;
-                    *materialized = Some(values);
-                }
-                Ok(materialized.as_ref().unwrap().as_slice())
+            SlotKind::BufferHeapTuple { tuple_ptr, tuple_len, decoder, .. } => {
+                let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
+                // Clone the decoder Rc to avoid borrowing self.kind while mutating self.tts_values
+                let decoder = Rc::clone(decoder);
+                decoder.decode_range(bytes, &mut self.tts_values, self.tts_nvalid, natts, &mut self.decode_offset)?;
+                self.tts_nvalid = natts;
+                Ok(&self.tts_values[..natts])
             }
-            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
-                Ok(unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) })
+            SlotKind::HeapTuple { desc, attr_descs, tuple, .. } => {
+                // HeapTuple: decode all columns at once via deform()
+                let raw = tuple.deform(attr_descs)?;
+                self.tts_values.clear();
+                for (column, datum) in desc.columns.iter().zip(raw.into_iter()) {
+                    self.tts_values.push(decode_value(column, datum)?);
+                }
+                self.tts_nvalid = self.tts_values.len();
+                Ok(&self.tts_values[..natts])
+            }
+            SlotKind::Empty => {
+                panic!("cannot get attrs from empty slot")
             }
         }
+    }
+
+    /// Get a single column value, decoding only up to that column.
+    /// Like PG's slot_getattr().
+    pub fn get_attr(&mut self, index: usize) -> Result<&Value, super::ExecError> {
+        self.slot_getsomeattrs(index + 1)?;
+        Ok(&self.tts_values[index])
     }
 
     pub fn into_values(mut self) -> Result<Vec<Value>, super::ExecError> {
-        match &self.source {
-            SlotSource::ScanBuf { values_ptr, values_len, .. } => {
-                let slice = unsafe { std::slice::from_raw_parts(*values_ptr, *values_len) };
-                return Ok(slice.iter().map(Value::to_owned_value).collect());
-            }
-            _ => {}
-        }
         self.values()?;
-        match self.source {
-            SlotSource::Virtual { values } => Ok(values),
-            SlotSource::Physical { materialized: Some(mut values), .. } => {
-                Value::materialize_all(&mut values);
-                Ok(values)
-            }
-            SlotSource::Physical { materialized: None, .. } => unreachable!("values() just materialized"),
-            SlotSource::BufferHeap { materialized: Some(mut values), .. } => {
-                Value::materialize_all(&mut values);
-                Ok(values)
-            }
-            SlotSource::BufferHeap { materialized: None, .. } => unreachable!("values() just materialized"),
-            SlotSource::ScanBuf { .. } => unreachable!("handled above"),
-        }
+        Value::materialize_all(&mut self.tts_values);
+        Ok(self.tts_values)
     }
 }
