@@ -270,6 +270,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 column_names,
                 scan: None,
                 slot,
+                qual: None,
                 stats: NodeExecStats::default(),
             })
         }
@@ -287,6 +288,25 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 current_left: None,
                 right_index: 0,
                 slot: TupleSlot::empty(ncols),
+                stats: NodeExecStats::default(),
+            })
+        }
+        // Like PG's ExecSeqScanWithQual: push the qual into the scan node
+        // so tuples that fail never leave the scan (no vtable dispatch).
+        Plan::Filter { input, predicate } if matches!(&*input, Plan::SeqScan { .. }) => {
+            let Plan::SeqScan { rel, desc } = *input else { unreachable!() };
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let attr_descs = desc.attribute_descs();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs));
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
+            Box::new(SeqScanState {
+                rel,
+                column_names,
+                scan: None,
+                slot,
+                qual: Some(expr::compile_predicate(&predicate)),
                 stats: NodeExecStats::default(),
             })
         }
