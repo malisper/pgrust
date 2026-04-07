@@ -237,6 +237,9 @@ pub struct TupleSlot {
     /// Byte offset in the tuple data area after the last decoded column,
     /// used to resume incremental decode for variable-width columns.
     pub(crate) decode_offset: usize,
+    /// Compiled tuple decoder, like PG's tts_tupleDescriptor. Set once when
+    /// the slot is created; shared via Rc so future scan types can share it.
+    pub(crate) decoder: Option<Rc<super::tuple_decoder::CompiledTupleDecoder>>,
 }
 
 /// Describes how the slot's underlying tuple data is stored.
@@ -254,12 +257,11 @@ pub(crate) enum SlotKind {
         tuple: HeapTuple,
     },
     /// Zero-copy reference to tuple bytes on a pinned buffer page.
-    /// Decoded lazily into tts_values via CompiledTupleDecoder::decode_range.
+    /// Decoded lazily into tts_values via the slot's `decoder` field.
     BufferHeapTuple {
         tuple_ptr: *const u8,
         tuple_len: usize,
         pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
-        decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
     },
 }
 
@@ -328,6 +330,7 @@ impl Clone for TupleSlot {
             tts_values: self.tts_values.iter().map(|v| v.to_owned_value()).collect(),
             tts_nvalid: self.tts_nvalid,
             decode_offset: 0,
+            decoder: None,
         }
     }
 }
@@ -391,9 +394,9 @@ pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) column_names: Vec<String>,
     pub(crate) scan: Option<VisibleHeapScan>,
-    pub(crate) decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
     /// Reusable slot, like PG's ss_ScanTupleSlot. Holds BufferHeapTuple
-    /// with lazy decode into tts_values.
+    /// with lazy decode into tts_values. The slot's `decoder` field holds
+    /// the compiled tuple decoder (set once at plan start).
     pub(crate) slot: TupleSlot,
     pub(crate) stats: NodeExecStats,
 }
@@ -518,7 +521,6 @@ impl PlanNode for SeqScanState {
                         tuple_ptr: raw_ptr,
                         tuple_len: raw_len,
                         pin,
-                        decoder: Rc::clone(&self.decoder),
                     };
                     self.slot.tts_nvalid = 0;
                     self.slot.tts_values.clear();
@@ -877,6 +879,7 @@ impl TupleSlot {
             tts_values: Vec::with_capacity(ncols),
             tts_nvalid: 0,
             decode_offset: 0,
+            decoder: None,
         }
     }
 
@@ -887,6 +890,7 @@ impl TupleSlot {
             tts_values: values,
             tts_nvalid: nvalid,
             decode_offset: 0,
+            decoder: None,
         }
     }
 
@@ -896,6 +900,7 @@ impl TupleSlot {
             tts_values: Vec::with_capacity(ncols),
             tts_nvalid: 0,
             decode_offset: 0,
+            decoder: None,
         }
     }
 
@@ -903,7 +908,7 @@ impl TupleSlot {
     pub(crate) fn ncols(&self) -> usize {
         match &self.kind {
             SlotKind::HeapTuple { desc, .. } => desc.columns.len(),
-            SlotKind::BufferHeapTuple { decoder, .. } => decoder.ncols(),
+            SlotKind::BufferHeapTuple { .. } => self.decoder.as_ref().expect("BufferHeapTuple requires decoder").ncols(),
             SlotKind::Virtual | SlotKind::Empty => self.tts_values.len(),
         }
     }
@@ -918,6 +923,7 @@ impl TupleSlot {
             tts_values: self.tts_values,
             tts_nvalid: self.tts_nvalid,
             decode_offset: 0,
+            decoder: None,
         })
     }
 
@@ -945,10 +951,10 @@ impl TupleSlot {
                 // Virtual: tts_values is authoritative
                 Ok(&self.tts_values[..natts])
             }
-            SlotKind::BufferHeapTuple { tuple_ptr, tuple_len, decoder, .. } => {
-                let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
-                // Clone the decoder Rc to avoid borrowing self.kind while mutating self.tts_values
-                let decoder = Rc::clone(decoder);
+            SlotKind::BufferHeapTuple { tuple_ptr, tuple_len, .. } => {
+                let (ptr, len) = (*tuple_ptr, *tuple_len);
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                let decoder = self.decoder.as_ref().expect("BufferHeapTuple requires decoder");
                 decoder.decode_range(bytes, &mut self.tts_values, self.tts_nvalid, natts, &mut self.decode_offset)?;
                 self.tts_nvalid = natts;
                 Ok(&self.tts_values[..natts])

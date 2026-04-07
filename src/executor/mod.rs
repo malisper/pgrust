@@ -199,12 +199,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let attr_descs = desc.attribute_descs();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs));
             let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
             Box::new(SeqScanState {
                 rel,
                 column_names,
                 scan: None,
-                decoder,
-                slot: TupleSlot::empty(ncols),
+                slot,
                 stats: NodeExecStats::default(),
             })
         }
