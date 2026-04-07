@@ -90,6 +90,17 @@ impl CompiledTupleDecoder {
         self.ncols
     }
 
+    /// Return the fixed byte offset for a column if it's a FixedInt32.
+    /// Used by the predicate compiler to read int32 values directly from
+    /// raw tuple bytes, bypassing the full decode path.
+    pub(crate) fn fixed_int32_offset(&self, col: usize) -> Option<usize> {
+        if col >= self.steps.len() { return None; }
+        match &self.steps[col] {
+            DecodeStep::FixedInt32 { data_offset } => Some(*data_offset),
+            _ => None,
+        }
+    }
+
     /// Decode into an existing Vec, reusing its heap allocation.
     /// The Vec is cleared and refilled. Callers keep the Vec across
     /// iterations to avoid per-row allocation (like PostgreSQL's

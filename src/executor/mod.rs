@@ -298,6 +298,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs = desc.attribute_descs();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(&desc, &attr_descs));
+            let qual = expr::compile_predicate_with_decoder(&predicate, &decoder);
             let ncols = desc.columns.len();
             let mut slot = TupleSlot::empty(ncols);
             slot.decoder = Some(decoder);
@@ -306,7 +307,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 column_names,
                 scan: None,
                 slot,
-                qual: Some(expr::compile_predicate(&predicate)),
+                qual: Some(qual),
                 stats: NodeExecStats::default(),
             })
         }
