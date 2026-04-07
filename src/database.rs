@@ -2202,6 +2202,68 @@ mod tests {
         }
     }
 
+    /// Regression test for bugs/005: try_read contention busy-loop.
+    ///
+    /// Before the fix, try_claim_tuple used try_read() to check xmax status.
+    /// Under contention (16 threads updating the same row), all try_read
+    /// attempts could fail, causing an infinite busy-loop. The fix replaced
+    /// try_read() with blocking read().
+    ///
+    /// This test verifies no lost updates under high contention.
+    #[test]
+    fn poc_try_read_contention_lost_update() {
+        let base = temp_dir("poc_try_read_contention");
+        let db = Database::open(&base, 64).unwrap();
+
+        db.execute(1, "create table ctr (id int4 not null, val int4 not null)")
+            .unwrap();
+        db.execute(1, "insert into ctr (id, val) values (1, 0)")
+            .unwrap();
+
+        let num_threads = 16;
+        let updates_per_thread = 5;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    for i in 0..updates_per_thread {
+                        if let Err(e) = db.execute(
+                            (t + 6000) as ClientId,
+                            "update ctr set val = val + 1 where id = 1",
+                        ) {
+                            panic!("thread {t} iteration {i}: {e:?}");
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        join_all_with_timeout(handles, Duration::from_secs(60));
+
+        let expected = (num_threads * updates_per_thread) as i32;
+        match db.execute(1, "select val from ctr where id = 1").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                let actual = match &rows[0][0] {
+                    Value::Int32(v) => *v,
+                    other => panic!("expected Int32, got {:?}", other),
+                };
+                assert_eq!(
+                    actual, expected,
+                    "LOST {} update(s): expected {expected}, got {actual}. \
+                     This demonstrates the try_read contention bug — \
+                     try_read returns None under txns write-lock contention, \
+                     causing committed updates to be treated as in-progress.",
+                    expected - actual
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
     #[test]
     fn begin_commit_groups_statements() {
         let base = temp_dir("begin_commit");
