@@ -100,56 +100,7 @@ impl AccumState {
         }
     }
 
-    pub(crate) fn accumulate(&mut self, value: &Value, is_count_star: bool) {
-        match self {
-            AccumState::Count { count } => {
-                if is_count_star || !matches!(value, Value::Null) {
-                    *count += 1;
-                }
-            }
-            AccumState::Sum { sum } => {
-                if let Value::Int32(v) = value {
-                    *sum = Some(sum.unwrap_or(0) + *v as i64);
-                }
-            }
-            AccumState::Avg { sum, count } => {
-                if let Value::Int32(v) = value {
-                    *sum = Some(sum.unwrap_or(0) + *v as i64);
-                    *count += 1;
-                }
-            }
-            AccumState::Min { min } => {
-                if !matches!(value, Value::Null) {
-                    *min = Some(match min.take() {
-                        None => value.clone(),
-                        Some(current) => {
-                            if compare_order_values(value, &current, None, false) == Ordering::Less {
-                                value.clone()
-                            } else {
-                                current
-                            }
-                        }
-                    });
-                }
-            }
-            AccumState::Max { max } => {
-                if !matches!(value, Value::Null) {
-                    *max = Some(match max.take() {
-                        None => value.clone(),
-                        Some(current) => {
-                            if compare_order_values(value, &current, None, false) == Ordering::Greater {
-                                value.clone()
-                            } else {
-                                current
-                            }
-                        }
-                    });
-                }
-            }
-        }
-    }
-
-    /// Return a compiled transition function resolved at plan time, like PG's
+/// Return a compiled transition function resolved at plan time, like PG's
     /// aggregate transition functions (e.g. int8inc_any for count(*)). Avoids
     /// per-tuple enum match dispatch in the hot loop.
     pub(crate) fn transition_fn(func: AggFunc, has_arg: bool) -> fn(&mut AccumState, &Value) {

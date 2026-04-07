@@ -5,10 +5,11 @@ pub use types::*;
 pub use backend::*;
 
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::storage::smgr::RelFileLocator;
 use crate::storage::wal::{INVALID_LSN, Lsn, WalWriter};
@@ -25,11 +26,48 @@ struct StrategyState {
     next_victim: usize,
 }
 
+/// Partitioned hash table for buffer tag -> buffer id lookup.
+/// Each partition has its own RwLock, so threads accessing different
+/// partitions never contend. Matches PostgreSQL's NUM_BUFFER_PARTITIONS
+/// approach (128 lwlock partitions over the shared buffer mapping table).
+const NUM_BUFFER_PARTITIONS: usize = 128;
+
+struct LookupPartition {
+    lock: RwLock<FxHashMap<BufferTag, BufferId>>,
+}
+
+struct PartitionedLookup {
+    partitions: Vec<LookupPartition>,
+}
+
+impl PartitionedLookup {
+    fn new() -> Self {
+        let partitions = (0..NUM_BUFFER_PARTITIONS)
+            .map(|_| LookupPartition {
+                lock: RwLock::new(FxHashMap::default()),
+            })
+            .collect();
+        Self { partitions }
+    }
+
+    #[inline]
+    fn partition_index(tag: &BufferTag) -> usize {
+        let mut hasher = FxHasher::default();
+        tag.hash(&mut hasher);
+        hasher.finish() as usize % NUM_BUFFER_PARTITIONS
+    }
+
+    #[inline]
+    fn partition(&self, tag: &BufferTag) -> &LookupPartition {
+        &self.partitions[Self::partition_index(tag)]
+    }
+}
+
 pub struct BufferPool<S: StorageBackend + Send> {
     storage: Mutex<S>,
     wal: Option<Arc<WalWriter>>,
     frames: Vec<BufferFrame>,
-    lookup: RwLock<FxHashMap<BufferTag, BufferId>>,
+    lookup: PartitionedLookup,
     strategy: Mutex<StrategyState>,
     max_usage_count: u8,
     stats_hit: AtomicU64,
@@ -65,7 +103,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             storage: Mutex::new(storage),
             wal,
             frames,
-            lookup: RwLock::new(FxHashMap::default()),
+            lookup: PartitionedLookup::new(),
             strategy: Mutex::new(StrategyState {
                 free_list,
                 next_victim: 0,
@@ -214,132 +252,205 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Some(f(&mut *guard))
     }
 
+    /// Allocate a buffer for the given tag. Mirrors PostgreSQL's BufferAlloc.
+    ///
+    /// Fast path: shared-lock the partition, look up the tag, pin, return.
+    /// The shared lock prevents eviction of any buffer in this partition,
+    /// so no tag re-check is needed after pinning (same as PostgreSQL's
+    /// PinBuffer which does not re-check the tag).
+    ///
+    /// Slow path: get a clean victim via get_victim_buffer (which handles
+    /// dirty flushing and old-tag eviction internally), then exclusive-lock
+    /// the new partition and install the new tag.
     pub fn request_page(&self, _client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
-        loop {
-            // Fast path: check if the tag is already in the lookup table.
-            {
-                let lookup = self.lookup.read();
-                if let Some(&buffer_id) = lookup.get(&tag) {
-                    let frame = &self.frames[buffer_id];
-                    frame.state.pin_and_bump_usage(self.max_usage_count);
-                    if frame.state.is_valid() {
-                        self.stats_hit.fetch_add(1, Ordering::Relaxed);
-                        return Ok(RequestPageResult::Hit { buffer_id });
-                    } else {
-                        return Ok(RequestPageResult::WaitingOnRead { buffer_id });
-                    }
+        let partition = self.lookup.partition(&tag);
+
+        // ---- fast path: see if the block is in the buffer pool already ----
+        // (PG: BufferAlloc lines 2025-2057)
+        {
+            let lookup = partition.lock.read();
+            if let Some(&buffer_id) = lookup.get(&tag) {
+                let frame = &self.frames[buffer_id];
+                frame.state.pin_and_bump_usage(self.max_usage_count);
+                // Partition read lock prevents eviction — no tag re-check needed.
+                if frame.state.is_valid() {
+                    self.stats_hit.fetch_add(1, Ordering::Relaxed);
+                    return Ok(RequestPageResult::Hit { buffer_id });
+                } else {
+                    return Ok(RequestPageResult::WaitingOnRead { buffer_id });
                 }
             }
+        }
+        // Partition lock released before slow path (PG: line 2063).
 
-            // Slow path: allocate a victim and install the new tag.
-            let mut strategy = self.strategy.lock();
+        // ---- slow path: allocate a victim and install the new tag ----
 
-            let Some(buffer_id) = self.allocate_victim(&mut strategy) else {
-                return Ok(RequestPageResult::AllBuffersPinned);
+        // Phase 1: Get a clean, pinned victim with no tag and no hash entry.
+        // Retry loop is internal. (PG: GetVictimBuffer, line 2070)
+        let buffer_id = match self.get_victim_buffer() {
+            Ok(id) => id,
+            Err(Error::AllBuffersPinned) => return Ok(RequestPageResult::AllBuffersPinned),
+            Err(e) => return Err(e),
+        };
+        let frame = &self.frames[buffer_id];
+
+        // Phase 2: Try to install the new tag. (PG: BufferAlloc lines 2078-2150)
+        let mut lookup = partition.lock.write();
+
+        // Check for collision — another thread may have inserted this tag
+        // while we were preparing the victim. (PG: BufTableInsert, line 2079)
+        if let Some(&existing_id) = lookup.get(&tag) {
+            // Collision. Give up the victim. (PG: lines 2095-2101)
+            frame.state.decrement_pin();
+            {
+                let mut strategy = self.strategy.lock();
+                strategy.free_list.push_back(buffer_id);
+            }
+
+            // Pin the existing buffer instead. (PG: PinBuffer, line 2107)
+            let existing_frame = &self.frames[existing_id];
+            existing_frame.state.pin_and_bump_usage(self.max_usage_count);
+            let valid = existing_frame.state.is_valid();
+            drop(lookup);
+
+            if valid {
+                self.stats_hit.fetch_add(1, Ordering::Relaxed);
+                return Ok(RequestPageResult::Hit {
+                    buffer_id: existing_id,
+                });
+            } else {
+                return Ok(RequestPageResult::WaitingOnRead {
+                    buffer_id: existing_id,
+                });
+            }
+        }
+
+        // No collision. Install the new tag. (PG: lines 2130-2150)
+        // PG does this under the buffer header spinlock; we use the tag mutex.
+        debug_assert_eq!(frame.state.pin_count(), 1);
+        *frame.tag.lock() = Some(tag);
+        frame.state.init_for_io();
+        lookup.insert(tag, buffer_id);
+
+        Ok(RequestPageResult::ReadIssued { buffer_id })
+    }
+
+    /// Select and prepare a victim buffer for reuse. Returns a clean buffer
+    /// that is pinned (refcount=1), has no tag, and no hash table entry.
+    /// Retries internally until a usable victim is found.
+    /// Mirrors PostgreSQL's GetVictimBuffer (bufmgr.c lines 2344-2496).
+    fn get_victim_buffer(&self) -> Result<BufferId, Error> {
+        loop {
+            // Select a victim. (PG: StrategyGetBuffer, line 2366)
+            let buffer_id = {
+                let mut strategy = self.strategy.lock();
+                let Some(buffer_id) = self.allocate_victim(&mut strategy) else {
+                    return Err(Error::AllBuffersPinned);
+                };
+
+                // Pin while strategy lock is held so no other thread can
+                // select this buffer. (PG: PinBuffer_Locked, line 2372)
+                let frame = &self.frames[buffer_id];
+                frame.state.pin_and_bump_usage(self.max_usage_count);
+                buffer_id
+                // Strategy lock released here.
             };
 
             let frame = &self.frames[buffer_id];
-            let mut lookup = self.lookup.write();
 
-            // Re-check: while we were waiting for the mapping lock, another
-            // reader that already held a shared lookup lock could have pinned
-            // this candidate buffer. In that case, restart victim selection.
-            if frame.state.pin_count() > 0 || frame.state.is_io_in_progress() {
-                drop(lookup);
-                drop(strategy);
-                continue;
-            }
-
-            // Re-check: another thread may have inserted this tag while we waited.
-            if let Some(&existing_id) = lookup.get(&tag) {
-                strategy.free_list.push_back(buffer_id);
-
-                // Pin the buffer WHILE still holding the write lock on lookup.
-                // This prevents another thread from evicting existing_id
-                // between now and when the caller uses it.
-                let existing_frame = &self.frames[existing_id];
-                existing_frame.state.pin_and_bump_usage(self.max_usage_count);
-                let valid = existing_frame.state.is_valid();
-
-                drop(lookup);
-                drop(strategy);
-
-                if valid {
-                    self.stats_hit.fetch_add(1, Ordering::Relaxed);
-                    return Ok(RequestPageResult::Hit {
-                        buffer_id: existing_id,
-                    });
-                } else {
-                    return Ok(RequestPageResult::WaitingOnRead {
-                        buffer_id: existing_id,
-                    });
-                }
-            }
-
-            // If the victim holds a dirty page, write it out before reusing.
-            // WAL rule: flush WAL up to the page's LSN before writing the data page.
+            // If dirty, flush to disk. (PG: lines 2386-2449)
             if frame.state.is_dirty() {
+                // Conditional content lock to avoid deadlock. (PG: line 2408)
+                let content_guard = match frame.content_lock.try_read() {
+                    Some(guard) => guard,
+                    None => {
+                        // Can't get lock — unpin and try another victim.
+                        // (PG: lines 2414-2415)
+                        frame.state.decrement_pin();
+                        continue;
+                    }
+                };
+                let page = *content_guard;
+                drop(content_guard);
+
                 let old_tag = *frame.tag.lock();
                 if let Some(old_tag) = old_tag {
-                    let page = *frame.content_lock.read();
                     let skip_fsync = self.wal.is_some();
-
-                    // Clear dirty BEFORE dropping locks. If a concurrent writer
-                    // re-dirties the frame during the eviction window, the
-                    // re-check below will detect it and restart.
                     frame.state.clear_dirty();
 
-                    // Ensure WAL is flushed up to this page's LSN (write-ahead rule).
                     if let Some(ref wal) = self.wal {
                         let page_lsn = u64::from_le_bytes(page[0..8].try_into().unwrap());
                         if page_lsn > 0 {
                             let _ = wal.flush_to(page_lsn);
                         }
                     }
-                    drop(lookup);
-                    drop(strategy);
 
-                    {
+                    let write_result = {
                         let mut storage = self.storage.lock();
-                        storage.write_page(old_tag, &page, skip_fsync).map_err(Error::Storage)?;
+                        storage.write_page(old_tag, &page, skip_fsync).map_err(Error::Storage)
+                    };
+                    if let Err(e) = write_result {
+                        frame.state.decrement_pin();
+                        return Err(e);
                     }
                     self.stats_written.fetch_add(1, Ordering::Relaxed);
-
-                    // Re-acquire all locks in the same order as above.
-                    strategy = self.strategy.lock();
-                    lookup = self.lookup.write();
-
-                    // Re-check: another thread may have pinned, replaced, or
-                    // re-dirtied this buffer while we dropped locks. We cleared
-                    // dirty above before dropping locks, so if it's dirty again
-                    // a concurrent writer modified the page and we must not
-                    // discard their changes.
-                    if frame.state.pin_count() > 0 || *frame.tag.lock() != Some(old_tag) || frame.state.is_dirty() {
-                        drop(lookup);
-                        drop(strategy);
-                        continue;
-                    }
                 }
             }
 
-            {
-                let mut tag_guard = frame.tag.lock();
-                if let Some(old_tag) = tag_guard.take() {
-                    lookup.remove(&old_tag);
+            // Evict the old tag from the hash table. This is only hit if the
+            // buffer was previously in use. We do not need to invalidate a
+            // buffer we got off the free list. 
+            // (PG: InvalidateVictimBuffer, lines 2276-2342)
+            if frame.tag.lock().is_some() {
+                if !self.invalidate_victim(buffer_id) {
+                    // Another thread pinned or dirtied this buffer during
+                    // the flush. Give up and try another. (PG: lines 2481-2482)
+                    frame.state.decrement_pin();
+                    continue;
                 }
-                *tag_guard = Some(tag);
             }
 
-            // Reset page data
-            *frame.content_lock.write() = [0u8; PAGE_SIZE];
+            return Ok(buffer_id);
+        }
+    }
 
-            // Reset atomic state: pin_count=1, usage_count=1, io_in_progress=true
-            frame.state.init_for_io();
+    /// Evict a victim buffer's old tag from the hash table. The buffer must
+    /// be pinned by this thread (refcount >= 1).
+    ///
+    /// Returns true if the buffer can be reused (tag cleared, hash entry
+    /// removed). Returns false if another thread pinned or dirtied the
+    /// buffer, in which case the caller should unpin and retry.
+    ///
+    /// Mirrors PostgreSQL's InvalidateVictimBuffer (bufmgr.c lines 2276-2342).
+    fn invalidate_victim(&self, buffer_id: BufferId) -> bool {
+        let frame = &self.frames[buffer_id];
 
-            lookup.insert(tag, buffer_id);
+        // Read tag — safe because we have a pin. (PG: line 2287)
+        let tag = match *frame.tag.lock() {
+            Some(tag) => tag,
+            None => return true, // no tag to evict
+        };
 
-            return Ok(RequestPageResult::ReadIssued { buffer_id });
-        } // loop
+        // Lock the old partition. (PG: line 2292)
+        let old_partition = self.lookup.partition(&tag);
+        let mut old_lookup = old_partition.lock.write();
+
+        // Re-check under partition lock: if somebody else pinned or dirtied
+        // this buffer, it's clearly in use — give up. (PG: line 2309)
+        let mut tag_guard = frame.tag.lock();
+        if frame.state.pin_count() != 1 || frame.state.is_dirty() {
+            return false;
+        }
+
+        // Clear the buffer's tag. (PG: ClearBufferTag, line 2326)
+        *tag_guard = None;
+        drop(tag_guard);
+
+        // Remove from hash table. (PG: BufTableDelete, line 2333)
+        old_lookup.remove(&tag);
+
+        true
+        // Partition lock released on drop. (PG: line 2335)
     }
 
     pub fn pending_io(&self, buffer_id: BufferId) -> Option<PendingIo> {
@@ -750,34 +861,41 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     }
 
     pub fn invalidate_relation(&self, rel: RelFileLocator) -> Result<usize, Error> {
-        let mut lookup = self.lookup.write();
         let mut strategy = self.strategy.lock();
 
-        // First pass: verify no frames are pinned or have I/O in progress.
-        for frame in &self.frames {
-            let tag_guard = frame.tag.lock();
-            if !matches!(*tag_guard, Some(tag) if tag.rel == rel) {
-                continue;
-            }
+        // Scan all frames without holding partition locks. For each match,
+        // lock just that partition, recheck, and remove. Matches PostgreSQL's
+        // DropRelationBuffers approach.
+        let mut removed = 0;
+        for (buffer_id, frame) in self.frames.iter().enumerate() {
+            // Quick check without partition lock — read the frame's tag.
+            let tag = {
+                let tag_guard = frame.tag.lock();
+                match *tag_guard {
+                    Some(t) if t.rel == rel => t,
+                    _ => continue,
+                }
+            };
+
+            // Callers (DROP TABLE, TRUNCATE) hold AccessExclusive on the
+            // relation, so no new pins can be acquired. A pin here is a bug.
             if frame.state.pin_count() > 0 {
                 return Err(Error::BufferPinned);
             }
             if frame.state.is_io_in_progress() {
                 return Err(Error::NoIoInProgress);
             }
-        }
 
-        // Second pass: clear matching frames.
-        let mut removed = 0;
-        for (buffer_id, frame) in self.frames.iter().enumerate() {
+            // Lock the partition and recheck — the tag may have changed.
+            let pidx = PartitionedLookup::partition_index(&tag);
+            let mut lookup = self.lookup.partitions[pidx].lock.write();
             let mut tag_guard = frame.tag.lock();
-            let Some(tag) = *tag_guard else { continue };
-            if tag.rel != rel {
-                continue;
+            match *tag_guard {
+                Some(t) if t == tag => {}
+                _ => continue, // tag changed, skip
             }
 
             lookup.remove(&tag);
-            // Reset the frame to default state
             *tag_guard = None;
             frame.state.store(0);
             *frame.content_lock.write() = [0u8; PAGE_SIZE];

@@ -2708,4 +2708,131 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
     }
 
+    #[test]
+    fn no_pins_leaked_concurrent_contention() {
+        // Small pool forces eviction, maximising buffer allocation races.
+        let base = temp_dir("no_pins_concurrent");
+        let db = Database::open(&base, 32).unwrap();
+
+        // Create two tables so threads contend on the same rows from
+        // different directions (readers vs writers, writers vs writers).
+        db.execute(1, "create table hot (id int4 not null, val int4 not null)").unwrap();
+        db.execute(1, "create table cold (id int4 not null, val int4 not null)").unwrap();
+        for i in 0..20 {
+            db.execute(1, &format!("insert into hot (id, val) values ({i}, 0)")).unwrap();
+            db.execute(1, &format!("insert into cold (id, val) values ({i}, 0)")).unwrap();
+        }
+
+        let num_threads = 8;
+        let iters = 100;
+        let mut handles = Vec::new();
+
+        // Writers: all contend on the same hot rows.
+        for t in 0..num_threads / 2 {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                let client = (t + 10) as ClientId;
+                for i in 0..iters {
+                    let row = i % 5; // contend on rows 0-4
+                    db.execute(client, &format!(
+                        "update hot set val = val + 1 where id = {row}"
+                    )).unwrap();
+                    // Full-table scan to pin many pages at once.
+                    db.execute(client, "select * from hot").unwrap();
+                }
+            }));
+        }
+
+        // Readers + cross-table writers: read hot, write cold.
+        for t in 0..num_threads / 2 {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                let client = (t + 20) as ClientId;
+                for i in 0..iters {
+                    let row = i % 5;
+                    db.execute(client, "select count(*) from hot").unwrap();
+                    db.execute(client, &format!(
+                        "update cold set val = val + 1 where id = {row}"
+                    )).unwrap();
+                    // Delete + reinsert to force page layout changes.
+                    db.execute(client, &format!(
+                        "delete from cold where id = {}", (i % 20)
+                    )).unwrap();
+                    db.execute(client, &format!(
+                        "insert into cold (id, val) values ({}, {})", i % 20, i
+                    )).unwrap();
+                }
+            }));
+        }
+
+        join_all_with_timeout(handles, Duration::from_secs(30));
+
+        // After all threads finish, no pins should remain.
+        let capacity = db.pool.capacity();
+        let mut pinned = Vec::new();
+        for buffer_id in 0..capacity {
+            if let Some(state) = db.pool.buffer_state(buffer_id) {
+                if state.pin_count > 0 {
+                    pinned.push((buffer_id, state));
+                }
+            }
+        }
+        assert!(
+            pinned.is_empty(),
+            "buffer pin leak: {} buffer(s) still pinned after concurrent workload:\n{:#?}",
+            pinned.len(),
+            pinned,
+        );
+    }
+
+    #[test]
+    fn no_pins_leaked_after_queries() {
+        let base = temp_dir("no_pins_leaked");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        // Set up schema and data.
+        session.execute(&db, "create table pintest (id int4 not null, val int4 not null)").unwrap();
+        for i in 0..50 {
+            session.execute(&db, &format!("insert into pintest (id, val) values ({i}, {i})")).unwrap();
+        }
+
+        // Run a variety of query types.
+        session.execute(&db, "select * from pintest").unwrap();
+        session.execute(&db, "select count(*) from pintest").unwrap();
+        session.execute(&db, "select id, val from pintest where id > 10").unwrap();
+        session.execute(&db, "select id + val from pintest").unwrap();
+        session.execute(&db, "update pintest set val = val + 1 where id = 1").unwrap();
+        session.execute(&db, "update pintest set val = 0").unwrap();
+        session.execute(&db, "delete from pintest where id > 40").unwrap();
+
+        // Explicit transaction.
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, "insert into pintest (id, val) values (999, 999)").unwrap();
+        session.execute(&db, "select * from pintest where id = 999").unwrap();
+        session.execute(&db, "commit").unwrap();
+
+        // Rolled-back transaction.
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, "insert into pintest (id, val) values (1000, 1000)").unwrap();
+        session.execute(&db, "rollback").unwrap();
+
+        // Assert no pins are held anywhere in the buffer pool.
+        let capacity = db.pool.capacity();
+        let mut pinned = Vec::new();
+        for buffer_id in 0..capacity {
+            if let Some(state) = db.pool.buffer_state(buffer_id) {
+                if state.pin_count > 0 {
+                    pinned.push((buffer_id, state));
+                }
+            }
+        }
+        assert!(
+            pinned.is_empty(),
+            "buffer pin leak: {} buffer(s) still pinned after all queries completed:\n{:#?}",
+            pinned.len(),
+            pinned,
+        );
+    }
+
 }
