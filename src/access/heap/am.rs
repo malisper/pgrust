@@ -630,9 +630,9 @@ pub fn heap_delete_with_waiter(
     txns: &RwLock<TransactionManager>,
     xid: TransactionId,
     tid: ItemPointerData,
+    snapshot: &Snapshot,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<(), HeapError> {
-    let snapshot = txns.read().snapshot(xid)?;
 
     loop {
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;

@@ -1,5 +1,5 @@
 use crate::access::heap::am::VisibleHeapScan;
-use crate::access::heap::am::{HeapError, heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page};
+use crate::access::heap::am::{heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page};
 use crate::access::heap::tuple::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::compact_string::CompactString;
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};

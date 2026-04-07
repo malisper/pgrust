@@ -101,17 +101,7 @@ impl CompiledTupleDecoder {
         }
     }
 
-    /// Decode into an existing Vec, reusing its heap allocation.
-    /// The Vec is cleared and refilled. Callers keep the Vec across
-    /// iterations to avoid per-row allocation (like PostgreSQL's
-    /// TupleTableSlot Datum array).
-    pub fn decode_into(&self, tuple_bytes: &[u8], values: &mut Vec<Value>) -> Result<(), ExecError> {
-        values.clear();
-        let mut offset = 0;
-        self.decode_range(tuple_bytes, values, 0, self.ncols, &mut offset)
-    }
-
-    /// Incrementally decode columns `start_attr..end_attr` into `values`,
+/// Incrementally decode columns `start_attr..end_attr` into `values`,
     /// resuming from `byte_offset` in the tuple data area.
     ///
     /// Like PostgreSQL's `slot_deform_heap_tuple`: only decodes the columns

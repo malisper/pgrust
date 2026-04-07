@@ -330,9 +330,21 @@ pub fn execute_delete_with_waiter(
         targets.push(tid);
     }
 
+    // Use the scan snapshot for visibility checks in the delete phase so that
+    // rows committed by other transactions after the scan still appear visible
+    // (enabling the correct TupleAlreadyModified path rather than TupleNotVisible).
+    let snapshot = scan.snapshot.clone();
+
+    let mut affected_rows = 0;
     for tid in &targets {
-        heap_delete_with_waiter(&*ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, *tid, waiter)?;
+        match heap_delete_with_waiter(&*ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, *tid, &snapshot, waiter) {
+            Ok(()) => affected_rows += 1,
+            // Row was concurrently deleted by another committed transaction —
+            // skip it, matching PostgreSQL's behaviour in ExecDelete.
+            Err(HeapError::TupleAlreadyModified(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
     }
 
-    Ok(StatementResult::AffectedRows(targets.len()))
+    Ok(StatementResult::AffectedRows(affected_rows))
 }
