@@ -226,9 +226,8 @@ fn handle_query(
         return Ok(());
     }
 
-    // Parse once, then use the streaming path for SELECT queries — avoids
-    // materializing the entire result set before sending any rows.
-    let parsed = crate::parser::parse_statement(sql);
+    // Use plan cache for parsing — avoids re-parsing the same SQL string.
+    let parsed = db.plan_cache.get_statement(sql).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e:?}")));
     if let Ok(crate::parser::Statement::Select(ref select_stmt)) = parsed {
         match state.session.execute_streaming(db, select_stmt) {
             Ok(mut guard) => {

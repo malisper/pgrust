@@ -34,12 +34,14 @@ pub(crate) fn execute_explain(
         }));
     };
 
+    let plan_start = std::time::Instant::now();
     let plan = build_plan(&select, catalog)?;
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
         ctx.timed = stmt.timing;
         let mut state = executor_start(plan);
+        let plan_elapsed = plan_start.elapsed();
         let mut row_count: u64 = 0;
         let started_at = std::time::Instant::now();
         while let Some(_slot) = state.exec_proc_node(ctx)? {
@@ -48,6 +50,7 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let elapsed = started_at.elapsed();
         format_explain_lines(state.as_ref(), 0, true, &mut lines);
+        lines.push(format!("Planning Time: {:.3} ms", plan_elapsed.as_secs_f64() * 1000.0));
         lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
         if stmt.buffers {
             let stats = ctx.pool.usage_stats();
