@@ -129,6 +129,24 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         self.stats_written.store(0, Ordering::Relaxed);
     }
 
+    /// Return a raw pointer to the page in a pinned buffer frame, WITHOUT
+    /// acquiring the content lock. This is safe when:
+    /// 1. The buffer is pinned (preventing eviction)
+    /// 2. The caller only reads immutable tuple user data (not headers)
+    /// 3. Visibility has already been determined under a lock
+    /// Matches PostgreSQL's `heapgettup_pagemode` which reads tuple data
+    /// from pinned pages without holding the buffer content lock.
+    ///
+    /// # Safety
+    /// The caller must hold a pin on the buffer and must not read data that
+    /// may be concurrently modified (e.g., hint bits). Tuple user data is
+    /// immutable after insertion and is safe to read.
+    pub unsafe fn page_unlocked(&self, buffer_id: BufferId) -> Option<&Page> {
+        let frame = self.frames.get(buffer_id)?;
+        // SAFETY: caller guarantees pin is held and only immutable data is read.
+        Some(unsafe { &*frame.content_lock.data_ptr() })
+    }
+
     /// Acquire a shared content lock on a buffer frame. Multiple readers can
     /// hold this simultaneously. The caller must hold a pin on the buffer.
     pub fn lock_buffer_shared(

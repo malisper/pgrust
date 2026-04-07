@@ -103,6 +103,98 @@ pub(crate) fn compare_order_values(
     }
 }
 
+/// A predicate compiled at plan time into a specialized closure, like PG's
+/// ExecInitQual which resolves expression evaluation steps once. Eliminates
+/// per-tuple recursive eval_expr dispatch. Allocated once at plan time;
+/// per-tuple cost is just an indirect function call.
+pub(crate) type CompiledPredicate = Box<dyn Fn(&mut TupleSlot) -> Result<bool, ExecError>>;
+
+/// Compile an expression into a specialized predicate closure.
+pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
+    match expr {
+        Expr::Gt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
+            let (col, val) = (*col, *val);
+            return Box::new(move |slot| match slot.get_attr(col)? {
+                Value::Int32(v) => Ok(*v > val),
+                Value::Null => Ok(false),
+                other => Err(ExecError::TypeMismatch { op: ">", left: other.clone(), right: Value::Int32(val) }),
+            });
+        } else { },
+        Expr::Lt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
+            let (col, val) = (*col, *val);
+            return Box::new(move |slot| match slot.get_attr(col)? {
+                Value::Int32(v) => Ok(*v < val),
+                Value::Null => Ok(false),
+                other => Err(ExecError::TypeMismatch { op: "<", left: other.clone(), right: Value::Int32(val) }),
+            });
+        } else { },
+        Expr::Eq(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
+            let (col, val) = (*col, *val);
+            return Box::new(move |slot| match slot.get_attr(col)? {
+                Value::Int32(v) => Ok(*v == val),
+                Value::Null => Ok(false),
+                other => Err(ExecError::TypeMismatch { op: "=", left: other.clone(), right: Value::Int32(val) }),
+            });
+        } else { },
+        Expr::And(_, _) => {
+            let parts: Vec<CompiledPredicate> = flatten_and(expr);
+            return Box::new(move |slot| {
+                for part in &parts {
+                    if !part(slot)? { return Ok(false); }
+                }
+                Ok(true)
+            });
+        },
+        Expr::Or(_, _) => {
+            let parts: Vec<CompiledPredicate> = flatten_or(expr);
+            return Box::new(move |slot| {
+                for part in &parts {
+                    if part(slot)? { return Ok(true); }
+                }
+                Ok(false)
+            });
+        },
+        _ => { },
+    }
+    // Fallback: generic eval_expr
+    let expr = expr.clone();
+    Box::new(move |slot| match eval_expr(&expr, slot)? {
+        Value::Bool(true) => Ok(true),
+        Value::Bool(false) | Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    })
+}
+
+fn flatten_and(expr: &Expr) -> Vec<CompiledPredicate> {
+    let mut out = Vec::new();
+    flatten_and_inner(expr, &mut out);
+    out
+}
+
+fn flatten_and_inner(expr: &Expr, out: &mut Vec<CompiledPredicate>) {
+    if let Expr::And(left, right) = expr {
+        flatten_and_inner(left, out);
+        flatten_and_inner(right, out);
+    } else {
+        out.push(compile_predicate(expr));
+    }
+}
+
+fn flatten_or(expr: &Expr) -> Vec<CompiledPredicate> {
+    let mut out = Vec::new();
+    flatten_or_inner(expr, &mut out);
+    out
+}
+
+fn flatten_or_inner(expr: &Expr, out: &mut Vec<CompiledPredicate>) {
+    if let Expr::Or(left, right) = expr {
+        flatten_or_inner(left, out);
+        flatten_or_inner(right, out);
+    } else {
+        out.push(compile_predicate(expr));
+    }
+}
+
 pub(crate) fn predicate_matches(predicate: Option<&Expr>, slot: &mut TupleSlot) -> Result<bool, ExecError> {
     let Some(predicate) = predicate else {
         return Ok(true);
