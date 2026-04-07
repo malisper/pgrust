@@ -149,6 +149,70 @@ impl AccumState {
         }
     }
 
+    /// Return a compiled transition function resolved at plan time, like PG's
+    /// aggregate transition functions (e.g. int8inc_any for count(*)). Avoids
+    /// per-tuple enum match dispatch in the hot loop.
+    pub(crate) fn transition_fn(func: AggFunc, has_arg: bool) -> fn(&mut AccumState, &Value) {
+        match (func, has_arg) {
+            (AggFunc::Count, false) => |state, _value| {
+                // count(*): unconditional increment, like PG's int8inc_any
+                if let AccumState::Count { count } = state { *count += 1; }
+            },
+            (AggFunc::Count, true) => |state, value| {
+                if let AccumState::Count { count } = state {
+                    if !matches!(value, Value::Null) { *count += 1; }
+                }
+            },
+            (AggFunc::Sum, _) => |state, value| {
+                if let AccumState::Sum { sum } = state {
+                    if let Value::Int32(v) = value {
+                        *sum = Some(sum.unwrap_or(0) + *v as i64);
+                    }
+                }
+            },
+            (AggFunc::Avg, _) => |state, value| {
+                if let AccumState::Avg { sum, count } = state {
+                    if let Value::Int32(v) = value {
+                        *sum = Some(sum.unwrap_or(0) + *v as i64);
+                        *count += 1;
+                    }
+                }
+            },
+            (AggFunc::Min, _) => |state, value| {
+                if let AccumState::Min { min } = state {
+                    if !matches!(value, Value::Null) {
+                        *min = Some(match min.take() {
+                            None => value.clone(),
+                            Some(current) => {
+                                if compare_order_values(value, &current, None, false) == Ordering::Less {
+                                    value.clone()
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                }
+            },
+            (AggFunc::Max, _) => |state, value| {
+                if let AccumState::Max { max } = state {
+                    if !matches!(value, Value::Null) {
+                        *max = Some(match max.take() {
+                            None => value.clone(),
+                            Some(current) => {
+                                if compare_order_values(value, &current, None, false) == Ordering::Greater {
+                                    value.clone()
+                                } else {
+                                    current
+                                }
+                            }
+                        });
+                    }
+                }
+            },
+        }
+    }
+
     pub(crate) fn finalize(&self) -> Value {
         match self {
             AccumState::Count { count } => Value::Int32(*count as i32),
@@ -226,11 +290,15 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::Filter { input, predicate } => Box::new(FilterState {
-            input: executor_start(*input),
-            predicate,
-            stats: NodeExecStats::default(),
-        }),
+        Plan::Filter { input, predicate } => {
+            let compiled_predicate = expr::compile_predicate(&predicate);
+            Box::new(FilterState {
+                input: executor_start(*input),
+                predicate,
+                compiled_predicate,
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::OrderBy { input, items } => Box::new(OrderByState {
             input: executor_start(*input),
             items,
@@ -269,6 +337,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             output_columns,
         } => {
             let key_buffer = Vec::with_capacity(group_by.len());
+            let trans_fns: Vec<fn(&mut AccumState, &Value)> = accumulators
+                .iter()
+                .map(|a| AccumState::transition_fn(a.func, a.arg.is_some()))
+                .collect();
             Box::new(AggregateState {
                 input: executor_start(*input),
                 group_by,
@@ -278,6 +350,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 result_rows: None,
                 next_index: 0,
                 key_buffer,
+                trans_fns,
                 stats: NodeExecStats::default(),
             })
         }

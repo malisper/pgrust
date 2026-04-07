@@ -401,11 +401,19 @@ pub struct SeqScanState {
     pub(crate) stats: NodeExecStats,
 }
 
-#[derive(Debug)]
 pub struct FilterState {
     pub(crate) input: PlanState,
     pub(crate) predicate: Expr,
+    pub(crate) compiled_predicate: super::expr::CompiledPredicate,
     pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for FilterState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilterState")
+            .field("predicate", &self.predicate)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -460,6 +468,9 @@ pub struct AggregateState {
     pub(crate) next_index: usize,
     /// Reusable buffer for group-by key evaluation, allocated once at plan start.
     pub(crate) key_buffer: Vec<Value>,
+    /// Compiled transition functions resolved at plan time, like PG's
+    /// aggregate transfn pointers. Avoids per-tuple enum dispatch.
+    pub(crate) trans_fns: Vec<fn(&mut AccumState, &Value)>,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -504,16 +515,19 @@ impl PlanNode for SeqScanState {
             let scan = self.scan.as_mut().unwrap();
 
             // Try to get the next tuple from the current page's visibility list.
+            // Like PG's heapgettup_pagemode: no content lock per tuple — visibility
+            // was already determined in heap_scan_prepare_next_page under a single
+            // lock. The pin prevents eviction and tuple user data is immutable.
             if scan.has_page_tuples() {
                 let buffer_id = scan.pinned_buffer_id().expect("buffer must be pinned");
-                let guard = ctx.pool.lock_buffer_shared(buffer_id)
-                    .map_err(|e| ExecError::Heap(HeapError::Buffer(e)))?;
-                let page = &*guard;
+                // SAFETY: buffer is pinned, visibility offsets were collected under
+                // lock in prepare_next_page, and tuple user data is immutable.
+                let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
+                    .expect("pinned buffer must be valid");
 
                 if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
                     let raw_ptr = tuple_bytes.as_ptr();
                     let raw_len = tuple_bytes.len();
-                    drop(guard);
 
                     let pin = scan.pinned_buffer_rc()
                         .expect("buffer must be pinned");
@@ -535,7 +549,6 @@ impl PlanNode for SeqScanState {
                     }
                     return Ok(Some(&mut self.slot));
                 }
-                drop(guard);
             }
 
             // Current page exhausted — prepare the next page.
@@ -574,20 +587,13 @@ impl PlanNode for FilterState {
                 }
             };
 
-            match eval_expr(&self.predicate, slot)? {
-                Value::Bool(true) => {
-                    if let Some(s) = start {
-                        self.stats.loops += 1;
-                        self.stats.total_time += s.elapsed();
-                        self.stats.rows += 1;
-                    }
-                    // Re-borrow the child's slot via current_slot().
-                    // The previous `slot` borrow is no longer used, so
-                    // the borrow checker allows re-borrowing state.input.
-                    return Ok(self.input.current_slot());
+            if (self.compiled_predicate)(slot)? {
+                if let Some(s) = start {
+                    self.stats.loops += 1;
+                    self.stats.total_time += s.elapsed();
+                    self.stats.rows += 1;
                 }
-                Value::Bool(false) | Value::Null => continue,
-                other => return Err(ExecError::NonBoolQual(other)),
+                return Ok(self.input.current_slot());
             }
         }
     }
@@ -800,14 +806,14 @@ impl PlanNode for AggregateState {
                     });
 
                 let group = &mut groups[group_idx];
+                static NO_ARG: Value = Value::Null;
                 for (i, accum) in self.accumulators.iter().enumerate() {
-                    let is_count_star = accum.func == AggFunc::Count && accum.arg.is_none();
-                    let value = if let Some(arg) = &accum.arg {
-                        eval_expr(arg, slot)?
+                    let value: &Value = if let Some(arg) = &accum.arg {
+                        &eval_expr(arg, slot)?
                     } else {
-                        Value::Null
+                        &NO_ARG
                     };
-                    group.accum_states[i].accumulate(&value, is_count_star);
+                    (self.trans_fns[i])(&mut group.accum_states[i], value);
                 }
             }
 
