@@ -389,7 +389,6 @@ pub struct ResultState {
     pub(crate) stats: NodeExecStats,
 }
 
-#[derive(Debug)]
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) column_names: Vec<String>,
@@ -398,7 +397,20 @@ pub struct SeqScanState {
     /// with lazy decode into tts_values. The slot's `decoder` field holds
     /// the compiled tuple decoder (set once at plan start).
     pub(crate) slot: TupleSlot,
+    /// Pushed-down qual, like PG's ExecSeqScanWithQual. When set, the scan
+    /// evaluates the predicate inline and only returns qualifying tuples.
+    /// Avoids a separate FilterState and its per-tuple vtable dispatch.
+    pub(crate) qual: Option<super::expr::CompiledPredicate>,
     pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for SeqScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeqScanState")
+            .field("rel", &self.rel)
+            .field("has_qual", &self.qual.is_some())
+            .finish()
+    }
 }
 
 pub struct FilterState {
@@ -541,6 +553,14 @@ impl PlanNode for SeqScanState {
                     self.slot.tts_nvalid = 0;
                     self.slot.tts_values.clear();
                     self.slot.decode_offset = 0;
+
+                    // Inline qual check (like PG's ExecScanExtended).
+                    // Tuples that fail the predicate never leave the scan node.
+                    if let Some(qual) = &self.qual {
+                        if !qual(&mut self.slot)? {
+                            continue;
+                        }
+                    }
 
                     if let Some(s) = start {
                         self.stats.loops += 1;
