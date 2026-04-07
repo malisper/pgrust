@@ -267,16 +267,20 @@ pub fn executor_start(plan: Plan) -> PlanState {
             accumulators,
             having,
             output_columns,
-        } => Box::new(AggregateState {
-            input: executor_start(*input),
-            group_by,
-            accumulators,
-            having,
-            output_columns,
-            result_rows: None,
-            next_index: 0,
-            stats: NodeExecStats::default(),
-        }),
+        } => {
+            let key_buffer = Vec::with_capacity(group_by.len());
+            Box::new(AggregateState {
+                input: executor_start(*input),
+                group_by,
+                accumulators,
+                having,
+                output_columns,
+                result_rows: None,
+                next_index: 0,
+                key_buffer,
+                stats: NodeExecStats::default(),
+            })
+        }
     }
 }
 
