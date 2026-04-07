@@ -51,6 +51,9 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
         let db = db.clone();
         thread::spawn(move || {
             let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+            // Register the socket FD against the VFD limit so segment file
+            // eviction accounts for open connections.
+            db.pool.with_storage_mut(|s| s.smgr.acquire_external_fd());
             if let Some(peer) = &peer {
                 eprintln!("pgrust: connection from {peer} (client {client_id})");
             }
@@ -64,6 +67,7 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
             if let Some(peer) = &peer {
                 eprintln!("pgrust: client {client_id} ({peer}) disconnected");
             }
+            db.pool.with_storage_mut(|s| s.smgr.release_external_fd());
         });
     }
     Ok(())
