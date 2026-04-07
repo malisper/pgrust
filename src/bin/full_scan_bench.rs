@@ -51,7 +51,7 @@ fn main() -> Result<(), String> {
         // Single-threaded path.
         for _ in 0..args.iterations {
             let result = db
-                .execute(2, "select * from scanbench")
+                .execute(2, &args.query)
                 .map_err(|e| format!("{e:?}"))?;
             let StatementResult::Query { rows, .. } = result else {
                 return Err("expected query result".into());
@@ -74,11 +74,12 @@ fn main() -> Result<(), String> {
             let checksum = Arc::clone(&checksum);
             let iters = iters_per_client + if client_idx < remainder { 1 } else { 0 };
             let client_id = client_idx as u32 + 10; // offset to avoid collision with setup
+            let query = args.query.clone();
 
             handles.push(std::thread::spawn(move || -> Result<(), String> {
                 for _ in 0..iters {
                     let result = db
-                        .execute(client_id, "select * from scanbench")
+                        .execute(client_id, &query)
                         .map_err(|e| format!("{e:?}"))?;
                     let StatementResult::Query { rows, .. } = result else {
                         return Err("expected query result".into());
@@ -136,6 +137,8 @@ struct Args {
     preserve_existing: bool,
     skip_load: bool,
     wal_replay: bool,
+    query: String,
+    count: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -149,6 +152,8 @@ fn parse_args() -> Result<Args, String> {
         preserve_existing: false,
         skip_load: false,
         wal_replay: false,
+        query: "select * from scanbench".to_string(),
+        count: false,
     };
 
     let raw = std::env::args().skip(1).collect::<Vec<_>>();
@@ -194,6 +199,14 @@ fn parse_args() -> Result<Args, String> {
                 args.pause_before_scan_secs = take_value(&raw, &mut i, "--pause")?
                     .parse()
                     .map_err(|_| "invalid --pause value".to_string())?;
+            }
+            "--query" => {
+                args.query = take_value(&raw, &mut i, "--query")?;
+            }
+            "--count" => {
+                args.count = true;
+                args.query = "select count(*) from scanbench".to_string();
+                i += 1;
             }
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag: {other}"));
