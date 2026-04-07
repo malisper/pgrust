@@ -458,6 +458,8 @@ pub struct AggregateState {
     pub(crate) output_columns: Vec<String>,
     pub(crate) result_rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
+    /// Reusable buffer for group-by key evaluation, allocated once at plan start.
+    pub(crate) key_buffer: Vec<Value>,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -776,14 +778,14 @@ impl PlanNode for AggregateState {
             let mut groups: Vec<AggGroup> = Vec::new();
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
-                let mut key_values = Vec::with_capacity(self.group_by.len());
+                self.key_buffer.clear();
                 for expr in &self.group_by {
-                    key_values.push(eval_expr(expr, slot)?);
+                    self.key_buffer.push(eval_expr(expr, slot)?);
                 }
 
                 let group_idx = groups
                     .iter()
-                    .position(|g| g.key_values == key_values)
+                    .position(|g| g.key_values == self.key_buffer)
                     .unwrap_or_else(|| {
                         let accum_states = self
                             .accumulators
@@ -791,7 +793,7 @@ impl PlanNode for AggregateState {
                             .map(|a| AccumState::new(a.func))
                             .collect();
                         groups.push(AggGroup {
-                            key_values: key_values.clone(),
+                            key_values: self.key_buffer.clone(),
                             accum_states,
                         });
                         groups.len() - 1
