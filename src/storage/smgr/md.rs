@@ -6,7 +6,7 @@
 
 use super::*;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -47,9 +47,27 @@ struct SegKey {
 ///
 /// This is the Rust equivalent of PostgreSQL's `md.c`. It translates the
 /// abstract `StorageManager` API into filesystem operations.
+/// Default maximum number of open file descriptors for segment files.
+/// Matches PG's `max_files_per_process` default (1000). Like PG, this
+/// limits how many OS FDs we keep open simultaneously. Files beyond
+/// this limit are closed (LRU eviction) and transparently reopened on
+/// next access.
+const DEFAULT_MAX_OPEN_FDS: usize = 1000;
+
 pub struct MdStorageManager {
     base_dir: PathBuf,
     open_segs: HashMap<SegKey, OpenSeg>,
+    /// LRU order tracker: front = least recently used, back = most recently used.
+    /// Like PG's VFD doubly-linked ring, but simpler (VecDeque instead of
+    /// intrusive list). Used to evict the LRU file when we hit max_open_fds.
+    lru_order: VecDeque<SegKey>,
+    /// Maximum total open file descriptors (segment files + external).
+    /// Matches PG's `max_files_per_process`.
+    max_open_fds: usize,
+    /// Number of externally-held file descriptors (sockets, WAL files, etc.)
+    /// not managed by the VFD layer but counted against the limit.
+    /// Like PG's `numExternalFDs`.
+    external_fds: usize,
     pub in_recovery: bool,
     /// Cache of opened relations — avoids mkdir/create_dir_all per insert.
     opened_rels: HashSet<RelFileLocator>,
@@ -64,6 +82,9 @@ impl MdStorageManager {
         MdStorageManager {
             base_dir: base_dir.into(),
             open_segs: HashMap::new(),
+            lru_order: VecDeque::new(),
+            max_open_fds: DEFAULT_MAX_OPEN_FDS,
+            external_fds: 0,
             in_recovery: false,
             opened_rels: HashSet::new(),
             created_forks: HashSet::new(),
@@ -75,6 +96,9 @@ impl MdStorageManager {
         MdStorageManager {
             base_dir: base_dir.into(),
             open_segs: HashMap::new(),
+            lru_order: VecDeque::new(),
+            max_open_fds: DEFAULT_MAX_OPEN_FDS,
+            external_fds: 0,
             in_recovery: true,
             opened_rels: HashSet::new(),
             created_forks: HashSet::new(),
@@ -87,6 +111,41 @@ impl MdStorageManager {
     /// Rust equivalent of `PROCSIGNAL_BARRIER_SMGRRELEASE`.
     pub fn release_all(&mut self) {
         self.open_segs.clear();
+        self.lru_order.clear();
+    }
+
+    /// Evict the least-recently-used file descriptor to stay under
+    /// `max_open_fds`. Like PG's `ReleaseLruFiles()`, considers both
+    /// segment files and external FDs (sockets, WAL, etc.) against the limit.
+    fn evict_lru(&mut self) {
+        while self.open_segs.len() + self.external_fds >= self.max_open_fds {
+            if let Some(victim) = self.lru_order.pop_front() {
+                self.open_segs.remove(&victim);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Move a segment key to the MRU (most recently used) position.
+    fn touch_lru(&mut self, key: &SegKey) {
+        if let Some(pos) = self.lru_order.iter().position(|k| k == key) {
+            self.lru_order.remove(pos);
+        }
+        self.lru_order.push_back(*key);
+    }
+
+    /// Register an external file descriptor (socket, WAL file, etc.) that
+    /// counts against the open FD limit but is not managed by the VFD layer.
+    /// Like PG's `AcquireExternalFD()`.
+    pub fn acquire_external_fd(&mut self) {
+        self.external_fds += 1;
+    }
+
+    /// Release a previously registered external file descriptor.
+    /// Like PG's `ReleaseExternalFD()`.
+    pub fn release_external_fd(&mut self) {
+        self.external_fds = self.external_fds.saturating_sub(1);
     }
 
     fn seg_path(&self, rel: RelFileLocator, fork: ForkNumber, segno: u32) -> PathBuf {
@@ -98,7 +157,9 @@ impl MdStorageManager {
     }
 
     /// Open (or retrieve from cache) a specific segment file.
-    /// Rust analogue of `_mdfd_getseg()`.
+    /// Rust analogue of `_mdfd_getseg()`. Like PG's VFD `FileAccess()`,
+    /// evicts the LRU file if we're at the FD limit, and moves the
+    /// accessed file to the MRU position.
     fn get_seg(
         &mut self,
         rel: RelFileLocator,
@@ -108,6 +169,7 @@ impl MdStorageManager {
         let key = SegKey { rel, fork, segno };
 
         if !self.open_segs.contains_key(&key) {
+            self.evict_lru();
             let path = self.seg_path(rel, fork, segno);
             let file = OpenOptions::new()
                 .read(true)
@@ -121,6 +183,9 @@ impl MdStorageManager {
                     }
                 })?;
             self.open_segs.insert(key, OpenSeg { file, segno });
+            self.lru_order.push_back(key);
+        } else {
+            self.touch_lru(&key);
         }
 
         Ok(self.open_segs.get_mut(&key).unwrap())
@@ -136,6 +201,7 @@ impl MdStorageManager {
         let key = SegKey { rel, fork, segno };
 
         if !self.open_segs.contains_key(&key) {
+            self.evict_lru();
             let path = self.seg_path(rel, fork, segno);
             let file = OpenOptions::new()
                 .read(true)
@@ -144,6 +210,9 @@ impl MdStorageManager {
                 .truncate(false)
                 .open(&path)?;
             self.open_segs.insert(key, OpenSeg { file, segno });
+            self.lru_order.push_back(key);
+        } else {
+            self.touch_lru(&key);
         }
 
         Ok(self.open_segs.get_mut(&key).unwrap())
@@ -210,6 +279,7 @@ impl MdStorageManager {
         for segno in start_segno.. {
             let key = SegKey { rel, fork, segno };
             self.open_segs.remove(&key);
+            self.lru_order.retain(|k| k != &key);
 
             let path = self.seg_path(rel, fork, segno);
             match fs::remove_file(&path) {
@@ -238,6 +308,7 @@ impl StorageManager for MdStorageManager {
     fn close(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), SmgrError> {
         self.open_segs
             .retain(|key, _| !(key.rel == rel && key.fork == fork));
+        self.lru_order.retain(|key| !(key.rel == rel && key.fork == fork));
         self.nblocks_cache.remove(&(rel, fork));
         Ok(())
     }
@@ -283,7 +354,9 @@ impl StorageManager for MdStorageManager {
             fork,
             segno: 0,
         };
+        self.evict_lru();
         self.open_segs.insert(key, OpenSeg { file, segno: 0 });
+        self.lru_order.push_back(key);
         self.created_forks.insert((rel, fork));
 
         Ok(())

@@ -8,7 +8,21 @@ use std::path::PathBuf;
 use pgrust::database::Database;
 use pgrust::server::serve;
 
+fn raise_fd_limit() {
+    unsafe {
+        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+            let target = 10240u64.min(rlim.rlim_max);
+            if rlim.rlim_cur < target {
+                rlim.rlim_cur = target;
+                libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), String> {
+    raise_fd_limit();
     let base_dir = std::env::args()
         .nth(1)
         .map(PathBuf::from)
