@@ -69,6 +69,7 @@ impl From<MvccError> for HeapError {
 /// Maximum tuples per 8kB page: 8160 usable / 28 min per tuple = 291.
 const MAX_HEAP_TUPLES_PER_PAGE: usize = 291;
 
+
 pub struct VisibleHeapScan {
     pub(crate) scan: HeapScan,
     pub(crate) snapshot: Snapshot,
@@ -784,22 +785,12 @@ fn try_claim_tuple(
     drop(guard);
     drop(pin);
 
-    // Check xmax status after releasing the buffer. We use try_read to
-    // avoid deadlock with parking_lot's write-preferring RwLock: a pending
-    // txns writer would block a blocking read() call, but try_read fails
-    // gracefully. If we can't get the lock, treat as InProgress
-    // (conservative).
-    let xmax_status = {
-        let mut status = None;
-        for _ in 0..10 {
-            if let Some(guard) = txns.try_read() {
-                status = guard.status(xmax);
-                break;
-            }
-            std::thread::yield_now();
-        }
-        status
-    };
+    // Check xmax status after releasing the buffer lock. Safe to use
+    // blocking read() here because the buffer lock is already dropped
+    // (lines 784-785), so there's no deadlock risk with the write-preferring
+    // RwLock. Previous code used try_read() with fallback to None, which
+    // caused an infinite busy-loop under contention (see bugs/005).
+    let xmax_status = txns.read().status(xmax);
 
     match xmax_status {
         Some(TransactionStatus::InProgress) | None => {
