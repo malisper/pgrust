@@ -932,6 +932,24 @@ impl TupleSlot {
         }
     }
 
+    /// Read a fixed-offset int32 directly from raw tuple bytes, like PG's
+    /// heap_getattr fast path. Bypasses the full decode machinery. Returns
+    /// None if the slot is not a BufferHeapTuple.
+    #[inline]
+    pub(crate) fn get_fixed_int32(&self, data_offset: usize) -> Option<i32> {
+        if let SlotKind::BufferHeapTuple { tuple_ptr, tuple_len, .. } = &self.kind {
+            let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
+            let hoff = bytes[22] as usize;
+            let start = hoff + data_offset;
+            if start + 4 <= bytes.len() {
+                return Some(i32::from_le_bytes([
+                    bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3],
+                ]));
+            }
+        }
+        None
+    }
+
     /// Number of columns in this slot.
     pub(crate) fn ncols(&self) -> usize {
         match &self.kind {

@@ -208,6 +208,11 @@ fn parse_args() -> Result<Args, String> {
                 args.query = "select count(*) from scanbench".to_string();
                 i += 1;
             }
+            "--count-where" => {
+                args.count = true;
+                args.query = "select count(*) from scanbench where id > 0".to_string();
+                i += 1;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag: {other}"));
             }

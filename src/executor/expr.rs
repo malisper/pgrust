@@ -109,6 +109,95 @@ pub(crate) fn compare_order_values(
 /// per-tuple cost is just an indirect function call.
 pub(crate) type CompiledPredicate = Box<dyn Fn(&mut TupleSlot) -> Result<bool, ExecError>>;
 
+/// Compile a predicate with access to the tuple decoder for direct byte access.
+/// Like PG's heap_getattr fast path for fixed-offset attributes.
+pub(crate) fn compile_predicate_with_decoder(
+    expr: &Expr,
+    decoder: &super::tuple_decoder::CompiledTupleDecoder,
+) -> CompiledPredicate {
+    // Try to compile with fixed-offset fast path first.
+    if let Some(pred) = try_compile_fixed_offset(expr, decoder) {
+        return pred;
+    }
+    // Fall back to the generic compiled predicate.
+    compile_predicate(expr)
+}
+
+/// Try to compile a predicate that reads fixed-offset int32 columns directly
+/// from raw tuple bytes, bypassing slot_getsomeattrs entirely.
+fn try_compile_fixed_offset(
+    expr: &Expr,
+    decoder: &super::tuple_decoder::CompiledTupleDecoder,
+) -> Option<CompiledPredicate> {
+    match expr {
+        Expr::Gt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
+            let off = decoder.fixed_int32_offset(*col)?;
+            let val = *val;
+            return Some(Box::new(move |slot| Ok(slot.get_fixed_int32(off).map_or(false, |v| v > val))));
+        } else { },
+        Expr::Lt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
+            let off = decoder.fixed_int32_offset(*col)?;
+            let val = *val;
+            return Some(Box::new(move |slot| Ok(slot.get_fixed_int32(off).map_or(false, |v| v < val))));
+        } else { },
+        Expr::Eq(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
+            let off = decoder.fixed_int32_offset(*col)?;
+            let val = *val;
+            return Some(Box::new(move |slot| Ok(slot.get_fixed_int32(off).map_or(false, |v| v == val))));
+        } else { },
+        Expr::And(_, _) => {
+            let parts: Vec<CompiledPredicate> = flatten_and_with_decoder(expr, decoder);
+            return Some(Box::new(move |slot| {
+                for part in &parts {
+                    if !part(slot)? { return Ok(false); }
+                }
+                Ok(true)
+            }));
+        },
+        Expr::Or(_, _) => {
+            let parts: Vec<CompiledPredicate> = flatten_or_with_decoder(expr, decoder);
+            return Some(Box::new(move |slot| {
+                for part in &parts {
+                    if part(slot)? { return Ok(true); }
+                }
+                Ok(false)
+            }));
+        },
+        _ => { },
+    }
+    None
+}
+
+fn flatten_and_with_decoder(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder) -> Vec<CompiledPredicate> {
+    let mut out = Vec::new();
+    flatten_and_with_decoder_inner(expr, decoder, &mut out);
+    out
+}
+
+fn flatten_and_with_decoder_inner(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder, out: &mut Vec<CompiledPredicate>) {
+    if let Expr::And(left, right) = expr {
+        flatten_and_with_decoder_inner(left, decoder, out);
+        flatten_and_with_decoder_inner(right, decoder, out);
+    } else {
+        out.push(compile_predicate_with_decoder(expr, decoder));
+    }
+}
+
+fn flatten_or_with_decoder(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder) -> Vec<CompiledPredicate> {
+    let mut out = Vec::new();
+    flatten_or_with_decoder_inner(expr, decoder, &mut out);
+    out
+}
+
+fn flatten_or_with_decoder_inner(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder, out: &mut Vec<CompiledPredicate>) {
+    if let Expr::Or(left, right) = expr {
+        flatten_or_with_decoder_inner(left, decoder, out);
+        flatten_or_with_decoder_inner(right, decoder, out);
+    } else {
+        out.push(compile_predicate_with_decoder(expr, decoder));
+    }
+}
+
 /// Compile an expression into a specialized predicate closure.
 pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
     match expr {

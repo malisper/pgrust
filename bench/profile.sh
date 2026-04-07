@@ -21,6 +21,7 @@ while [[ $# -gt 0 ]]; do
         --pool-size) POOL_SIZE="$2"; shift 2 ;;
         --query) QUERY="$2"; shift 2 ;;
         --count) QUERY="select count(*) from scanbench"; shift ;;
+        --count-where) QUERY="select count(*) from scanbench where id > 0"; shift ;;
         --out) OUT="$2"; shift 2 ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
