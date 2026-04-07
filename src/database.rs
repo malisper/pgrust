@@ -7,9 +7,100 @@ use parking_lot::{Condvar, Mutex, RwLock};
 use crate::access::heap::mvcc::{CommandId, MvccError, TransactionId, TransactionManager};
 use crate::catalog::{CatalogError, DurableCatalog};
 use crate::executor::{ExecError, ExecutorContext, StatementResult};
+use crate::executor::nodes::Plan;
+use crate::parser::Statement;
 use crate::storage::smgr::{MdStorageManager, RelFileLocator};
 use crate::storage::wal::{WalBgWriter, WalWriter, WalError};
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
+
+/// Query plan cache — caches parsed statements and built plans to avoid
+/// re-parsing and re-planning on repeated executions of the same SQL.
+/// Like PostgreSQL's CachedPlanSource, but simpler: keyed on SQL string,
+/// invalidated on any DDL.
+pub struct PlanCache {
+    cache: RwLock<HashMap<String, CachedEntry>>,
+}
+
+struct CachedEntry {
+    statement: Statement,
+    /// For SELECT statements, the built Plan (result of build_plan).
+    /// None for non-SELECT statements.
+    plan: Option<Plan>,
+}
+
+impl PlanCache {
+    pub fn new() -> Self {
+        Self {
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get a cached statement, or parse and cache it.
+    pub fn get_statement(&self, sql: &str) -> Result<Statement, ExecError> {
+        // Fast path: read lock lookup.
+        {
+            let cache = self.cache.read();
+            if let Some(entry) = cache.get(sql) {
+                return Ok(entry.statement.clone());
+            }
+        }
+        // Slow path: parse and insert.
+        let stmt = crate::parser::parse_statement(sql)?;
+        let mut cache = self.cache.write();
+        cache.entry(sql.to_string()).or_insert(CachedEntry {
+            statement: stmt.clone(),
+            plan: None,
+        });
+        Ok(stmt)
+    }
+
+    /// Get a cached plan for a SELECT statement, or build and cache it.
+    pub fn get_plan(&self, sql: &str, catalog: &crate::catalog::Catalog) -> Result<Plan, ExecError> {
+        // Fast path: read lock lookup.
+        {
+            let cache = self.cache.read();
+            if let Some(entry) = cache.get(sql) {
+                if let Some(ref plan) = entry.plan {
+                    return Ok(plan.clone());
+                }
+            }
+        }
+        // Slow path: parse + build plan + cache.
+        let stmt = crate::parser::parse_statement(sql)?;
+        let plan = match &stmt {
+            Statement::Select(select) => Some(crate::parser::build_plan(select, catalog)?),
+            Statement::Explain(explain) => {
+                if let Statement::Select(select) = &*explain.statement {
+                    Some(crate::parser::build_plan(select, catalog)?)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let mut cache = self.cache.write();
+        let entry = cache.entry(sql.to_string()).or_insert(CachedEntry {
+            statement: stmt,
+            plan: None,
+        });
+        if plan.is_some() && entry.plan.is_none() {
+            entry.plan = plan.clone();
+        }
+        Ok(plan.unwrap_or_else(|| unreachable!("get_plan called for non-SELECT")))
+    }
+
+    /// Invalidate all cached entries (called on DDL).
+    pub fn invalidate_all(&self) {
+        self.cache.write().clear();
+    }
+}
+
+impl Clone for PlanCache {
+    fn clone(&self) -> Self {
+        // Each clone gets an empty cache — shared via Arc in Database.
+        Self::new()
+    }
+}
 
 #[derive(Debug)]
 pub enum DatabaseError {
@@ -152,6 +243,7 @@ pub struct Database {
     pub catalog: Arc<RwLock<DurableCatalog>>,
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
+    pub plan_cache: Arc<PlanCache>,
     /// Background WAL writer — flushes BufWriter to kernel periodically.
     _wal_bg_writer: Arc<WalBgWriter>,
 }
@@ -223,6 +315,7 @@ impl Database {
             catalog: Arc::new(RwLock::new(catalog)),
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
+            plan_cache: Arc::new(PlanCache::new()),
             _wal_bg_writer: Arc::new(wal_bg_writer),
         })
     }
@@ -242,10 +335,10 @@ impl Database {
             execute_insert, execute_update_with_waiter,
         };
         use crate::parser::{
-            Statement, bind_delete, bind_insert, bind_update, parse_statement,
+            bind_delete, bind_insert, bind_update,
         };
 
-        let stmt = parse_statement(sql)?;
+        let stmt = self.plan_cache.get_statement(sql)?;
 
         match stmt {
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
@@ -386,6 +479,7 @@ impl Database {
                         });
                     }
                     let _ = catalog_guard.persist();
+                    self.plan_cache.invalidate_all();
                 }
                 result
             }
@@ -416,6 +510,7 @@ impl Database {
                 let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
                 if result.is_ok() {
                     let _ = catalog_guard.persist();
+                    self.plan_cache.invalidate_all();
                 }
                 drop(ctx);
                 drop(catalog_guard);
@@ -688,9 +783,7 @@ impl Session {
         db: &Database,
         sql: &str,
     ) -> Result<StatementResult, ExecError> {
-        use crate::parser::{Statement, parse_statement};
-
-        let stmt = parse_statement(sql)?;
+        let stmt = db.plan_cache.get_statement(sql)?;
 
         match stmt {
             Statement::Begin => {
@@ -921,6 +1014,7 @@ impl Session {
                         });
                     }
                     let _ = catalog_guard.persist();
+                    db.plan_cache.invalidate_all();
                 }
                 result
             }
@@ -954,6 +1048,7 @@ impl Session {
                 let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
                 if result.is_ok() {
                     let _ = catalog_guard.persist();
+                    db.plan_cache.invalidate_all();
                 }
                 result
             }
