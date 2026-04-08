@@ -503,6 +503,22 @@ pub fn heap_page_get_tuple(
     Ok(HeapTuple::parse(page_get_item(page, offset)?)?)
 }
 
+/// Read just the ctid from a tuple on a page without parsing the full tuple.
+/// ctid is at bytes 12-17 of the tuple data (block_number LE u32, offset_number LE u16).
+pub fn heap_page_get_ctid(
+    page: &[u8; BLCKSZ],
+    offset: OffsetNumber,
+) -> Result<ItemPointerData, TupleError> {
+    let bytes = page_get_item(page, offset)?;
+    if bytes.len() < 18 {
+        return Err(TupleError::HeaderTooShort);
+    }
+    Ok(ItemPointerData {
+        block_number: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+        offset_number: u16::from_le_bytes([bytes[16], bytes[17]]),
+    })
+}
+
 /// Rewrite only the header portion of a tuple on the page.
 ///
 /// All callers modify only header fields (xmax, ctid, infomask), never user

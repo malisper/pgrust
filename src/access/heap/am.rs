@@ -4,7 +4,7 @@ use crate::access::heap::mvcc::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager, TransactionStatus,
 };
 use crate::access::heap::tuple::{
-    HeapTuple, ItemPointerData, TupleError, heap_page_add_tuple, heap_page_get_tuple,
+    HeapTuple, ItemPointerData, TupleError, heap_page_add_tuple, heap_page_get_ctid, heap_page_get_tuple,
     heap_page_init, heap_page_replace_tuple,
 };
 use crate::database::TransactionWaiter;
@@ -694,21 +694,18 @@ pub fn heap_delete_with_waiter(
                 return Ok(());
             }
             Some(TransactionStatus::Committed) => {
-                // Re-read the tuple to get the ctid.
+                // Read just the ctid under a shared lock — no page copy.
                 let pin2 = pin_existing_block(pool, client_id, rel, tid.block_number)?;
                 let buffer_id2 = pin2.buffer_id();
                 let guard2 = pool.lock_buffer_shared(buffer_id2)?;
-                let page2 = *guard2;
+                let current_ctid = heap_page_get_ctid(&*guard2, tid.offset_number)
+                    .map_err(HeapError::from)?;
                 drop(guard2);
                 drop(pin2);
-                let current = heap_page_get_tuple(&page2, tid.offset_number)?;
-                if current.header.ctid == tid {
-                    // ctid points to self — the row was deleted, not updated.
+                if current_ctid == tid {
                     return Err(HeapError::TupleAlreadyModified(tid));
                 }
-                // The row was updated — return the new ctid so the caller
-                // can follow the chain, matching PostgreSQL's TM_Updated.
-                return Err(HeapError::TupleUpdated(tid, current.header.ctid));
+                return Err(HeapError::TupleUpdated(tid, current_ctid));
             }
         }
     }
@@ -832,14 +829,14 @@ fn try_claim_tuple(
             // BEFORE committing. If we read the tuple before ctid was
             // written, we'd see ctid == self and incorrectly return Deleted
             // instead of Updated.
+            // Read just the ctid under a shared lock — no page copy.
             let pin2 = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
             let buffer_id2 = pin2.buffer_id();
             let guard = pool.lock_buffer_shared(buffer_id2)?;
-            let page = *guard;
+            let current_ctid = heap_page_get_ctid(&*guard, target_tid.offset_number)
+                .map_err(HeapError::from)?;
             drop(guard);
             drop(pin2);
-            let current = heap_page_get_tuple(&page, target_tid.offset_number)?;
-            let current_ctid = current.header.ctid;
             if current_ctid == target_tid {
                 Ok((ClaimResult::Deleted, target_tid))
             } else {
