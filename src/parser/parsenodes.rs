@@ -190,6 +190,7 @@ pub enum SqlExpr {
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),
     Gt(Box<SqlExpr>, Box<SqlExpr>),
+    RegexMatch(Box<SqlExpr>, Box<SqlExpr>),
     And(Box<SqlExpr>, Box<SqlExpr>),
     Or(Box<SqlExpr>, Box<SqlExpr>),
     Not(Box<SqlExpr>),

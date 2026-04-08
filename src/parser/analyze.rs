@@ -298,6 +298,10 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
             Box::new(bind_expr(left, scope)?),
             Box::new(bind_expr(right, scope)?),
         ),
+        SqlExpr::RegexMatch(left, right) => Expr::RegexMatch(
+            Box::new(bind_expr(left, scope)?),
+            Box::new(bind_expr(right, scope)?),
+        ),
         SqlExpr::And(left, right) => Expr::And(
             Box::new(bind_expr(left, scope)?),
             Box::new(bind_expr(right, scope)?),
@@ -612,6 +616,7 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
         SqlExpr::AggCall { .. } => true,
         SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => false,
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
+        | SqlExpr::RegexMatch(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
         SqlExpr::Negate(inner) | SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
@@ -630,6 +635,7 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>)>) {
         }
         SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => {}
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
+        | SqlExpr::RegexMatch(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => { collect_aggs(l, aggs); collect_aggs(r, aggs); }
         SqlExpr::Negate(inner) | SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
@@ -680,6 +686,7 @@ fn bind_agg_output_expr(
         SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Gt(l, r) => Ok(Expr::Gt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
+        SqlExpr::RegexMatch(l, r) => Ok(Expr::RegexMatch(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::And(l, r) => Ok(Expr::And(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Or(l, r) => Ok(Expr::Or(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Not(inner) => Ok(Expr::Not(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),

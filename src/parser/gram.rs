@@ -480,6 +480,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
                         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
                         ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
+                        "~" => SqlExpr::RegexMatch(Box::new(left), Box::new(right)),
                         _ => unreachable!(),
                     })
                 }
