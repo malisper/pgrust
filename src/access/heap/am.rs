@@ -24,6 +24,7 @@ pub enum HeapError {
     TupleNotVisible(ItemPointerData),
     TupleAlreadyModified(ItemPointerData),
     TupleUpdated(ItemPointerData, ItemPointerData),
+    DeadlockDetected,
 }
 
 /// Result of a heap modification that encountered a concurrent modification.
@@ -666,8 +667,10 @@ pub fn heap_delete_with_waiter(
         match xmax_status {
             Some(TransactionStatus::InProgress) | None => {
                 if let Some((txns_lock, txn_waiter)) = waiter {
-                    txn_waiter.wait_for(txns_lock, xmax);
-                    continue;
+                    if txn_waiter.wait_for(txns_lock, xmax) {
+                        continue;
+                    }
+                    return Err(HeapError::DeadlockDetected);
                 }
                 return Err(HeapError::TupleAlreadyModified(tid));
             }
@@ -869,8 +872,10 @@ pub fn heap_update_with_waiter(
             }
             ClaimResult::WaitFor(xwait) => {
                 if let Some((txns_lock, txn_waiter)) = waiter {
-                    txn_waiter.wait_for(txns_lock, xwait);
-                    continue;
+                    if txn_waiter.wait_for(txns_lock, xwait) {
+                        continue;
+                    }
+                    return Err(HeapError::DeadlockDetected);
                 }
                 return Err(HeapError::TupleAlreadyModified(tid));
             }
