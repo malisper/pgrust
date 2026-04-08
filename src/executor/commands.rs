@@ -20,7 +20,7 @@ use crate::storage::smgr::ForkNumber;
 use crate::storage::smgr::StorageManager;
 
 use super::nodes::*;
-use super::expr::{eval_expr, predicate_matches, tuple_from_values};
+use super::expr::{eval_expr, compile_predicate_with_decoder, tuple_from_values};
 use super::explain::{format_buffer_usage, format_explain_lines};
 use super::tuple_decoder::CompiledTupleDecoder;
 use super::{ExecError, ExecutorContext, StatementResult, executor_start};
@@ -212,10 +212,16 @@ pub fn execute_update_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
-    // Hoist descriptor allocation and decoder compilation out of the per-tuple loop.
+    // Hoist descriptor allocation, decoder compilation, and predicate
+    // compilation out of the per-tuple loop.
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+    // BufferHeapTuple predicate: uses fixed-offset fast path for the main scan.
+    let qual = stmt.predicate.as_ref().map(|p| compile_predicate_with_decoder(p, &decoder));
+    // HeapTuple predicate: for the TupleUpdated retry path which uses from_heap_tuple.
+    // The decoder fast path uses get_fixed_int32 which only works for BufferHeapTuple.
+    let heap_qual = stmt.predicate.as_ref().map(|p| super::expr::compile_predicate(p));
 
     // Page-mode scan: batch visibility checks per page under a single lock,
     // matching the SELECT path (heap_scan_prepare_next_page). This replaces
@@ -236,8 +242,8 @@ pub fn execute_update_with_waiter(
             let mut slot = TupleSlot::from_buffer_tuple(
                 tuple_bytes, Rc::clone(&pin), Rc::clone(&decoder),
             );
-            if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
-                continue;
+            if let Some(q) = &qual {
+                if !q(&mut slot)? { continue; }
             }
             let original_values = slot.into_values()?;
             let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
@@ -271,7 +277,8 @@ pub fn execute_update_with_waiter(
                         let mut new_slot = TupleSlot::from_heap_tuple(
                             Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
                         );
-                        if !predicate_matches(stmt.predicate.as_ref(), &mut new_slot)? {
+                        let passes = match &heap_qual { Some(q) => q(&mut new_slot)?, None => true };
+                        if !passes {
                             break;
                         }
                         let new_values_base = new_slot.into_values()?;
@@ -314,10 +321,12 @@ pub fn execute_delete_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();
 
-    // Hoist descriptor allocation and decoder compilation out of the per-tuple loop.
+    // Hoist descriptor allocation, decoder compilation, and predicate
+    // compilation out of the per-tuple loop.
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+    let qual = stmt.predicate.as_ref().map(|p| compile_predicate_with_decoder(p, &decoder));
 
     // Page-mode scan: batch visibility checks per page under a single lock.
     loop {
@@ -334,8 +343,8 @@ pub fn execute_delete_with_waiter(
             let mut slot = TupleSlot::from_buffer_tuple(
                 tuple_bytes, Rc::clone(&pin), Rc::clone(&decoder),
             );
-            if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
-                continue;
+            if let Some(q) = &qual {
+                if !q(&mut slot)? { continue; }
             }
             targets.push(tid);
         }
