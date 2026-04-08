@@ -147,19 +147,37 @@ fn try_compile_fixed_offset(
 ) -> Option<CompiledPredicate> {
     match expr {
         Expr::Gt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let off = decoder.fixed_int32_offset(*col)?;
-            let val = *val;
-            return Some(Box::new(move |slot| Ok(slot.get_fixed_int32(off).map_or(false, |v| v > val))));
+            let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+            return Some(Box::new(move |slot| {
+                if let Some(v) = slot.get_fixed_int32(off) { return Ok(v > val); }
+                match slot.get_attr(col)? {
+                    Value::Int32(v) => Ok(*v > val),
+                    Value::Null => Ok(false),
+                    other => Err(ExecError::TypeMismatch { op: ">", left: other.clone(), right: Value::Int32(val) }),
+                }
+            }));
         } else { },
         Expr::Lt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let off = decoder.fixed_int32_offset(*col)?;
-            let val = *val;
-            return Some(Box::new(move |slot| Ok(slot.get_fixed_int32(off).map_or(false, |v| v < val))));
+            let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+            return Some(Box::new(move |slot| {
+                if let Some(v) = slot.get_fixed_int32(off) { return Ok(v < val); }
+                match slot.get_attr(col)? {
+                    Value::Int32(v) => Ok(*v < val),
+                    Value::Null => Ok(false),
+                    other => Err(ExecError::TypeMismatch { op: "<", left: other.clone(), right: Value::Int32(val) }),
+                }
+            }));
         } else { },
         Expr::Eq(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let off = decoder.fixed_int32_offset(*col)?;
-            let val = *val;
-            return Some(Box::new(move |slot| Ok(slot.get_fixed_int32(off).map_or(false, |v| v == val))));
+            let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+            return Some(Box::new(move |slot| {
+                if let Some(v) = slot.get_fixed_int32(off) { return Ok(v == val); }
+                match slot.get_attr(col)? {
+                    Value::Int32(v) => Ok(*v == val),
+                    Value::Null => Ok(false),
+                    other => Err(ExecError::TypeMismatch { op: "=", left: other.clone(), right: Value::Int32(val) }),
+                }
+            }));
         } else { },
         Expr::And(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_and_with_decoder(expr, decoder);

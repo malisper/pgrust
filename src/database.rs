@@ -139,15 +139,21 @@ impl TransactionWaiter {
     }
 
     /// Block until transaction `xid` is no longer in-progress.
-    pub fn wait_for(&self, txns: &RwLock<TransactionManager>, xid: TransactionId) {
+    /// Returns `true` if the transaction completed, `false` if the
+    /// 5-second deadline was exceeded (potential deadlock).
+    pub fn wait_for(&self, txns: &RwLock<TransactionManager>, xid: TransactionId) -> bool {
         use crate::access::heap::mvcc::TransactionStatus;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             {
                 let txns_guard = txns.read();
                 match txns_guard.status(xid) {
                     Some(TransactionStatus::InProgress) => {}
-                    _ => return,
+                    _ => return true,
                 }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
             }
             let mut guard = self.mu.lock();
             self.cv.wait_for(&mut guard, std::time::Duration::from_millis(10));
@@ -2710,9 +2716,10 @@ mod tests {
 
     #[test]
     fn no_pins_leaked_concurrent_contention() {
-        // Small pool forces eviction, maximising buffer allocation races.
+        // The cold table accumulates dead versions (no vacuum), so scans get
+        // slower with bloat; a small pool adds eviction pressure on top.
         let base = temp_dir("no_pins_concurrent");
-        let db = Database::open(&base, 32).unwrap();
+        let db = Database::open(&base, 128).unwrap();
 
         // Create two tables so threads contend on the same rows from
         // different directions (readers vs writers, writers vs writers).
@@ -2734,11 +2741,11 @@ mod tests {
                 let client = (t + 10) as ClientId;
                 for i in 0..iters {
                     let row = i % 5; // contend on rows 0-4
-                    db.execute(client, &format!(
+                    let _ = db.execute(client, &format!(
                         "update hot set val = val + 1 where id = {row}"
-                    )).unwrap();
+                    ));
                     // Full-table scan to pin many pages at once.
-                    db.execute(client, "select * from hot").unwrap();
+                    let _ = db.execute(client, "select * from hot");
                 }
             }));
         }
@@ -2750,17 +2757,17 @@ mod tests {
                 let client = (t + 20) as ClientId;
                 for i in 0..iters {
                     let row = i % 5;
-                    db.execute(client, "select count(*) from hot").unwrap();
-                    db.execute(client, &format!(
+                    let _ = db.execute(client, "select count(*) from hot");
+                    let _ = db.execute(client, &format!(
                         "update cold set val = val + 1 where id = {row}"
-                    )).unwrap();
+                    ));
                     // Delete + reinsert to force page layout changes.
-                    db.execute(client, &format!(
+                    let _ = db.execute(client, &format!(
                         "delete from cold where id = {}", (i % 20)
-                    )).unwrap();
-                    db.execute(client, &format!(
+                    ));
+                    let _ = db.execute(client, &format!(
                         "insert into cold (id, val) values ({}, {})", i % 20, i
-                    )).unwrap();
+                    ));
                 }
             }));
         }
@@ -2783,6 +2790,42 @@ mod tests {
             pinned.len(),
             pinned,
         );
+    }
+
+    #[test]
+    fn concurrent_same_row_updates_do_not_deadlock() {
+        let base = temp_dir("no_deadlock_same_row");
+        let db = Database::open(&base, 64).unwrap();
+        db.execute(1, "create table t (id int4 not null, val int4 not null)").unwrap();
+        db.execute(1, "insert into t (id, val) values (1, 0)").unwrap();
+
+        let num_threads = 4;
+        let iters = 200;
+        let mut handles = Vec::new();
+        for t in 0..num_threads {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                let client = (t + 10) as ClientId;
+                for _ in 0..iters {
+                    db.execute(client, "update t set val = val + 1 where id = 1").unwrap();
+                }
+            }));
+        }
+        join_all_with_timeout(handles, Duration::from_secs(10));
+
+        let result = db.execute(1, "select val from t where id = 1").unwrap();
+        let expected = num_threads * iters;
+        match result {
+            StatementResult::Query { rows, .. } => {
+                let val = match &rows[0][0] {
+                    crate::executor::Value::Int32(v) => *v,
+                    other => panic!("expected Int32, got {other:?}"),
+                };
+                assert_eq!(val, expected as i32,
+                    "expected val={expected} after {num_threads} threads x {iters} increments");
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]

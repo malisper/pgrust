@@ -217,11 +217,9 @@ pub fn execute_update_with_waiter(
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
-    // BufferHeapTuple predicate: uses fixed-offset fast path for the main scan.
+    // Compiled predicate: uses the fixed-offset fast path for BufferHeapTuple
+    // and falls back for HeapTuple.
     let qual = stmt.predicate.as_ref().map(|p| compile_predicate_with_decoder(p, &decoder));
-    // HeapTuple predicate: for the TupleUpdated retry path which uses from_heap_tuple.
-    // The decoder fast path uses get_fixed_int32 which only works for BufferHeapTuple.
-    let heap_qual = stmt.predicate.as_ref().map(|p| super::expr::compile_predicate(p));
 
     // Page-mode scan: batch visibility checks per page under a single lock,
     // matching the SELECT path (heap_scan_prepare_next_page). This replaces
@@ -277,7 +275,7 @@ pub fn execute_update_with_waiter(
                         let mut new_slot = TupleSlot::from_heap_tuple(
                             Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
                         );
-                        let passes = match &heap_qual { Some(q) => q(&mut new_slot)?, None => true };
+                        let passes = match &qual { Some(q) => q(&mut new_slot)?, None => true };
                         if !passes {
                             break;
                         }
