@@ -4,8 +4,11 @@ use parking_lot::RwLock;
 
 use crate::access::heap::am::{
     HeapError, heap_delete_with_waiter, heap_fetch, heap_insert_mvcc_with_cid,
-    heap_scan_begin_visible, heap_scan_next, heap_update_with_waiter,
+    heap_scan_begin_visible, heap_scan_end,
+    heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_update_with_waiter,
 };
+use crate::access::heap::tuple::HeapTuple;
 use crate::access::heap::mvcc::{TransactionId, TransactionManager};
 use crate::access::heap::mvcc::CommandId;
 use crate::catalog::Catalog;
@@ -209,83 +212,86 @@ pub fn execute_update_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
-    // Scan tuples without holding txns.read(), then check visibility
-    // separately. This avoids a lock-ordering deadlock: heap_scan_next
-    // acquires buffer content_lock (via read_page), and the SELECT path
-    // (heap_scan_next_visible_raw) acquires content_lock before txns.read().
-    // Holding txns.read() across heap_scan_next would invert that order.
+    // Hoist descriptor allocation out of the per-tuple loop.
+    let desc = Rc::new(stmt.desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+
+    // Page-mode scan: batch visibility checks per page under a single lock,
+    // matching the SELECT path (heap_scan_prepare_next_page). This replaces
+    // the old per-tuple txns.read() which caused 19% lock contention.
     loop {
-        let (tid, tuple) = match heap_scan_next(&*ctx.pool, ctx.client_id, &mut scan.scan)? {
-            Some(t) => t,
-            None => break,
-        };
-        let visible = {
-            let txns_guard = ctx.txns.read();
-            scan.snapshot.tuple_visible(&txns_guard, &tuple)
-        };
-        if !visible {
-            continue;
-        }
+        let next: Result<Option<usize>, ExecError> =
+            heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
+        let Some(buffer_id) = next? else { break; };
 
-        let desc = Rc::new(stmt.desc.clone());
-        let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
-        if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
-            continue;
-        }
-        let original_values = slot.into_values()?;
-        let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
-        let mut values = original_values;
-        for assignment in &stmt.assignments {
-            values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot)?;
-        }
+        // SAFETY: buffer is pinned, visibility offsets were collected under
+        // lock in prepare_next_page, and tuple user data is immutable.
+        let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
+            .expect("pinned buffer must be valid");
 
-        let replacement = tuple_from_values(&stmt.desc, &values)?;
-        let mut current_tid = tid;
-        let mut current_replacement = replacement;
-        loop {
-            match heap_update_with_waiter(
-                &*ctx.pool,
-                ctx.client_id,
-                stmt.rel,
-                &ctx.txns,
-                xid,
-                cid,
-                current_tid,
-                &current_replacement,
-                waiter,
-            ) {
-                Ok(new_tid) => {
-                    let _ = new_tid;
-                    affected_rows += 1;
-                    break;
-                }
-                Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
-                    let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
-                    let desc = Rc::new(stmt.desc.clone());
-                    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-                    let mut new_slot = TupleSlot::from_heap_tuple(desc, attr_descs, new_ctid, new_tuple);
-                    if !predicate_matches(stmt.predicate.as_ref(), &mut new_slot)? {
+        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
+            let tuple = HeapTuple::parse(tuple_bytes).map_err(HeapError::from)?;
+            let mut slot = TupleSlot::from_heap_tuple(
+                Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple,
+            );
+            if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
+                continue;
+            }
+            let original_values = slot.into_values()?;
+            let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
+            let mut values = original_values;
+            for assignment in &stmt.assignments {
+                values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot)?;
+            }
+
+            let replacement = tuple_from_values(&stmt.desc, &values)?;
+            let mut current_tid = tid;
+            let mut current_replacement = replacement;
+            loop {
+                match heap_update_with_waiter(
+                    &*ctx.pool,
+                    ctx.client_id,
+                    stmt.rel,
+                    &ctx.txns,
+                    xid,
+                    cid,
+                    current_tid,
+                    &current_replacement,
+                    waiter,
+                ) {
+                    Ok(new_tid) => {
+                        let _ = new_tid;
+                        affected_rows += 1;
                         break;
                     }
-                    let new_values_base = new_slot.into_values()?;
-                    let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
-                    let mut new_values = new_values_base;
-                    for assignment in &stmt.assignments {
-                        new_values[assignment.column_index] =
-                            eval_expr(&assignment.expr, &mut eval_slot)?;
+                    Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                        let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                        let mut new_slot = TupleSlot::from_heap_tuple(
+                            Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
+                        );
+                        if !predicate_matches(stmt.predicate.as_ref(), &mut new_slot)? {
+                            break;
+                        }
+                        let new_values_base = new_slot.into_values()?;
+                        let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
+                        let mut new_values = new_values_base;
+                        for assignment in &stmt.assignments {
+                            new_values[assignment.column_index] =
+                                eval_expr(&assignment.expr, &mut eval_slot)?;
+                        }
+                        current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
+                        current_tid = new_ctid;
                     }
-                    current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
-                    current_tid = new_ctid;
+                    Err(HeapError::TupleAlreadyModified(_)) => {
+                        break;
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(HeapError::TupleAlreadyModified(_)) => {
-                    break;
-                }
-                Err(e) => return Err(e.into()),
             }
         }
     }
 
+    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
     Ok(StatementResult::AffectedRows(affected_rows))
 }
 
@@ -306,34 +312,36 @@ pub fn execute_delete_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();
 
-    // Same lock-ordering fix as execute_update_with_waiter: acquire
-    // content_lock (via heap_scan_next) and txns.read() separately.
-    loop {
-        let (tid, tuple) = match heap_scan_next(&*ctx.pool, ctx.client_id, &mut scan.scan)? {
-            Some(t) => t,
-            None => break,
-        };
-        let visible = {
-            let txns_guard = ctx.txns.read();
-            scan.snapshot.tuple_visible(&txns_guard, &tuple)
-        };
-        if !visible {
-            continue;
-        }
+    // Hoist descriptor allocation out of the per-tuple loop.
+    let desc = Rc::new(stmt.desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
 
-        let desc = Rc::new(stmt.desc.clone());
-        let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-        let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
-        if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
-            continue;
+    // Page-mode scan: batch visibility checks per page under a single lock.
+    loop {
+        let next: Result<Option<usize>, ExecError> =
+            heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
+        let Some(buffer_id) = next? else { break; };
+
+        let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
+            .expect("pinned buffer must be valid");
+
+        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
+            let tuple = HeapTuple::parse(tuple_bytes).map_err(HeapError::from)?;
+            let mut slot = TupleSlot::from_heap_tuple(
+                Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple,
+            );
+            if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
+                continue;
+            }
+            targets.push(tid);
         }
-        targets.push(tid);
     }
 
     // Use the scan snapshot for visibility checks in the delete phase so that
     // rows committed by other transactions after the scan still appear visible
     // (enabling the correct TupleAlreadyModified path rather than TupleNotVisible).
     let snapshot = scan.snapshot.clone();
+    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
 
     let mut affected_rows = 0;
     for tid in &targets {
