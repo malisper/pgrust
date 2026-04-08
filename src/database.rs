@@ -140,10 +140,10 @@ impl TransactionWaiter {
 
     /// Block until transaction `xid` is no longer in-progress.
     /// Returns `true` if the transaction completed, `false` if the
-    /// 5-second deadline was exceeded (potential deadlock).
+    /// 2-second deadline was exceeded (potential deadlock).
     pub fn wait_for(&self, txns: &RwLock<TransactionManager>, xid: TransactionId) -> bool {
         use crate::access::heap::mvcc::TransactionStatus;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             {
                 let txns_guard = txns.read();

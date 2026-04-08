@@ -356,12 +356,32 @@ pub fn execute_delete_with_waiter(
 
     let mut affected_rows = 0;
     for tid in &targets {
-        match heap_delete_with_waiter(&*ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, *tid, &snapshot, waiter) {
-            Ok(()) => affected_rows += 1,
-            // Row was concurrently deleted by another committed transaction —
-            // skip it, matching PostgreSQL's behaviour in ExecDelete.
-            Err(HeapError::TupleAlreadyModified(_)) => {}
-            Err(e) => return Err(e.into()),
+        let mut current_tid = *tid;
+        loop {
+            match heap_delete_with_waiter(&*ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, current_tid, &snapshot, waiter) {
+                Ok(()) => {
+                    affected_rows += 1;
+                    break;
+                }
+                // Row was concurrently deleted — skip it.
+                Err(HeapError::TupleAlreadyModified(_)) => { break; }
+                // Row was concurrently updated — follow ctid chain, recheck
+                // predicate, and retry. Matches PostgreSQL's ExecDelete.
+                Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                    let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                    let mut new_slot = TupleSlot::from_heap_tuple(
+                        Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
+                    );
+                    let passes = match &qual { Some(q) => q(&mut new_slot)?, None => true };
+                    if !passes {
+                        // Concurrent update changed the row so it no longer
+                        // matches our WHERE — skip it.
+                        break;
+                    }
+                    current_tid = new_ctid;
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
     }
 

@@ -694,7 +694,21 @@ pub fn heap_delete_with_waiter(
                 return Ok(());
             }
             Some(TransactionStatus::Committed) => {
-                return Err(HeapError::TupleAlreadyModified(tid));
+                // Re-read the tuple to get the ctid.
+                let pin2 = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+                let buffer_id2 = pin2.buffer_id();
+                let guard2 = pool.lock_buffer_shared(buffer_id2)?;
+                let page2 = *guard2;
+                drop(guard2);
+                drop(pin2);
+                let current = heap_page_get_tuple(&page2, tid.offset_number)?;
+                if current.header.ctid == tid {
+                    // ctid points to self — the row was deleted, not updated.
+                    return Err(HeapError::TupleAlreadyModified(tid));
+                }
+                // The row was updated — return the new ctid so the caller
+                // can follow the chain, matching PostgreSQL's TM_Updated.
+                return Err(HeapError::TupleUpdated(tid, current.header.ctid));
             }
         }
     }
