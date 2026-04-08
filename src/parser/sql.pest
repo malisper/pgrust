@@ -59,7 +59,7 @@ is_null_suffix = { kw_is ~ kw_null }
 is_not_null_suffix = { kw_is ~ kw_not ~ kw_null }
 is_distinct_suffix = { kw_is ~ kw_distinct ~ kw_from ~ add_expr }
 is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
-comp_op = { "=" | "<" | ">" }
+comp_op = { "=" | "<" | ">" | "~" }
 unary_expr = { negated_expr | primary_expr }
 negated_expr = { "-" ~ unary_expr }
 primary_expr = { kw_null | kw_true | kw_false | kw_current_timestamp | agg_call | func_call | identifier | integer | string_literal | "(" ~ expr ~ ")" }

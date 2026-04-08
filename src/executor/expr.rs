@@ -31,6 +31,22 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
             eval_expr(right, slot)?,
             |a, b| a > b,
         ),
+        Expr::RegexMatch(left, right) => {
+            let text = eval_expr(left, slot)?;
+            let pattern = eval_expr(right, slot)?;
+            if matches!(text, Value::Null) || matches!(pattern, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let text_str = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "~", left: text.clone(), right: pattern.clone(),
+            })?;
+            let pat_str = pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "~", left: text.clone(), right: pattern.clone(),
+            })?;
+            let re = regex::Regex::new(pat_str)
+                .map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
+            Ok(Value::Bool(re.is_match(text_str)))
+        }
         Expr::And(left, right) => eval_and(eval_expr(left, slot)?, eval_expr(right, slot)?),
         Expr::Or(left, right) => eval_or(eval_expr(left, slot)?, eval_expr(right, slot)?),
         Expr::Not(inner) => match eval_expr(inner, slot)? {
@@ -242,6 +258,28 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
                 }
                 Ok(false)
             });
+        },
+        Expr::RegexMatch(left, right) => {
+            if let (Expr::Column(col), Expr::Const(Value::Text(pat))) = (left.as_ref(), right.as_ref()) {
+                let col = *col;
+                if let Ok(re) = regex::Regex::new(pat.as_str()) {
+                    let re = std::sync::Arc::new(re);
+                    return Box::new(move |slot| {
+                        let val = slot.get_attr(col)?;
+                        if let Some(s) = val.as_text() {
+                            Ok(re.is_match(s))
+                        } else if matches!(val, Value::Null) {
+                            Ok(false)
+                        } else {
+                            Err(ExecError::TypeMismatch {
+                                op: "~",
+                                left: val.clone(),
+                                right: Value::Null,
+                            })
+                        }
+                    });
+                }
+            }
         },
         _ => { },
     }
