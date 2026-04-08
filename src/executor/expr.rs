@@ -322,16 +322,6 @@ fn flatten_or_inner(expr: &Expr, out: &mut Vec<CompiledPredicate>) {
     }
 }
 
-pub(crate) fn predicate_matches(predicate: Option<&Expr>, slot: &mut TupleSlot) -> Result<bool, ExecError> {
-    let Some(predicate) = predicate else {
-        return Ok(true);
-    };
-    match eval_expr(predicate, slot)? {
-        Value::Bool(true) => Ok(true),
-        Value::Bool(false) | Value::Null => Ok(false),
-        other => Err(ExecError::NonBoolQual(other)),
-    }
-}
 
 pub(crate) fn tuple_from_values(desc: &RelationDesc, values: &[Value]) -> Result<crate::access::heap::tuple::HeapTuple, ExecError> {
     let tuple_values = desc
