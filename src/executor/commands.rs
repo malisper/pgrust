@@ -8,7 +8,6 @@ use crate::access::heap::am::{
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
     heap_update_with_waiter,
 };
-use crate::access::heap::tuple::HeapTuple;
 use crate::access::heap::mvcc::{TransactionId, TransactionManager};
 use crate::access::heap::mvcc::CommandId;
 use crate::catalog::Catalog;
@@ -23,6 +22,7 @@ use crate::storage::smgr::StorageManager;
 use super::nodes::*;
 use super::expr::{eval_expr, predicate_matches, tuple_from_values};
 use super::explain::{format_buffer_usage, format_explain_lines};
+use super::tuple_decoder::CompiledTupleDecoder;
 use super::{ExecError, ExecutorContext, StatementResult, executor_start};
 
 pub(crate) fn execute_explain(
@@ -212,9 +212,10 @@ pub fn execute_update_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
-    // Hoist descriptor allocation out of the per-tuple loop.
+    // Hoist descriptor allocation and decoder compilation out of the per-tuple loop.
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
 
     // Page-mode scan: batch visibility checks per page under a single lock,
     // matching the SELECT path (heap_scan_prepare_next_page). This replaces
@@ -229,10 +230,11 @@ pub fn execute_update_with_waiter(
         let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
             .expect("pinned buffer must be valid");
 
+        let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
+
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
-            let tuple = HeapTuple::parse(tuple_bytes).map_err(HeapError::from)?;
-            let mut slot = TupleSlot::from_heap_tuple(
-                Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple,
+            let mut slot = TupleSlot::from_buffer_tuple(
+                tuple_bytes, Rc::clone(&pin), Rc::clone(&decoder),
             );
             if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
                 continue;
@@ -312,9 +314,10 @@ pub fn execute_delete_with_waiter(
     let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();
 
-    // Hoist descriptor allocation out of the per-tuple loop.
+    // Hoist descriptor allocation and decoder compilation out of the per-tuple loop.
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
 
     // Page-mode scan: batch visibility checks per page under a single lock.
     loop {
@@ -325,10 +328,11 @@ pub fn execute_delete_with_waiter(
         let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
             .expect("pinned buffer must be valid");
 
+        let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
+
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
-            let tuple = HeapTuple::parse(tuple_bytes).map_err(HeapError::from)?;
-            let mut slot = TupleSlot::from_heap_tuple(
-                Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple,
+            let mut slot = TupleSlot::from_buffer_tuple(
+                tuple_bytes, Rc::clone(&pin), Rc::clone(&decoder),
             );
             if !predicate_matches(stmt.predicate.as_ref(), &mut slot)? {
                 continue;
