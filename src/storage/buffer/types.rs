@@ -548,6 +548,7 @@ pub enum Error {
     WrongIoOp,
     NoIoInProgress,
     BufferPinned,
+    AllBuffersPinned,
     InvalidBuffer,
     NotDirty,
     Storage(String),
