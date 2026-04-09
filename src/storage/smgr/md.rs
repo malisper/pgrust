@@ -8,11 +8,13 @@ use super::*;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 
 
 #[cfg(target_os = "linux")]
@@ -405,9 +407,7 @@ impl StorageManager for MdStorageManager {
         let byte_offset = seg_offset as u64 * BLCKSZ as u64;
 
         let seg = self.get_seg(rel, fork, segno)?;
-        seg.file.seek(SeekFrom::Start(byte_offset))?;
-
-        let n = seg.file.read(buf)?;
+        let n = seg.file.read_at(buf, byte_offset)?;
         if n != BLCKSZ {
             return Err(SmgrError::BlockOutOfRange { rel, fork, block });
         }
@@ -431,9 +431,7 @@ impl StorageManager for MdStorageManager {
         let byte_offset = seg_offset as u64 * BLCKSZ as u64;
 
         let seg = self.get_seg(rel, fork, segno)?;
-        seg.file.seek(SeekFrom::Start(byte_offset))?;
-
-        let n = seg.file.write(data)?;
+        let n = seg.file.write_at(data, byte_offset)?;
         if n != BLCKSZ {
             return Err(SmgrError::ShortIo {
                 expected: BLCKSZ,
