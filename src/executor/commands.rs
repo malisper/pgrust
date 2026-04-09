@@ -221,6 +221,10 @@ pub fn execute_update_with_waiter(
     // and falls back for HeapTuple.
     let qual = stmt.predicate.as_ref().map(|p| compile_predicate_with_decoder(p, &decoder));
 
+    // Reusable slot — allocated once, reset per tuple (like PG's ss_ScanTupleSlot).
+    let mut slot = TupleSlot::empty(decoder.ncols());
+    slot.decoder = Some(Rc::clone(&decoder));
+
     // Page-mode scan: batch visibility checks per page under a single lock,
     // matching the SELECT path (heap_scan_prepare_next_page). This replaces
     // the old per-tuple txns.read() which caused 19% lock contention.
@@ -237,13 +241,22 @@ pub fn execute_update_with_waiter(
         let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
 
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
-            let mut slot = TupleSlot::from_buffer_tuple(
-                tuple_bytes, Rc::clone(&pin), Rc::clone(&decoder),
-            );
+            // Reset slot for new tuple (like PG's ExecStoreBufferHeapTuple)
+            slot.kind = SlotKind::BufferHeapTuple {
+                tuple_ptr: tuple_bytes.as_ptr(),
+                tuple_len: tuple_bytes.len(),
+                pin: Rc::clone(&pin),
+            };
+            slot.tts_nvalid = 0;
+            slot.tts_values.clear();
+            slot.decode_offset = 0;
+
             if let Some(q) = &qual {
                 if !q(&mut slot)? { continue; }
             }
-            let original_values = slot.into_values()?;
+            slot.values()?;
+            Value::materialize_all(&mut slot.tts_values);
+            let original_values = slot.tts_values.clone();
             let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
             let mut values = original_values;
             for assignment in &stmt.assignments {
@@ -326,6 +339,10 @@ pub fn execute_delete_with_waiter(
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
     let qual = stmt.predicate.as_ref().map(|p| compile_predicate_with_decoder(p, &decoder));
 
+    // Reusable slot — allocated once, reset per tuple.
+    let mut slot = TupleSlot::empty(decoder.ncols());
+    slot.decoder = Some(Rc::clone(&decoder));
+
     // Page-mode scan: batch visibility checks per page under a single lock.
     loop {
         let next: Result<Option<usize>, ExecError> =
@@ -338,9 +355,15 @@ pub fn execute_delete_with_waiter(
         let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
 
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
-            let mut slot = TupleSlot::from_buffer_tuple(
-                tuple_bytes, Rc::clone(&pin), Rc::clone(&decoder),
-            );
+            slot.kind = SlotKind::BufferHeapTuple {
+                tuple_ptr: tuple_bytes.as_ptr(),
+                tuple_len: tuple_bytes.len(),
+                pin: Rc::clone(&pin),
+            };
+            slot.tts_nvalid = 0;
+            slot.tts_values.clear();
+            slot.decode_offset = 0;
+
             if let Some(q) = &qual {
                 if !q(&mut slot)? { continue; }
             }

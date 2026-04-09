@@ -1,3 +1,8 @@
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 use pgrust::database::{Database, Session};
 use pgrust::executor::{StatementResult, Value};
 use pgrust::ClientId;

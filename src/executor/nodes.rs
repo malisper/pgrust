@@ -923,27 +923,6 @@ impl TupleSlot {
         }
     }
 
-    /// Zero-copy slot backed by raw bytes on a pinned buffer page.
-    /// No allocation — the tuple is decoded lazily from the page.
-    pub(crate) fn from_buffer_tuple(
-        tuple_bytes: &[u8],
-        pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
-        decoder: Rc<super::tuple_decoder::CompiledTupleDecoder>,
-    ) -> Self {
-        let ncols = decoder.ncols();
-        Self {
-            kind: SlotKind::BufferHeapTuple {
-                tuple_ptr: tuple_bytes.as_ptr(),
-                tuple_len: tuple_bytes.len(),
-                pin,
-            },
-            tts_values: Vec::with_capacity(ncols),
-            tts_nvalid: 0,
-            decode_offset: 0,
-            decoder: Some(decoder),
-        }
-    }
-
     pub(crate) fn empty(ncols: usize) -> Self {
         Self {
             kind: SlotKind::Empty,
