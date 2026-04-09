@@ -306,7 +306,8 @@ impl Database {
                     let rel = entry.rel;
                     pool.with_storage_mut(|s| {
                         let _ = s.smgr.open(rel);
-                        let _ = s.smgr.create(rel, ForkNumber::Main, false);
+                        // Use is_redo=true so create tolerates existing fork files on restart.
+                        let _ = s.smgr.create(rel, ForkNumber::Main, true);
                     });
                 }
             }
