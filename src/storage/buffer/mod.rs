@@ -5,11 +5,10 @@ pub use types::*;
 pub use backend::*;
 
 use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::FxHashMap;
 
 use crate::storage::smgr::RelFileLocator;
 use crate::storage::wal::{INVALID_LSN, Lsn, WalWriter};
@@ -52,9 +51,7 @@ impl PartitionedLookup {
 
     #[inline]
     fn partition_index(tag: &BufferTag) -> usize {
-        let mut hasher = FxHasher::default();
-        tag.hash(&mut hasher);
-        hasher.finish() as usize % NUM_BUFFER_PARTITIONS
+        (tag.rel.rel_number.wrapping_add(tag.block)) as usize % NUM_BUFFER_PARTITIONS
     }
 
     #[inline]
