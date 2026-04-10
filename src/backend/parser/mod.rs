@@ -952,6 +952,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_json_operators_and_functions() {
+        let stmt = parse_select(
+            "select '{\"a\":[1,null]}'::json -> 'a', '{\"a\":[1,null]}'::json ->> 'a', '{\"a\":{\"b\":1}}'::json #> ARRAY['a','b']::varchar[], json_typeof('{\"a\":1}'::json)",
+        )
+        .unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::JsonGet(_, _)));
+        assert!(matches!(stmt.targets[1].expr, SqlExpr::JsonGetText(_, _)));
+        assert!(matches!(stmt.targets[2].expr, SqlExpr::JsonPath(_, _)));
+        assert!(matches!(stmt.targets[3].expr, SqlExpr::FuncCall { .. }));
+    }
+
+    #[test]
+    fn parse_json_table_function_in_from() {
+        let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
+        assert!(matches!(
+            stmt.from,
+            Some(FromItem::FunctionCall { name, .. }) if name == "json_each"
+        ));
+    }
+
+    #[test]
     fn parse_current_timestamp() {
         let stmt =
             parse_statement("insert into pgbench_history (mtime) values (current_timestamp)")

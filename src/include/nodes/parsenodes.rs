@@ -273,6 +273,7 @@ pub enum SqlTypeKind {
     Float4,
     Float8,
     Numeric,
+    Json,
     Text,
     Bool,
     Timestamp,
@@ -430,5 +431,13 @@ pub enum SqlExpr {
         array: Box<SqlExpr>,
     },
     Random,
+    JsonGet(Box<SqlExpr>, Box<SqlExpr>),
+    JsonGetText(Box<SqlExpr>, Box<SqlExpr>),
+    JsonPath(Box<SqlExpr>, Box<SqlExpr>),
+    JsonPathText(Box<SqlExpr>, Box<SqlExpr>),
+    FuncCall {
+        name: String,
+        args: Vec<SqlExpr>,
+    },
     CurrentTimestamp,
 }

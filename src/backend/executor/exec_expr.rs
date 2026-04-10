@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
+use serde_json::Value as SerdeJsonValue;
 
 use crate::pgrust::compact_string::CompactString;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
@@ -11,6 +12,22 @@ use super::nodes::*;
 use super::{ExecError, ExecutorContext, executor_start, exec_next};
 
 extern crate rand;
+
+fn validate_json_text(text: &str) -> Result<(), ExecError> {
+    serde_json::from_str::<SerdeJsonValue>(text)
+        .map(|_| ())
+        .map_err(|_| ExecError::InvalidStorageValue {
+            column: "json".into(),
+            details: format!("invalid input syntax for type json: \"{text}\""),
+        })
+}
+
+fn parse_json_text(text: &str) -> Result<SerdeJsonValue, ExecError> {
+    serde_json::from_str::<SerdeJsonValue>(text).map_err(|_| ExecError::InvalidStorageValue {
+        column: "json".into(),
+        details: format!("invalid input syntax for type json: \"{text}\""),
+    })
+}
 
 pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
     match expr {
@@ -124,8 +141,358 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
             eval_quantified_array(&left_value, *op, true, &right_value)
         }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
+        Expr::JsonGet(left, right) => eval_json_get(left, right, false, slot, ctx),
+        Expr::JsonGetText(left, right) => eval_json_get(left, right, true, slot, ctx),
+        Expr::JsonPath(left, right) => eval_json_path(left, right, false, slot, ctx),
+        Expr::JsonPathText(left, right) => eval_json_path(left, right, true, slot, ctx),
+        Expr::FuncCall { func, args } => eval_builtin_function(*func, args, slot, ctx),
         Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(render_current_timestamp()))),
     }
+}
+
+fn eval_builtin_function(
+    func: BuiltinScalarFunction,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    match func {
+        BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
+        BuiltinScalarFunction::ToJson => {
+            let value = values.first().cloned().unwrap_or(Value::Null);
+            Ok(Value::Json(CompactString::from_owned(value_to_json_text(&value, false))))
+        }
+        BuiltinScalarFunction::ArrayToJson => {
+            let value = values.first().cloned().unwrap_or(Value::Null);
+            let pretty = values
+                .get(1)
+                .and_then(|value| match value {
+                    Value::Bool(v) => Some(*v),
+                    _ => None,
+                })
+                .unwrap_or(false);
+            Ok(Value::Json(CompactString::from_owned(value_to_json_text(&value, pretty))))
+        }
+        BuiltinScalarFunction::JsonTypeof => {
+            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
+            let ty = match json {
+                SerdeJsonValue::Null => "null",
+                SerdeJsonValue::Bool(_) => "boolean",
+                SerdeJsonValue::Number(_) => "number",
+                SerdeJsonValue::String(_) => "string",
+                SerdeJsonValue::Array(_) => "array",
+                SerdeJsonValue::Object(_) => "object",
+            };
+            Ok(Value::Text(CompactString::new(ty)))
+        }
+        BuiltinScalarFunction::JsonArrayLength => {
+            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
+            match json {
+                SerdeJsonValue::Array(items) => Ok(Value::Int32(items.len() as i32)),
+                other => Err(ExecError::TypeMismatch {
+                    op: "json_array_length",
+                    left: json_value_to_value(&other, false),
+                    right: Value::Null,
+                }),
+            }
+        }
+        BuiltinScalarFunction::JsonExtractPath => {
+            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
+            let path = parse_json_path_args(&values[1..])?;
+            Ok(json_value_to_value(
+                json_lookup_path(&json, &path).unwrap_or(&SerdeJsonValue::Null),
+                false,
+            ))
+        }
+        BuiltinScalarFunction::JsonExtractPathText => {
+            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
+            let path = parse_json_path_args(&values[1..])?;
+            Ok(json_value_to_value(
+                json_lookup_path(&json, &path).unwrap_or(&SerdeJsonValue::Null),
+                true,
+            ))
+        }
+    }
+}
+
+fn eval_json_get(
+    left: &Expr,
+    right: &Expr,
+    as_text: bool,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let json_value = eval_expr(left, slot, ctx)?;
+    let key = eval_expr(right, slot, ctx)?;
+    if matches!(json_value, Value::Null) || matches!(key, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let parsed = parse_json_argument(&json_value)?;
+    let selected = match key {
+        Value::Text(_) | Value::TextRef(_, _) => {
+            let name = key.as_text().unwrap();
+            match &parsed {
+                SerdeJsonValue::Object(map) => map.get(name),
+                _ => None,
+            }
+        }
+        Value::Int16(index) => json_lookup_index(&parsed, index as i32),
+        Value::Int32(index) => json_lookup_index(&parsed, index),
+        Value::Int64(index) => i32::try_from(index).ok().and_then(|index| json_lookup_index(&parsed, index)),
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: if as_text { "->>" } else { "->" },
+                left: json_value,
+                right: other,
+            });
+        }
+    };
+    Ok(selected
+        .map(|value| json_value_to_value(value, as_text))
+        .unwrap_or(Value::Null))
+}
+
+fn eval_json_path(
+    left: &Expr,
+    right: &Expr,
+    as_text: bool,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let json_value = eval_expr(left, slot, ctx)?;
+    let path_value = eval_expr(right, slot, ctx)?;
+    if matches!(json_value, Value::Null) || matches!(path_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let parsed = parse_json_argument(&json_value)?;
+    let path = parse_json_path_value(&path_value, if as_text { "#>>" } else { "#>" }, json_value.clone())?;
+    Ok(json_lookup_path(&parsed, &path)
+        .map(|value| json_value_to_value(value, as_text))
+        .unwrap_or(Value::Null))
+}
+
+fn parse_json_argument(value: &Value) -> Result<SerdeJsonValue, ExecError> {
+    match value {
+        Value::Json(text) => parse_json_text(text.as_str()),
+        Value::Text(text) => parse_json_text(text.as_str()),
+        Value::TextRef(_, _) => parse_json_text(value.as_text().unwrap()),
+        other => Err(ExecError::TypeMismatch {
+            op: "json",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn parse_json_path_args(args: &[Value]) -> Result<Vec<String>, ExecError> {
+    args.iter()
+        .map(|arg| match arg {
+            Value::Text(_) | Value::TextRef(_, _) => Ok(arg.as_text().unwrap().to_string()),
+            Value::Null => Ok(String::new()),
+            other => Err(ExecError::TypeMismatch {
+                op: "json path",
+                left: other.clone(),
+                right: Value::Null,
+            }),
+        })
+        .collect()
+}
+
+fn parse_json_path_value(value: &Value, op: &'static str, left: Value) -> Result<Vec<String>, ExecError> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Text(_) | Value::TextRef(_, _) => Ok(item.as_text().unwrap().to_string()),
+                Value::Null => Ok(String::new()),
+                other => Err(ExecError::TypeMismatch {
+                    op,
+                    left: left.clone(),
+                    right: other.clone(),
+                }),
+            })
+            .collect(),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left,
+            right: other.clone(),
+        }),
+    }
+}
+
+fn json_lookup_index<'a>(json: &'a SerdeJsonValue, index: i32) -> Option<&'a SerdeJsonValue> {
+    let items = match json {
+        SerdeJsonValue::Array(items) => items,
+        _ => return None,
+    };
+    let len = items.len() as i32;
+    let idx = if index < 0 { len + index } else { index };
+    if idx < 0 {
+        None
+    } else {
+        items.get(idx as usize)
+    }
+}
+
+fn json_lookup_path<'a>(json: &'a SerdeJsonValue, path: &[String]) -> Option<&'a SerdeJsonValue> {
+    let mut current = json;
+    for step in path {
+        current = match current {
+            SerdeJsonValue::Object(map) => map.get(step)?,
+            SerdeJsonValue::Array(_) => {
+                let index = step.parse::<i32>().ok()?;
+                json_lookup_index(current, index)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn json_value_to_text(value: &SerdeJsonValue) -> Option<String> {
+    match value {
+        SerdeJsonValue::Null => None,
+        SerdeJsonValue::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn json_value_to_value(value: &SerdeJsonValue, as_text: bool) -> Value {
+    if as_text {
+        json_value_to_text(value)
+            .map(|text| Value::Text(CompactString::from_owned(text)))
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Json(CompactString::from_owned(value.to_string()))
+    }
+}
+
+fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
+    match value {
+        Value::Null => SerdeJsonValue::Null,
+        Value::Int16(v) => SerdeJsonValue::from(*v),
+        Value::Int32(v) => SerdeJsonValue::from(*v),
+        Value::Int64(v) => SerdeJsonValue::from(*v),
+        Value::Float64(v) => serde_json::Number::from_f64(*v)
+            .map(SerdeJsonValue::Number)
+            .unwrap_or(SerdeJsonValue::Null),
+        Value::Numeric(v) => parse_json_text(&v.render()).unwrap_or(SerdeJsonValue::Null),
+        Value::Bool(v) => SerdeJsonValue::Bool(*v),
+        Value::Json(text) => parse_json_text(text.as_str()).unwrap_or(SerdeJsonValue::Null),
+        Value::Text(_) | Value::TextRef(_, _) => SerdeJsonValue::String(value.as_text().unwrap().to_string()),
+        Value::Array(items) => SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect()),
+    }
+}
+
+fn value_to_json_text(value: &Value, pretty: bool) -> String {
+    let json = value_to_json_serde(value);
+    if pretty {
+        serde_json::to_string_pretty(&json).unwrap()
+    } else {
+        serde_json::to_string(&json).unwrap()
+    }
+}
+
+pub(crate) fn eval_json_table_function(
+    kind: JsonTableFunction,
+    arg: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let value = eval_expr(arg, slot, ctx)?;
+    if matches!(value, Value::Null) {
+        return Ok(Vec::new());
+    }
+    let json = parse_json_argument(&value)?;
+    let mut rows = Vec::new();
+    match kind {
+        JsonTableFunction::ObjectKeys => {
+            let map = match json {
+                SerdeJsonValue::Object(map) => map,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "json_object_keys",
+                        left: json_value_to_value(&other, false),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for (key, _) in map {
+                rows.push(TupleSlot::virtual_row(vec![Value::Text(CompactString::from_owned(key))]));
+            }
+        }
+        JsonTableFunction::Each => {
+            let map = match json {
+                SerdeJsonValue::Object(map) => map,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "json_each",
+                        left: json_value_to_value(&other, false),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for (key, value) in map {
+                rows.push(TupleSlot::virtual_row(vec![
+                    Value::Text(CompactString::from_owned(key)),
+                    json_value_to_value(&value, false),
+                ]));
+            }
+        }
+        JsonTableFunction::EachText => {
+            let map = match json {
+                SerdeJsonValue::Object(map) => map,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "json_each_text",
+                        left: json_value_to_value(&other, false),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for (key, value) in map {
+                rows.push(TupleSlot::virtual_row(vec![
+                    Value::Text(CompactString::from_owned(key)),
+                    json_value_to_value(&value, true),
+                ]));
+            }
+        }
+        JsonTableFunction::ArrayElements => {
+            let items = match json {
+                SerdeJsonValue::Array(items) => items,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "json_array_elements",
+                        left: json_value_to_value(&other, false),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for value in items {
+                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(&value, false)]));
+            }
+        }
+        JsonTableFunction::ArrayElementsText => {
+            let items = match json {
+                SerdeJsonValue::Array(items) => items,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "json_array_elements_text",
+                        left: json_value_to_value(&other, false),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for value in items {
+                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(&value, true)]));
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn eval_quantified_array(
@@ -322,7 +689,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
             SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
             SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
@@ -343,7 +710,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
             SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
             SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
@@ -354,7 +721,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
         },
         Value::Bool(v) => match ty {
             SqlType { kind: SqlTypeKind::Bool, .. } => Ok(Value::Bool(v)),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
                 cast_text_value(if v { "true" } else { "false" }, ty, true)
             }
             SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Float4 | SqlTypeKind::Float8 | SqlTypeKind::Numeric, .. } => Err(ExecError::TypeMismatch {
@@ -370,6 +737,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             };
             cast_text_value(text, ty, true)
         }
+        Value::Json(text) => cast_text_value(text.as_str(), ty, true),
         Value::Int64(v) => match ty {
             SqlType { kind: SqlTypeKind::Int2, .. } => i16::try_from(v)
                 .map(Value::Int16)
@@ -388,7 +756,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
             SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v))),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
             SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
@@ -400,7 +768,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
         Value::Float64(v) => match ty {
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) { (v as f32) as f64 } else { v })),
             SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(parse_numeric_text(&v.to_string()).ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?)),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
             SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
@@ -423,6 +791,10 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
 fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::new(text))),
+        SqlTypeKind::Json => {
+            validate_json_text(text)?;
+            Ok(Value::Json(CompactString::new(text)))
+        }
         SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
             coerce_character_string(text, ty, explicit)?,
         ))),
@@ -470,6 +842,11 @@ fn cast_numeric_value(value: NumericValue, ty: SqlType, explicit: bool) -> Resul
     match ty.kind {
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
         SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::from_owned(value.render()))),
+        SqlTypeKind::Json => {
+            let rendered = value.render();
+            validate_json_text(&rendered)?;
+            Ok(Value::Json(CompactString::from_owned(rendered)))
+        }
         SqlTypeKind::Char | SqlTypeKind::Varchar => {
             cast_text_value(&value.render(), ty, explicit)
         }
@@ -869,6 +1246,17 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
                 }),
             }
         }
+        (ScalarType::Json, v) => {
+            let coerced = coerce_assignment_value(v, column.sql_type)?;
+            match coerced {
+                Value::Json(text) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
+                other => Err(ExecError::TypeMismatch {
+                    op: "assignment",
+                    left: Value::Null,
+                    right: other,
+                }),
+            }
+        }
         (ScalarType::Text, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
             Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
@@ -921,6 +1309,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
         Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Numeric(numeric) => cast_numeric_value(numeric.clone(), target, false),
+        Value::Json(text) => cast_text_value(text.as_str(), target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::Array(items) => Ok(Value::Array(items.clone())),
@@ -1032,6 +1421,18 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 column: column.name.clone(),
                 details: "invalid numeric text".into(),
             })?))
+        }
+        ScalarType::Json => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            let text = unsafe { std::str::from_utf8_unchecked(bytes) };
+            validate_json_text(text)?;
+            Ok(Value::Json(CompactString::new(text)))
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -1443,6 +1844,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
         Value::Numeric(text) => Ok(text.render().into_bytes()),
+        Value::Json(text) => Ok(text.as_bytes().to_vec()),
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
         Value::Float64(v) => Ok(v.to_string().into_bytes()),
@@ -1540,6 +1942,11 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
                 details: "invalid numeric array element".into(),
             })?))
         }
+        SqlTypeKind::Json => {
+            let text = unsafe { std::str::from_utf8_unchecked(bytes) };
+            validate_json_text(text)?;
+            Ok(Value::Json(CompactString::new(text)))
+        }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1568,6 +1975,19 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
+            Value::Json(v) => {
+                out.push('"');
+                for ch in v.chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
             Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
             Value::Text(_) | Value::TextRef(_, _) => {
                 out.push('"');

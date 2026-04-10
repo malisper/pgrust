@@ -507,6 +507,7 @@ impl Session {
                                     right: Value::Text(raw.clone().into()),
                                 }),
                             ScalarType::Numeric => Ok(Value::Numeric(raw.as_str().into())),
+                            ScalarType::Json => Ok(Value::Json(raw.clone().into())),
                             ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),

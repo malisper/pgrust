@@ -762,6 +762,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::Cast(inner, _) => select_item_name(inner, index),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::Random => "random".to_string(),
+        SqlExpr::FuncCall { name, .. } => name.clone(),
         SqlExpr::IntegerLiteral(_) | SqlExpr::NumericLiteral(_) => format!("expr{}", index + 1),
         _ => format!("expr{}", index + 1),
     }
@@ -827,6 +828,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
             }
         }
         Rule::kw_text => SqlType::new(SqlTypeKind::Text),
+        Rule::kw_json => SqlType::new(SqlTypeKind::Json),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
         Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
         Rule::char_type => {
@@ -994,6 +996,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
                         "&&" => SqlExpr::ArrayOverlap(Box::new(left), Box::new(right)),
+                        "->" => SqlExpr::JsonGet(Box::new(left), Box::new(right)),
+                        "->>" => SqlExpr::JsonGetText(Box::new(left), Box::new(right)),
+                        "#>" => SqlExpr::JsonPath(Box::new(left), Box::new(right)),
+                        "#>>" => SqlExpr::JsonPathText(Box::new(left), Box::new(right)),
                         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
                         "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
                         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
@@ -1040,7 +1046,25 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 .unwrap_or_default(),
         )),
         Rule::agg_call => build_agg_call(pair),
-        Rule::func_call => Ok(SqlExpr::Random),
+        Rule::func_call => {
+            let mut inner = pair.into_inner();
+            let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+            let args = inner
+                .find(|part| part.as_rule() == Rule::expr_list)
+                .map(|list| {
+                    list.into_inner()
+                        .filter(|part| part.as_rule() == Rule::expr)
+                        .map(build_expr)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            if name.eq_ignore_ascii_case("random") && args.is_empty() {
+                Ok(SqlExpr::Random)
+            } else {
+                Ok(SqlExpr::FuncCall { name, args })
+            }
+        }
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
@@ -1071,6 +1095,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::kw_avg => AggFunc::Avg,
                     Rule::kw_min => AggFunc::Min,
                     Rule::kw_max => AggFunc::Max,
+                    Rule::kw_json_agg => AggFunc::JsonAgg,
                     _ => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "aggregate function",

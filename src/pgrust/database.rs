@@ -829,9 +829,18 @@ fn collect_rels_from_expr(expr: &crate::backend::executor::Expr, rels: &mut std:
         | Expr::And(left, right)
         | Expr::Or(left, right)
         | Expr::IsDistinctFrom(left, right)
-        | Expr::IsNotDistinctFrom(left, right) => {
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::JsonGet(left, right)
+        | Expr::JsonGetText(left, right)
+        | Expr::JsonPath(left, right)
+        | Expr::JsonPathText(left, right) => {
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
+        }
+        Expr::FuncCall { args, .. } => {
+            for arg in args {
+                collect_rels_from_expr(arg, rels);
+            }
         }
         Expr::ArrayLiteral { elements, .. } => {
             for element in elements {
@@ -916,6 +925,7 @@ fn collect_rels_from_plan(plan: &crate::backend::executor::Plan, rels: &mut std:
                 collect_rels_from_expr(arg, rels);
             }
         }
+        Plan::JsonTableFunction { arg, .. } => collect_rels_from_expr(arg, rels),
     }
 }
 

@@ -21,6 +21,7 @@ pub enum ScalarType {
     Float32,
     Float64,
     Numeric,
+    Json,
     Text,
     Bool,
     Array(Box<ScalarType>),
@@ -67,6 +68,7 @@ pub enum Value {
     Int64(i64),
     Float64(f64),
     Numeric(NumericValue),
+    Json(CompactString),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned
     /// (the slot's `Rc<OwnedBufferPin>` keeps the pin alive). User data on the
@@ -248,6 +250,7 @@ impl Value {
             Value::Int64(v) => Value::Int64(*v),
             Value::Float64(v) => Value::Float64(*v),
             Value::Numeric(v) => Value::Numeric(v.clone()),
+            Value::Json(s) => Value::Json(s.clone()),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -286,6 +289,7 @@ impl PartialEq for Value {
             (Value::Int64(a), Value::Int64(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
+            (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -307,6 +311,7 @@ impl std::hash::Hash for Value {
             Value::Int64(v) => { 2u8.hash(state); v.hash(state); }
             Value::Float64(v) => { 3u8.hash(state); v.to_bits().hash(state); }
             Value::Numeric(v) => { 4u8.hash(state); v.hash(state); }
+            Value::Json(s) => { 9u8.hash(state); s.as_str().hash(state); }
             // Text and TextRef hash the same way so equal values get the same hash
             Value::Text(s) => { 5u8.hash(state); s.as_str().hash(state); }
             Value::TextRef(ptr, len) => {
@@ -353,6 +358,7 @@ pub enum AggFunc {
     Avg,
     Min,
     Max,
+    JsonAgg,
 }
 
 impl AggFunc {
@@ -363,8 +369,29 @@ impl AggFunc {
             AggFunc::Avg => "avg",
             AggFunc::Min => "min",
             AggFunc::Max => "max",
+            AggFunc::JsonAgg => "json_agg",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinScalarFunction {
+    Random,
+    ToJson,
+    ArrayToJson,
+    JsonTypeof,
+    JsonArrayLength,
+    JsonExtractPath,
+    JsonExtractPathText,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonTableFunction {
+    ObjectKeys,
+    Each,
+    EachText,
+    ArrayElements,
+    ArrayElementsText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,6 +457,14 @@ pub enum Expr {
         right: Box<Expr>,
     },
     Random,
+    JsonGet(Box<Expr>, Box<Expr>),
+    JsonGetText(Box<Expr>, Box<Expr>),
+    JsonPath(Box<Expr>, Box<Expr>),
+    JsonPathText(Box<Expr>, Box<Expr>),
+    FuncCall {
+        func: BuiltinScalarFunction,
+        args: Vec<Expr>,
+    },
     CurrentTimestamp,
 }
 
@@ -479,6 +514,11 @@ pub enum Plan {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    JsonTableFunction {
+        kind: JsonTableFunction,
+        arg: Expr,
+        output_columns: Vec<QueryColumn>,
+    },
 }
 
 impl Plan {
@@ -511,6 +551,7 @@ impl Plan {
             }
             Plan::GenerateSeries { output, .. } => vec![output.clone()],
             Plan::Unnest { output_columns, .. } => output_columns.clone(),
+            Plan::JsonTableFunction { output_columns, .. } => output_columns.clone(),
         }
     }
 
@@ -796,6 +837,16 @@ pub struct GenerateSeriesState {
 #[derive(Debug)]
 pub struct UnnestState {
     pub(crate) args: Vec<Expr>,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) rows: Option<Vec<TupleSlot>>,
+    pub(crate) next_index: usize,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct JsonTableFunctionState {
+    pub(crate) kind: JsonTableFunction,
+    pub(crate) arg: Expr,
     pub(crate) output_columns: Vec<String>,
     pub(crate) rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
@@ -1313,6 +1364,39 @@ impl PlanNode for UnnestState {
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Function Scan on unnest".into() }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for JsonTableFunctionState {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.rows.is_none() {
+            let mut dummy = TupleSlot::empty(0);
+            self.rows = Some(crate::backend::executor::exec_expr::eval_json_table_function(
+                self.kind,
+                &self.arg,
+                &mut dummy,
+                ctx,
+            )?);
+        }
+
+        let rows = self.rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+    fn column_names(&self) -> &[String] { &self.output_columns }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Function Scan on json".into() }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 

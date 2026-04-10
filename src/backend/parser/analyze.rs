@@ -1,6 +1,9 @@
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::executor::{AggAccum, AggFunc, Expr, Plan, QueryColumn, RelationDesc, TargetEntry, Value};
+use crate::backend::executor::{
+    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, Plan, QueryColumn,
+    RelationDesc, TargetEntry, Value,
+};
 
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use super::parsenodes::*;
@@ -21,6 +24,30 @@ fn empty_scope() -> BoundScope {
     BoundScope {
         desc: RelationDesc { columns: Vec::new() },
         columns: Vec::new(),
+    }
+}
+
+fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
+    match name.to_ascii_lowercase().as_str() {
+        "random" => Some(BuiltinScalarFunction::Random),
+        "to_json" => Some(BuiltinScalarFunction::ToJson),
+        "array_to_json" => Some(BuiltinScalarFunction::ArrayToJson),
+        "json_typeof" => Some(BuiltinScalarFunction::JsonTypeof),
+        "json_array_length" => Some(BuiltinScalarFunction::JsonArrayLength),
+        "json_extract_path" => Some(BuiltinScalarFunction::JsonExtractPath),
+        "json_extract_path_text" => Some(BuiltinScalarFunction::JsonExtractPathText),
+        _ => None,
+    }
+}
+
+fn resolve_json_table_function(name: &str) -> Option<JsonTableFunction> {
+    match name.to_ascii_lowercase().as_str() {
+        "json_object_keys" => Some(JsonTableFunction::ObjectKeys),
+        "json_each" => Some(JsonTableFunction::Each),
+        "json_each_text" => Some(JsonTableFunction::EachText),
+        "json_array_elements" => Some(JsonTableFunction::ArrayElements),
+        "json_array_elements_text" => Some(JsonTableFunction::ArrayElementsText),
+        _ => None,
     }
 }
 
@@ -532,6 +559,35 @@ pub(crate) fn bind_expr_with_outer(
             }
         }
         SqlExpr::Random => Expr::Random,
+        SqlExpr::JsonGet(left, right) => Expr::JsonGet(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::JsonGetText(left, right) => Expr::JsonGetText(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::JsonPath(left, right) => Expr::JsonPath(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::JsonPathText(left, right) => Expr::JsonPathText(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::FuncCall { name, args } => {
+            let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "supported builtin function",
+                actual: name.clone(),
+            })?;
+            Expr::FuncCall {
+                func,
+                args: args
+                    .iter()
+                    .map(|arg| bind_expr_with_outer(arg, scope, catalog, outer_scopes, grouped_outer))
+                    .collect::<Result<_, _>>()?,
+            }
+        }
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
 }
@@ -632,6 +688,7 @@ fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Json => "json",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Timestamp => "timestamp",
@@ -1006,7 +1063,47 @@ fn bind_from_item(
                     scope,
                 ))
             }
-            other => Err(ParseError::UnknownTable(other.to_string())),
+            other => {
+                if let Some(kind) = resolve_json_table_function(other) {
+                    if args.len() != 1 {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "single json argument",
+                            actual: format!("{other} with {} arguments", args.len()),
+                        });
+                    }
+                    let empty_scope = empty_scope();
+                    let arg = bind_expr_with_outer(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer)?;
+                    let output_columns = match kind {
+                        JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
+                        JsonTableFunction::Each => vec![
+                            QueryColumn::text("key"),
+                            QueryColumn { name: "value".into(), sql_type: SqlType::new(SqlTypeKind::Json) },
+                        ],
+                        JsonTableFunction::EachText => vec![
+                            QueryColumn::text("key"),
+                            QueryColumn::text("value"),
+                        ],
+                        JsonTableFunction::ArrayElements => vec![QueryColumn {
+                            name: "json_array_elements".into(),
+                            sql_type: SqlType::new(SqlTypeKind::Json),
+                        }],
+                        JsonTableFunction::ArrayElementsText => vec![QueryColumn::text("json_array_elements_text")],
+                    };
+                    let desc = RelationDesc {
+                        columns: output_columns
+                            .iter()
+                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                            .collect(),
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    Ok((
+                        Plan::JsonTableFunction { kind, arg, output_columns },
+                        scope,
+                    ))
+                } else {
+                    Err(ParseError::UnknownTable(other.to_string()))
+                }
+            }
         },
         FromItem::DerivedTable(select) => {
             let plan = build_plan_with_outer(select, catalog, &[], None)?;
@@ -1138,9 +1235,15 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
+        | SqlExpr::FuncCall { .. }
         | SqlExpr::CurrentTimestamp => false,
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_contains_agg),
-        SqlExpr::ArrayOverlap(l, r) | SqlExpr::QuantifiedArray { left: l, array: r, .. } => {
+        SqlExpr::ArrayOverlap(l, r)
+        | SqlExpr::QuantifiedArray { left: l, array: r, .. }
+        | SqlExpr::JsonGet(l, r)
+        | SqlExpr::JsonGetText(l, r)
+        | SqlExpr::JsonPath(l, r)
+        | SqlExpr::JsonPathText(l, r) => {
             expr_contains_agg(l) || expr_contains_agg(r)
         }
         SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
@@ -1188,12 +1291,22 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>, bool)>
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => {}
+        SqlExpr::FuncCall { args, .. } => {
+            for arg in args {
+                collect_aggs(arg, aggs);
+            }
+        }
         SqlExpr::ArrayLiteral(elements) => {
             for element in elements {
                 collect_aggs(element, aggs);
             }
         }
-        SqlExpr::ArrayOverlap(l, r) | SqlExpr::QuantifiedArray { left: l, array: r, .. } => {
+        SqlExpr::ArrayOverlap(l, r)
+        | SqlExpr::QuantifiedArray { left: l, array: r, .. }
+        | SqlExpr::JsonGet(l, r)
+        | SqlExpr::JsonGetText(l, r)
+        | SqlExpr::JsonPath(l, r)
+        | SqlExpr::JsonPathText(l, r) => {
             collect_aggs(l, aggs);
             collect_aggs(r, aggs);
         }
@@ -1256,6 +1369,7 @@ fn infer_sql_expr_type(
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::Const(Value::Numeric(_)) => SqlType::new(SqlTypeKind::Numeric),
+        SqlExpr::Const(Value::Json(_)) => SqlType::new(SqlTypeKind::Json),
         SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) | SqlExpr::Const(Value::Null) => {
             SqlType::new(SqlTypeKind::Text)
         }
@@ -1291,6 +1405,8 @@ fn infer_sql_expr_type(
         | SqlExpr::IsNotDistinctFrom(_, _)
         | SqlExpr::ArrayOverlap(_, _)
         | SqlExpr::QuantifiedArray { .. } => SqlType::new(SqlTypeKind::Bool),
+        SqlExpr::JsonGet(_, _) | SqlExpr::JsonPath(_, _) => SqlType::new(SqlTypeKind::Json),
+        SqlExpr::JsonGetText(_, _) | SqlExpr::JsonPathText(_, _) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::AggCall { func, arg, .. } => aggregate_sql_type(
             *func,
             arg.as_deref().map(|expr| infer_sql_expr_type(expr, scope, catalog, outer_scopes, grouped_outer)),
@@ -1308,6 +1424,17 @@ fn infer_sql_expr_type(
             SqlType::new(SqlTypeKind::Bool)
         }
         SqlExpr::Random => SqlType::new(SqlTypeKind::Float8),
+        SqlExpr::FuncCall { name, .. } => match resolve_scalar_function(name) {
+            Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
+            Some(BuiltinScalarFunction::ToJson) | Some(BuiltinScalarFunction::ArrayToJson) => {
+                SqlType::new(SqlTypeKind::Json)
+            }
+            Some(BuiltinScalarFunction::JsonTypeof)
+            | Some(BuiltinScalarFunction::JsonExtractPathText) => SqlType::new(SqlTypeKind::Text),
+            Some(BuiltinScalarFunction::JsonArrayLength) => SqlType::new(SqlTypeKind::Int4),
+            Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
+            None => SqlType::new(SqlTypeKind::Text),
+        },
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
     }
 }
@@ -1402,6 +1529,7 @@ fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> SqlType {
             None => SqlType::new(Numeric),
         },
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
+        AggFunc::JsonAgg => SqlType::new(Json),
     }
 }
 
@@ -1489,6 +1617,22 @@ fn bind_agg_output_expr(
             array_type: infer_array_literal_type(elements, input_scope, catalog, outer_scopes, grouped_outer)?,
         }),
         SqlExpr::ArrayOverlap(l, r) => Ok(Expr::ArrayOverlap(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+        )),
+        SqlExpr::JsonGet(l, r) => Ok(Expr::JsonGet(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+        )),
+        SqlExpr::JsonGetText(l, r) => Ok(Expr::JsonGetText(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+        )),
+        SqlExpr::JsonPath(l, r) => Ok(Expr::JsonPath(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+        )),
+        SqlExpr::JsonPathText(l, r) => Ok(Expr::JsonPathText(
             Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
             Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
         )),
@@ -1591,6 +1735,19 @@ fn bind_agg_output_expr(
             }
         }
         SqlExpr::Random => Ok(Expr::Random),
+        SqlExpr::FuncCall { name, args } => {
+            let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "supported builtin function",
+                actual: name.clone(),
+            })?;
+            Ok(Expr::FuncCall {
+                func,
+                args: args
+                    .iter()
+                    .map(|arg| bind_agg_output_expr(arg, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys))
+                    .collect::<Result<_, _>>()?,
+            })
+        }
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
     }
 }

@@ -259,6 +259,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Float32 => (4, AttributeAlign::Int),
         ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Numeric => (-1, AttributeAlign::Int),
+        ScalarType::Json => (-1, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Bool => (1, AttributeAlign::Char),
         ScalarType::Array(_) => (-1, AttributeAlign::Int),
@@ -287,6 +288,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Float4 => ScalarType::Float32,
         SqlTypeKind::Float8 => ScalarType::Float64,
         SqlTypeKind::Numeric => ScalarType::Numeric,
+        SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
             ScalarType::Text
         }
@@ -302,6 +304,7 @@ fn encode_sql_type(sql_type: SqlType) -> String {
         SqlTypeKind::Float4 => "float4",
         SqlTypeKind::Float8 => "float8",
         SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Json => "json",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
@@ -325,6 +328,7 @@ fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
         "float4" => SqlType { kind: SqlTypeKind::Float4, typmod, is_array: false },
         "float8" => SqlType { kind: SqlTypeKind::Float8, typmod, is_array: false },
         "numeric" => SqlType { kind: SqlTypeKind::Numeric, typmod, is_array: false },
+        "json" => SqlType { kind: SqlTypeKind::Json, typmod, is_array: false },
         "text" => SqlType { kind: SqlTypeKind::Text, typmod, is_array: false },
         "bool" => SqlType { kind: SqlTypeKind::Bool, typmod, is_array: false },
         "timestamp" => SqlType { kind: SqlTypeKind::Timestamp, typmod, is_array: false },
