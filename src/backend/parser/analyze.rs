@@ -129,10 +129,14 @@ fn build_plan_with_outer(
         let accumulators: Vec<AggAccum> = aggs
             .iter()
             .map(|(func, arg, distinct)| {
+                let arg_type = arg
+                    .as_ref()
+                    .map(|e| infer_sql_expr_type(e, &scope, catalog, outer_scopes, grouped_outer.as_ref()));
                 Ok(AggAccum {
                     func: *func,
                     arg: arg.as_ref().map(|e| bind_expr_with_outer(e, &scope, catalog, outer_scopes, grouped_outer.as_ref())).transpose()?,
                     distinct: *distinct,
+                    sql_type: aggregate_sql_type(*func, arg_type),
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -145,10 +149,13 @@ fn build_plan_with_outer(
                 sql_type: infer_sql_expr_type(gk, &scope, catalog, outer_scopes, grouped_outer.as_ref()),
             });
         }
-        for (func, _, _) in &aggs {
+        for (func, arg, _) in &aggs {
             output_columns.push(QueryColumn {
                 name: func.name().to_string(),
-                sql_type: aggregate_sql_type(*func),
+                sql_type: aggregate_sql_type(
+                    *func,
+                    arg.as_ref().map(|e| infer_sql_expr_type(e, &scope, catalog, outer_scopes, grouped_outer.as_ref())),
+                ),
             });
         }
 
@@ -1151,7 +1158,10 @@ fn infer_sql_expr_type(
         | SqlExpr::IsNotDistinctFrom(_, _)
         | SqlExpr::ArrayOverlap(_, _)
         | SqlExpr::QuantifiedArray { .. } => SqlType::new(SqlTypeKind::Bool),
-        SqlExpr::AggCall { func, .. } => aggregate_sql_type(*func),
+        SqlExpr::AggCall { func, arg, .. } => aggregate_sql_type(
+            *func,
+            arg.as_deref().map(|expr| infer_sql_expr_type(expr, scope, catalog, outer_scopes, grouped_outer)),
+        ),
         SqlExpr::ArrayLiteral(elements) => infer_array_literal_type(elements, scope, catalog, outer_scopes, grouped_outer)
             .unwrap_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
         SqlExpr::ScalarSubquery(select) => build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.cloned())
@@ -1238,10 +1248,25 @@ fn ensure_single_column_subquery(plan: &Plan) -> Result<(), ParseError> {
     }
 }
 
-fn aggregate_sql_type(func: AggFunc) -> SqlType {
+fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> SqlType {
+    use SqlTypeKind::*;
+
     match func {
-        AggFunc::Count | AggFunc::Sum | AggFunc::Avg => SqlType::new(SqlTypeKind::Int8),
-        AggFunc::Min | AggFunc::Max => SqlType::new(SqlTypeKind::Text),
+        AggFunc::Count => SqlType::new(Int8),
+        AggFunc::Sum => match arg_type.map(|t| t.element_type().kind) {
+            Some(Int2 | Int4) => SqlType::new(Int8),
+            Some(Int8 | Numeric) => SqlType::new(Numeric),
+            Some(Float4 | Float8) => SqlType::new(Float8),
+            Some(kind) => SqlType::new(kind),
+            None => SqlType::new(Int8),
+        },
+        AggFunc::Avg => match arg_type.map(|t| t.element_type().kind) {
+            Some(Int2 | Int4 | Int8 | Numeric) => SqlType::new(Numeric),
+            Some(Float4 | Float8) => SqlType::new(Float8),
+            Some(kind) => SqlType::new(kind),
+            None => SqlType::new(Numeric),
+        },
+        AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
     }
 }
 
