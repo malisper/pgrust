@@ -373,6 +373,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_generate_series() {
+        let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 2));
+    }
+
+    #[test]
+    fn parse_generate_series_with_step() {
+        let stmt = parse_select("select * from generate_series(1, 10, 2)").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 3));
+    }
+
+    #[test]
     fn parse_random_function() {
         let stmt = parse_select("select random()").unwrap();
         assert_eq!(stmt.targets.len(), 1);
