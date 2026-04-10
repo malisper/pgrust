@@ -441,6 +441,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_create_table_with_array_types() {
+        match parse_statement(
+            "create table widgets (a varchar[], b varchar(5)[], c int4[], d text[])",
+        )
+        .unwrap()
+        {
+            Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+                assert_eq!(columns[0].ty, SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)));
+                assert_eq!(columns[1].ty, SqlType::array_of(SqlType::with_char_len(SqlTypeKind::Varchar, 5)));
+                assert_eq!(columns[2].ty, SqlType::array_of(SqlType::new(SqlTypeKind::Int4)));
+                assert_eq!(columns[3].ty, SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
+            }
+            other => panic!("expected create table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_array_and_unnest_expressions() {
+        let stmt = parse_select("select * from unnest(ARRAY['a', 'b']::varchar[], ARRAY[1, 2])").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "unnest" && args.len() == 2));
+
+        let stmt = parse_select("select 1 = any (ARRAY[1, 2])").unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::QuantifiedArray { is_all: false, .. }));
+
+        let stmt = parse_select("select 1 < all (ARRAY[2, 3])").unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::QuantifiedArray { is_all: true, .. }));
+
+        let stmt = parse_select("select ARRAY['a'] && ARRAY['b']").unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayOverlap(_, _)));
+    }
+
+    #[test]
+    fn build_plan_rejects_untyped_empty_array() {
+        let stmt = parse_select("select ARRAY[]").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnexpectedToken { .. })
+        ));
+    }
+
+    #[test]
+    fn build_plan_accepts_typed_empty_array() {
+        let stmt = parse_select("select ARRAY[]::varchar[]").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { targets, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].sql_type, SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)));
+            }
+            other => panic!("expected projection, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_aggregate_select() {
         let stmt = parse_select("select count(*) from people").unwrap();
         assert_eq!(stmt.targets.len(), 1);
@@ -516,6 +570,20 @@ mod tests {
     fn parse_generate_series_with_step() {
         let stmt = parse_select("select * from generate_series(1, 10, 2)").unwrap();
         assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 3));
+    }
+
+    #[test]
+    fn build_plan_for_unnest_uses_array_element_types() {
+        let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[], ARRAY[1, 2])").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Unnest { output_columns, .. } => {
+                assert_eq!(output_columns.len(), 2);
+                assert_eq!(output_columns[0].sql_type, SqlType::new(SqlTypeKind::Varchar));
+                assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
+            }
+            other => panic!("expected unnest plan, got {other:?}"),
+        }
     }
 
     #[test]

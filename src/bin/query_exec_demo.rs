@@ -63,6 +63,10 @@ fn render_value(value: &Value) -> String {
         Value::Text(v) => format!("{:?}", v),
         Value::TextRef(_, _) => format!("{:?}", value.as_text().unwrap()),
         Value::Bool(v) => v.to_string(),
+        Value::Array(items) => format!(
+            "{{{}}}",
+            items.iter().map(render_value).collect::<Vec<_>>().join(", ")
+        ),
         Value::Null => "NULL".into(),
     }
 }

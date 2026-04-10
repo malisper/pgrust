@@ -256,6 +256,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Int32 => (4, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Bool => (1, AttributeAlign::Char),
+        ScalarType::Array(_) => (-1, AttributeAlign::Int),
     };
     ColumnDesc {
         name: name.clone(),
@@ -271,6 +272,9 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
 }
 
 fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
+    if sql_type.is_array {
+        return ScalarType::Array(Box::new(scalar_type_for_sql_type(sql_type.element_type())));
+    }
     match sql_type.kind {
         SqlTypeKind::Int4 => ScalarType::Int32,
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
@@ -280,27 +284,36 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     }
 }
 
-fn encode_sql_type(sql_type: SqlType) -> &'static str {
-    match sql_type.kind {
+fn encode_sql_type(sql_type: SqlType) -> String {
+    let base = match sql_type.kind {
         SqlTypeKind::Int4 => "int4",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
         SqlTypeKind::Char => "char",
         SqlTypeKind::Varchar => "varchar",
+    };
+    if sql_type.is_array {
+        format!("{base}[]")
+    } else {
+        base.to_string()
     }
 }
 
 fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
-    match name {
-        "int4" => Ok(SqlType { kind: SqlTypeKind::Int4, typmod }),
-        "text" => Ok(SqlType { kind: SqlTypeKind::Text, typmod }),
-        "bool" => Ok(SqlType { kind: SqlTypeKind::Bool, typmod }),
-        "timestamp" => Ok(SqlType { kind: SqlTypeKind::Timestamp, typmod }),
-        "char" => Ok(SqlType { kind: SqlTypeKind::Char, typmod }),
-        "varchar" => Ok(SqlType { kind: SqlTypeKind::Varchar, typmod }),
-        other => Err(CatalogError::UnknownType(other.to_string())),
-    }
+    let is_array = name.ends_with("[]");
+    let base = if is_array { &name[..name.len() - 2] } else { name };
+    let mut sql_type = match base {
+        "int4" => SqlType { kind: SqlTypeKind::Int4, typmod, is_array: false },
+        "text" => SqlType { kind: SqlTypeKind::Text, typmod, is_array: false },
+        "bool" => SqlType { kind: SqlTypeKind::Bool, typmod, is_array: false },
+        "timestamp" => SqlType { kind: SqlTypeKind::Timestamp, typmod, is_array: false },
+        "char" => SqlType { kind: SqlTypeKind::Char, typmod, is_array: false },
+        "varchar" => SqlType { kind: SqlTypeKind::Varchar, typmod, is_array: false },
+        other => return Err(CatalogError::UnknownType(other.to_string())),
+    };
+    sql_type.is_array = is_array;
+    Ok(sql_type)
 }
 
 #[cfg(test)]
@@ -365,6 +378,57 @@ mod tests {
 
         let reopened = DurableCatalog::load(&base).unwrap();
         assert!(reopened.catalog().get("widgets").is_none());
+    }
+
+    #[test]
+    fn durable_catalog_roundtrips_array_types() {
+        let base = temp_dir("array_roundtrip");
+        let mut store = DurableCatalog::load(&base).unwrap();
+        store
+            .catalog_mut()
+            .create_table(
+                "shipments",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("tags", SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)), true),
+                        column_desc("counts", SqlType::array_of(SqlType::new(SqlTypeKind::Int4)), true),
+                    ],
+                },
+            )
+            .unwrap();
+        store.persist().unwrap();
+
+        let reopened = DurableCatalog::load(&base).unwrap();
+        let entry = reopened.catalog().get("shipments").unwrap();
+        assert_eq!(entry.desc.columns[0].sql_type, SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)));
+        assert_eq!(entry.desc.columns[1].sql_type, SqlType::array_of(SqlType::new(SqlTypeKind::Int4)));
+    }
+
+    #[test]
+    fn durable_catalog_roundtrips_varchar_array_typmod() {
+        let base = temp_dir("varchar_array_typmod");
+        let mut store = DurableCatalog::load(&base).unwrap();
+        store
+            .catalog_mut()
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![column_desc(
+                        "codes",
+                        SqlType::array_of(SqlType::with_char_len(SqlTypeKind::Varchar, 5)),
+                        true,
+                    )],
+                },
+            )
+            .unwrap();
+        store.persist().unwrap();
+
+        let reopened = DurableCatalog::load(&base).unwrap();
+        let entry = reopened.catalog().get("widgets").unwrap();
+        assert_eq!(
+            entry.desc.columns[0].sql_type,
+            SqlType::array_of(SqlType::with_char_len(SqlTypeKind::Varchar, 5))
+        );
     }
 
     #[test]

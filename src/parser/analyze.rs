@@ -25,7 +25,7 @@ fn empty_scope() -> BoundScope {
 }
 
 #[derive(Debug, Clone)]
-struct GroupedOuterScope {
+pub(crate) struct GroupedOuterScope {
     scope: BoundScope,
     group_by_exprs: Vec<SqlExpr>,
 }
@@ -87,7 +87,7 @@ fn build_plan_with_outer(
     }
 
     let (base, scope) = if let Some(from) = &stmt.from {
-        bind_from_item(from, catalog)?
+        bind_from_item(from, catalog, outer_scopes, grouped_outer.as_ref())?
     } else {
         (Plan::Result, empty_scope())
     };
@@ -316,6 +316,7 @@ fn bind_select_targets(
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
     bind_expr_with_outer(expr, scope, &Catalog::default(), &[], None)
 }
@@ -338,10 +339,20 @@ pub(crate) fn bind_expr_with_outer(
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?)),
-        SqlExpr::Cast(inner, ty) => Expr::Cast(
-            Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?),
-            *ty,
-        ),
+        SqlExpr::Cast(inner, ty) => {
+            let bound_inner = if let SqlExpr::ArrayLiteral(elements) = inner.as_ref() {
+                Expr::ArrayLiteral {
+                    elements: elements
+                        .iter()
+                        .map(|element| bind_expr_with_outer(element, scope, catalog, outer_scopes, grouped_outer))
+                        .collect::<Result<_, _>>()?,
+                    array_type: *ty,
+                }
+            } else {
+                bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?
+            };
+            Expr::Cast(Box::new(bound_inner), *ty)
+        }
         SqlExpr::Eq(left, right) => Expr::Eq(
             Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
@@ -374,6 +385,17 @@ pub(crate) fn bind_expr_with_outer(
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::ArrayLiteral(elements) => Expr::ArrayLiteral {
+            elements: elements
+                .iter()
+                .map(|element| bind_expr_with_outer(element, scope, catalog, outer_scopes, grouped_outer))
+                .collect::<Result<_, _>>()?,
+            array_type: infer_array_literal_type(elements, scope, catalog, outer_scopes, grouped_outer)?,
+        },
+        SqlExpr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
             Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
@@ -431,6 +453,21 @@ pub(crate) fn bind_expr_with_outer(
                     left: Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
                     op: *op,
                     subquery: Box::new(subquery_plan),
+                }
+            }
+        }
+        SqlExpr::QuantifiedArray { left, op, is_all, array } => {
+            if *is_all {
+                Expr::AllArray {
+                    left: Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+                    op: *op,
+                    right: Box::new(bind_expr_with_outer(array, scope, catalog, outer_scopes, grouped_outer)?),
+                }
+            } else {
+                Expr::AnyArray {
+                    left: Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+                    op: *op,
+                    right: Box::new(bind_expr_with_outer(array, scope, catalog, outer_scopes, grouped_outer)?),
                 }
             }
         }
@@ -693,7 +730,12 @@ fn outer_column_is_grouped(index: usize, scope: &BoundScope, group_by_exprs: &[S
     })
 }
 
-fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScope), ParseError> {
+fn bind_from_item(
+    stmt: &FromItem,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<(Plan, BoundScope), ParseError> {
     match stmt {
         FromItem::Table { name } => {
             let entry = catalog
@@ -717,10 +759,10 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                     });
                 }
                 let empty_scope = empty_scope();
-                let start = bind_expr_with_outer(&args[0], &empty_scope, catalog, &[], None)?;
-                let stop = bind_expr_with_outer(&args[1], &empty_scope, catalog, &[], None)?;
+                let start = bind_expr_with_outer(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer)?;
+                let stop = bind_expr_with_outer(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer)?;
                 let step = if args.len() == 3 {
-                    bind_expr_with_outer(&args[2], &empty_scope, catalog, &[], None)?
+                    bind_expr_with_outer(&args[2], &empty_scope, catalog, outer_scopes, grouped_outer)?
                 } else {
                     Expr::Const(Value::Int32(1))
                 };
@@ -745,6 +787,48 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                     scope,
                 ))
             }
+            "unnest" => {
+                if args.is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "unnest(array_expr [, array_expr ...])",
+                        actual: "unnest()".into(),
+                    });
+                }
+                let empty_scope = empty_scope();
+                let mut bound_args = Vec::with_capacity(args.len());
+                let mut output_columns = Vec::with_capacity(args.len());
+                let mut desc_columns = Vec::with_capacity(args.len());
+                for (idx, arg) in args.iter().enumerate() {
+                    let arg_type = infer_sql_expr_type(arg, &empty_scope, catalog, outer_scopes, grouped_outer);
+                    if !arg_type.is_array {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "array argument to unnest",
+                            actual: format!("{arg:?}"),
+                        });
+                    }
+                    let element_type = arg_type.element_type();
+                    let column_name = if idx == 0 {
+                        "unnest".to_string()
+                    } else {
+                        format!("unnest_{}", idx + 1)
+                    };
+                    bound_args.push(bind_expr_with_outer(arg, &empty_scope, catalog, outer_scopes, grouped_outer)?);
+                    output_columns.push(QueryColumn {
+                        name: column_name.clone(),
+                        sql_type: element_type,
+                    });
+                    desc_columns.push(column_desc(column_name, element_type, true));
+                }
+                let desc = RelationDesc { columns: desc_columns };
+                let scope = scope_for_relation(Some(name), &desc);
+                Ok((
+                    Plan::Unnest {
+                        args: bound_args,
+                        output_columns,
+                    },
+                    scope,
+                ))
+            }
             other => Err(ParseError::UnknownTable(other.to_string())),
         },
         FromItem::DerivedTable(select) => {
@@ -758,11 +842,11 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
             kind,
             on,
         } => {
-            let (left_plan, left_scope) = bind_from_item(left, catalog)?;
-            let (right_plan, right_scope) = bind_from_item(right, catalog)?;
+            let (left_plan, left_scope) = bind_from_item(left, catalog, outer_scopes, grouped_outer)?;
+            let (right_plan, right_scope) = bind_from_item(right, catalog, outer_scopes, grouped_outer)?;
             let scope = combine_scopes(&left_scope, &right_scope);
             let on = match (kind, on) {
-                (JoinKind::Inner, Some(on)) => bind_expr_with_outer(on, &scope, catalog, &[], None)?,
+                (JoinKind::Inner, Some(on)) => bind_expr_with_outer(on, &scope, catalog, outer_scopes, grouped_outer)?,
                 (JoinKind::Cross, None) => Expr::Const(Value::Bool(true)),
                 _ => {
                     return Err(ParseError::UnexpectedToken {
@@ -785,7 +869,7 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
             alias,
             column_aliases,
         } => {
-            let (plan, scope) = bind_from_item(source, catalog)?;
+            let (plan, scope) = bind_from_item(source, catalog, outer_scopes, grouped_outer)?;
             apply_relation_alias(plan, scope, alias, column_aliases)
         }
     }
@@ -876,6 +960,10 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => false,
+        SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_contains_agg),
+        SqlExpr::ArrayOverlap(l, r) | SqlExpr::QuantifiedArray { left: l, array: r, .. } => {
+            expr_contains_agg(l) || expr_contains_agg(r)
+        }
         SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::RegexMatch(l, r)
@@ -903,6 +991,15 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>, bool)>
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => {}
+        SqlExpr::ArrayLiteral(elements) => {
+            for element in elements {
+                collect_aggs(element, aggs);
+            }
+        }
+        SqlExpr::ArrayOverlap(l, r) | SqlExpr::QuantifiedArray { left: l, array: r, .. } => {
+            collect_aggs(l, aggs);
+            collect_aggs(r, aggs);
+        }
         SqlExpr::Cast(inner, _) => collect_aggs(inner, aggs),
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::RegexMatch(l, r)
@@ -916,7 +1013,13 @@ fn sql_expr_name(expr: &SqlExpr) -> String {
     match expr {
         SqlExpr::Column(name) => name.clone(),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
-        SqlExpr::ScalarSubquery(_) | SqlExpr::Exists(_) | SqlExpr::InSubquery { .. } | SqlExpr::QuantifiedSubquery { .. } => "?column?".to_string(),
+        SqlExpr::ScalarSubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::InSubquery { .. }
+        | SqlExpr::QuantifiedSubquery { .. }
+        | SqlExpr::ArrayLiteral(_)
+        | SqlExpr::ArrayOverlap(_, _)
+        | SqlExpr::QuantifiedArray { .. } => "?column?".to_string(),
         _ => "?column?".to_string(),
     }
 }
@@ -940,6 +1043,7 @@ fn infer_sql_expr_type(
         SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) | SqlExpr::Const(Value::Null) => {
             SqlType::new(SqlTypeKind::Text)
         }
+        SqlExpr::Const(Value::Array(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Add(_, _) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Negate(inner) => infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer),
@@ -954,8 +1058,12 @@ fn infer_sql_expr_type(
         | SqlExpr::IsNull(_)
         | SqlExpr::IsNotNull(_)
         | SqlExpr::IsDistinctFrom(_, _)
-        | SqlExpr::IsNotDistinctFrom(_, _) => SqlType::new(SqlTypeKind::Bool),
+        | SqlExpr::IsNotDistinctFrom(_, _)
+        | SqlExpr::ArrayOverlap(_, _)
+        | SqlExpr::QuantifiedArray { .. } => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::AggCall { func, .. } => aggregate_sql_type(*func),
+        SqlExpr::ArrayLiteral(elements) => infer_array_literal_type(elements, scope, catalog, outer_scopes, grouped_outer)
+            .unwrap_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
         SqlExpr::ScalarSubquery(select) => build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.cloned())
             .ok()
             .and_then(|plan| {
@@ -1027,10 +1135,20 @@ fn bind_agg_output_expr(
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
         SqlExpr::Add(l, r) => Ok(Expr::Add(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Negate(inner) => Ok(Expr::Negate(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
-        SqlExpr::Cast(inner, ty) => Ok(Expr::Cast(
-            Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
-            *ty,
-        )),
+        SqlExpr::Cast(inner, ty) => {
+            let bound_inner = if let SqlExpr::ArrayLiteral(elements) = inner.as_ref() {
+                Expr::ArrayLiteral {
+                    elements: elements
+                        .iter()
+                        .map(|element| bind_agg_output_expr(element, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys))
+                        .collect::<Result<_, _>>()?,
+                    array_type: *ty,
+                }
+            } else {
+                bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?
+            };
+            Ok(Expr::Cast(Box::new(bound_inner), *ty))
+        }
         SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Gt(l, r) => Ok(Expr::Gt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
@@ -1042,6 +1160,17 @@ fn bind_agg_output_expr(
         SqlExpr::IsNotNull(inner) => Ok(Expr::IsNotNull(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::IsDistinctFrom(l, r) => Ok(Expr::IsDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::IsNotDistinctFrom(l, r) => Ok(Expr::IsNotDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::ArrayLiteral(elements) => Ok(Expr::ArrayLiteral {
+            elements: elements
+                .iter()
+                .map(|element| bind_agg_output_expr(element, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys))
+                .collect::<Result<_, _>>()?,
+            array_type: infer_array_literal_type(elements, input_scope, catalog, outer_scopes, grouped_outer)?,
+        }),
+        SqlExpr::ArrayOverlap(l, r) => Ok(Expr::ArrayOverlap(
+            Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+        )),
         SqlExpr::ScalarSubquery(select) => {
             let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
             child_outer.push(input_scope.clone());
@@ -1125,7 +1254,43 @@ fn bind_agg_output_expr(
                 })
             }
         }
+        SqlExpr::QuantifiedArray { left, op, is_all, array } => {
+            if *is_all {
+                Ok(Expr::AllArray {
+                    left: Box::new(bind_agg_output_expr(left, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+                    op: *op,
+                    right: Box::new(bind_agg_output_expr(array, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+                })
+            } else {
+                Ok(Expr::AnyArray {
+                    left: Box::new(bind_agg_output_expr(left, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+                    op: *op,
+                    right: Box::new(bind_agg_output_expr(array, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+                })
+            }
+        }
         SqlExpr::Random => Ok(Expr::Random),
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
     }
+}
+
+fn infer_array_literal_type(
+    elements: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<SqlType, ParseError> {
+    for element in elements {
+        if matches!(element, SqlExpr::Const(Value::Null)) {
+            continue;
+        }
+        return Ok(SqlType::array_of(
+            infer_sql_expr_type(element, scope, catalog, outer_scopes, grouped_outer).element_type(),
+        ));
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ARRAY[...] with a typed element or explicit cast",
+        actual: "ARRAY[]".into(),
+    })
 }
