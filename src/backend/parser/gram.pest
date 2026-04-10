@@ -85,7 +85,7 @@ nullability = { not_null | nullable }
 not_null = { kw_not ~ kw_null }
 nullable = { kw_null }
 type_name = { base_type_name ~ array_suffix? }
-base_type_name = { kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | char_type | varchar_type | character_varying_type }
+base_type_name = { kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | kw_json | char_type | varchar_type | character_varying_type }
 array_suffix = { "[" ~ "]" }
 double_precision_type = { kw_double ~ kw_precision }
 numeric_type = { (kw_numeric | kw_decimal) ~ ("(" ~ integer ~ ("," ~ integer)? ~ ")")? }
@@ -110,8 +110,9 @@ is_not_null_suffix = { kw_is ~ kw_not ~ kw_null }
 is_distinct_suffix = { kw_is ~ kw_distinct ~ kw_from ~ add_expr }
 is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ select_stmt ~ ")" }
-quantified_suffix = { comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
-comp_op = { "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
+quantified_comp_op = { "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+comp_op = { "&&" | "#>>" | "#>" | "->>" | "->" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ cast_suffix* }
 cast_suffix = { "::" ~ type_name }
@@ -123,9 +124,8 @@ exists_expr = { kw_exists ~ "(" ~ select_stmt ~ ")" }
 array_expr = { kw_array ~ "[" ~ expr_list? ~ "]" }
 agg_call = { agg_func ~ "(" ~ (agg_distinct ~ expr | star | expr) ~ ")" }
 agg_distinct = { kw_distinct_atom }
-agg_func = { kw_count | kw_sum | kw_avg | kw_min | kw_max }
-func_call = { kw_random ~ "(" ~ ")" }
-kw_random = { ^"random" ~ keyword_end }
+agg_func = { kw_count | kw_sum | kw_avg | kw_min | kw_max | kw_json_agg }
+func_call = { identifier ~ "(" ~ expr_list? ~ ")" }
 
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
 keyword_end = _{ !ident_cont }
@@ -211,6 +211,7 @@ kw_sum = { kw_sum_atom }
 kw_avg = { kw_avg_atom }
 kw_min = { kw_min_atom }
 kw_max = { kw_max_atom }
+kw_json_agg = { kw_json_agg_atom }
 
 kw_int4 = { kw_int4_atom }
 kw_int2 = { kw_int2_atom }
@@ -317,6 +318,7 @@ kw_sum_atom = @{ ^"sum" ~ keyword_end }
 kw_avg_atom = @{ ^"avg" ~ keyword_end }
 kw_min_atom = @{ ^"min" ~ keyword_end }
 kw_max_atom = @{ ^"max" ~ keyword_end }
+kw_json_agg_atom = @{ ^"json_agg" ~ keyword_end }
 
 kw_int2_atom = @{ ^"int2" ~ keyword_end }
 kw_int4_atom = @{ ^"int4" ~ keyword_end }

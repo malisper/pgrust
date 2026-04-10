@@ -205,6 +205,10 @@ impl CompiledTupleDecoder {
                                     values.push(Value::Null);
                                     continue;
                                 }
+                                ScalarType::Json => {
+                                    values.push(Value::Null);
+                                    continue;
+                                }
                                 ScalarType::Text => {
                                     values.push(Value::Null);
                                     continue;
@@ -237,6 +241,11 @@ impl CompiledTupleDecoder {
                                         details: "invalid numeric text".into(),
                                     })?));
                                 }
+                                ScalarType::Json => {
+                                    values.push(Value::Json(crate::pgrust::compact_string::CompactString::new(unsafe {
+                                        std::str::from_utf8_unchecked(bytes_slice)
+                                    })));
+                                }
                                 ScalarType::Text => {
                                     values.push(Value::TextRef(bytes_slice.as_ptr(), bytes_slice.len() as u32));
                                 }
@@ -261,6 +270,11 @@ impl CompiledTupleDecoder {
                                         column: "<tuple>".into(),
                                         details: "invalid numeric text".into(),
                                     })?));
+                                }
+                                ScalarType::Json => {
+                                    values.push(Value::Json(crate::pgrust::compact_string::CompactString::new(unsafe {
+                                        std::str::from_utf8_unchecked(bytes)
+                                    })));
                                 }
                                 ScalarType::Text => {
                                     values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
@@ -368,6 +382,9 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
         ScalarType::Numeric => Ok(Value::Numeric(
             unsafe { std::str::from_utf8_unchecked(bytes) }.into(),
         )),
+        ScalarType::Json => Ok(Value::Json(crate::pgrust::compact_string::CompactString::new(unsafe {
+            std::str::from_utf8_unchecked(bytes)
+        }))),
         ScalarType::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {

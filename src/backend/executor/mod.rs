@@ -119,6 +119,7 @@ pub(crate) enum AccumState {
     CountDistinct { seen: HashSet<Value> },
     Sum { sum: Option<NumericAccum>, result_type: crate::backend::parser::SqlType },
     Avg { sum: Option<NumericAccum>, count: i64, result_type: crate::backend::parser::SqlType },
+    JsonAgg { values: Vec<Value> },
     Min { min: Option<Value> },
     Max { max: Option<Value> },
 }
@@ -130,6 +131,7 @@ impl AccumState {
             (AggFunc::Count, false) => AccumState::Count { count: 0 },
             (AggFunc::Sum, _) => AccumState::Sum { sum: None, result_type: sql_type },
             (AggFunc::Avg, _) => AccumState::Avg { sum: None, count: 0, result_type: sql_type },
+            (AggFunc::JsonAgg, _) => AccumState::JsonAgg { values: Vec::new() },
             (AggFunc::Min, _) => AccumState::Min { min: None },
             (AggFunc::Max, _) => AccumState::Max { max: None },
         }
@@ -167,6 +169,11 @@ impl AccumState {
                         *sum = accumulate_value(sum.take(), *result_type, value);
                         *count += 1;
                     }
+                }
+            },
+            (AggFunc::JsonAgg, _, _) => |state, value| {
+                if let AccumState::JsonAgg { values } = state {
+                    values.push(value.to_owned_value());
                 }
             },
             (AggFunc::Min, _, _) => |state, value| {
@@ -242,9 +249,39 @@ impl AccumState {
                     }
                 }
             }
+            AccumState::JsonAgg { values } => Value::Json(crate::pgrust::compact_string::CompactString::from_owned(
+                render_json_array(values),
+            )),
             AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
             AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
         }
+    }
+}
+
+fn render_json_array(values: &[Value]) -> String {
+    let mut out = String::from("[");
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&value_to_json_text(value));
+    }
+    out.push(']');
+    out
+}
+
+fn value_to_json_text(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Bool(v) => if *v { "true".into() } else { "false".into() },
+        Value::Json(v) => v.to_string(),
+        Value::Text(_) | Value::TextRef(_, _) => serde_json::to_string(value.as_text().unwrap()).unwrap(),
+        Value::Array(items) => render_json_array(items),
     }
 }
 
@@ -478,6 +515,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let column_names = output_columns.into_iter().map(|c| c.name).collect();
             Box::new(UnnestState {
                 args,
+                output_columns: column_names,
+                rows: None,
+                next_index: 0,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::JsonTableFunction { kind, arg, output_columns } => {
+            let column_names = output_columns.into_iter().map(|c| c.name).collect();
+            Box::new(JsonTableFunctionState {
+                kind,
+                arg,
                 output_columns: column_names,
                 rows: None,
                 next_index: 0,
@@ -1745,6 +1793,96 @@ mod tests {
     #[test] fn explain_shows_aggregate_node() { let base = temp_dir("explain_agg"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "explain select note, count(*) from people group by note").unwrap() { StatementResult::Query { rows, .. } => { let rendered = rows.into_iter().map(|row| match &row[0] { Value::Text(text) => text.clone(), other => panic!("expected text, got {:?}", other), }).collect::<Vec<_>>(); assert!(rendered.iter().any(|line| line.contains("Aggregate"))); assert!(rendered.iter().any(|line| line.contains("Seq Scan"))); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn group_by_with_order_by_and_limit() { let base = temp_dir("group_by_order_limit"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y'), (3, 'carol', 'x'), (4, 'dave', 'y'), (5, 'eve', 'z')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by count(*) desc limit 2").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("x".into()), Value::Int64(2)], vec![Value::Text("y".into()), Value::Int64(2)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn random_returns_float_in_range() { let base = temp_dir("random_func"); let txns = TransactionManager::new_durable(&base).unwrap(); for _ in 0..10 { match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select random()").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["random".to_string()]); assert_eq!(rows.len(), 1); match &rows[0][0] { Value::Float64(v) => assert!(*v >= 0.0 && *v < 1.0, "random() must be in [0,1), got {v}"), other => panic!("expected Float64, got {:?}", other), } } other => panic!("expected query result, got {:?}", other), } } }
+
+    #[test]
+    fn json_cast_and_extract_operators_work() {
+        let base = temp_dir("json_extract_ops");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '{\"a\":[1,null],\"b\":{\"c\":\"x\"}}'::json -> 'a', '{\"a\":[1,null],\"b\":{\"c\":\"x\"}}'::json ->> 'a', '{\"a\":[1,null],\"b\":{\"c\":\"x\"}}'::json #> ARRAY['b','c']::varchar[], '{\"a\":[1,null],\"b\":{\"c\":\"x\"}}'::json #>> ARRAY['b','c']::varchar[]",
+        ).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![
+                    Value::Json("[1,null]".into()),
+                    Value::Text("[1,null]".into()),
+                    Value::Json("\"x\"".into()),
+                    Value::Text("x".into()),
+                ]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn json_scalar_functions_work() {
+        let base = temp_dir("json_scalar_functions");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select to_json(ARRAY[1,2]), array_to_json(ARRAY['a','b']::varchar[]), json_typeof('{\"a\":1}'::json), json_array_length('[1,2,3]'::json), json_extract_path('{\"a\":{\"b\":2}}'::json, 'a', 'b'), json_extract_path_text('{\"a\":{\"b\":2}}'::json, 'a', 'b')",
+        ).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![
+                    Value::Json("[1,2]".into()),
+                    Value::Json("[\"a\",\"b\"]".into()),
+                    Value::Text("object".into()),
+                    Value::Int32(3),
+                    Value::Json("2".into()),
+                    Value::Text("2".into()),
+                ]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn json_table_functions_and_json_agg_work() {
+        let base = temp_dir("json_table_functions");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y')").unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select key, value from json_each('{\"a\":1,\"b\":null}'::json) order by key",
+        ).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![
+                    vec![Value::Text("a".into()), Value::Json("1".into())],
+                    vec![Value::Text("b".into()), Value::Json("null".into())],
+                ]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select json_agg(id) from people",
+        ).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Json("[1,2]".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn invalid_json_input_errors() {
+        let base = temp_dir("json_invalid_input");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '{bad'::json").unwrap_err();
+        assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "json"));
+    }
 
     #[test]
     fn insert_sql_varchar_rejects_non_space_overflow() {
