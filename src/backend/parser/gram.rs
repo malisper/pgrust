@@ -528,7 +528,20 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
         Rule::kw_float4 | Rule::kw_real => SqlType::new(SqlTypeKind::Float4),
         Rule::kw_float8 | Rule::double_precision_type => SqlType::new(SqlTypeKind::Float8),
-        Rule::numeric_type => SqlType::new(SqlTypeKind::Numeric),
+        Rule::numeric_type => {
+            let dims = pair
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("numeric precision/scale");
+            match dims.as_slice() {
+                [] => SqlType::new(SqlTypeKind::Numeric),
+                [precision] => SqlType::with_numeric_precision_scale(*precision, 0),
+                [precision, scale] => SqlType::with_numeric_precision_scale(*precision, *scale),
+                _ => unreachable!("unexpected numeric typmod arity"),
+            }
+        }
         Rule::kw_text => SqlType::new(SqlTypeKind::Text),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
         Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),

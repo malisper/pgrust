@@ -1160,6 +1160,28 @@ mod tests {
             other => panic!("expected query result, got {:?}", other),
         }
     }
+
+    #[test]
+    fn numeric_cast_typmod_rounds_to_scale() {
+        let base = temp_dir("numeric_cast_typmod_rounds");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '12.345'::numeric(5,2)").unwrap() {
+            StatementResult::Query { rows, columns, .. } => {
+                assert_eq!(columns[0].sql_type, crate::backend::parser::SqlType::with_numeric_precision_scale(5, 2));
+                assert_eq!(rows, vec![vec![Value::Numeric("12.35".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn numeric_cast_typmod_rejects_precision_overflow() {
+        let base = temp_dir("numeric_cast_typmod_overflow");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '1234.56'::numeric(5,2)")
+            .unwrap_err();
+        assert!(matches!(err, ExecError::TypeMismatch { op: "::numeric", .. }));
+    }
     #[test] fn all_array_semantics_match_empty_false_and_null_cases() { let base = temp_dir("all_array_semantics"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 < all(ARRAY[2, 3]), 1 < all(ARRAY[]::int4[]), 3 < all(ARRAY[2, null]::int4[]), 1 < all(ARRAY[2, null]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn any_array_empty_and_null_array_cases() { let base = temp_dir("any_array_empty_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 = any(ARRAY[]::int4[]), 1 = any((null)::int4[]), (null)::int4 = any(ARRAY[1]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Null, Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn array_overlap_false_and_null_cases() { let base = temp_dir("array_overlap_false_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a']::varchar[] && ARRAY['b']::varchar[], ARRAY['a', null]::varchar[] && ARRAY['b', null]::varchar[], ARRAY['a']::varchar[] && (null)::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
