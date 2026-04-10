@@ -8,13 +8,21 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
-        ExecError::InvalidIntegerInput { ty, value } => format!("invalid input syntax for type {ty}: \"{value}\""),
-        ExecError::InvalidNumericInput(value) => format!("invalid input syntax for type numeric: \"{value}\""),
-        ExecError::InvalidFloatInput(value) => format!("invalid input syntax for type double precision: \"{value}\""),
+        ExecError::InvalidIntegerInput { ty, value } => {
+            format!("invalid input syntax for type {ty}: \"{value}\"")
+        }
+        ExecError::InvalidNumericInput(value) => {
+            format!("invalid input syntax for type numeric: \"{value}\"")
+        }
+        ExecError::InvalidFloatInput(value) => {
+            format!("invalid input syntax for type double precision: \"{value}\"")
+        }
+        ExecError::InvalidStorageValue { details, .. } => details.clone(),
         ExecError::Int2OutOfRange => "smallint out of range".to_string(),
         ExecError::Int4OutOfRange => "integer out of range".to_string(),
         ExecError::Int8OutOfRange => "bigint out of range".to_string(),
         ExecError::NumericFieldOverflow => "numeric field overflow".to_string(),
+        ExecError::RequestedLengthTooLarge => "requested length too large".to_string(),
         ExecError::DivisionByZero(_) => "division by zero".to_string(),
         other => format!("{other:?}"),
     }
@@ -121,6 +129,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Float8 => 1022,
             SqlTypeKind::Numeric => 1231,
             SqlTypeKind::Json => 199,
+            SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => 1009,
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
@@ -135,13 +144,20 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Float8 => (701, 8, -1),
         SqlTypeKind::Numeric => (1700, -1, col.sql_type.typmod),
         SqlTypeKind::Json => (114, -1, -1),
+        SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::Bool => (16, 1, -1),
         SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
-        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => (25, -1, col.sql_type.typmod),
+        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => {
+            (25, -1, col.sql_type.typmod)
+        }
     }
 }
 
-pub(crate) fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<u8>) -> io::Result<()> {
+pub(crate) fn send_data_row(
+    w: &mut impl Write,
+    values: &[Value],
+    buf: &mut Vec<u8>,
+) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
     for val in values {
@@ -190,6 +206,11 @@ pub(crate) fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<
             Value::Json(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
                 buf.extend_from_slice(v.as_bytes());
+            }
+            Value::Jsonb(v) => {
+                let text = crate::backend::executor::jsonb::render_jsonb_bytes(v).unwrap();
+                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
             }
             Value::Text(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());

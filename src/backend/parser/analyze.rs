@@ -48,6 +48,8 @@ fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
         "jsonb_extract_path_text" => Some(BuiltinScalarFunction::JsonbExtractPathText),
         "jsonb_build_array" => Some(BuiltinScalarFunction::JsonbBuildArray),
         "jsonb_build_object" => Some(BuiltinScalarFunction::JsonbBuildObject),
+        "left" => Some(BuiltinScalarFunction::Left),
+        "repeat" => Some(BuiltinScalarFunction::Repeat),
         _ => None,
     }
 }
@@ -87,6 +89,7 @@ fn validate_scalar_function_arity(
         | BuiltinScalarFunction::JsonbExtractPath
         | BuiltinScalarFunction::JsonbExtractPathText => !args.is_empty(),
         BuiltinScalarFunction::JsonbBuildArray | BuiltinScalarFunction::JsonbBuildObject => true,
+        BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => args.len() == 2,
     };
 
     if valid {
@@ -1129,18 +1132,53 @@ pub(crate) fn bind_expr_with_outer(
                     actual: name.clone(),
                 })?;
             validate_scalar_function_arity(func, args)?;
-            Expr::FuncCall {
-                func,
-                args: args
-                    .iter()
-                    .map(|arg| {
-                        bind_expr_with_outer(arg, scope, catalog, outer_scopes, grouped_outer)
-                    })
-                    .collect::<Result<_, _>>()?,
-            }
+            bind_scalar_function_call(func, args, scope, catalog, outer_scopes, grouped_outer)?
         }
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
+}
+
+fn bind_scalar_function_call(
+    func: BuiltinScalarFunction,
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    let bound_args = args
+        .iter()
+        .map(|arg| bind_expr_with_outer(arg, scope, catalog, outer_scopes, grouped_outer))
+        .collect::<Result<Vec<_>, _>>()?;
+    match func {
+        BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
+            let left_type = infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let right_type = infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            if !should_use_text_concat(&args[0], left_type, &args[0], left_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "text argument",
+                    actual: format!("{func:?}({})", sql_type_name(left_type)),
+                });
+            }
+            if !is_numeric_family(right_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "integer argument",
+                    actual: format!("{func:?}({})", sql_type_name(right_type)),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    coerce_bound_expr(bound_args[0].clone(), left_type, SqlType::new(SqlTypeKind::Text)),
+                    coerce_bound_expr(bound_args[1].clone(), right_type, SqlType::new(SqlTypeKind::Int4)),
+                ],
+            })
+        }
+        _ => Ok(Expr::FuncCall {
+            func,
+            args: bound_args,
+        }),
+    }
 }
 
 fn bind_arithmetic_expr(
@@ -2266,7 +2304,9 @@ fn infer_sql_expr_type(
             Some(BuiltinScalarFunction::JsonTypeof)
             | Some(BuiltinScalarFunction::JsonExtractPathText)
             | Some(BuiltinScalarFunction::JsonbTypeof)
-            | Some(BuiltinScalarFunction::JsonbExtractPathText) => SqlType::new(SqlTypeKind::Text),
+            | Some(BuiltinScalarFunction::JsonbExtractPathText)
+            | Some(BuiltinScalarFunction::Left)
+            | Some(BuiltinScalarFunction::Repeat) => SqlType::new(SqlTypeKind::Text),
             Some(BuiltinScalarFunction::JsonArrayLength)
             | Some(BuiltinScalarFunction::JsonbArrayLength) => SqlType::new(SqlTypeKind::Int4),
             Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
@@ -3330,24 +3370,60 @@ fn bind_agg_output_expr(
                     actual: name.clone(),
                 })?;
             validate_scalar_function_arity(func, args)?;
-            Ok(Expr::FuncCall {
-                func,
-                args: args
-                    .iter()
-                    .map(|arg| {
-                        bind_agg_output_expr(
-                            arg,
-                            group_by_exprs,
-                            input_scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            agg_list,
-                            n_keys,
-                        )
+            let bound_args = args
+                .iter()
+                .map(|arg| {
+                    bind_agg_output_expr(
+                        arg,
+                        group_by_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            match func {
+                BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
+                    let left_type =
+                        infer_sql_expr_type(&args[0], input_scope, catalog, outer_scopes, grouped_outer);
+                    let right_type =
+                        infer_sql_expr_type(&args[1], input_scope, catalog, outer_scopes, grouped_outer);
+                    if !should_use_text_concat(&args[0], left_type, &args[0], left_type) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "text argument",
+                            actual: format!("{func:?}({})", sql_type_name(left_type)),
+                        });
+                    }
+                    if !is_numeric_family(right_type) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "integer argument",
+                            actual: format!("{func:?}({})", sql_type_name(right_type)),
+                        });
+                    }
+                    Ok(Expr::FuncCall {
+                        func,
+                        args: vec![
+                            coerce_bound_expr(
+                                bound_args[0].clone(),
+                                left_type,
+                                SqlType::new(SqlTypeKind::Text),
+                            ),
+                            coerce_bound_expr(
+                                bound_args[1].clone(),
+                                right_type,
+                                SqlType::new(SqlTypeKind::Int4),
+                            ),
+                        ],
                     })
-                    .collect::<Result<_, _>>()?,
-            })
+                }
+                _ => Ok(Expr::FuncCall {
+                    func,
+                    args: bound_args,
+                }),
+            }
         }
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
     }

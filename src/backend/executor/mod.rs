@@ -85,6 +85,7 @@ pub enum ExecError {
     Int4OutOfRange,
     Int8OutOfRange,
     NumericFieldOverflow,
+    RequestedLengthTooLarge,
 }
 
 impl From<HeapError> for ExecError {
@@ -4563,6 +4564,30 @@ mod tests {
             err,
             ExecError::Parse(ParseError::UndefinedOperator { op: "||", .. })
         ));
+    }
+
+    #[test]
+    fn left_and_repeat_follow_postgres_text_semantics() {
+        let base = temp_dir("left_repeat");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select left('ahoj', 2), left('ahoj', -1), repeat('ab', 3), repeat('ab', -1)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![
+                    Value::Text("ah".into()),
+                    Value::Text("aho".into()),
+                    Value::Text("ababab".into()),
+                    Value::Text("".into()),
+                ]]);
+            }
+            other => panic!("expected query result, got {other:?}"),
+        }
     }
 
     #[test]
