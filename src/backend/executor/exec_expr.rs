@@ -443,7 +443,7 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
                 left: Value::Text(CompactString::new(text)),
                 right: Value::Int64(0),
             }),
-        SqlTypeKind::Float4 | SqlTypeKind::Float8 => text.parse::<f64>()
+        SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text)
             .map(Value::Float64)
             .map_err(|_| ExecError::TypeMismatch {
                 op: "::float8",
@@ -492,6 +492,10 @@ fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<St
 }
 
 fn coerce_numeric_string(text: &str, ty: SqlType) -> Result<String, ExecError> {
+    if text.eq_ignore_ascii_case("nan") {
+        return Ok("NaN".to_string());
+    }
+
     let Some((precision, scale)) = ty.numeric_precision_scale() else {
         return Ok(text.to_string());
     };
@@ -525,6 +529,16 @@ fn coerce_numeric_string(text: &str, ty: SqlType) -> Result<String, ExecError> {
     }
 
     Ok(rendered)
+}
+
+fn parse_pg_float(text: &str) -> Result<f64, ()> {
+    if text.eq_ignore_ascii_case("infinity") || text.eq_ignore_ascii_case("+infinity") {
+        Ok(f64::INFINITY)
+    } else if text.eq_ignore_ascii_case("-infinity") {
+        Ok(f64::NEG_INFINITY)
+    } else {
+        text.parse::<f64>().map_err(|_| ())
+    }
 }
 
 pub(crate) fn compare_order_by_keys(
