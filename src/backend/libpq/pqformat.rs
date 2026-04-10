@@ -102,7 +102,11 @@ pub(crate) fn send_row_description(w: &mut impl Write, columns: &[QueryColumn]) 
 fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     if col.sql_type.is_array {
         let oid = match col.sql_type.kind {
+            SqlTypeKind::Int2 => 1005,
             SqlTypeKind::Int4 => 1007,
+            SqlTypeKind::Int8 => 1016,
+            SqlTypeKind::Float4 => 1021,
+            SqlTypeKind::Float8 => 1022,
             SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => 1009,
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
@@ -110,7 +114,11 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         return (oid, -1, -1);
     }
     match col.sql_type.kind {
+        SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
+        SqlTypeKind::Int8 => (20, 8, -1),
+        SqlTypeKind::Float4 => (700, 4, -1),
+        SqlTypeKind::Float8 => (701, 8, -1),
         SqlTypeKind::Bool => (16, 1, -1),
         SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => (25, -1, col.sql_type.typmod),
@@ -123,7 +131,25 @@ pub(crate) fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<
     for val in values {
         match val {
             Value::Null => buf.extend_from_slice(&(-1_i32).to_be_bytes()),
+            Value::Int16(v) => {
+                let start = buf.len();
+                buf.extend_from_slice(&0_i32.to_be_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                let written = itoa_buf.format(*v);
+                buf.extend_from_slice(written.as_bytes());
+                let text_len = (buf.len() - start - 4) as i32;
+                buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
+            }
             Value::Int32(v) => {
+                let start = buf.len();
+                buf.extend_from_slice(&0_i32.to_be_bytes());
+                let mut itoa_buf = itoa::Buffer::new();
+                let written = itoa_buf.format(*v);
+                buf.extend_from_slice(written.as_bytes());
+                let text_len = (buf.len() - start - 4) as i32;
+                buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
+            }
+            Value::Int64(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
                 let mut itoa_buf = itoa::Buffer::new();

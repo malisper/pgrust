@@ -55,8 +55,9 @@ nullability = { not_null | nullable }
 not_null = { kw_not ~ kw_null }
 nullable = { kw_null }
 type_name = { base_type_name ~ array_suffix? }
-base_type_name = { kw_int4 | kw_int | kw_integer | kw_text | kw_bool | kw_boolean | kw_timestamp | char_type | varchar_type | character_varying_type }
+base_type_name = { kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_float4 | kw_real | kw_float8 | double_precision_type | kw_text | kw_bool | kw_boolean | kw_timestamp | char_type | varchar_type | character_varying_type }
 array_suffix = { "[" ~ "]" }
+double_precision_type = { kw_double ~ kw_precision }
 char_type = { kw_char ~ ("(" ~ integer ~ ")")? }
 varchar_type = { kw_varchar ~ ("(" ~ integer ~ ")")? }
 character_varying_type = { kw_character ~ kw_varying ~ ("(" ~ integer ~ ")")? }
@@ -68,8 +69,10 @@ or_expr = { and_expr ~ (kw_or ~ and_expr)* }
 and_expr = { not_expr ~ (kw_and ~ not_expr)* }
 not_expr = { kw_not ~ not_expr | cmp_expr }
 cmp_expr = { add_expr ~ (null_predicate_suffix | in_subquery_suffix | quantified_suffix | comp_op ~ add_expr)? }
-add_expr = { postfix_expr ~ (add_op ~ postfix_expr)* }
-add_op = { "+" }
+add_expr = { mul_expr ~ (add_op ~ mul_expr)* }
+mul_expr = { postfix_expr ~ (mul_op ~ postfix_expr)* }
+add_op = { "+" | "-" }
+mul_op = { "*" | "/" | "%" }
 null_predicate_suffix = { is_not_distinct_suffix | is_distinct_suffix | is_not_null_suffix | is_null_suffix }
 is_null_suffix = { kw_is ~ kw_null }
 is_not_null_suffix = { kw_is ~ kw_not ~ kw_null }
@@ -77,12 +80,13 @@ is_distinct_suffix = { kw_is ~ kw_distinct ~ kw_from ~ add_expr }
 is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ select_stmt ~ ")" }
 quantified_suffix = { comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
-comp_op = { "&&" | "=" | "<" | ">" | "~" }
-unary_expr = { negated_expr | primary_expr }
+comp_op = { "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ cast_suffix* }
 cast_suffix = { "::" ~ type_name }
+positive_expr = { "+" ~ unary_expr }
 negated_expr = { "-" ~ unary_expr }
-primary_expr = { kw_null | kw_true | kw_false | kw_current_timestamp | exists_expr | scalar_subquery_expr | array_expr | agg_call | func_call | identifier | integer | string_literal | "(" ~ expr ~ ")" }
+primary_expr = { kw_null | kw_true | kw_false | kw_current_timestamp | exists_expr | scalar_subquery_expr | array_expr | agg_call | func_call | identifier | numeric_literal | integer | string_literal | "(" ~ expr ~ ")" }
 scalar_subquery_expr = { "(" ~ select_stmt ~ ")" }
 exists_expr = { kw_exists ~ "(" ~ select_stmt ~ ")" }
 array_expr = { kw_array ~ "[" ~ expr_list? ~ "]" }
@@ -95,7 +99,13 @@ kw_random = { ^"random" ~ keyword_end }
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
 keyword_end = _{ !ident_cont }
 identifier = @{ (ASCII_ALPHA | "_") ~ ident_cont* }
+numeric_literal = @{
+    (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ exponent?)
+    | ("." ~ ASCII_DIGIT+ ~ exponent?)
+    | (ASCII_DIGIT+ ~ exponent)
+}
 integer = @{ ASCII_DIGIT+ }
+exponent = _{ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
 string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
 star = { "*" }
 
@@ -161,8 +171,17 @@ kw_min = { kw_min_atom }
 kw_max = { kw_max_atom }
 
 kw_int4 = { kw_int4_atom }
+kw_int2 = { kw_int2_atom }
 kw_int = { kw_int_atom }
 kw_integer = { kw_integer_atom }
+kw_int8 = { kw_int8_atom }
+kw_smallint = { kw_smallint_atom }
+kw_bigint = { kw_bigint_atom }
+kw_float4 = { kw_float4_atom }
+kw_float8 = { kw_float8_atom }
+kw_real = { kw_real_atom }
+kw_double = { kw_double_atom }
+kw_precision = { kw_precision_atom }
 kw_text = { kw_text_atom }
 kw_bool = { kw_bool_atom }
 kw_boolean = { kw_boolean_atom }
@@ -242,9 +261,18 @@ kw_avg_atom = @{ ^"avg" ~ keyword_end }
 kw_min_atom = @{ ^"min" ~ keyword_end }
 kw_max_atom = @{ ^"max" ~ keyword_end }
 
+kw_int2_atom = @{ ^"int2" ~ keyword_end }
 kw_int4_atom = @{ ^"int4" ~ keyword_end }
 kw_int_atom = @{ ^"int" ~ keyword_end }
 kw_integer_atom = @{ ^"integer" ~ keyword_end }
+kw_int8_atom = @{ ^"int8" ~ keyword_end }
+kw_smallint_atom = @{ ^"smallint" ~ keyword_end }
+kw_bigint_atom = @{ ^"bigint" ~ keyword_end }
+kw_float4_atom = @{ ^"float4" ~ keyword_end }
+kw_float8_atom = @{ ^"float8" ~ keyword_end }
+kw_real_atom = @{ ^"real" ~ keyword_end }
+kw_double_atom = @{ ^"double" ~ keyword_end }
+kw_precision_atom = @{ ^"precision" ~ keyword_end }
 kw_text_atom = @{ ^"text" ~ keyword_end }
 kw_bool_atom = @{ ^"bool" ~ keyword_end }
 kw_boolean_atom = @{ ^"boolean" ~ keyword_end }

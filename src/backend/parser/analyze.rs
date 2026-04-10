@@ -334,10 +334,35 @@ pub(crate) fn bind_expr_with_outer(
             ResolvedColumn::Outer { depth, index } => Expr::OuterColumn { depth, index },
         },
         SqlExpr::Const(value) => Expr::Const(value.clone()),
+        SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
+        SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),
         SqlExpr::Add(left, right) => Expr::Add(
             Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
+        SqlExpr::Sub(left, right) => Expr::Sub(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::Mul(left, right) => Expr::Mul(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::Div(left, right) => Expr::Div(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::Mod(left, right) => Expr::Mod(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(bind_expr_with_outer(
+            inner,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )?)),
         SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?)),
         SqlExpr::Cast(inner, ty) => {
             let bound_inner = if let SqlExpr::ArrayLiteral(elements) = inner.as_ref() {
@@ -357,11 +382,23 @@ pub(crate) fn bind_expr_with_outer(
             Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
+        SqlExpr::NotEq(left, right) => Expr::NotEq(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
         SqlExpr::Lt(left, right) => Expr::Lt(
             Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
+        SqlExpr::LtEq(left, right) => Expr::LtEq(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
         SqlExpr::Gt(left, right) => Expr::Gt(
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
+        ),
+        SqlExpr::GtEq(left, right) => Expr::GtEq(
             Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
@@ -954,6 +991,8 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
         SqlExpr::AggCall { .. } => true,
         SqlExpr::Column(_)
         | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
@@ -965,11 +1004,27 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
             expr_contains_agg(l) || expr_contains_agg(r)
         }
         SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
-        SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
+        SqlExpr::Add(l, r)
+        | SqlExpr::Sub(l, r)
+        | SqlExpr::Mul(l, r)
+        | SqlExpr::Div(l, r)
+        | SqlExpr::Mod(l, r)
+        | SqlExpr::Eq(l, r)
+        | SqlExpr::NotEq(l, r)
+        | SqlExpr::Lt(l, r)
+        | SqlExpr::LtEq(l, r)
+        | SqlExpr::Gt(l, r)
+        | SqlExpr::GtEq(l, r)
         | SqlExpr::RegexMatch(l, r)
-        | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
+        | SqlExpr::And(l, r)
+        | SqlExpr::Or(l, r)
+        | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
-        SqlExpr::Negate(inner) | SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
     }
 }
 
@@ -985,6 +1040,8 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>, bool)>
         }
         SqlExpr::Column(_)
         | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
         | SqlExpr::ScalarSubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
@@ -1001,11 +1058,27 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>, bool)>
             collect_aggs(r, aggs);
         }
         SqlExpr::Cast(inner, _) => collect_aggs(inner, aggs),
-        SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
+        SqlExpr::Add(l, r)
+        | SqlExpr::Sub(l, r)
+        | SqlExpr::Mul(l, r)
+        | SqlExpr::Div(l, r)
+        | SqlExpr::Mod(l, r)
+        | SqlExpr::Eq(l, r)
+        | SqlExpr::NotEq(l, r)
+        | SqlExpr::Lt(l, r)
+        | SqlExpr::LtEq(l, r)
+        | SqlExpr::Gt(l, r)
+        | SqlExpr::GtEq(l, r)
         | SqlExpr::RegexMatch(l, r)
-        | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
+        | SqlExpr::And(l, r)
+        | SqlExpr::Or(l, r)
+        | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => { collect_aggs(l, aggs); collect_aggs(r, aggs); }
-        SqlExpr::Negate(inner) | SqlExpr::Not(inner) | SqlExpr::IsNull(inner) | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
     }
 }
 
@@ -1038,19 +1111,35 @@ fn infer_sql_expr_type(
             Err(_) => None,
         }
         .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
+        SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) | SqlExpr::Const(Value::Null) => {
             SqlType::new(SqlTypeKind::Text)
         }
         SqlExpr::Const(Value::Array(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-        SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Text),
-        SqlExpr::Add(_, _) => SqlType::new(SqlTypeKind::Int4),
+        SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Float8),
+        SqlExpr::IntegerLiteral(value) => infer_integer_literal_type(value),
+        SqlExpr::NumericLiteral(_) => SqlType::new(SqlTypeKind::Float8),
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right) => infer_arithmetic_sql_type(
+            expr,
+            infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer),
+            infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer),
+        ),
+        SqlExpr::UnaryPlus(inner) => infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer),
         SqlExpr::Negate(inner) => infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer),
         SqlExpr::Cast(_, ty) => *ty,
         SqlExpr::Eq(_, _)
+        | SqlExpr::NotEq(_, _)
         | SqlExpr::Lt(_, _)
+        | SqlExpr::LtEq(_, _)
         | SqlExpr::Gt(_, _)
+        | SqlExpr::GtEq(_, _)
         | SqlExpr::RegexMatch(_, _)
         | SqlExpr::And(_, _)
         | SqlExpr::Or(_, _)
@@ -1074,9 +1163,66 @@ fn infer_sql_expr_type(
         SqlExpr::Exists(_) | SqlExpr::InSubquery { .. } | SqlExpr::QuantifiedSubquery { .. } => {
             SqlType::new(SqlTypeKind::Bool)
         }
-        SqlExpr::Random => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::Random => SqlType::new(SqlTypeKind::Float8),
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
     }
+}
+
+fn infer_integer_literal_type(value: &str) -> SqlType {
+    if value.parse::<i32>().is_ok() {
+        SqlType::new(SqlTypeKind::Int4)
+    } else if value.parse::<i64>().is_ok() {
+        SqlType::new(SqlTypeKind::Int8)
+    } else {
+        SqlType::new(SqlTypeKind::Float8)
+    }
+}
+
+fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: SqlType) -> SqlType {
+    use SqlTypeKind::*;
+
+    let left = left.element_type();
+    let right = right.element_type();
+
+    let has_float8 = matches!(left.kind, Float8) || matches!(right.kind, Float8);
+    let has_float4 = matches!(left.kind, Float4) || matches!(right.kind, Float4);
+    if has_float8 {
+        return SqlType::new(Float8);
+    }
+    if has_float4 {
+        return SqlType::new(Float4);
+    }
+
+    let widest_int = if matches!(left.kind, Int8) || matches!(right.kind, Int8) {
+        Int8
+    } else if matches!(left.kind, Int4) || matches!(right.kind, Int4) {
+        Int4
+    } else {
+        Int2
+    };
+
+    match expr {
+        SqlExpr::Div(_, _) | SqlExpr::Mod(_, _) => SqlType::new(widest_int),
+        SqlExpr::Add(_, _) | SqlExpr::Sub(_, _) | SqlExpr::Mul(_, _) => SqlType::new(widest_int),
+        _ => SqlType::new(Int4),
+    }
+}
+
+fn bind_integer_literal(value: &str) -> Result<Value, ParseError> {
+    if let Ok(parsed) = value.parse::<i32>() {
+        Ok(Value::Int32(parsed))
+    } else if let Ok(parsed) = value.parse::<i64>() {
+        Ok(Value::Int64(parsed))
+    } else {
+        Err(ParseError::InvalidInteger(value.to_string()))
+    }
+}
+
+fn bind_numeric_literal(value: &str) -> Result<Value, ParseError> {
+    value
+        .parse::<f64>()
+        .map(Value::Float64)
+        .map_err(|_| ParseError::InvalidNumeric(value.to_string()))
 }
 
 fn ensure_single_column_subquery(plan: &Plan) -> Result<(), ParseError> {
@@ -1089,7 +1235,7 @@ fn ensure_single_column_subquery(plan: &Plan) -> Result<(), ParseError> {
 
 fn aggregate_sql_type(func: AggFunc) -> SqlType {
     match func {
-        AggFunc::Count | AggFunc::Sum | AggFunc::Avg => SqlType::new(SqlTypeKind::Int4),
+        AggFunc::Count | AggFunc::Sum | AggFunc::Avg => SqlType::new(SqlTypeKind::Int8),
         AggFunc::Min | AggFunc::Max => SqlType::new(SqlTypeKind::Text),
     }
 }
@@ -1133,7 +1279,14 @@ fn bind_agg_output_expr(
             Err(ParseError::UngroupedColumn(name.clone()))
         }
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
+        SqlExpr::IntegerLiteral(value) => Ok(Expr::Const(bind_integer_literal(value)?)),
+        SqlExpr::NumericLiteral(value) => Ok(Expr::Const(bind_numeric_literal(value)?)),
         SqlExpr::Add(l, r) => Ok(Expr::Add(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Sub(l, r) => Ok(Expr::Sub(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Mul(l, r) => Ok(Expr::Mul(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Div(l, r) => Ok(Expr::Div(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Mod(l, r) => Ok(Expr::Mod(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::UnaryPlus(inner) => Ok(Expr::UnaryPlus(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Negate(inner) => Ok(Expr::Negate(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Cast(inner, ty) => {
             let bound_inner = if let SqlExpr::ArrayLiteral(elements) = inner.as_ref() {
@@ -1150,8 +1303,11 @@ fn bind_agg_output_expr(
             Ok(Expr::Cast(Box::new(bound_inner), *ty))
         }
         SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::NotEq(l, r) => Ok(Expr::NotEq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::LtEq(l, r) => Ok(Expr::LtEq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Gt(l, r) => Ok(Expr::Gt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::GtEq(l, r) => Ok(Expr::GtEq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::RegexMatch(l, r) => Ok(Expr::RegexMatch(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::And(l, r) => Ok(Expr::And(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Or(l, r) => Ok(Expr::Or(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),

@@ -478,6 +478,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::Cast(inner, _) => select_item_name(inner, index),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::Random => "random".to_string(),
+        SqlExpr::IntegerLiteral(_) | SqlExpr::NumericLiteral(_) => format!("expr{}", index + 1),
         _ => format!("expr{}", index + 1),
     }
 }
@@ -522,7 +523,11 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
             }
         }
         Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
+        Rule::kw_int2 | Rule::kw_smallint => SqlType::new(SqlTypeKind::Int2),
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
+        Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
+        Rule::kw_float4 | Rule::kw_real => SqlType::new(SqlTypeKind::Float4),
+        Rule::kw_float8 | Rule::double_precision_type => SqlType::new(SqlTypeKind::Float8),
         Rule::kw_text => SqlType::new(SqlTypeKind::Text),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
         Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
@@ -566,7 +571,7 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
 
 pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     match pair.as_rule() {
-        Rule::expr | Rule::or_expr | Rule::and_expr | Rule::add_expr => {
+        Rule::expr | Rule::or_expr | Rule::and_expr | Rule::add_expr | Rule::mul_expr => {
             let mut inner = pair.into_inner();
             let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             fold_infix(first, inner)
@@ -588,6 +593,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             Ok(expr)
         }
         Rule::unary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
+        Rule::positive_expr => Ok(SqlExpr::UnaryPlus(Box::new(build_expr(
+            pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
+        )?))),
         Rule::negated_expr => Ok(SqlExpr::Negate(Box::new(build_expr(
             pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
         )?))),
@@ -639,8 +647,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             })
                         }
                         "=" => SubqueryComparisonOp::Eq,
+                        "<>" | "!=" => SubqueryComparisonOp::NotEq,
                         "<" => SubqueryComparisonOp::Lt,
+                        "<=" => SubqueryComparisonOp::LtEq,
                         ">" => SubqueryComparisonOp::Gt,
+                        ">=" => SubqueryComparisonOp::GtEq,
                         other => {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "subquery comparison operator",
@@ -686,8 +697,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Ok(match next.as_str() {
                         "&&" => SqlExpr::ArrayOverlap(Box::new(left), Box::new(right)),
                         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
+                        "<>" | "!=" => SqlExpr::NotEq(Box::new(left), Box::new(right)),
                         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
+                        "<=" => SqlExpr::LtEq(Box::new(left), Box::new(right)),
                         ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
+                        ">=" => SqlExpr::GtEq(Box::new(left), Box::new(right)),
                         "~" => SqlExpr::RegexMatch(Box::new(left), Box::new(right)),
                         _ => unreachable!(),
                     })
@@ -730,11 +744,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::agg_call => build_agg_call(pair),
         Rule::func_call => Ok(SqlExpr::Random),
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
-        Rule::integer => pair
-            .as_str()
-            .parse::<i32>()
-            .map(|value| SqlExpr::Const(Value::Int32(value)))
-            .map_err(|_| ParseError::InvalidInteger(pair.as_str().into())),
+        Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
+        Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
         Rule::string_literal => Ok(SqlExpr::Const(Value::Text(unescape_string(pair.as_str()).into()))),
         Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
@@ -834,7 +845,17 @@ fn fold_infix(
         expr = match op.as_rule() {
             Rule::kw_or => SqlExpr::Or(Box::new(expr), Box::new(rhs)),
             Rule::kw_and => SqlExpr::And(Box::new(expr), Box::new(rhs)),
-            Rule::add_op => SqlExpr::Add(Box::new(expr), Box::new(rhs)),
+            Rule::add_op => match op.as_str() {
+                "+" => SqlExpr::Add(Box::new(expr), Box::new(rhs)),
+                "-" => SqlExpr::Sub(Box::new(expr), Box::new(rhs)),
+                _ => unreachable!(),
+            },
+            Rule::mul_op => match op.as_str() {
+                "*" => SqlExpr::Mul(Box::new(expr), Box::new(rhs)),
+                "/" => SqlExpr::Div(Box::new(expr), Box::new(rhs)),
+                "%" => SqlExpr::Mod(Box::new(expr), Box::new(rhs)),
+                _ => unreachable!(),
+            },
             _ => unreachable!(),
         };
     }

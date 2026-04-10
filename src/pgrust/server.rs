@@ -251,6 +251,30 @@ mod tests {
     }
 
     #[test]
+    fn row_description_reports_extended_numeric_oids() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+        send_query(
+            &mut stream,
+            "select '7'::int2, '9'::int8, '1.5'::real, '2.5'::double precision",
+        );
+        let response = read_until_ready(&mut stream, "extended_numeric_row_description");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields[0].1, 21);
+        assert_eq!(fields[1].1, 20);
+        assert_eq!(fields[2].1, 700);
+        assert_eq!(fields[3].1, 701);
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn row_description_reports_varchar_array_oid() {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
