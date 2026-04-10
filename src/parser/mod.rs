@@ -220,6 +220,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_cast_expression() {
+        let stmt = parse_select("select (p.name)::text from people p").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "name");
+        assert!(matches!(
+            &stmt.targets[0].expr,
+            SqlExpr::Cast(inner, SqlType::Text)
+                if matches!(**inner, SqlExpr::Column(ref name) if name == "p.name")
+        ));
+    }
+
+    #[test]
     fn parse_cross_join_with_aliases() {
         let stmt = parse_select("select p.name, q.name from people p, pets q").unwrap();
         assert_eq!(

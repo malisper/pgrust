@@ -447,6 +447,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
 fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     match expr {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
+        SqlExpr::Cast(inner, _) => select_item_name(inner, index),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::Random => "random".to_string(),
         _ => format!("expr{}", index + 1),
@@ -502,6 +503,22 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             let mut inner = pair.into_inner();
             let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             fold_infix(first, inner)
+        }
+        Rule::postfix_expr => {
+            let mut inner = pair.into_inner();
+            let mut expr = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            for suffix in inner {
+                if suffix.as_rule() == Rule::cast_suffix {
+                    let ty = build_type(
+                        suffix
+                            .into_inner()
+                            .find(|part| part.as_rule() == Rule::type_name)
+                            .ok_or(ParseError::UnexpectedEof)?,
+                    );
+                    expr = SqlExpr::Cast(Box::new(expr), ty);
+                }
+            }
+            Ok(expr)
         }
         Rule::unary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
         Rule::negated_expr => Ok(SqlExpr::Negate(Box::new(build_expr(

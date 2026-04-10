@@ -17,6 +17,14 @@ pub(crate) struct ScopeColumn {
     pub(crate) qualified_name: String,
 }
 
+fn scalar_type_for_sql_type(ty: SqlType) -> crate::executor::ScalarType {
+    match ty {
+        SqlType::Int4 => crate::executor::ScalarType::Int32,
+        SqlType::Text | SqlType::Timestamp | SqlType::Char => crate::executor::ScalarType::Text,
+        SqlType::Bool => crate::executor::ScalarType::Bool,
+    }
+}
+
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
     RelationDesc {
         columns: stmt
@@ -25,13 +33,7 @@ pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
             .map(|column| {
                 column_desc(
                     column.name.clone(),
-                    match column.ty {
-                        SqlType::Int4 => crate::executor::ScalarType::Int32,
-                        SqlType::Text | SqlType::Timestamp | SqlType::Char => {
-                            crate::executor::ScalarType::Text
-                        }
-                        SqlType::Bool => crate::executor::ScalarType::Bool,
-                    },
+                    scalar_type_for_sql_type(column.ty),
                     column.nullable,
                 )
             })
@@ -290,6 +292,10 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
             Box::new(bind_expr(right, scope)?),
         ),
         SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr(inner, scope)?)),
+        SqlExpr::Cast(inner, ty) => Expr::Cast(
+            Box::new(bind_expr(inner, scope)?),
+            scalar_type_for_sql_type(*ty),
+        ),
         SqlExpr::Eq(left, right) => Expr::Eq(
             Box::new(bind_expr(left, scope)?),
             Box::new(bind_expr(right, scope)?),
@@ -658,6 +664,7 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::AggCall { .. } => true,
         SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => false,
+        SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::RegexMatch(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
@@ -677,6 +684,7 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>, bool)>
             if !aggs.contains(&entry) { aggs.push(entry); }
         }
         SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => {}
+        SqlExpr::Cast(inner, _) => collect_aggs(inner, aggs),
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::RegexMatch(l, r)
         | SqlExpr::And(l, r) | SqlExpr::Or(l, r) | SqlExpr::IsDistinctFrom(l, r)
@@ -726,6 +734,10 @@ fn bind_agg_output_expr(
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
         SqlExpr::Add(l, r) => Ok(Expr::Add(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Negate(inner) => Ok(Expr::Negate(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
+        SqlExpr::Cast(inner, ty) => Ok(Expr::Cast(
+            Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?),
+            scalar_type_for_sql_type(*ty),
+        )),
         SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Gt(l, r) => Ok(Expr::Gt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),

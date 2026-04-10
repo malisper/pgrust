@@ -176,6 +176,7 @@ pub enum Expr {
     Const(Value),
     Add(Box<Expr>, Box<Expr>),
     Negate(Box<Expr>),
+    Cast(Box<Expr>, ScalarType),
     Eq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
@@ -1123,4 +1124,3 @@ impl TupleSlot {
         Ok(self.tts_values)
     }
 }
-
