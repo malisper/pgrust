@@ -1185,7 +1185,7 @@ fn infer_integer_literal_type(value: &str) -> SqlType {
     } else if value.parse::<i64>().is_ok() {
         SqlType::new(SqlTypeKind::Int8)
     } else {
-        SqlType::new(SqlTypeKind::Float8)
+        SqlType::new(SqlTypeKind::Numeric)
     }
 }
 
@@ -1228,6 +1228,8 @@ fn bind_integer_literal(value: &str) -> Result<Value, ParseError> {
         Ok(Value::Int32(parsed))
     } else if let Ok(parsed) = value.parse::<i64>() {
         Ok(Value::Int64(parsed))
+    } else if value.chars().all(|ch| ch.is_ascii_digit()) {
+        Ok(Value::Numeric(value.into()))
     } else {
         Err(ParseError::InvalidInteger(value.to_string()))
     }
