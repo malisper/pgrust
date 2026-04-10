@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_create_table, execute_delete_with_waiter, execute_drop_table, execute_insert,
-    execute_prepared_insert_row, execute_truncate_table, execute_update_with_waiter,
+    execute_analyze, execute_create_table, execute_delete_with_waiter, execute_drop_table,
+    execute_insert, execute_prepared_insert_row, execute_truncate_table, execute_update_with_waiter,
 };
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement};
 use crate::backend::parser::{PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update, ParseError};
@@ -144,6 +144,10 @@ impl Session {
                     }
                 }
 
+                if matches!(stmt, Statement::Vacuum(_)) && self.active_txn.is_some() {
+                    return Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")));
+                }
+
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
                     if result.is_err() {
@@ -189,6 +193,11 @@ impl Session {
         match stmt {
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
+            Statement::Analyze(ref analyze_stmt) => {
+                let catalog_guard = db.catalog.read();
+                execute_analyze(analyze_stmt.clone(), catalog_guard.catalog())
+            }
+            Statement::Vacuum(_) => Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM"))),
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let catalog_guard = db.catalog.read();
@@ -352,7 +361,6 @@ impl Session {
                 };
                 execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx)
             }
-            Statement::Vacuum(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Begin | Statement::Commit | Statement::Rollback => unreachable!("handled in Session::execute"),
         }
     }

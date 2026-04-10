@@ -32,6 +32,8 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         "DELETE" => format!("DELETE {affected}"),
         "CREATE" => "CREATE TABLE".to_string(),
         "DROP" => "DROP TABLE".to_string(),
+        "ANALYZE" => "ANALYZE".to_string(),
+        "VACUUM" => "VACUUM".to_string(),
         "SET" => "SET".to_string(),
         "RESET" => "RESET".to_string(),
         "BEGIN" | "START" => "BEGIN".to_string(),

@@ -524,12 +524,13 @@ pub fn execute_statement(
     let result = match stmt {
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::ShowTables => execute_show_tables(catalog),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
         Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx),
-        Statement::Vacuum(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog),
         Statement::Insert(stmt) => execute_insert(bind_insert(&stmt, catalog)?, ctx, xid, cid),
         Statement::Update(stmt) => execute_update(bind_update(&stmt, catalog)?, ctx, xid, cid),
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, ctx, xid),
@@ -553,8 +554,10 @@ pub fn execute_readonly_statement(
     match stmt {
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::ShowTables => execute_show_tables(catalog),
+        Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: format!("{other:?}"),
@@ -978,6 +981,9 @@ mod tests {
     }
 
     #[test] fn insert_sql_inserts_row() { let base = temp_dir("insert_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); assert_eq!(run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap(), StatementResult::AffectedRows(1)); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, note from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Text("alpha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn analyze_sql_validates_existing_targets() { let base = temp_dir("analyze_sql"); let txns = TransactionManager::new_durable(&base).unwrap(); assert_eq!(run_sql(&base, &txns, INVALID_TRANSACTION_ID, "analyze people(note)").unwrap(), StatementResult::AffectedRows(0)); }
+    #[test] fn analyze_sql_rejects_missing_columns() { let base = temp_dir("analyze_missing_column"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "analyze people(nope)").unwrap_err() { ExecError::Parse(ParseError::UnknownColumn(name)) => assert_eq!(name, "nope"), other => panic!("expected unknown column, got {:?}", other), } }
+    #[test] fn vacuum_analyze_sql_succeeds_outside_transaction() { let base = temp_dir("vacuum_analyze_sql"); let txns = TransactionManager::new_durable(&base).unwrap(); assert_eq!(run_sql(&base, &txns, INVALID_TRANSACTION_ID, "vacuum analyze people(note)").unwrap(), StatementResult::AffectedRows(0)); }
     #[test] fn select_sql_with_table_alias() { let base = temp_dir("select_sql_table_alias"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.name from people p where p.id = 1").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["name"]); assert_eq!(rows, vec![vec![Value::Text("alice".into())]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn select_sql_text_cast() { let base = temp_dir("select_sql_text_cast"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (id)::text from people").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["id"]); assert_eq!(rows, vec![vec![Value::Text("1".into())]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn select_sql_varchar_cast_truncates() { let base = temp_dir("select_sql_varchar_cast"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'abcdef'::varchar(3)").unwrap() { StatementResult::Query { columns, rows, .. } => { assert_eq!(columns[0].sql_type, crate::backend::parser::SqlType::with_char_len(crate::backend::parser::SqlTypeKind::Varchar, 3)); assert_eq!(rows, vec![vec![Value::Text("abc".into())]]); } other => panic!("expected query result, got {:?}", other), } }
