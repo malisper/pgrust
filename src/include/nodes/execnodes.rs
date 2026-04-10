@@ -220,6 +220,7 @@ pub struct AggAccum {
     pub func: AggFunc,
     pub arg: Option<Expr>,
     pub distinct: bool,
+    pub sql_type: SqlType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -979,7 +980,7 @@ impl PlanNode for AggregateState {
                         let accum_states = self
                             .accumulators
                             .iter()
-                            .map(|a| AccumState::new(a.func, a.distinct))
+                            .map(|a| AccumState::new(a.func, a.distinct, a.sql_type))
                             .collect();
                         groups.push(AggGroup {
                             key_values: self.key_buffer.clone(),
@@ -1004,7 +1005,7 @@ impl PlanNode for AggregateState {
                 let accum_states = self
                     .accumulators
                     .iter()
-                    .map(|a| AccumState::new(a.func, a.distinct))
+                    .map(|a| AccumState::new(a.func, a.distinct, a.sql_type))
                     .collect();
                 groups.push(AggGroup {
                     key_values: Vec::new(),
