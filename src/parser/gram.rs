@@ -63,21 +63,38 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
 fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut analyze = false;
     let mut buffers = false;
-    let mut timing = true; // default on, like PostgreSQL
+    let mut timing = true;
     let mut statement = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::kw_analyze => analyze = true,
             Rule::explain_option => {
-                let mut inner = part.into_inner();
-                let opt = inner.next().ok_or(ParseError::UnexpectedEof)?;
-                match opt.as_rule() {
-                    Rule::kw_analyze => analyze = true,
-                    Rule::kw_buffers => buffers = true,
-                    Rule::kw_timing => timing = false, // TIMING OFF
-                    _ => {}
+                let mut name_rule = None;
+                let mut bool_val = true;
+                for child in part.into_inner() {
+                    match child.as_rule() {
+                        Rule::explain_option_name => {
+                            name_rule = child.into_inner().next().map(|r| r.as_rule());
+                        }
+                        Rule::explain_option_value => {
+                            let val = child.into_inner().next();
+                            if let Some(v) = val {
+                                match v.as_rule() {
+                                    Rule::kw_off | Rule::kw_false => bool_val = false,
+                                    _ => bool_val = true,
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-            },
+                match name_rule {
+                    Some(Rule::kw_analyze) => analyze = bool_val,
+                    Some(Rule::kw_buffers) => buffers = bool_val,
+                    Some(Rule::kw_timing) => timing = bool_val,
+                    _ => {} // COSTS, VERBOSE, SUMMARY, FORMAT: parsed but ignored
+                }
+            }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
             _ => {}
         }
