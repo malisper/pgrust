@@ -1,8 +1,10 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
-use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page};
+use crate::backend::access::heap::heapam::{
+    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+};
+use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::pgrust::compact_string::CompactString;
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -22,6 +24,7 @@ pub enum ScalarType {
     Float64,
     Numeric,
     Json,
+    Jsonb,
     Text,
     Bool,
     Array(Box<ScalarType>),
@@ -69,6 +72,7 @@ pub enum Value {
     Float64(f64),
     Numeric(NumericValue),
     Json(CompactString),
+    Jsonb(Vec<u8>),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned
     /// (the slot's `Rc<OwnedBufferPin>` keeps the pin alive). User data on the
@@ -103,7 +107,10 @@ impl NumericValue {
     pub fn normalize(self) -> Self {
         match self {
             Self::NaN => Self::NaN,
-            Self::Finite { mut coeff, mut scale } => {
+            Self::Finite {
+                mut coeff,
+                mut scale,
+            } => {
                 if coeff.is_zero() {
                     return Self::zero();
                 }
@@ -124,7 +131,12 @@ impl NumericValue {
     pub fn digit_count(&self) -> i32 {
         match self {
             Self::NaN => 0,
-            Self::Finite { coeff, .. } => coeff.to_str_radix(10).trim_start_matches('-').trim_start_matches('0').len().max(1) as i32,
+            Self::Finite { coeff, .. } => coeff
+                .to_str_radix(10)
+                .trim_start_matches('-')
+                .trim_start_matches('0')
+                .len()
+                .max(1) as i32,
         }
     }
 
@@ -145,7 +157,11 @@ impl NumericValue {
                 let negative = coeff.is_negative();
                 let digits = coeff.abs().to_str_radix(10);
                 if *scale == 0 {
-                    if negative { format!("-{digits}") } else { digits }
+                    if negative {
+                        format!("-{digits}")
+                    } else {
+                        digits
+                    }
                 } else {
                     let scale = *scale as usize;
                     let mut out = String::new();
@@ -222,11 +238,13 @@ fn parse_numeric_literal(text: &str) -> Option<NumericValue> {
     if negative {
         coeff = -coeff;
     }
-    Some(NumericValue::Finite {
-        coeff,
-        scale: scale as u32,
-    }
-    .normalize())
+    Some(
+        NumericValue::Finite {
+            coeff,
+            scale: scale as u32,
+        }
+        .normalize(),
+    )
 }
 
 impl Value {
@@ -251,6 +269,7 @@ impl Value {
             Value::Float64(v) => Value::Float64(*v),
             Value::Numeric(v) => Value::Numeric(v.clone()),
             Value::Json(s) => Value::Json(s.clone()),
+            Value::Jsonb(bytes) => Value::Jsonb(bytes.clone()),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -259,7 +278,9 @@ impl Value {
             }
             Value::Text(s) => Value::Text(s.clone()),
             Value::Bool(v) => Value::Bool(*v),
-            Value::Array(values) => Value::Array(values.iter().map(Value::to_owned_value).collect()),
+            Value::Array(values) => {
+                Value::Array(values.iter().map(Value::to_owned_value).collect())
+            }
             Value::Null => Value::Null,
         }
     }
@@ -290,6 +311,7 @@ impl PartialEq for Value {
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
             (Value::Json(a), Value::Json(b)) => a == b,
+            (Value::Jsonb(a), Value::Jsonb(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -306,14 +328,39 @@ impl Eq for Value {}
 impl std::hash::Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
-            Value::Int16(v) => { 0u8.hash(state); v.hash(state); }
-            Value::Int32(v) => { 1u8.hash(state); v.hash(state); }
-            Value::Int64(v) => { 2u8.hash(state); v.hash(state); }
-            Value::Float64(v) => { 3u8.hash(state); v.to_bits().hash(state); }
-            Value::Numeric(v) => { 4u8.hash(state); v.hash(state); }
-            Value::Json(s) => { 9u8.hash(state); s.as_str().hash(state); }
+            Value::Int16(v) => {
+                0u8.hash(state);
+                v.hash(state);
+            }
+            Value::Int32(v) => {
+                1u8.hash(state);
+                v.hash(state);
+            }
+            Value::Int64(v) => {
+                2u8.hash(state);
+                v.hash(state);
+            }
+            Value::Float64(v) => {
+                3u8.hash(state);
+                v.to_bits().hash(state);
+            }
+            Value::Numeric(v) => {
+                4u8.hash(state);
+                v.hash(state);
+            }
+            Value::Json(s) => {
+                9u8.hash(state);
+                s.as_str().hash(state);
+            }
+            Value::Jsonb(bytes) => {
+                10u8.hash(state);
+                bytes.hash(state);
+            }
             // Text and TextRef hash the same way so equal values get the same hash
-            Value::Text(s) => { 5u8.hash(state); s.as_str().hash(state); }
+            Value::Text(s) => {
+                5u8.hash(state);
+                s.as_str().hash(state);
+            }
             Value::TextRef(ptr, len) => {
                 5u8.hash(state);
                 let s = unsafe {
@@ -321,12 +368,17 @@ impl std::hash::Hash for Value {
                 };
                 s.hash(state);
             }
-            Value::Bool(v) => { 6u8.hash(state); v.hash(state); }
+            Value::Bool(v) => {
+                6u8.hash(state);
+                v.hash(state);
+            }
             Value::Array(values) => {
                 7u8.hash(state);
                 values.hash(state);
             }
-            Value::Null => { 8u8.hash(state); }
+            Value::Null => {
+                8u8.hash(state);
+            }
         }
     }
 }
@@ -359,6 +411,9 @@ pub enum AggFunc {
     Min,
     Max,
     JsonAgg,
+    JsonbAgg,
+    JsonObjectAgg,
+    JsonbObjectAgg,
 }
 
 impl AggFunc {
@@ -370,6 +425,9 @@ impl AggFunc {
             AggFunc::Min => "min",
             AggFunc::Max => "max",
             AggFunc::JsonAgg => "json_agg",
+            AggFunc::JsonbAgg => "jsonb_agg",
+            AggFunc::JsonObjectAgg => "json_object_agg",
+            AggFunc::JsonbObjectAgg => "jsonb_object_agg",
         }
     }
 }
@@ -378,11 +436,21 @@ impl AggFunc {
 pub enum BuiltinScalarFunction {
     Random,
     ToJson,
+    ToJsonb,
     ArrayToJson,
+    JsonBuildArray,
+    JsonBuildObject,
+    JsonObject,
     JsonTypeof,
     JsonArrayLength,
     JsonExtractPath,
     JsonExtractPathText,
+    JsonbTypeof,
+    JsonbArrayLength,
+    JsonbExtractPath,
+    JsonbExtractPathText,
+    JsonbBuildArray,
+    JsonbBuildObject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,12 +460,17 @@ pub enum JsonTableFunction {
     EachText,
     ArrayElements,
     ArrayElementsText,
+    JsonbObjectKeys,
+    JsonbEach,
+    JsonbEachText,
+    JsonbArrayElements,
+    JsonbArrayElementsText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggAccum {
     pub func: AggFunc,
-    pub arg: Option<Expr>,
+    pub args: Vec<Expr>,
     pub distinct: bool,
     pub sql_type: SqlType,
 }
@@ -405,7 +478,10 @@ pub struct AggAccum {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Column(usize),
-    OuterColumn { depth: usize, index: usize },
+    OuterColumn {
+        depth: usize,
+        index: usize,
+    },
     Const(Value),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
@@ -434,6 +510,11 @@ pub enum Expr {
         array_type: SqlType,
     },
     ArrayOverlap(Box<Expr>, Box<Expr>),
+    JsonbContains(Box<Expr>, Box<Expr>),
+    JsonbContained(Box<Expr>, Box<Expr>),
+    JsonbExists(Box<Expr>, Box<Expr>),
+    JsonbExistsAny(Box<Expr>, Box<Expr>),
+    JsonbExistsAll(Box<Expr>, Box<Expr>),
     ScalarSubquery(Box<Plan>),
     ExistsSubquery(Box<Plan>),
     AnySubquery {
@@ -533,9 +614,9 @@ impl Plan {
                     sql_type: c.sql_type,
                 })
                 .collect(),
-            Plan::Filter { input, .. } | Plan::OrderBy { input, .. } | Plan::Limit { input, .. } => {
-                input.columns()
-            }
+            Plan::Filter { input, .. }
+            | Plan::OrderBy { input, .. }
+            | Plan::Limit { input, .. } => input.columns(),
             Plan::Projection { targets, .. } => targets
                 .iter()
                 .map(|t| QueryColumn {
@@ -604,7 +685,9 @@ impl std::fmt::Debug for SlotKind {
         match self {
             SlotKind::Empty => write!(f, "Empty"),
             SlotKind::Virtual => write!(f, "Virtual"),
-            SlotKind::HeapTuple { tid, .. } => f.debug_struct("HeapTuple").field("tid", tid).finish(),
+            SlotKind::HeapTuple { tid, .. } => {
+                f.debug_struct("HeapTuple").field("tid", tid).finish()
+            }
             SlotKind::BufferHeapTuple { tuple_len, pin, .. } => f
                 .debug_struct("BufferHeapTuple")
                 .field("tuple_len", tuple_len)
@@ -619,7 +702,12 @@ impl Clone for SlotKind {
         match self {
             SlotKind::Empty => SlotKind::Empty,
             SlotKind::Virtual => SlotKind::Virtual,
-            SlotKind::HeapTuple { desc, attr_descs, tid, tuple } => SlotKind::HeapTuple {
+            SlotKind::HeapTuple {
+                desc,
+                attr_descs,
+                tid,
+                tuple,
+            } => SlotKind::HeapTuple {
                 desc: Rc::clone(desc),
                 attr_descs: Rc::clone(attr_descs),
                 tid: *tid,
@@ -816,7 +904,7 @@ pub struct AggregateState {
     pub(crate) key_buffer: Vec<Value>,
     /// Compiled transition functions resolved at plan time, like PG's
     /// aggregate transfn pointers. Avoids per-tuple enum dispatch.
-    pub(crate) trans_fns: Vec<fn(&mut AccumState, &Value)>,
+    pub(crate) trans_fns: Vec<fn(&mut AccumState, &[Value])>,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -856,7 +944,10 @@ pub struct JsonTableFunctionState {
 // --- PlanNode trait implementations ---
 
 impl PlanNode for ResultState {
-    fn exec_proc_node<'a>(&'a mut self, _ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        _ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.emitted {
             Ok(None)
         } else {
@@ -867,16 +958,29 @@ impl PlanNode for ResultState {
             Ok(Some(&mut self.slot))
         }
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
-    fn column_names(&self) -> &[String] { &[] }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Result".into() }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &[]
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Result".into()
+    }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
 impl PlanNode for SeqScanState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.scan.is_none() {
             self.scan = Some(heap_scan_begin_visible(
                 &ctx.pool,
@@ -886,7 +990,11 @@ impl PlanNode for SeqScanState {
             )?);
         }
 
-        let start = if ctx.timed { Some(Instant::now()) } else { None };
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         loop {
             // Reborrow scan each iteration so the borrow checker can see that
@@ -908,8 +1016,7 @@ impl PlanNode for SeqScanState {
                     let raw_ptr = tuple_bytes.as_ptr();
                     let raw_len = tuple_bytes.len();
 
-                    let pin = scan.pinned_buffer_rc()
-                        .expect("buffer must be pinned");
+                    let pin = scan.pinned_buffer_rc().expect("buffer must be pinned");
 
                     // Reset slot for new tuple (like PG's ExecStoreBufferHeapTuple)
                     self.slot.kind = SlotKind::BufferHeapTuple {
@@ -951,17 +1058,34 @@ impl PlanNode for SeqScanState {
             }
         }
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
-    fn column_names(&self) -> &[String] { &self.column_names }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { format!("Seq Scan on rel {}", self.rel.rel_number) }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        format!("Seq Scan on rel {}", self.rel.rel_number)
+    }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
 impl PlanNode for FilterState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-        let start = if ctx.timed { Some(Instant::now()) } else { None };
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
         loop {
             let slot = match self.input.exec_proc_node(ctx)? {
                 Some(s) => s,
@@ -984,18 +1108,31 @@ impl PlanNode for FilterState {
             }
         }
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> { self.input.current_slot() }
-    fn column_names(&self) -> &[String] { self.input.column_names() }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Filter".into() }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Filter".into()
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
     }
 }
 
 impl PlanNode for NestedLoopJoinState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.right.exec_proc_node(ctx)? {
@@ -1044,11 +1181,21 @@ impl PlanNode for NestedLoopJoinState {
             self.current_left = None;
         }
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
-    fn column_names(&self) -> &[String] { &self.combined_names }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Nested Loop".into() }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.combined_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Nested Loop".into()
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         super::explain::format_explain_lines(&*self.left, indent, analyze, lines);
         super::explain::format_explain_lines(&*self.right, indent, analyze, lines);
@@ -1056,7 +1203,10 @@ impl PlanNode for NestedLoopJoinState {
 }
 
 impl PlanNode for OrderByState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
@@ -1093,17 +1243,28 @@ impl PlanNode for OrderByState {
         let idx = self.next_index.checked_sub(1)?;
         rows.get_mut(idx)
     }
-    fn column_names(&self) -> &[String] { self.input.column_names() }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Sort".into() }
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Sort".into()
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
     }
 }
 
 impl PlanNode for LimitState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if let Some(limit) = self.limit {
             if self.returned >= limit {
                 return Ok(None);
@@ -1123,18 +1284,31 @@ impl PlanNode for LimitState {
         }
         Ok(slot)
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> { self.input.current_slot() }
-    fn column_names(&self) -> &[String] { self.input.column_names() }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Limit".into() }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Limit".into()
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
     }
 }
 
 impl PlanNode for ProjectionState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         let input_slot = match self.input.exec_proc_node(ctx)? {
             Some(s) => s,
             None => return Ok(None),
@@ -1155,18 +1329,31 @@ impl PlanNode for ProjectionState {
         self.slot.decode_offset = 0;
         Ok(Some(&mut self.slot))
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
-    fn column_names(&self) -> &[String] { &self.column_names }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Projection".into() }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Projection".into()
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
     }
 }
 
 impl PlanNode for AggregateState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.result_rows.is_none() {
             let mut groups: Vec<AggGroup> = Vec::new();
 
@@ -1193,14 +1380,13 @@ impl PlanNode for AggregateState {
                     });
 
                 let group = &mut groups[group_idx];
-                static NO_ARG: Value = Value::Null;
                 for (i, accum) in self.accumulators.iter().enumerate() {
-                    let value: &Value = if let Some(arg) = &accum.arg {
-                        &eval_expr(arg, slot, ctx)?
-                    } else {
-                        &NO_ARG
-                    };
-                    (self.trans_fns[i])(&mut group.accum_states[i], value);
+                    let values = accum
+                        .args
+                        .iter()
+                        .map(|arg| eval_expr(arg, slot, ctx))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (self.trans_fns[i])(&mut group.accum_states[i], &values);
                 }
             }
 
@@ -1252,30 +1438,59 @@ impl PlanNode for AggregateState {
         let idx = self.next_index.checked_sub(1)?;
         rows.get_mut(idx)
     }
-    fn column_names(&self) -> &[String] { &self.output_columns }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Aggregate".into() }
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Aggregate".into()
+    }
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
     }
 }
 
 impl PlanNode for GenerateSeriesState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if !self.initialized {
             let mut dummy = TupleSlot::empty(0);
             self.current = match eval_expr(&self.start, &mut dummy, ctx)? {
                 Value::Int32(v) => v,
-                other => return Err(ExecError::TypeMismatch { op: "generate_series start", left: other, right: Value::Null }),
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "generate_series start",
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
             };
             self.end = match eval_expr(&self.stop, &mut dummy, ctx)? {
                 Value::Int32(v) => v,
-                other => return Err(ExecError::TypeMismatch { op: "generate_series stop", left: other, right: Value::Null }),
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "generate_series stop",
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
             };
             self.step_val = match eval_expr(&self.step, &mut dummy, ctx)? {
                 Value::Int32(v) => v,
-                other => return Err(ExecError::TypeMismatch { op: "generate_series step", left: other, right: Value::Null }),
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "generate_series step",
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
             };
             self.initialized = true;
         }
@@ -1285,7 +1500,11 @@ impl PlanNode for GenerateSeriesState {
         } else if self.step_val < 0 {
             self.current < self.end
         } else {
-            return Err(ExecError::TypeMismatch { op: "generate_series step must be non-zero", left: Value::Int32(0), right: Value::Null });
+            return Err(ExecError::TypeMismatch {
+                op: "generate_series step must be non-zero",
+                left: Value::Int32(0),
+                right: Value::Null,
+            });
         };
 
         if done {
@@ -1299,16 +1518,29 @@ impl PlanNode for GenerateSeriesState {
         self.current += self.step_val;
         Ok(Some(&mut self.slot))
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
-    fn column_names(&self) -> &[String] { &self.column_names }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Function Scan on generate_series".into() }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Function Scan on generate_series".into()
+    }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
 impl PlanNode for UnnestState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
             let mut arrays = Vec::with_capacity(self.args.len());
@@ -1360,23 +1592,33 @@ impl PlanNode for UnnestState {
         rows.get_mut(idx)
     }
 
-    fn column_names(&self) -> &[String] { &self.output_columns }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Function Scan on unnest".into() }
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Function Scan on unnest".into()
+    }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
 impl PlanNode for JsonTableFunctionState {
-    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
-            self.rows = Some(crate::backend::executor::exec_expr::eval_json_table_function(
-                self.kind,
-                &self.arg,
-                &mut dummy,
-                ctx,
-            )?);
+            self.rows = Some(
+                crate::backend::executor::exec_expr::eval_json_table_function(
+                    self.kind, &self.arg, &mut dummy, ctx,
+                )?,
+            );
         }
 
         let rows = self.rows.as_mut().unwrap();
@@ -1393,10 +1635,18 @@ impl PlanNode for JsonTableFunctionState {
         let idx = self.next_index.checked_sub(1)?;
         rows.get_mut(idx)
     }
-    fn column_names(&self) -> &[String] { &self.output_columns }
-    fn node_stats(&self) -> &NodeExecStats { &self.stats }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
-    fn node_label(&self) -> String { "Function Scan on json".into() }
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Function Scan on json".into()
+    }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
@@ -1409,7 +1659,12 @@ impl TupleSlot {
     ) -> Self {
         let ncols = desc.columns.len();
         Self {
-            kind: SlotKind::HeapTuple { desc, attr_descs, tid, tuple },
+            kind: SlotKind::HeapTuple {
+                desc,
+                attr_descs,
+                tid,
+                tuple,
+            },
             tts_values: Vec::with_capacity(ncols),
             tts_nvalid: 0,
             decode_offset: 0,
@@ -1443,13 +1698,21 @@ impl TupleSlot {
     /// None if the slot is not a BufferHeapTuple.
     #[inline]
     pub(crate) fn get_fixed_int32(&self, data_offset: usize) -> Option<i32> {
-        if let SlotKind::BufferHeapTuple { tuple_ptr, tuple_len, .. } = &self.kind {
+        if let SlotKind::BufferHeapTuple {
+            tuple_ptr,
+            tuple_len,
+            ..
+        } = &self.kind
+        {
             let bytes = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
             let hoff = bytes[22] as usize;
             let start = hoff + data_offset;
             if start + 4 <= bytes.len() {
                 return Some(i32::from_le_bytes([
-                    bytes[start], bytes[start + 1], bytes[start + 2], bytes[start + 3],
+                    bytes[start],
+                    bytes[start + 1],
+                    bytes[start + 2],
+                    bytes[start + 3],
                 ]));
             }
         }
@@ -1460,7 +1723,11 @@ impl TupleSlot {
     pub(crate) fn ncols(&self) -> usize {
         match &self.kind {
             SlotKind::HeapTuple { desc, .. } => desc.columns.len(),
-            SlotKind::BufferHeapTuple { .. } => self.decoder.as_ref().expect("BufferHeapTuple requires decoder").ncols(),
+            SlotKind::BufferHeapTuple { .. } => self
+                .decoder
+                .as_ref()
+                .expect("BufferHeapTuple requires decoder")
+                .ncols(),
             SlotKind::Virtual | SlotKind::Empty => self.tts_values.len(),
         }
     }
@@ -1503,15 +1770,33 @@ impl TupleSlot {
                 // Virtual: tts_values is authoritative
                 Ok(&self.tts_values[..natts])
             }
-            SlotKind::BufferHeapTuple { tuple_ptr, tuple_len, .. } => {
+            SlotKind::BufferHeapTuple {
+                tuple_ptr,
+                tuple_len,
+                ..
+            } => {
                 let (ptr, len) = (*tuple_ptr, *tuple_len);
                 let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-                let decoder = self.decoder.as_ref().expect("BufferHeapTuple requires decoder");
-                decoder.decode_range(bytes, &mut self.tts_values, self.tts_nvalid, natts, &mut self.decode_offset)?;
+                let decoder = self
+                    .decoder
+                    .as_ref()
+                    .expect("BufferHeapTuple requires decoder");
+                decoder.decode_range(
+                    bytes,
+                    &mut self.tts_values,
+                    self.tts_nvalid,
+                    natts,
+                    &mut self.decode_offset,
+                )?;
                 self.tts_nvalid = natts;
                 Ok(&self.tts_values[..natts])
             }
-            SlotKind::HeapTuple { desc, attr_descs, tuple, .. } => {
+            SlotKind::HeapTuple {
+                desc,
+                attr_descs,
+                tuple,
+                ..
+            } => {
                 // HeapTuple: decode all columns at once via deform()
                 let raw = tuple.deform(attr_descs)?;
                 self.tts_values.clear();
