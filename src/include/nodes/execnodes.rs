@@ -451,6 +451,8 @@ pub enum BuiltinScalarFunction {
     JsonbExtractPathText,
     JsonbBuildArray,
     JsonbBuildObject,
+    Left,
+    Repeat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

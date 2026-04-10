@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use crate::backend::executor::{ExecError, QueryColumn, StatementResult, Value};
-use crate::backend::libpq::pqcomm::{cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes};
+use crate::backend::libpq::pqcomm::{
+    cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
+};
 use crate::backend::libpq::pqformat::{
     format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
     send_close_complete, send_command_complete, send_copy_in_response, send_data_row,
-    send_empty_query, send_error, send_no_data, send_parameter_description,
-    send_parameter_status, send_parse_complete, send_query_result, send_ready_for_query,
-    send_row_description,
+    send_empty_query, send_error, send_no_data, send_parameter_description, send_parameter_status,
+    send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
 };
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -22,12 +23,15 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidFloatInput(_) => "22P02",
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
-        ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => "42704",
+        ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
+            "42704"
+        }
         ExecError::Parse(crate::backend::parser::ParseError::ActiveSqlTransaction(_)) => "25001",
         ExecError::Int2OutOfRange
         | ExecError::Int4OutOfRange
         | ExecError::Int8OutOfRange
         | ExecError::NumericFieldOverflow => "22003",
+        ExecError::RequestedLengthTooLarge => "54000",
         ExecError::DivisionByZero(_) => "22012",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::CardinalityViolation(_) => "21000",
@@ -35,10 +39,10 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         _ => "XX000",
     }
 }
-use crate::backend::parser::{parse_statement, Statement};
+use crate::ClientId;
+use crate::backend::parser::{Statement, parse_statement};
 use crate::pgrust::database::Database;
 use crate::pgrust::session::Session;
-use crate::ClientId;
 
 const SSL_REQUEST_CODE: i32 = 80877103;
 pub(crate) const PROTOCOL_VERSION_3_0: i32 = 196608;
@@ -83,7 +87,9 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
                 eprintln!("pgrust: connection from {peer} (client {client_id})");
             }
             if let Err(e) = handle_connection(stream, &db, client_id) {
-                if e.kind() != io::ErrorKind::UnexpectedEof && e.kind() != io::ErrorKind::ConnectionReset {
+                if e.kind() != io::ErrorKind::UnexpectedEof
+                    && e.kind() != io::ErrorKind::ConnectionReset
+                {
                     eprintln!("pgrust: client {client_id} error: {e}");
                 }
             }
@@ -96,14 +102,21 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn handle_connection(stream: TcpStream, db: &Database, client_id: ClientId) -> io::Result<()> {
+pub(crate) fn handle_connection(
+    stream: TcpStream,
+    db: &Database,
+    client_id: ClientId,
+) -> io::Result<()> {
     let mut reader = stream.try_clone()?;
     let mut writer = BufWriter::new(stream);
 
     loop {
         let len = read_i32(&mut reader)? as usize;
         if len < 4 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "startup packet too short"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "startup packet too short",
+            ));
         }
         let mut payload = vec![0u8; len - 4];
         reader.read_exact(&mut payload)?;
@@ -117,7 +130,11 @@ pub(crate) fn handle_connection(stream: TcpStream, db: &Database, client_id: Cli
             }
             PROTOCOL_VERSION_3_0 => break,
             _ => {
-                send_error(&mut writer, "08P01", &format!("unsupported protocol version: {code}"))?;
+                send_error(
+                    &mut writer,
+                    "08P01",
+                    &format!("unsupported protocol version: {code}"),
+                )?;
                 writer.flush()?;
                 return Ok(());
             }
@@ -152,7 +169,10 @@ pub(crate) fn handle_connection(stream: TcpStream, db: &Database, client_id: Cli
 
         let len = read_i32(&mut reader)? as usize;
         if len < 4 {
-                break Err(io::Error::new(io::ErrorKind::InvalidData, "message too short"));
+            break Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "message too short",
+            ));
         }
         let mut body = vec![0u8; len - 4];
         reader.read_exact(&mut body)?;
@@ -215,7 +235,12 @@ pub(crate) fn handle_connection(stream: TcpStream, db: &Database, client_id: Cli
     result
 }
 
-fn handle_query(stream: &mut impl Write, db: &Database, state: &mut ConnectionState, sql: &str) -> io::Result<()> {
+fn handle_query(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    sql: &str,
+) -> io::Result<()> {
     let sql = sql.trim().trim_end_matches(';').trim();
     if sql.is_empty() {
         send_empty_query(stream)?;
@@ -224,12 +249,18 @@ fn handle_query(stream: &mut impl Write, db: &Database, state: &mut ConnectionSt
     }
 
     if let Some(table_name) = parse_copy_from_stdin(sql) {
-        state.copy_in = Some(CopyInState { table_name, pending: Vec::new() });
+        state.copy_in = Some(CopyInState {
+            table_name,
+            pending: Vec::new(),
+        });
         send_copy_in_response(stream)?;
         return Ok(());
     }
 
-    let parsed = db.plan_cache.get_statement(sql).map_err(|e| io::Error::other(format!("{e:?}")));
+    let parsed = db
+        .plan_cache
+        .get_statement(sql)
+        .map_err(|e| io::Error::other(format!("{e:?}")));
     if let Ok(Statement::Select(ref select_stmt)) = parsed {
         match state.session.execute_streaming(db, select_stmt) {
             Ok(mut guard) => {
@@ -300,15 +331,25 @@ fn handle_query(stream: &mut impl Write, db: &Database, state: &mut ConnectionSt
 
 fn handle_copy_data(state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
     let Some(copy) = state.copy_in.as_mut() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "received CopyData outside copy-in mode"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "received CopyData outside copy-in mode",
+        ));
     };
     copy.pending.extend_from_slice(body);
     Ok(())
 }
 
-fn handle_copy_done(stream: &mut impl Write, db: &Database, state: &mut ConnectionState) -> io::Result<()> {
+fn handle_copy_done(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+) -> io::Result<()> {
     let Some(copy) = state.copy_in.take() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "received CopyDone outside copy-in mode"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "received CopyDone outside copy-in mode",
+        ));
     };
 
     let text = String::from_utf8_lossy(&copy.pending);
@@ -316,7 +357,11 @@ fn handle_copy_done(stream: &mut impl Write, db: &Database, state: &mut Connecti
         .lines()
         .map(|line| line.trim_end_matches('\r'))
         .filter(|line| !line.is_empty() && *line != "\\.")
-        .map(|line| line.split('\t').map(|part| part.to_string()).collect::<Vec<_>>())
+        .map(|line| {
+            line.split('\t')
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     state
         .session
@@ -328,7 +373,11 @@ fn handle_copy_done(stream: &mut impl Write, db: &Database, state: &mut Connecti
     Ok(())
 }
 
-fn handle_copy_fail(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
+fn handle_copy_fail(
+    stream: &mut impl Write,
+    state: &mut ConnectionState,
+    body: &[u8],
+) -> io::Result<()> {
     state.copy_in = None;
     let message = cstr_from_bytes(body);
     send_error(stream, "57014", &format!("copy failed: {message}"))?;
@@ -345,10 +394,18 @@ fn parse_copy_from_stdin(sql: &str) -> Option<String> {
     }
     let end = lower.find(suffix)?;
     let table = sql[prefix.len()..end].trim();
-    if table.is_empty() { None } else { Some(table.to_string()) }
+    if table.is_empty() {
+        None
+    } else {
+        Some(table.to_string())
+    }
 }
 
-fn handle_parse(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
+fn handle_parse(
+    stream: &mut impl Write,
+    state: &mut ConnectionState,
+    body: &[u8],
+) -> io::Result<()> {
     let mut offset = 0;
     let statement_name = read_cstr(body, &mut offset)?;
     let sql = read_cstr(body, &mut offset)?;
@@ -356,11 +413,17 @@ fn handle_parse(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8
     for _ in 0..nparams {
         let _ = read_i32_bytes(body, &mut offset)?;
     }
-    state.prepared.insert(statement_name, PreparedStatement { sql });
+    state
+        .prepared
+        .insert(statement_name, PreparedStatement { sql });
     send_parse_complete(stream)
 }
 
-fn handle_bind(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
+fn handle_bind(
+    stream: &mut impl Write,
+    state: &mut ConnectionState,
+    body: &[u8],
+) -> io::Result<()> {
     let mut offset = 0;
     let portal_name = read_cstr(body, &mut offset)?;
     let statement_name = read_cstr(body, &mut offset)?;
@@ -388,24 +451,44 @@ fn handle_bind(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8]
         send_error(stream, "26000", "unknown prepared statement")?;
         return Ok(());
     };
-    state.portals.insert(portal_name, BoundPortal { sql: stmt.sql.clone(), params });
+    state.portals.insert(
+        portal_name,
+        BoundPortal {
+            sql: stmt.sql.clone(),
+            params,
+        },
+    );
     send_bind_complete(stream)
 }
 
-fn handle_describe(stream: &mut impl Write, db: &Database, state: &ConnectionState, body: &[u8]) -> io::Result<()> {
+fn handle_describe(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &ConnectionState,
+    body: &[u8],
+) -> io::Result<()> {
     let mut offset = 0;
-    let target_type = body.get(offset).copied().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "describe target missing"))?;
+    let target_type = body
+        .get(offset)
+        .copied()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "describe target missing"))?;
     offset += 1;
     let name = read_cstr(body, &mut offset)?;
     match target_type {
         b'S' => {
             send_parameter_description(stream, &[])?;
-            match state.prepared.get(&name).and_then(|stmt| describe_sql(db, state.session.client_id, &stmt.sql, &[])) {
+            match state
+                .prepared
+                .get(&name)
+                .and_then(|stmt| describe_sql(db, state.session.client_id, &stmt.sql, &[]))
+            {
                 Some(cols) => send_row_description(stream, &cols),
                 None => send_no_data(stream),
             }
         }
-        b'P' => match state.portals.get(&name).and_then(|portal| describe_sql(db, state.session.client_id, &portal.sql, &portal.params)) {
+        b'P' => match state.portals.get(&name).and_then(|portal| {
+            describe_sql(db, state.session.client_id, &portal.sql, &portal.params)
+        }) {
             Some(cols) => send_row_description(stream, &cols),
             None => send_no_data(stream),
         },
@@ -413,7 +496,12 @@ fn handle_describe(stream: &mut impl Write, db: &Database, state: &ConnectionSta
     }
 }
 
-fn handle_execute(stream: &mut impl Write, db: &Database, state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
+fn handle_execute(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    body: &[u8],
+) -> io::Result<()> {
     let mut offset = 0;
     let portal_name = read_cstr(body, &mut offset)?;
     let _max_rows = read_i32_bytes(body, &mut offset)?;
@@ -424,9 +512,16 @@ fn handle_execute(stream: &mut impl Write, db: &Database, state: &mut Connection
     execute_portal(stream, db, &mut state.session, portal)
 }
 
-fn handle_close(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
+fn handle_close(
+    stream: &mut impl Write,
+    state: &mut ConnectionState,
+    body: &[u8],
+) -> io::Result<()> {
     let mut offset = 0;
-    let target_type = body.get(offset).copied().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "close target missing"))?;
+    let target_type = body
+        .get(offset)
+        .copied()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "close target missing"))?;
     offset += 1;
     let name = read_cstr(body, &mut offset)?;
     match target_type {
@@ -441,9 +536,16 @@ fn handle_close(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8
     send_close_complete(stream)
 }
 
-fn execute_portal(stream: &mut impl Write, db: &Database, session: &mut Session, portal: &BoundPortal) -> io::Result<()> {
+fn execute_portal(
+    stream: &mut impl Write,
+    db: &Database,
+    session: &mut Session,
+    portal: &BoundPortal,
+) -> io::Result<()> {
     let mut row_buf = Vec::new();
-    if let Some((_columns, rows, tag)) = execute_special_query(db, session.client_id, &portal.sql, &portal.params) {
+    if let Some((_columns, rows, tag)) =
+        execute_special_query(db, session.client_id, &portal.sql, &portal.params)
+    {
         for row in &rows {
             send_data_row(stream, row, &mut row_buf)?;
         }
@@ -469,7 +571,12 @@ fn execute_portal(stream: &mut impl Write, db: &Database, session: &mut Session,
     Ok(())
 }
 
-fn describe_sql(db: &Database, client_id: ClientId, sql: &str, params: &[Option<String>]) -> Option<Vec<QueryColumn>> {
+fn describe_sql(
+    db: &Database,
+    client_id: ClientId,
+    sql: &str,
+    params: &[Option<String>],
+) -> Option<Vec<QueryColumn>> {
     let normalized = sql.trim().to_ascii_lowercase();
     if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
         return Some(vec![QueryColumn::text("relkind")]);
@@ -482,7 +589,9 @@ fn describe_sql(db: &Database, client_id: ClientId, sql: &str, params: &[Option<
     match parse_statement(&sql).ok()? {
         Statement::Select(stmt) => {
             let catalog = db.visible_catalog(client_id);
-            crate::backend::parser::build_plan(&stmt, &catalog).ok().map(|plan| plan.columns())
+            crate::backend::parser::build_plan(&stmt, &catalog)
+                .ok()
+                .map(|plan| plan.columns())
         }
         Statement::ShowTables => Some(vec![QueryColumn::text("table_name")]),
         Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
@@ -490,13 +599,26 @@ fn describe_sql(db: &Database, client_id: ClientId, sql: &str, params: &[Option<
     }
 }
 
-fn execute_special_query(db: &Database, client_id: ClientId, sql: &str, params: &[Option<String>]) -> Option<(Vec<String>, Vec<Vec<Value>>, String)> {
+fn execute_special_query(
+    db: &Database,
+    client_id: ClientId,
+    sql: &str,
+    params: &[Option<String>],
+) -> Option<(Vec<String>, Vec<Vec<Value>>, String)> {
     let normalized = sql.trim().to_ascii_lowercase();
     if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
         let table_name = params.first()?.as_ref()?.to_ascii_lowercase();
         let exists = db.visible_catalog(client_id).get(&table_name).is_some();
-        let rows = if exists { vec![vec![Value::Text("r".into())]] } else { Vec::new() };
-        return Some((vec!["relkind".to_string()], rows.clone(), format!("SELECT {}", rows.len())));
+        let rows = if exists {
+            vec![vec![Value::Text("r".into())]]
+        } else {
+            Vec::new()
+        };
+        return Some((
+            vec!["relkind".to_string()],
+            rows.clone(),
+            format!("SELECT {}", rows.len()),
+        ));
     }
     None
 }
@@ -512,5 +634,6 @@ fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
         };
         out = out.replace(&placeholder, &value);
     }
-    out.replace("::pg_catalog.regclass", "").replace("::regclass", "")
+    out.replace("::pg_catalog.regclass", "")
+        .replace("::regclass", "")
 }
