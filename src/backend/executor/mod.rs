@@ -524,6 +524,7 @@ pub fn execute_statement(
     let result = match stmt {
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::ShowTables => execute_show_tables(catalog),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
@@ -552,6 +553,7 @@ pub fn execute_readonly_statement(
     match stmt {
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::ShowTables => execute_show_tables(catalog),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

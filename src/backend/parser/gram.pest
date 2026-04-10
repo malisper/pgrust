@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ explain_stmt | select_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ explain_stmt | select_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
 explain_option = { explain_option_name ~ explain_option_value? }
@@ -16,6 +16,13 @@ order_by_item = { expr ~ (kw_asc | kw_desc)? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
 limit_clause = { kw_limit ~ integer }
 offset_clause = { kw_offset ~ integer }
+set_stmt = { kw_set ~ set_scope? ~ identifier ~ (("=" | kw_to) ~ set_value_list) }
+reset_stmt = { kw_reset ~ (kw_all | identifier) }
+set_scope = { kw_session | kw_local }
+set_value_list = { set_value_atom ~ ("," ~ set_value_atom)* }
+set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | string_literal | identifier | numeric_literal | integer }
+signed_set_value = { ("+" | "-") ~ (numeric_literal | integer | identifier) }
+
 show_tables_stmt = { kw_show ~ kw_tables }
 insert_stmt = { kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_values ~ values_row ~ ("," ~ values_row)* }
 create_table_stmt = { kw_create ~ kw_table ~ identifier ~ "(" ~ column_def ~ ("," ~ column_def)* ~ ")" ~ with_clause? }
@@ -112,6 +119,9 @@ star = { "*" }
 
 kw_select = _{ kw_select_atom }
 kw_show = _{ kw_show_atom }
+kw_reset = _{ kw_reset_atom }
+kw_session = _{ kw_session_atom }
+kw_local = _{ kw_local_atom }
 kw_tables = _{ kw_tables_atom }
 kw_explain = _{ kw_explain_atom }
 kw_analyze = { kw_analyze_atom }
@@ -158,6 +168,8 @@ kw_in = _{ kw_in_atom }
 kw_any = _{ kw_any_atom }
 kw_all = _{ kw_all_atom }
 kw_array = _{ kw_array_atom }
+kw_to = _{ kw_to_atom }
+kw_default = { kw_default_atom }
 kw_true = { kw_true_atom }
 kw_false = { kw_false_atom }
 kw_is = { kw_is_atom }
@@ -207,6 +219,9 @@ kw_rollback = _{ kw_rollback_atom }
 
 kw_select_atom = @{ ^"select" ~ keyword_end }
 kw_show_atom = @{ ^"show" ~ keyword_end }
+kw_reset_atom = @{ ^"reset" ~ keyword_end }
+kw_session_atom = @{ ^"session" ~ keyword_end }
+kw_local_atom = @{ ^"local" ~ keyword_end }
 kw_tables_atom = @{ ^"tables" ~ keyword_end }
 kw_explain_atom = @{ ^"explain" ~ keyword_end }
 kw_analyze_atom = @{ ^"analyze" ~ keyword_end }
@@ -251,6 +266,8 @@ kw_in_atom = @{ ^"in" ~ keyword_end }
 kw_any_atom = @{ ^"any" ~ keyword_end }
 kw_all_atom = @{ ^"all" ~ keyword_end }
 kw_array_atom = @{ ^"array" ~ keyword_end }
+kw_to_atom = @{ ^"to" ~ keyword_end }
+kw_default_atom = @{ ^"default" ~ keyword_end }
 kw_true_atom = @{ ^"true" ~ keyword_end }
 kw_false_atom = @{ ^"false" ~ keyword_end }
 kw_is_atom = @{ ^"is" ~ keyword_end }

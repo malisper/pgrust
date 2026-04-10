@@ -73,6 +73,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_set_statement() {
+        let stmt = parse_statement("set extra_float_digits = 0").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Set(SetStatement {
+                name: "extra_float_digits".into(),
+                value: "0".into(),
+                is_local: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_set_local_statement() {
+        let stmt = parse_statement("set local client_min_messages to 'warning'").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Set(SetStatement {
+                name: "client_min_messages".into(),
+                value: "warning".into(),
+                is_local: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_reset_statement() {
+        let stmt = parse_statement("reset extra_float_digits").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Reset(ResetStatement {
+                name: Some("extra_float_digits".into()),
+            })
+        );
+    }
+
+    #[test]
     fn parse_select_with_where() {
         let stmt =
             parse_select("select name, note from people where id > 1 and note is null").unwrap();

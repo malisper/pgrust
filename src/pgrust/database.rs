@@ -147,6 +147,7 @@ impl Database {
         let stmt = self.plan_cache.get_statement(sql)?;
 
         match stmt {
+            Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let (plan_or_stmt, rels) = {
                     let catalog_guard = self.catalog.read();
