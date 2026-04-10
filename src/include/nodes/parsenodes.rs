@@ -45,7 +45,9 @@ impl fmt::Display for ParseError {
             ParseError::InvalidNumeric(value) => write!(f, "invalid numeric: {value}"),
             ParseError::UnknownTable(name) => write!(f, "unknown table: {name}"),
             ParseError::UnknownColumn(name) => write!(f, "unknown column: {name}"),
-            ParseError::EmptySelectList => write!(f, "SELECT requires a target list or FROM clause"),
+            ParseError::EmptySelectList => {
+                write!(f, "SELECT requires a target list or FROM clause")
+            }
             ParseError::UnsupportedQualifiedName(name) => {
                 write!(f, "unsupported qualified name: {name}")
             }
@@ -56,11 +58,18 @@ impl fmt::Display for ParseError {
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
             ParseError::UnsupportedType(name) => write!(f, "unsupported type: {name}"),
-            ParseError::UndefinedOperator { op, left_type, right_type } => {
+            ParseError::UndefinedOperator {
+                op,
+                left_type,
+                right_type,
+            } => {
                 write!(f, "operator does not exist: {left_type} {op} {right_type}")
             }
             ParseError::UngroupedColumn(name) => {
-                write!(f, "column \"{name}\" must appear in the GROUP BY clause or be used in an aggregate function")
+                write!(
+                    f,
+                    "column \"{name}\" must appear in the GROUP BY clause or be used in an aggregate function"
+                )
             }
             ParseError::AggInWhere => {
                 write!(f, "aggregate functions are not allowed in WHERE")
@@ -78,11 +87,17 @@ impl fmt::Display for ParseError {
                 write!(f, "ON COMMIT can only be used on temporary tables")
             }
             ParseError::TempTableInNonTempSchema(_name) => {
-                write!(f, "cannot create temporary relation in non-temporary schema")
+                write!(
+                    f,
+                    "cannot create temporary relation in non-temporary schema"
+                )
             }
             ParseError::OnlyTemporaryRelationsInTemporarySchemas(name) => {
                 let _ = name;
-                write!(f, "only temporary relations may be created in temporary schemas")
+                write!(
+                    f,
+                    "only temporary relations may be created in temporary schemas"
+                )
             }
         }
     }
@@ -274,6 +289,7 @@ pub enum SqlTypeKind {
     Float8,
     Numeric,
     Json,
+    Jsonb,
     Text,
     Bool,
     Timestamp,
@@ -406,9 +422,14 @@ pub enum SqlExpr {
     IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     ArrayLiteral(Vec<SqlExpr>),
     ArrayOverlap(Box<SqlExpr>, Box<SqlExpr>),
+    JsonbContains(Box<SqlExpr>, Box<SqlExpr>),
+    JsonbContained(Box<SqlExpr>, Box<SqlExpr>),
+    JsonbExists(Box<SqlExpr>, Box<SqlExpr>),
+    JsonbExistsAny(Box<SqlExpr>, Box<SqlExpr>),
+    JsonbExistsAll(Box<SqlExpr>, Box<SqlExpr>),
     AggCall {
         func: AggFunc,
-        arg: Option<Box<SqlExpr>>,
+        args: Vec<SqlExpr>,
         distinct: bool,
     },
     ScalarSubquery(Box<SelectStatement>),

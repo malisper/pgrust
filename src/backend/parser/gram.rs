@@ -2,8 +2,8 @@ use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
 
-use crate::backend::executor::{AggFunc, Value};
 use super::parsenodes::*;
+use crate::backend::executor::{AggFunc, Value};
 
 #[derive(Parser)]
 #[grammar = "backend/parser/gram.pest"]
@@ -17,9 +17,12 @@ pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
 
 #[cfg(test)]
 pub(crate) fn pest_parse_keyword(rule: Rule, input: &str) -> Result<String, ParseError> {
-    let mut pairs = SqlParser::parse(rule, input)
-        .map_err(|e| map_pest_error("keyword", e))?;
-    Ok(pairs.next().ok_or(ParseError::UnexpectedEof)?.as_str().to_string())
+    let mut pairs = SqlParser::parse(rule, input).map_err(|e| map_pest_error("keyword", e))?;
+    Ok(pairs
+        .next()
+        .ok_or(ParseError::UnexpectedEof)?
+        .as_str()
+        .to_string())
 }
 
 fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
@@ -515,7 +518,9 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         };
         match part.as_rule() {
             Rule::temp_clause => persistence = TablePersistence::Temporary,
-            Rule::identifier if relation_name.is_none() => relation_name = Some(build_relation_name(part)),
+            Rule::identifier if relation_name.is_none() => {
+                relation_name = Some(build_relation_name(part))
+            }
             Rule::create_table_column_form => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
@@ -664,7 +669,9 @@ fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
     })
 }
 
-fn build_maintenance_target_list(pair: Pair<'_, Rule>) -> Result<Vec<MaintenanceTarget>, ParseError> {
+fn build_maintenance_target_list(
+    pair: Pair<'_, Rule>,
+) -> Result<Vec<MaintenanceTarget>, ParseError> {
     pair.into_inner()
         .filter(|part| part.as_rule() == Rule::maintenance_target)
         .map(build_maintenance_target)
@@ -746,7 +753,12 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         let mut item_inner = item_pair.into_inner();
         let expr = build_expr(item_inner.next().ok_or(ParseError::UnexpectedEof)?)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
-            alias_pair.into_inner().last().ok_or(ParseError::UnexpectedEof)?.as_str().to_string()
+            alias_pair
+                .into_inner()
+                .last()
+                .ok_or(ParseError::UnexpectedEof)?
+                .as_str()
+                .to_string()
         } else {
             select_item_name(&expr, index)
         };
@@ -829,6 +841,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         }
         Rule::kw_text => SqlType::new(SqlTypeKind::Text),
         Rule::kw_json => SqlType::new(SqlTypeKind::Json),
+        Rule::kw_jsonb => SqlType::new(SqlTypeKind::Jsonb),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
         Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
         Rule::char_type => {
@@ -944,7 +957,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "comparison operator for ANY/ALL",
                                 actual: "&&".into(),
-                            })
+                            });
                         }
                         "=" => SubqueryComparisonOp::Eq,
                         "<>" | "!=" => SubqueryComparisonOp::NotEq,
@@ -956,7 +969,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "subquery comparison operator",
                                 actual: other.into(),
-                            })
+                            });
                         }
                     };
                     let quantifier = parts.next().ok_or(ParseError::UnexpectedEof)?;
@@ -967,7 +980,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "ANY or ALL",
                                 actual: quantifier.as_str().into(),
-                            })
+                            });
                         }
                     };
                     let rhs = parts.next().ok_or(ParseError::UnexpectedEof)?;
@@ -988,13 +1001,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "subquery or array expression",
                                 actual: rhs.as_str().into(),
-                            })
+                            });
                         }
                     })
                 }
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
+                        "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
+                        "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
+                        "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
+                        "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
+                        "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),
                         "&&" => SqlExpr::ArrayOverlap(Box::new(left), Box::new(right)),
                         "->" => SqlExpr::JsonGet(Box::new(left), Box::new(right)),
                         "->>" => SqlExpr::JsonGetText(Box::new(left), Box::new(right)),
@@ -1016,7 +1034,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 }),
             }
         }
-        Rule::primary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
+        Rule::primary_expr => {
+            build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
+        }
         Rule::scalar_subquery_expr => {
             let subquery = build_select(
                 pair.into_inner()
@@ -1068,7 +1088,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
-        Rule::string_literal => Ok(SqlExpr::Const(Value::Text(unescape_string(pair.as_str()).into()))),
+        Rule::string_literal => Ok(SqlExpr::Const(Value::Text(
+            unescape_string(pair.as_str()).into(),
+        ))),
         Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
@@ -1082,7 +1104,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
 fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut func = None;
-    let mut arg = None;
+    let mut args = Vec::new();
     let mut is_star = false;
     let mut distinct = false;
     for part in pair.into_inner() {
@@ -1096,35 +1118,37 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::kw_min => AggFunc::Min,
                     Rule::kw_max => AggFunc::Max,
                     Rule::kw_json_agg => AggFunc::JsonAgg,
+                    Rule::kw_jsonb_agg => AggFunc::JsonbAgg,
+                    Rule::kw_json_object_agg => AggFunc::JsonObjectAgg,
+                    Rule::kw_jsonb_object_agg => AggFunc::JsonbObjectAgg,
                     _ => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "aggregate function",
                             actual: inner.as_str().into(),
-                        })
+                        });
                     }
                 });
             }
             Rule::agg_distinct => distinct = true,
             Rule::star => is_star = true,
-            Rule::expr => arg = Some(build_expr(part)?),
+            Rule::expr_list => {
+                args = part
+                    .into_inner()
+                    .filter(|part| part.as_rule() == Rule::expr)
+                    .map(build_expr)
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
             _ => {}
         }
     }
     Ok(SqlExpr::AggCall {
         func: func.ok_or(ParseError::UnexpectedEof)?,
-        arg: if is_star {
-            None
-        } else {
-            Some(Box::new(arg.ok_or(ParseError::UnexpectedEof)?))
-        },
+        args: if is_star { Vec::new() } else { args },
         distinct,
     })
 }
 
-fn build_null_predicate(
-    left: SqlExpr,
-    pair: Pair<'_, Rule>,
-) -> Result<SqlExpr, ParseError> {
+fn build_null_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let pair = if pair.as_rule() == Rule::null_predicate_suffix {
         pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?
     } else {

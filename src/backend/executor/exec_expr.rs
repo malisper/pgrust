@@ -6,10 +6,16 @@ use num_integer::Integer;
 use num_traits::{Signed, Zero};
 use serde_json::Value as SerdeJsonValue;
 
-use crate::pgrust::compact_string::CompactString;
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use super::nodes::*;
-use super::{ExecError, ExecutorContext, executor_start, exec_next};
+use super::{ExecError, ExecutorContext, exec_next, executor_start};
+use crate::backend::executor::jsonb::{
+    JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_contains,
+    jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value, jsonb_get,
+    jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value, parse_jsonb_text,
+    render_jsonb_bytes,
+};
+use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::pgrust::compact_string::CompactString;
 
 extern crate rand;
 
@@ -29,7 +35,52 @@ fn parse_json_text(text: &str) -> Result<SerdeJsonValue, ExecError> {
     })
 }
 
-pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+enum ParsedJsonValue {
+    Json(SerdeJsonValue),
+    Jsonb(JsonbValue),
+}
+
+impl ParsedJsonValue {
+    fn from_value(value: &Value) -> Result<Self, ExecError> {
+        match value {
+            Value::Json(text) => Ok(Self::Json(parse_json_text(text.as_str())?)),
+            Value::Jsonb(bytes) => Ok(Self::Jsonb(decode_jsonb(bytes)?)),
+            Value::Text(text) => Ok(Self::Json(parse_json_text(text.as_str())?)),
+            Value::TextRef(_, _) => Ok(Self::Json(parse_json_text(value.as_text().unwrap())?)),
+            other => Err(ExecError::TypeMismatch {
+                op: "json",
+                left: other.clone(),
+                right: Value::Null,
+            }),
+        }
+    }
+    fn typeof_name(&self) -> &'static str {
+        match self {
+            Self::Json(value) => match value {
+                SerdeJsonValue::Null => "null",
+                SerdeJsonValue::Bool(_) => "boolean",
+                SerdeJsonValue::Number(_) => "number",
+                SerdeJsonValue::String(_) => "string",
+                SerdeJsonValue::Array(_) => "array",
+                SerdeJsonValue::Object(_) => "object",
+            },
+            Self::Jsonb(value) => match value {
+                JsonbValue::Null => "null",
+                JsonbValue::Bool(_) => "boolean",
+                JsonbValue::Numeric(_) => "number",
+                JsonbValue::String(_) => "string",
+                JsonbValue::Array(_) => "array",
+                JsonbValue::Object(_) => "object",
+            },
+        }
+    }
+}
+
+pub fn eval_expr(
+    expr: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     match expr {
         Expr::Column(index) => {
             let val = slot.get_attr(*index)?;
@@ -40,19 +91,34 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
             .get(*depth)
             .and_then(|row| row.get(*index))
             .cloned()
-            .ok_or(ExecError::UnboundOuterColumn { depth: *depth, index: *index }),
+            .ok_or(ExecError::UnboundOuterColumn {
+                depth: *depth,
+                index: *index,
+            }),
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Add(left, right) => add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
-        Expr::Sub(left, right) => sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
-        Expr::Mul(left, right) => mul_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
-        Expr::Div(left, right) => div_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
-        Expr::Mod(left, right) => mod_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Add(left, right) => {
+            add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::Sub(left, right) => {
+            sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::Mul(left, right) => {
+            mul_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::Div(left, right) => {
+            div_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::Mod(left, right) => {
+            mod_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
         Expr::UnaryPlus(inner) => eval_expr(inner, slot, ctx),
         Expr::Negate(inner) => negate_value(eval_expr(inner, slot, ctx)?),
         Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot, ctx)?, *ty),
-        Expr::Eq(left, right) => {
-            compare_values("=", eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
-        }
+        Expr::Eq(left, right) => compare_values(
+            "=",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+        ),
         Expr::NotEq(left, right) => {
             not_equal_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
@@ -83,24 +149,36 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
                 return Ok(Value::Null);
             }
             let text_str = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "~", left: text.clone(), right: pattern.clone(),
+                op: "~",
+                left: text.clone(),
+                right: pattern.clone(),
             })?;
             let pat_str = pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "~", left: text.clone(), right: pattern.clone(),
+                op: "~",
+                left: text.clone(),
+                right: pattern.clone(),
             })?;
-            let re = regex::Regex::new(pat_str)
-                .map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
+            let re =
+                regex::Regex::new(pat_str).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
             Ok(Value::Bool(re.is_match(text_str)))
         }
-        Expr::And(left, right) => eval_and(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::And(left, right) => {
+            eval_and(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
         Expr::Or(left, right) => eval_or(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
         Expr::Not(inner) => match eval_expr(inner, slot, ctx)? {
             Value::Bool(value) => Ok(Value::Bool(!value)),
             Value::Null => Ok(Value::Null),
             other => Err(ExecError::NonBoolQual(other)),
         },
-        Expr::IsNull(inner) => Ok(Value::Bool(matches!(eval_expr(inner, slot, ctx)?, Value::Null))),
-        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(eval_expr(inner, slot, ctx)?, Value::Null))),
+        Expr::IsNull(inner) => Ok(Value::Bool(matches!(
+            eval_expr(inner, slot, ctx)?,
+            Value::Null
+        ))),
+        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(
+            eval_expr(inner, slot, ctx)?,
+            Value::Null
+        ))),
         Expr::IsDistinctFrom(left, right) => Ok(Value::Bool(values_are_distinct(
             &eval_expr(left, slot, ctx)?,
             &eval_expr(right, slot, ctx)?,
@@ -109,7 +187,10 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
             &eval_expr(left, slot, ctx)?,
             &eval_expr(right, slot, ctx)?,
         ))),
-        Expr::ArrayLiteral { elements, array_type } => {
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => {
             let element_type = array_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
             for expr in elements {
@@ -119,6 +200,21 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
         }
         Expr::ArrayOverlap(left, right) => {
             eval_array_overlap(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::JsonbContains(left, right) => {
+            eval_jsonb_contains(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::JsonbContained(left, right) => {
+            eval_jsonb_contained(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::JsonbExists(left, right) => {
+            eval_jsonb_exists(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::JsonbExistsAny(left, right) => {
+            eval_jsonb_exists_any(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::JsonbExistsAll(left, right) => {
+            eval_jsonb_exists_all(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
         Expr::ScalarSubquery(plan) => eval_scalar_subquery(plan, slot, ctx),
         Expr::ExistsSubquery(plan) => eval_exists_subquery(plan, slot, ctx),
@@ -146,7 +242,9 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
         Expr::JsonPath(left, right) => eval_json_path(left, right, false, slot, ctx),
         Expr::JsonPathText(left, right) => eval_json_path(left, right, true, slot, ctx),
         Expr::FuncCall { func, args } => eval_builtin_function(*func, args, slot, ctx),
-        Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(render_current_timestamp()))),
+        Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(
+            render_current_timestamp(),
+        ))),
     }
 }
 
@@ -164,7 +262,13 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
         BuiltinScalarFunction::ToJson => {
             let value = values.first().cloned().unwrap_or(Value::Null);
-            Ok(Value::Json(CompactString::from_owned(value_to_json_text(&value, false))))
+            Ok(Value::Json(CompactString::from_owned(value_to_json_text(
+                &value, false,
+            ))))
+        }
+        BuiltinScalarFunction::ToJsonb => {
+            let value = values.first().cloned().unwrap_or(Value::Null);
+            Ok(Value::Jsonb(encode_jsonb(&jsonb_from_value(&value)?)))
         }
         BuiltinScalarFunction::ArrayToJson => {
             let value = values.first().cloned().unwrap_or(Value::Null);
@@ -175,47 +279,263 @@ fn eval_builtin_function(
                     _ => None,
                 })
                 .unwrap_or(false);
-            Ok(Value::Json(CompactString::from_owned(value_to_json_text(&value, pretty))))
+            Ok(Value::Json(CompactString::from_owned(value_to_json_text(
+                &value, pretty,
+            ))))
         }
+        BuiltinScalarFunction::JsonBuildArray => Ok(Value::Json(CompactString::from_owned(
+            render_json_builder_array(&values),
+        ))),
+        BuiltinScalarFunction::JsonBuildObject => Ok(Value::Json(CompactString::from_owned(
+            render_json_builder_object(&values)?,
+        ))),
+        BuiltinScalarFunction::JsonObject => Ok(Value::Json(CompactString::from_owned(
+            render_json_object_function(&values)?,
+        ))),
         BuiltinScalarFunction::JsonTypeof => {
-            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
-            let ty = match json {
-                SerdeJsonValue::Null => "null",
-                SerdeJsonValue::Bool(_) => "boolean",
-                SerdeJsonValue::Number(_) => "number",
-                SerdeJsonValue::String(_) => "string",
-                SerdeJsonValue::Array(_) => "array",
-                SerdeJsonValue::Object(_) => "object",
-            };
-            Ok(Value::Text(CompactString::new(ty)))
+            let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
+            Ok(Value::Text(CompactString::new(json.typeof_name())))
+        }
+        BuiltinScalarFunction::JsonbTypeof => {
+            let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
+            Ok(Value::Text(CompactString::new(json.typeof_name())))
         }
         BuiltinScalarFunction::JsonArrayLength => {
-            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
-            match json {
-                SerdeJsonValue::Array(items) => Ok(Value::Int32(items.len() as i32)),
-                other => Err(ExecError::TypeMismatch {
+            match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                ParsedJsonValue::Json(SerdeJsonValue::Array(items)) => {
+                    Ok(Value::Int32(items.len() as i32))
+                }
+                ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
+                    Ok(Value::Int32(items.len() as i32))
+                }
+                ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
                     op: "json_array_length",
                     left: json_value_to_value(&other, false),
+                    right: Value::Null,
+                }),
+                ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
+                    op: "json_array_length",
+                    left: jsonb_to_value(&other),
+                    right: Value::Null,
+                }),
+            }
+        }
+        BuiltinScalarFunction::JsonbArrayLength => {
+            match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                ParsedJsonValue::Json(SerdeJsonValue::Array(items)) => {
+                    Ok(Value::Int32(items.len() as i32))
+                }
+                ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
+                    Ok(Value::Int32(items.len() as i32))
+                }
+                ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
+                    op: "jsonb_array_length",
+                    left: json_value_to_value(&other, false),
+                    right: Value::Null,
+                }),
+                ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
+                    op: "jsonb_array_length",
+                    left: jsonb_to_value(&other),
                     right: Value::Null,
                 }),
             }
         }
         BuiltinScalarFunction::JsonExtractPath => {
-            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
             let path = parse_json_path_args(&values[1..])?;
-            Ok(json_value_to_value(
-                json_lookup_path(&json, &path).unwrap_or(&SerdeJsonValue::Null),
-                false,
-            ))
+            Ok(
+                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                        .map(|value| json_value_to_value(value, false))
+                        .unwrap_or(Value::Null),
+                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                        .map(jsonb_to_value)
+                        .unwrap_or(Value::Null),
+                },
+            )
         }
         BuiltinScalarFunction::JsonExtractPathText => {
-            let json = parse_json_argument(values.first().unwrap_or(&Value::Null))?;
             let path = parse_json_path_args(&values[1..])?;
-            Ok(json_value_to_value(
-                json_lookup_path(&json, &path).unwrap_or(&SerdeJsonValue::Null),
-                true,
-            ))
+            Ok(
+                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                        .map(|value| json_value_to_value(value, true))
+                        .unwrap_or(Value::Null),
+                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                        .map(jsonb_to_text_value)
+                        .unwrap_or(Value::Null),
+                },
+            )
         }
+        BuiltinScalarFunction::JsonbExtractPath => {
+            let path = parse_json_path_args(&values[1..])?;
+            Ok(
+                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                        .map(|value| Value::Jsonb(parse_jsonb_text(&value.to_string()).unwrap()))
+                        .unwrap_or(Value::Null),
+                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                        .map(jsonb_to_value)
+                        .unwrap_or(Value::Null),
+                },
+            )
+        }
+        BuiltinScalarFunction::JsonbExtractPathText => {
+            let path = parse_json_path_args(&values[1..])?;
+            Ok(
+                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                        .map(|value| json_value_to_value(value, true))
+                        .unwrap_or(Value::Null),
+                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                        .map(jsonb_to_text_value)
+                        .unwrap_or(Value::Null),
+                },
+            )
+        }
+        BuiltinScalarFunction::JsonbBuildArray => {
+            let mut items = Vec::with_capacity(values.len());
+            for value in &values {
+                items.push(jsonb_from_value(value)?);
+            }
+            Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items))))
+        }
+        BuiltinScalarFunction::JsonbBuildObject => {
+            let pairs = json_builder_pairs(&values, "jsonb_build_object")?;
+            Ok(Value::Jsonb(encode_jsonb(&jsonb_object_from_pairs(
+                &pairs,
+            )?)))
+        }
+    }
+}
+
+fn render_json_builder_array(values: &[Value]) -> String {
+    let mut out = String::from("[");
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&value_to_json_text(value, false));
+    }
+    out.push(']');
+    out
+}
+
+fn render_json_builder_object(values: &[Value]) -> Result<String, ExecError> {
+    let pairs = json_builder_pairs(values, "json_build_object")?;
+    Ok(render_json_pairs(&pairs))
+}
+
+fn render_json_object_function(values: &[Value]) -> Result<String, ExecError> {
+    match values {
+        [single] => {
+            let items = array_values_for_json_object(single, "json_object")?;
+            if items.len() % 2 != 0 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "json".into(),
+                    details: "argument list must have even number of elements".into(),
+                });
+            }
+            let pairs = items
+                .chunks(2)
+                .map(|chunk| {
+                    Ok((
+                        json_object_key_text(&chunk[0], "json_object")?,
+                        chunk.get(1).cloned().unwrap_or(Value::Null),
+                    ))
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            Ok(render_json_string_pairs(&pairs))
+        }
+        [keys, vals] => {
+            let keys = array_values_for_json_object(keys, "json_object")?;
+            let vals = array_values_for_json_object(vals, "json_object")?;
+            if keys.len() != vals.len() {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "json".into(),
+                    details: "mismatched array dimensions".into(),
+                });
+            }
+            let pairs = keys
+                .into_iter()
+                .zip(vals)
+                .map(|(k, v)| Ok((json_object_key_text(&k, "json_object")?, v)))
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            Ok(render_json_string_pairs(&pairs))
+        }
+        _ => Err(ExecError::InvalidStorageValue {
+            column: "json".into(),
+            details: "json_object expects one or two array arguments".into(),
+        }),
+    }
+}
+
+fn json_builder_pairs(
+    values: &[Value],
+    op: &'static str,
+) -> Result<Vec<(String, Value)>, ExecError> {
+    if values.len() % 2 != 0 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "json".into(),
+            details: format!("{op} arguments must alternate keys and values"),
+        });
+    }
+    values
+        .chunks(2)
+        .map(|chunk| {
+            Ok((
+                jsonb_builder_key(&chunk[0])?,
+                chunk.get(1).cloned().unwrap_or(Value::Null),
+            ))
+        })
+        .collect()
+}
+
+fn render_json_pairs(pairs: &[(String, Value)]) -> String {
+    let mut out = String::from("{");
+    for (idx, (key, value)) in pairs.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&serde_json::to_string(key).unwrap());
+        out.push(':');
+        out.push_str(&value_to_json_text(value, false));
+    }
+    out.push('}');
+    out
+}
+
+fn render_json_string_pairs(pairs: &[(String, Value)]) -> String {
+    render_json_pairs(pairs)
+}
+
+fn array_values_for_json_object(value: &Value, op: &'static str) -> Result<Vec<Value>, ExecError> {
+    match value {
+        Value::Array(items) => Ok(items.clone()),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecError> {
+    match value {
+        Value::Null => Ok("".into()),
+        Value::Text(_) | Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::Int16(v) => Ok(v.to_string()),
+        Value::Int32(v) => Ok(v.to_string()),
+        Value::Int64(v) => Ok(v.to_string()),
+        Value::Float64(v) => Ok(v.to_string()),
+        Value::Numeric(v) => Ok(v.render()),
+        Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
+        Value::Json(v) => Ok(v.to_string()),
+        Value::Jsonb(v) => render_jsonb_bytes(v),
+        Value::Array(_) => Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Null,
+        }),
     }
 }
 
@@ -231,29 +551,43 @@ fn eval_json_get(
     if matches!(json_value, Value::Null) || matches!(key, Value::Null) {
         return Ok(Value::Null);
     }
-    let parsed = parse_json_argument(&json_value)?;
-    let selected = match key {
-        Value::Text(_) | Value::TextRef(_, _) => {
-            let name = key.as_text().unwrap();
-            match &parsed {
-                SerdeJsonValue::Object(map) => map.get(name),
-                _ => None,
-            }
+    match ParsedJsonValue::from_value(&json_value)? {
+        ParsedJsonValue::Json(parsed) => {
+            let selected = match key {
+                Value::Text(_) | Value::TextRef(_, _) => {
+                    let name = key.as_text().unwrap();
+                    match &parsed {
+                        SerdeJsonValue::Object(map) => map.get(name),
+                        _ => None,
+                    }
+                }
+                Value::Int16(index) => json_lookup_index(&parsed, index as i32),
+                Value::Int32(index) => json_lookup_index(&parsed, index),
+                Value::Int64(index) => i32::try_from(index)
+                    .ok()
+                    .and_then(|index| json_lookup_index(&parsed, index)),
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: if as_text { "->>" } else { "->" },
+                        left: json_value,
+                        right: other,
+                    });
+                }
+            };
+            Ok(selected
+                .map(|value| json_value_to_value(value, as_text))
+                .unwrap_or(Value::Null))
         }
-        Value::Int16(index) => json_lookup_index(&parsed, index as i32),
-        Value::Int32(index) => json_lookup_index(&parsed, index),
-        Value::Int64(index) => i32::try_from(index).ok().and_then(|index| json_lookup_index(&parsed, index)),
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: if as_text { "->>" } else { "->" },
-                left: json_value,
-                right: other,
-            });
-        }
-    };
-    Ok(selected
-        .map(|value| json_value_to_value(value, as_text))
-        .unwrap_or(Value::Null))
+        ParsedJsonValue::Jsonb(parsed) => Ok(jsonb_get(&parsed, &key)?
+            .map(|value| {
+                if as_text {
+                    jsonb_to_text_value(value)
+                } else {
+                    jsonb_to_value(value)
+                }
+            })
+            .unwrap_or(Value::Null)),
+    }
 }
 
 fn eval_json_path(
@@ -268,24 +602,25 @@ fn eval_json_path(
     if matches!(json_value, Value::Null) || matches!(path_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let parsed = parse_json_argument(&json_value)?;
-    let path = parse_json_path_value(&path_value, if as_text { "#>>" } else { "#>" }, json_value.clone())?;
-    Ok(json_lookup_path(&parsed, &path)
-        .map(|value| json_value_to_value(value, as_text))
-        .unwrap_or(Value::Null))
-}
-
-fn parse_json_argument(value: &Value) -> Result<SerdeJsonValue, ExecError> {
-    match value {
-        Value::Json(text) => parse_json_text(text.as_str()),
-        Value::Text(text) => parse_json_text(text.as_str()),
-        Value::TextRef(_, _) => parse_json_text(value.as_text().unwrap()),
-        other => Err(ExecError::TypeMismatch {
-            op: "json",
-            left: other.clone(),
-            right: Value::Null,
-        }),
-    }
+    let path = parse_json_path_value(
+        &path_value,
+        if as_text { "#>>" } else { "#>" },
+        json_value.clone(),
+    )?;
+    Ok(match ParsedJsonValue::from_value(&json_value)? {
+        ParsedJsonValue::Json(parsed) => json_lookup_path(&parsed, &path)
+            .map(|value| json_value_to_value(value, as_text))
+            .unwrap_or(Value::Null),
+        ParsedJsonValue::Jsonb(parsed) => jsonb_path(&parsed, &path)
+            .map(|value| {
+                if as_text {
+                    jsonb_to_text_value(value)
+                } else {
+                    jsonb_to_value(value)
+                }
+            })
+            .unwrap_or(Value::Null),
+    })
 }
 
 fn parse_json_path_args(args: &[Value]) -> Result<Vec<String>, ExecError> {
@@ -302,7 +637,11 @@ fn parse_json_path_args(args: &[Value]) -> Result<Vec<String>, ExecError> {
         .collect()
 }
 
-fn parse_json_path_value(value: &Value, op: &'static str, left: Value) -> Result<Vec<String>, ExecError> {
+fn parse_json_path_value(
+    value: &Value,
+    op: &'static str,
+    left: Value,
+) -> Result<Vec<String>, ExecError> {
     match value {
         Value::Array(items) => items
             .iter()
@@ -383,8 +722,15 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         Value::Numeric(v) => parse_json_text(&v.render()).unwrap_or(SerdeJsonValue::Null),
         Value::Bool(v) => SerdeJsonValue::Bool(*v),
         Value::Json(text) => parse_json_text(text.as_str()).unwrap_or(SerdeJsonValue::Null),
-        Value::Text(_) | Value::TextRef(_, _) => SerdeJsonValue::String(value.as_text().unwrap().to_string()),
-        Value::Array(items) => SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect()),
+        Value::Jsonb(bytes) => decode_jsonb(bytes)
+            .map(|value| value.to_serde())
+            .unwrap_or(SerdeJsonValue::Null),
+        Value::Text(_) | Value::TextRef(_, _) => {
+            SerdeJsonValue::String(value.as_text().unwrap().to_string())
+        }
+        Value::Array(items) => {
+            SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect())
+        }
     }
 }
 
@@ -407,10 +753,10 @@ pub(crate) fn eval_json_table_function(
     if matches!(value, Value::Null) {
         return Ok(Vec::new());
     }
-    let json = parse_json_argument(&value)?;
     let mut rows = Vec::new();
-    match kind {
-        JsonTableFunction::ObjectKeys => {
+    match (kind, ParsedJsonValue::from_value(&value)?) {
+        (JsonTableFunction::ObjectKeys, ParsedJsonValue::Json(json))
+        | (JsonTableFunction::JsonbObjectKeys, ParsedJsonValue::Json(json)) => {
             let map = match json {
                 SerdeJsonValue::Object(map) => map,
                 other => {
@@ -422,10 +768,29 @@ pub(crate) fn eval_json_table_function(
                 }
             };
             for (key, _) in map {
-                rows.push(TupleSlot::virtual_row(vec![Value::Text(CompactString::from_owned(key))]));
+                rows.push(TupleSlot::virtual_row(vec![Value::Text(
+                    CompactString::from_owned(key),
+                )]));
             }
         }
-        JsonTableFunction::Each => {
+        (JsonTableFunction::JsonbObjectKeys, ParsedJsonValue::Jsonb(json)) => {
+            let items = match json {
+                JsonbValue::Object(items) => items,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "jsonb_object_keys",
+                        left: jsonb_to_value(&other),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for (key, _) in items {
+                rows.push(TupleSlot::virtual_row(vec![Value::Text(
+                    CompactString::from_owned(key),
+                )]));
+            }
+        }
+        (JsonTableFunction::Each, ParsedJsonValue::Json(json)) => {
             let map = match json {
                 SerdeJsonValue::Object(map) => map,
                 other => {
@@ -443,7 +808,25 @@ pub(crate) fn eval_json_table_function(
                 ]));
             }
         }
-        JsonTableFunction::EachText => {
+        (JsonTableFunction::JsonbEach, ParsedJsonValue::Jsonb(json)) => {
+            let items = match json {
+                JsonbValue::Object(items) => items,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "jsonb_each",
+                        left: jsonb_to_value(&other),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for (key, value) in items {
+                rows.push(TupleSlot::virtual_row(vec![
+                    Value::Text(CompactString::from_owned(key)),
+                    jsonb_to_value(&value),
+                ]));
+            }
+        }
+        (JsonTableFunction::EachText, ParsedJsonValue::Json(json)) => {
             let map = match json {
                 SerdeJsonValue::Object(map) => map,
                 other => {
@@ -461,7 +844,25 @@ pub(crate) fn eval_json_table_function(
                 ]));
             }
         }
-        JsonTableFunction::ArrayElements => {
+        (JsonTableFunction::JsonbEachText, ParsedJsonValue::Jsonb(json)) => {
+            let items = match json {
+                JsonbValue::Object(items) => items,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "jsonb_each_text",
+                        left: jsonb_to_value(&other),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for (key, value) in items {
+                rows.push(TupleSlot::virtual_row(vec![
+                    Value::Text(CompactString::from_owned(key)),
+                    jsonb_to_text_value(&value),
+                ]));
+            }
+        }
+        (JsonTableFunction::ArrayElements, ParsedJsonValue::Json(json)) => {
             let items = match json {
                 SerdeJsonValue::Array(items) => items,
                 other => {
@@ -473,10 +874,27 @@ pub(crate) fn eval_json_table_function(
                 }
             };
             for value in items {
-                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(&value, false)]));
+                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(
+                    &value, false,
+                )]));
             }
         }
-        JsonTableFunction::ArrayElementsText => {
+        (JsonTableFunction::JsonbArrayElements, ParsedJsonValue::Jsonb(json)) => {
+            let items = match json {
+                JsonbValue::Array(items) => items,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "jsonb_array_elements",
+                        left: jsonb_to_value(&other),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for value in items {
+                rows.push(TupleSlot::virtual_row(vec![jsonb_to_value(&value)]));
+            }
+        }
+        (JsonTableFunction::ArrayElementsText, ParsedJsonValue::Json(json)) => {
             let items = match json {
                 SerdeJsonValue::Array(items) => items,
                 other => {
@@ -488,11 +906,137 @@ pub(crate) fn eval_json_table_function(
                 }
             };
             for value in items {
-                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(&value, true)]));
+                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(
+                    &value, true,
+                )]));
             }
+        }
+        (JsonTableFunction::JsonbArrayElementsText, ParsedJsonValue::Jsonb(json)) => {
+            let items = match json {
+                JsonbValue::Array(items) => items,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "jsonb_array_elements_text",
+                        left: jsonb_to_value(&other),
+                        right: Value::Null,
+                    });
+                }
+            };
+            for value in items {
+                rows.push(TupleSlot::virtual_row(vec![jsonb_to_text_value(&value)]));
+            }
+        }
+        (kind, ParsedJsonValue::Jsonb(json)) => {
+            return Err(ExecError::TypeMismatch {
+                op: match kind {
+                    JsonTableFunction::ObjectKeys => "json_object_keys",
+                    JsonTableFunction::Each => "json_each",
+                    JsonTableFunction::EachText => "json_each_text",
+                    JsonTableFunction::ArrayElements => "json_array_elements",
+                    JsonTableFunction::ArrayElementsText => "json_array_elements_text",
+                    JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
+                    JsonTableFunction::JsonbEach => "jsonb_each",
+                    JsonTableFunction::JsonbEachText => "jsonb_each_text",
+                    JsonTableFunction::JsonbArrayElements => "jsonb_array_elements",
+                    JsonTableFunction::JsonbArrayElementsText => "jsonb_array_elements_text",
+                },
+                left: jsonb_to_value(&json),
+                right: Value::Null,
+            });
+        }
+        (kind, ParsedJsonValue::Json(json)) => {
+            return Err(ExecError::TypeMismatch {
+                op: match kind {
+                    JsonTableFunction::ObjectKeys => "json_object_keys",
+                    JsonTableFunction::Each => "json_each",
+                    JsonTableFunction::EachText => "json_each_text",
+                    JsonTableFunction::ArrayElements => "json_array_elements",
+                    JsonTableFunction::ArrayElementsText => "json_array_elements_text",
+                    JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
+                    JsonTableFunction::JsonbEach => "jsonb_each",
+                    JsonTableFunction::JsonbEachText => "jsonb_each_text",
+                    JsonTableFunction::JsonbArrayElements => "jsonb_array_elements",
+                    JsonTableFunction::JsonbArrayElementsText => "jsonb_array_elements_text",
+                },
+                left: json_value_to_value(&json, false),
+                right: Value::Null,
+            });
         }
     }
     Ok(rows)
+}
+
+fn eval_jsonb_contains(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let left_jsonb = jsonb_from_value(&left)?;
+    let right_jsonb = jsonb_from_value(&right)?;
+    Ok(Value::Bool(jsonb_contains(&left_jsonb, &right_jsonb)))
+}
+
+fn eval_jsonb_contained(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let left_jsonb = jsonb_from_value(&left)?;
+    let right_jsonb = jsonb_from_value(&right)?;
+    Ok(Value::Bool(jsonb_contains(&right_jsonb, &left_jsonb)))
+}
+
+fn eval_jsonb_exists(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let key = right.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "?",
+        left: left.clone(),
+        right: right.clone(),
+    })?;
+    let jsonb = jsonb_from_value(&left)?;
+    Ok(Value::Bool(jsonb_exists(&jsonb, key)))
+}
+
+fn eval_jsonb_exists_any(left: Value, right: Value) -> Result<Value, ExecError> {
+    eval_jsonb_exists_list(left, right, "?|", jsonb_exists_any)
+}
+
+fn eval_jsonb_exists_all(left: Value, right: Value) -> Result<Value, ExecError> {
+    eval_jsonb_exists_list(left, right, "?&", jsonb_exists_all)
+}
+
+fn eval_jsonb_exists_list(
+    left: Value,
+    right: Value,
+    op: &'static str,
+    pred: fn(&JsonbValue, &[String]) -> bool,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let keys = match right {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_text()
+                    .map(|text| text.to_string())
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op,
+                        left: left.clone(),
+                        right: item.clone(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left,
+                right: other,
+            });
+        }
+    };
+    let jsonb = jsonb_from_value(&left)?;
+    Ok(Value::Bool(pred(&jsonb, &keys)))
 }
 
 fn eval_quantified_array(
@@ -547,7 +1091,10 @@ fn eval_array_overlap(left: Value, right: Value) -> Result<Value, ExecError> {
                     if matches!(right_item, Value::Null) {
                         continue;
                     }
-                    if matches!(compare_values("=", left_item.clone(), right_item.clone())?, Value::Bool(true)) {
+                    if matches!(
+                        compare_values("=", left_item.clone(), right_item.clone())?,
+                        Value::Bool(true)
+                    ) {
                         return Ok(Value::Bool(true));
                     }
                 }
@@ -562,7 +1109,11 @@ fn eval_array_overlap(left: Value, right: Value) -> Result<Value, ExecError> {
     }
 }
 
-fn eval_scalar_subquery(plan: &Plan, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+fn eval_scalar_subquery(
+    plan: &Plan,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     let outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     ctx.outer_rows.insert(0, outer_row);
     let result = (|| {
@@ -588,7 +1139,11 @@ fn eval_scalar_subquery(plan: &Plan, slot: &mut TupleSlot, ctx: &mut ExecutorCon
     result
 }
 
-fn eval_exists_subquery(plan: &Plan, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+fn eval_exists_subquery(
+    plan: &Plan,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     let outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     ctx.outer_rows.insert(0, outer_row);
     let result = (|| {
@@ -684,47 +1239,116 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int16(v) => match ty {
-            SqlType { kind: SqlTypeKind::Int2, .. } => Ok(Value::Int16(v)),
-            SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v as i32)),
-            SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
-            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
-                cast_text_value(&v.to_string(), ty, true)
-            }
-            SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
+            SqlType {
+                kind: SqlTypeKind::Int2,
+                ..
+            } => Ok(Value::Int16(v)),
+            SqlType {
+                kind: SqlTypeKind::Int4,
+                ..
+            } => Ok(Value::Int32(v as i32)),
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                ..
+            } => Ok(Value::Int64(v as i64)),
+            SqlType {
+                kind: SqlTypeKind::Float4 | SqlTypeKind::Float8,
+                ..
+            } => Ok(Value::Float64(v as f64)),
+            SqlType {
+                kind: SqlTypeKind::Numeric,
+                ..
+            } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
+            SqlType {
+                kind:
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::Jsonb,
+                ..
+            } => cast_text_value(&v.to_string(), ty, true),
+            SqlType {
+                kind: SqlTypeKind::Bool,
+                ..
+            } => Err(ExecError::TypeMismatch {
                 op: "::bool",
                 left: Value::Int16(v),
                 right: Value::Bool(false),
             }),
         },
         Value::Int32(v) => match ty {
-            SqlType { kind: SqlTypeKind::Int2, .. } => i16::try_from(v)
+            SqlType {
+                kind: SqlTypeKind::Int2,
+                ..
+            } => i16::try_from(v)
                 .map(Value::Int16)
                 .map_err(|_| ExecError::TypeMismatch {
                     op: "::int2",
                     left: Value::Int32(v),
                     right: Value::Int16(0),
                 }),
-            SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v)),
-            SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
-            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
-                cast_text_value(&v.to_string(), ty, true)
-            }
-            SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
+            SqlType {
+                kind: SqlTypeKind::Int4,
+                ..
+            } => Ok(Value::Int32(v)),
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                ..
+            } => Ok(Value::Int64(v as i64)),
+            SqlType {
+                kind: SqlTypeKind::Float4 | SqlTypeKind::Float8,
+                ..
+            } => Ok(Value::Float64(v as f64)),
+            SqlType {
+                kind: SqlTypeKind::Numeric,
+                ..
+            } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
+            SqlType {
+                kind:
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::Jsonb,
+                ..
+            } => cast_text_value(&v.to_string(), ty, true),
+            SqlType {
+                kind: SqlTypeKind::Bool,
+                ..
+            } => Err(ExecError::TypeMismatch {
                 op: "::bool",
                 left: Value::Int32(v),
                 right: Value::Bool(false),
             }),
         },
         Value::Bool(v) => match ty {
-            SqlType { kind: SqlTypeKind::Bool, .. } => Ok(Value::Bool(v)),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
-                cast_text_value(if v { "true" } else { "false" }, ty, true)
-            }
-            SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Float4 | SqlTypeKind::Float8 | SqlTypeKind::Numeric, .. } => Err(ExecError::TypeMismatch {
+            SqlType {
+                kind: SqlTypeKind::Bool,
+                ..
+            } => Ok(Value::Bool(v)),
+            SqlType {
+                kind:
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::Jsonb,
+                ..
+            } => cast_text_value(if v { "true" } else { "false" }, ty, true),
+            SqlType {
+                kind:
+                    SqlTypeKind::Int2
+                    | SqlTypeKind::Int4
+                    | SqlTypeKind::Int8
+                    | SqlTypeKind::Float4
+                    | SqlTypeKind::Float8
+                    | SqlTypeKind::Numeric,
+                ..
+            } => Err(ExecError::TypeMismatch {
                 op: "::int4",
                 left: Value::Bool(v),
                 right: Value::Int32(0),
@@ -738,47 +1362,122 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             cast_text_value(text, ty, true)
         }
         Value::Json(text) => cast_text_value(text.as_str(), ty, true),
+        Value::Jsonb(bytes) => match ty.kind {
+            SqlTypeKind::Jsonb => Ok(Value::Jsonb(bytes)),
+            SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(render_jsonb_bytes(
+                &bytes,
+            )?))),
+            SqlTypeKind::Text
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar => cast_text_value(&render_jsonb_bytes(&bytes)?, ty, true),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::jsonb",
+                left: Value::Jsonb(bytes),
+                right: Value::Null,
+            }),
+        },
         Value::Int64(v) => match ty {
-            SqlType { kind: SqlTypeKind::Int2, .. } => i16::try_from(v)
+            SqlType {
+                kind: SqlTypeKind::Int2,
+                ..
+            } => i16::try_from(v)
                 .map(Value::Int16)
                 .map_err(|_| ExecError::TypeMismatch {
                     op: "::int2",
                     left: Value::Int64(v),
                     right: Value::Int16(0),
                 }),
-            SqlType { kind: SqlTypeKind::Int4, .. } => i32::try_from(v)
+            SqlType {
+                kind: SqlTypeKind::Int4,
+                ..
+            } => i32::try_from(v)
                 .map(Value::Int32)
                 .map_err(|_| ExecError::TypeMismatch {
                     op: "::int4",
                     left: Value::Int64(v),
                     right: Value::Int32(0),
                 }),
-            SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v)),
-            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v))),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
-                cast_text_value(&v.to_string(), ty, true)
-            }
-            SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                ..
+            } => Ok(Value::Int64(v)),
+            SqlType {
+                kind: SqlTypeKind::Float4 | SqlTypeKind::Float8,
+                ..
+            } => Ok(Value::Float64(v as f64)),
+            SqlType {
+                kind: SqlTypeKind::Numeric,
+                ..
+            } => Ok(Value::Numeric(NumericValue::from_i64(v))),
+            SqlType {
+                kind:
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::Jsonb,
+                ..
+            } => cast_text_value(&v.to_string(), ty, true),
+            SqlType {
+                kind: SqlTypeKind::Bool,
+                ..
+            } => Err(ExecError::TypeMismatch {
                 op: "::bool",
                 left: Value::Int64(v),
                 right: Value::Bool(false),
             }),
         },
         Value::Float64(v) => match ty {
-            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) { (v as f32) as f64 } else { v })),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(parse_numeric_text(&v.to_string()).ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?)),
-            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar | SqlTypeKind::Json, .. } => {
-                cast_text_value(&v.to_string(), ty, true)
-            }
-            SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
+            SqlType {
+                kind: SqlTypeKind::Float4 | SqlTypeKind::Float8,
+                ..
+            } => Ok(Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
+                (v as f32) as f64
+            } else {
+                v
+            })),
+            SqlType {
+                kind: SqlTypeKind::Numeric,
+                ..
+            } => Ok(Value::Numeric(
+                parse_numeric_text(&v.to_string())
+                    .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?,
+            )),
+            SqlType {
+                kind:
+                    SqlTypeKind::Text
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::Char
+                    | SqlTypeKind::Varchar
+                    | SqlTypeKind::Json
+                    | SqlTypeKind::Jsonb,
+                ..
+            } => cast_text_value(&v.to_string(), ty, true),
+            SqlType {
+                kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Bool,
+                ..
+            } => Err(ExecError::TypeMismatch {
                 op: "::",
                 left: Value::Float64(v),
                 right: match ty {
-                    SqlType { kind: SqlTypeKind::Int2, .. } => Value::Int16(0),
-                    SqlType { kind: SqlTypeKind::Int4, .. } => Value::Int32(0),
-                    SqlType { kind: SqlTypeKind::Int8, .. } => Value::Int64(0),
-                    SqlType { kind: SqlTypeKind::Bool, .. } => Value::Bool(false),
+                    SqlType {
+                        kind: SqlTypeKind::Int2,
+                        ..
+                    } => Value::Int16(0),
+                    SqlType {
+                        kind: SqlTypeKind::Int4,
+                        ..
+                    } => Value::Int32(0),
+                    SqlType {
+                        kind: SqlTypeKind::Int8,
+                        ..
+                    } => Value::Int64(0),
+                    SqlType {
+                        kind: SqlTypeKind::Bool,
+                        ..
+                    } => Value::Bool(false),
                     _ => Value::Text(CompactString::new("")),
                 },
             }),
@@ -795,35 +1494,49 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
         }
+        SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
         SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
             coerce_character_string(text, ty, explicit)?,
         ))),
-        SqlTypeKind::Int2 => text.parse::<i16>()
-            .map(Value::Int16)
-            .map_err(|_| ExecError::TypeMismatch {
-                op: "::int2",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Int16(0),
-            }),
-        SqlTypeKind::Int4 => text.parse::<i32>()
-            .map(Value::Int32)
-            .map_err(|_| ExecError::TypeMismatch {
-                op: "::int4",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Int32(0),
-            }),
-        SqlTypeKind::Int8 => text.parse::<i64>()
-            .map(Value::Int64)
-            .map_err(|_| ExecError::TypeMismatch {
-                op: "::int8",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Int64(0),
-            }),
+        SqlTypeKind::Int2 => {
+            text.parse::<i16>()
+                .map(Value::Int16)
+                .map_err(|_| ExecError::TypeMismatch {
+                    op: "::int2",
+                    left: Value::Text(CompactString::new(text)),
+                    right: Value::Int16(0),
+                })
+        }
+        SqlTypeKind::Int4 => {
+            text.parse::<i32>()
+                .map(Value::Int32)
+                .map_err(|_| ExecError::TypeMismatch {
+                    op: "::int4",
+                    left: Value::Text(CompactString::new(text)),
+                    right: Value::Int32(0),
+                })
+        }
+        SqlTypeKind::Int8 => {
+            text.parse::<i64>()
+                .map(Value::Int64)
+                .map_err(|_| ExecError::TypeMismatch {
+                    op: "::int8",
+                    left: Value::Text(CompactString::new(text)),
+                    right: Value::Int64(0),
+                })
+        }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text)
-            .map(|v| Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) { (v as f32) as f64 } else { v }))
+            .map(|v| {
+                Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
+                    (v as f32) as f64
+                } else {
+                    v
+                })
+            })
             .map_err(|_| ExecError::InvalidFloatInput(text.to_string())),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(
-            parse_numeric_text(text).ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))?,
+            parse_numeric_text(text)
+                .ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))?,
             ty,
         )?)),
         SqlTypeKind::Bool => match text.to_ascii_lowercase().as_str() {
@@ -838,39 +1551,58 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
     }
 }
 
-fn cast_numeric_value(value: NumericValue, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
+fn cast_numeric_value(
+    value: NumericValue,
+    ty: SqlType,
+    explicit: bool,
+) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
-        SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::from_owned(value.render()))),
+        SqlTypeKind::Text | SqlTypeKind::Timestamp => {
+            Ok(Value::Text(CompactString::from_owned(value.render())))
+        }
         SqlTypeKind::Json => {
             let rendered = value.render();
             validate_json_text(&rendered)?;
             Ok(Value::Json(CompactString::from_owned(rendered)))
         }
-        SqlTypeKind::Char | SqlTypeKind::Varchar => {
-            cast_text_value(&value.render(), ty, explicit)
+        SqlTypeKind::Jsonb => {
+            let rendered = value.render();
+            Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
         }
+        SqlTypeKind::Char | SqlTypeKind::Varchar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Float4 => {
             let rendered = value.render();
-            let v = parse_pg_float(&rendered).map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
+            let v = parse_pg_float(&rendered)
+                .map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
             Ok(Value::Float64((v as f32) as f64))
         }
         SqlTypeKind::Float8 => {
             let rendered = value.render();
-            let v = parse_pg_float(&rendered).map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
+            let v = parse_pg_float(&rendered)
+                .map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
             Ok(Value::Float64(v))
         }
         SqlTypeKind::Int2 => {
             let rendered = value.render();
-            rendered.parse::<i16>().map(Value::Int16).map_err(|_| ExecError::Int2OutOfRange)
+            rendered
+                .parse::<i16>()
+                .map(Value::Int16)
+                .map_err(|_| ExecError::Int2OutOfRange)
         }
         SqlTypeKind::Int4 => {
             let rendered = value.render();
-            rendered.parse::<i32>().map(Value::Int32).map_err(|_| ExecError::Int4OutOfRange)
+            rendered
+                .parse::<i32>()
+                .map(Value::Int32)
+                .map_err(|_| ExecError::Int4OutOfRange)
         }
         SqlTypeKind::Int8 => {
             let rendered = value.render();
-            rendered.parse::<i64>().map(Value::Int64).map_err(|_| ExecError::Int8OutOfRange)
+            rendered
+                .parse::<i64>()
+                .map(Value::Int64)
+                .map_err(|_| ExecError::Int8OutOfRange)
         }
         SqlTypeKind::Bool => Err(ExecError::TypeMismatch {
             op: "::bool",
@@ -937,10 +1669,17 @@ pub(crate) fn compare_order_by_keys(
     left_keys: &[Value],
     right_keys: &[Value],
 ) -> Ordering {
-    for (item, (left_value, right_value)) in items.iter().zip(left_keys.iter().zip(right_keys.iter())) {
-        let ordering = compare_order_values(left_value, right_value, item.nulls_first, item.descending);
+    for (item, (left_value, right_value)) in
+        items.iter().zip(left_keys.iter().zip(right_keys.iter()))
+    {
+        let ordering =
+            compare_order_values(left_value, right_value, item.nulls_first, item.descending);
         if ordering != Ordering::Equal {
-            return if item.descending && !matches!((left_value, right_value), (Value::Null, _) | (_, Value::Null)) {
+            return if item.descending
+                && !matches!(
+                    (left_value, right_value),
+                    (Value::Null, _) | (_, Value::Null)
+                ) {
                 ordering.reverse()
             } else {
                 ordering
@@ -967,10 +1706,18 @@ pub(crate) fn compare_order_values(
     match (left, right) {
         (Value::Null, Value::Null) => Ordering::Equal,
         (Value::Null, _) => {
-            if nulls_first { Ordering::Less } else { Ordering::Greater }
+            if nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
         }
         (_, Value::Null) => {
-            if nulls_first { Ordering::Greater } else { Ordering::Less }
+            if nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
         }
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
@@ -979,6 +1726,10 @@ pub(crate) fn compare_order_values(
                 .and_then(|left| parsed_numeric_value(b).map(|right| left.cmp(&right)))
                 .unwrap_or(Ordering::Equal)
         }
+        (Value::Jsonb(a), Value::Jsonb(b)) => compare_jsonb(
+            &decode_jsonb(a).unwrap_or(JsonbValue::Null),
+            &decode_jsonb(b).unwrap_or(JsonbValue::Null),
+        ),
         (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
             a.as_text().unwrap().cmp(b.as_text().unwrap())
         }
@@ -992,7 +1743,8 @@ pub(crate) fn compare_order_values(
 /// ExecInitQual which resolves expression evaluation steps once. Eliminates
 /// per-tuple recursive eval_expr dispatch. Allocated once at plan time;
 /// per-tuple cost is just an indirect function call.
-pub(crate) type CompiledPredicate = Box<dyn Fn(&mut TupleSlot, &mut ExecutorContext) -> Result<bool, ExecError>>;
+pub(crate) type CompiledPredicate =
+    Box<dyn Fn(&mut TupleSlot, &mut ExecutorContext) -> Result<bool, ExecError>>;
 
 /// Compile a predicate with access to the tuple decoder for direct byte access.
 /// Like PG's heap_getattr fast path for fixed-offset attributes.
@@ -1015,69 +1767,113 @@ fn try_compile_fixed_offset(
     decoder: &super::tuple_decoder::CompiledTupleDecoder,
 ) -> Option<CompiledPredicate> {
     match expr {
-        Expr::Gt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
-            return Some(Box::new(move |slot, _ctx| {
-                if let Some(v) = slot.get_fixed_int32(off) { return Ok(v > val); }
-                match slot.get_attr(col)? {
-                    Value::Int32(v) => Ok(*v > val),
-                    Value::Null => Ok(false),
-                    other => Err(ExecError::TypeMismatch { op: ">", left: other.clone(), right: Value::Int32(val) }),
-                }
-            }));
-        } else { },
-        Expr::Lt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
-            return Some(Box::new(move |slot, _ctx| {
-                if let Some(v) = slot.get_fixed_int32(off) { return Ok(v < val); }
-                match slot.get_attr(col)? {
-                    Value::Int32(v) => Ok(*v < val),
-                    Value::Null => Ok(false),
-                    other => Err(ExecError::TypeMismatch { op: "<", left: other.clone(), right: Value::Int32(val) }),
-                }
-            }));
-        } else { },
-        Expr::Eq(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
-            return Some(Box::new(move |slot, _ctx| {
-                if let Some(v) = slot.get_fixed_int32(off) { return Ok(v == val); }
-                match slot.get_attr(col)? {
-                    Value::Int32(v) => Ok(*v == val),
-                    Value::Null => Ok(false),
-                    other => Err(ExecError::TypeMismatch { op: "=", left: other.clone(), right: Value::Int32(val) }),
-                }
-            }));
-        } else { },
+        Expr::Gt(left, right) => {
+            if let (Expr::Column(col), Expr::Const(Value::Int32(val))) =
+                (left.as_ref(), right.as_ref())
+            {
+                let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+                return Some(Box::new(move |slot, _ctx| {
+                    if let Some(v) = slot.get_fixed_int32(off) {
+                        return Ok(v > val);
+                    }
+                    match slot.get_attr(col)? {
+                        Value::Int32(v) => Ok(*v > val),
+                        Value::Null => Ok(false),
+                        other => Err(ExecError::TypeMismatch {
+                            op: ">",
+                            left: other.clone(),
+                            right: Value::Int32(val),
+                        }),
+                    }
+                }));
+            } else {
+            }
+        }
+        Expr::Lt(left, right) => {
+            if let (Expr::Column(col), Expr::Const(Value::Int32(val))) =
+                (left.as_ref(), right.as_ref())
+            {
+                let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+                return Some(Box::new(move |slot, _ctx| {
+                    if let Some(v) = slot.get_fixed_int32(off) {
+                        return Ok(v < val);
+                    }
+                    match slot.get_attr(col)? {
+                        Value::Int32(v) => Ok(*v < val),
+                        Value::Null => Ok(false),
+                        other => Err(ExecError::TypeMismatch {
+                            op: "<",
+                            left: other.clone(),
+                            right: Value::Int32(val),
+                        }),
+                    }
+                }));
+            } else {
+            }
+        }
+        Expr::Eq(left, right) => {
+            if let (Expr::Column(col), Expr::Const(Value::Int32(val))) =
+                (left.as_ref(), right.as_ref())
+            {
+                let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
+                return Some(Box::new(move |slot, _ctx| {
+                    if let Some(v) = slot.get_fixed_int32(off) {
+                        return Ok(v == val);
+                    }
+                    match slot.get_attr(col)? {
+                        Value::Int32(v) => Ok(*v == val),
+                        Value::Null => Ok(false),
+                        other => Err(ExecError::TypeMismatch {
+                            op: "=",
+                            left: other.clone(),
+                            right: Value::Int32(val),
+                        }),
+                    }
+                }));
+            } else {
+            }
+        }
         Expr::And(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_and_with_decoder(expr, decoder);
             return Some(Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if !part(slot, ctx)? { return Ok(false); }
+                    if !part(slot, ctx)? {
+                        return Ok(false);
+                    }
                 }
                 Ok(true)
             }));
-        },
+        }
         Expr::Or(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_or_with_decoder(expr, decoder);
             return Some(Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if part(slot, ctx)? { return Ok(true); }
+                    if part(slot, ctx)? {
+                        return Ok(true);
+                    }
                 }
                 Ok(false)
             }));
-        },
-        _ => { },
+        }
+        _ => {}
     }
     None
 }
 
-fn flatten_and_with_decoder(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder) -> Vec<CompiledPredicate> {
+fn flatten_and_with_decoder(
+    expr: &Expr,
+    decoder: &super::tuple_decoder::CompiledTupleDecoder,
+) -> Vec<CompiledPredicate> {
     let mut out = Vec::new();
     flatten_and_with_decoder_inner(expr, decoder, &mut out);
     out
 }
 
-fn flatten_and_with_decoder_inner(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder, out: &mut Vec<CompiledPredicate>) {
+fn flatten_and_with_decoder_inner(
+    expr: &Expr,
+    decoder: &super::tuple_decoder::CompiledTupleDecoder,
+    out: &mut Vec<CompiledPredicate>,
+) {
     if let Expr::And(left, right) = expr {
         flatten_and_with_decoder_inner(left, decoder, out);
         flatten_and_with_decoder_inner(right, decoder, out);
@@ -1086,13 +1882,20 @@ fn flatten_and_with_decoder_inner(expr: &Expr, decoder: &super::tuple_decoder::C
     }
 }
 
-fn flatten_or_with_decoder(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder) -> Vec<CompiledPredicate> {
+fn flatten_or_with_decoder(
+    expr: &Expr,
+    decoder: &super::tuple_decoder::CompiledTupleDecoder,
+) -> Vec<CompiledPredicate> {
     let mut out = Vec::new();
     flatten_or_with_decoder_inner(expr, decoder, &mut out);
     out
 }
 
-fn flatten_or_with_decoder_inner(expr: &Expr, decoder: &super::tuple_decoder::CompiledTupleDecoder, out: &mut Vec<CompiledPredicate>) {
+fn flatten_or_with_decoder_inner(
+    expr: &Expr,
+    decoder: &super::tuple_decoder::CompiledTupleDecoder,
+    out: &mut Vec<CompiledPredicate>,
+) {
     if let Expr::Or(left, right) = expr {
         flatten_or_with_decoder_inner(left, decoder, out);
         flatten_or_with_decoder_inner(right, decoder, out);
@@ -1104,50 +1907,83 @@ fn flatten_or_with_decoder_inner(expr: &Expr, decoder: &super::tuple_decoder::Co
 /// Compile an expression into a specialized predicate closure.
 pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
     match expr {
-        Expr::Gt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let (col, val) = (*col, *val);
-            return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
-                Value::Int32(v) => Ok(*v > val),
-                Value::Null => Ok(false),
-                other => Err(ExecError::TypeMismatch { op: ">", left: other.clone(), right: Value::Int32(val) }),
-            });
-        } else { },
-        Expr::Lt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let (col, val) = (*col, *val);
-            return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
-                Value::Int32(v) => Ok(*v < val),
-                Value::Null => Ok(false),
-                other => Err(ExecError::TypeMismatch { op: "<", left: other.clone(), right: Value::Int32(val) }),
-            });
-        } else { },
-        Expr::Eq(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
-            let (col, val) = (*col, *val);
-            return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
-                Value::Int32(v) => Ok(*v == val),
-                Value::Null => Ok(false),
-                other => Err(ExecError::TypeMismatch { op: "=", left: other.clone(), right: Value::Int32(val) }),
-            });
-        } else { },
+        Expr::Gt(left, right) => {
+            if let (Expr::Column(col), Expr::Const(Value::Int32(val))) =
+                (left.as_ref(), right.as_ref())
+            {
+                let (col, val) = (*col, *val);
+                return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
+                    Value::Int32(v) => Ok(*v > val),
+                    Value::Null => Ok(false),
+                    other => Err(ExecError::TypeMismatch {
+                        op: ">",
+                        left: other.clone(),
+                        right: Value::Int32(val),
+                    }),
+                });
+            } else {
+            }
+        }
+        Expr::Lt(left, right) => {
+            if let (Expr::Column(col), Expr::Const(Value::Int32(val))) =
+                (left.as_ref(), right.as_ref())
+            {
+                let (col, val) = (*col, *val);
+                return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
+                    Value::Int32(v) => Ok(*v < val),
+                    Value::Null => Ok(false),
+                    other => Err(ExecError::TypeMismatch {
+                        op: "<",
+                        left: other.clone(),
+                        right: Value::Int32(val),
+                    }),
+                });
+            } else {
+            }
+        }
+        Expr::Eq(left, right) => {
+            if let (Expr::Column(col), Expr::Const(Value::Int32(val))) =
+                (left.as_ref(), right.as_ref())
+            {
+                let (col, val) = (*col, *val);
+                return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
+                    Value::Int32(v) => Ok(*v == val),
+                    Value::Null => Ok(false),
+                    other => Err(ExecError::TypeMismatch {
+                        op: "=",
+                        left: other.clone(),
+                        right: Value::Int32(val),
+                    }),
+                });
+            } else {
+            }
+        }
         Expr::And(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_and(expr);
             return Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if !part(slot, ctx)? { return Ok(false); }
+                    if !part(slot, ctx)? {
+                        return Ok(false);
+                    }
                 }
                 Ok(true)
             });
-        },
+        }
         Expr::Or(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_or(expr);
             return Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if part(slot, ctx)? { return Ok(true); }
+                    if part(slot, ctx)? {
+                        return Ok(true);
+                    }
                 }
                 Ok(false)
             });
-        },
+        }
         Expr::RegexMatch(left, right) => {
-            if let (Expr::Column(col), Expr::Const(Value::Text(pat))) = (left.as_ref(), right.as_ref()) {
+            if let (Expr::Column(col), Expr::Const(Value::Text(pat))) =
+                (left.as_ref(), right.as_ref())
+            {
                 let col = *col;
                 if let Ok(re) = regex::Regex::new(pat.as_str()) {
                     let re = std::sync::Arc::new(re);
@@ -1167,8 +2003,8 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
                     });
                 }
             }
-        },
-        _ => { },
+        }
+        _ => {}
     }
     // Fallback: generic eval_expr
     let expr = expr.clone();
@@ -1209,18 +2045,24 @@ fn flatten_or_inner(expr: &Expr, out: &mut Vec<CompiledPredicate>) {
     }
 }
 
-
-pub(crate) fn tuple_from_values(desc: &RelationDesc, values: &[Value]) -> Result<crate::include::access::htup::HeapTuple, ExecError> {
+pub(crate) fn tuple_from_values(
+    desc: &RelationDesc,
+    values: &[Value],
+) -> Result<crate::include::access::htup::HeapTuple, ExecError> {
     let tuple_values = desc
         .columns
         .iter()
         .zip(values.iter())
         .map(|(column, value)| encode_value(column, value))
         .collect::<Result<Vec<_>, _>>()?;
-    crate::include::access::htup::HeapTuple::from_values(&desc.attribute_descs(), &tuple_values).map_err(ExecError::from)
+    crate::include::access::htup::HeapTuple::from_values(&desc.attribute_descs(), &tuple_values)
+        .map_err(ExecError::from)
 }
 
-pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::include::access::htup::TupleValue, ExecError> {
+pub(crate) fn encode_value(
+    column: &ColumnDesc,
+    value: &Value,
+) -> Result<crate::include::access::htup::TupleValue, ExecError> {
     use crate::include::access::htup::TupleValue;
     match (&column.ty, value) {
         (_, Value::Null) => {
@@ -1233,7 +2075,9 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
         (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((*v as f32).to_le_bytes().to_vec())),
+        (ScalarType::Float32, Value::Float64(v)) => {
+            Ok(TupleValue::Bytes((*v as f32).to_le_bytes().to_vec()))
+        }
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Numeric, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
@@ -1257,15 +2101,31 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
                 }),
             }
         }
+        (ScalarType::Jsonb, v) => {
+            let coerced = coerce_assignment_value(v, column.sql_type)?;
+            match coerced {
+                Value::Jsonb(bytes) => Ok(TupleValue::Bytes(bytes)),
+                other => Err(ExecError::TypeMismatch {
+                    op: "assignment",
+                    left: Value::Null,
+                    right: other,
+                }),
+            }
+        }
         (ScalarType::Text, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
-            Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
+            Ok(TupleValue::Bytes(
+                coerced.as_text().unwrap().as_bytes().to_vec(),
+            ))
         }
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(*v)])),
         (ScalarType::Array(_), v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
             match coerced {
-                Value::Array(items) => Ok(TupleValue::Bytes(encode_array_bytes(column.sql_type.element_type(), &items)?)),
+                Value::Array(items) => Ok(TupleValue::Bytes(encode_array_bytes(
+                    column.sql_type.element_type(),
+                    &items,
+                )?)),
                 other => Err(ExecError::TypeMismatch {
                     op: "assignment",
                     left: Value::Null,
@@ -1310,6 +2170,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Numeric(numeric) => cast_numeric_value(numeric.clone(), target, false),
         Value::Json(text) => cast_text_value(text.as_str(), target, false),
+        Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::Array(items) => Ok(Value::Array(items.clone())),
@@ -1330,14 +2191,12 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Int16(i16::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| ExecError::InvalidStorageValue {
-                        column: column.name.clone(),
-                        details: "int2 must be exactly 2 bytes".into(),
-                    })?,
-            )))
+            Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "int2 must be exactly 2 bytes".into(),
+                },
+            )?)))
         }
         ScalarType::Int32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
@@ -1347,14 +2206,12 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Int32(i32::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| ExecError::InvalidStorageValue {
-                        column: column.name.clone(),
-                        details: "int4 must be exactly 4 bytes".into(),
-                    })?,
-            )))
+            Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "int4 must be exactly 4 bytes".into(),
+                },
+            )?)))
         }
         ScalarType::Int64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
@@ -1364,14 +2221,12 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Int64(i64::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| ExecError::InvalidStorageValue {
-                        column: column.name.clone(),
-                        details: "int8 must be exactly 8 bytes".into(),
-                    })?,
-            )))
+            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "int8 must be exactly 8 bytes".into(),
+                },
+            )?)))
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
@@ -1381,14 +2236,14 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Float64(f32::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| ExecError::InvalidStorageValue {
+            Ok(Value::Float64(
+                f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                    ExecError::InvalidStorageValue {
                         column: column.name.clone(),
                         details: "float4 must be exactly 4 bytes".into(),
-                    })?,
-            ) as f64))
+                    }
+                })?) as f64,
+            ))
         }
         ScalarType::Float64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
@@ -1415,12 +2270,14 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Numeric(parse_numeric_text(unsafe {
-                std::str::from_utf8_unchecked(bytes)
-            }).ok_or_else(|| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "invalid numeric text".into(),
-            })?))
+            Ok(Value::Numeric(
+                parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(
+                    || ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "invalid numeric text".into(),
+                    },
+                )?,
+            ))
         }
         ScalarType::Json => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -1434,6 +2291,17 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
         }
+        ScalarType::Jsonb => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            decode_jsonb(bytes)?;
+            Ok(Value::Jsonb(bytes.to_vec()))
+        }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(ExecError::UnsupportedStorageType {
@@ -1443,7 +2311,9 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 });
             }
             // SAFETY: text columns are stored as valid UTF-8 by the insert path.
-            Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
+            Ok(Value::Text(CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            })))
         }
         ScalarType::Bool => {
             if column.storage.attlen != 1 || bytes.len() != 1 {
@@ -1521,9 +2391,19 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            Ok(Value::Bool(parsed_numeric_value(l).unwrap().cmp(&parsed_numeric_value(r).unwrap()) == Ordering::Equal))
+            Ok(Value::Bool(
+                parsed_numeric_value(l)
+                    .unwrap()
+                    .cmp(&parsed_numeric_value(r).unwrap())
+                    == Ordering::Equal,
+            ))
         }
-        (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(l.as_text() == r.as_text())),
+        (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Bool(
+            compare_jsonb(&decode_jsonb(l)?, &decode_jsonb(r)?) == Ordering::Equal,
+        )),
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
+            Ok(Value::Bool(l.as_text() == r.as_text()))
+        }
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
         (Value::Array(l), Value::Array(r)) => Ok(Value::Bool(l == r)),
         _ => Err(ExecError::TypeMismatch { op, left, right }),
@@ -1555,8 +2435,16 @@ fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int64(l), Value::Int64(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            parsed_numeric_value(l).unwrap().cmp(&parsed_numeric_value(r).unwrap()) != Ordering::Equal
+            parsed_numeric_value(l)
+                .unwrap()
+                .cmp(&parsed_numeric_value(r).unwrap())
+                != Ordering::Equal
         }
+        (Value::Jsonb(l), Value::Jsonb(r)) => decode_jsonb(l)
+            .ok()
+            .zip(decode_jsonb(r).ok())
+            .map(|(l, r)| compare_jsonb(&l, &r) != Ordering::Equal)
+            .unwrap_or(true),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
         (Value::Array(l), Value::Array(r)) => l != r,
@@ -1606,7 +2494,11 @@ fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
         }
-        _ => Err(ExecError::TypeMismatch { op: "-", left, right }),
+        _ => Err(ExecError::TypeMismatch {
+            op: "-",
+            left,
+            right,
+        }),
     }
 }
 
@@ -1627,7 +2519,11 @@ fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.mul(rv)), "*")
         }
-        _ => Err(ExecError::TypeMismatch { op: "*", left, right }),
+        _ => Err(ExecError::TypeMismatch {
+            op: "*",
+            left,
+            right,
+        }),
     }
 }
 
@@ -1659,7 +2555,11 @@ fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| lv.div(rv, 16), "/")
         }
-        _ => Err(ExecError::TypeMismatch { op: "/", left, right }),
+        _ => Err(ExecError::TypeMismatch {
+            op: "/",
+            left,
+            right,
+        }),
     }
 }
 
@@ -1690,7 +2590,11 @@ fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| lv.rem(rv), "%")
         }
-        _ => Err(ExecError::TypeMismatch { op: "%", left, right }),
+        _ => Err(ExecError::TypeMismatch {
+            op: "%",
+            left,
+            right,
+        }),
     }
 }
 
@@ -1725,9 +2629,7 @@ fn negate_value(value: Value) -> Result<Value, ExecError> {
         Value::Int32(v) => Ok(Value::Int32(-v)),
         Value::Int64(v) => Ok(Value::Int64(-v)),
         Value::Float64(v) => Ok(Value::Float64(-v)),
-        Value::Numeric(v) => {
-            Ok(Value::Numeric(v.negate()))
-        }
+        Value::Numeric(v) => Ok(Value::Numeric(v.negate())),
         other => Err(ExecError::TypeMismatch {
             op: "unary -",
             left: other,
@@ -1761,7 +2663,21 @@ fn order_values(op: &'static str, left: Value, right: Value) -> Result<Value, Ex
             let ordering = parsed_numeric_value(l)
                 .zip(parsed_numeric_value(r))
                 .map(|(lv, rv)| lv.cmp(&rv))
-                .ok_or_else(|| ExecError::TypeMismatch { op, left: left.clone(), right: right.clone() })?;
+                .ok_or_else(|| ExecError::TypeMismatch {
+                    op,
+                    left: left.clone(),
+                    right: right.clone(),
+                })?;
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::Jsonb(l), Value::Jsonb(r)) => {
+            let ordering = compare_jsonb(&decode_jsonb(l)?, &decode_jsonb(r)?);
             Ok(Value::Bool(match op {
                 "<" => ordering == Ordering::Less,
                 "<=" => ordering != Ordering::Greater,
@@ -1853,6 +2769,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
             left: coerced,
             right: Value::Null,
         }),
+        Value::Jsonb(bytes) => Ok(bytes),
     }
 }
 
@@ -1886,7 +2803,10 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
                 details: "array element payload truncated".into(),
             });
         }
-        items.push(decode_array_element(element_type, &bytes[offset..offset + len])?);
+        items.push(decode_array_element(
+            element_type,
+            &bytes[offset..offset + len],
+        )?);
         offset += len;
     }
     Ok(Value::Array(items))
@@ -1922,30 +2842,44 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
         }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-            if bytes.len() != if matches!(element_type.kind, SqlTypeKind::Float4) { 4 } else { 8 } {
+            if bytes.len()
+                != if matches!(element_type.kind, SqlTypeKind::Float4) {
+                    4
+                } else {
+                    8
+                }
+            {
                 return Err(ExecError::InvalidStorageValue {
                     column: "<array>".into(),
                     details: "float array element has wrong width".into(),
                 });
             }
             if matches!(element_type.kind, SqlTypeKind::Float4) {
-                Ok(Value::Float64(f32::from_le_bytes(bytes.try_into().unwrap()) as f64))
+                Ok(Value::Float64(
+                    f32::from_le_bytes(bytes.try_into().unwrap()) as f64,
+                ))
             } else {
-                Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
+                Ok(Value::Float64(f64::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )))
             }
         }
-        SqlTypeKind::Numeric => {
-            Ok(Value::Numeric(parse_numeric_text(unsafe {
-                std::str::from_utf8_unchecked(bytes)
-            }).ok_or_else(|| ExecError::InvalidStorageValue {
-                column: "<array>".into(),
-                details: "invalid numeric array element".into(),
-            })?))
-        }
+        SqlTypeKind::Numeric => Ok(Value::Numeric(
+            parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(
+                || ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "invalid numeric array element".into(),
+                },
+            )?,
+        )),
         SqlTypeKind::Json => {
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
+        }
+        SqlTypeKind::Jsonb => {
+            decode_jsonb(bytes)?;
+            Ok(Value::Jsonb(bytes.to_vec()))
         }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
@@ -1957,7 +2891,9 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             Ok(Value::Bool(bytes[0] != 0))
         }
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
-            Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
+            Ok(Value::Text(CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            })))
         }
     }
 }
@@ -1978,6 +2914,20 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Json(v) => {
                 out.push('"');
                 for ch in v.chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
+            Value::Jsonb(v) => {
+                let rendered = render_jsonb_bytes(v).unwrap_or_else(|_| "null".into());
+                out.push('"');
+                for ch in rendered.chars() {
                     match ch {
                         '"' | '\\' => {
                             out.push('\\');
@@ -2016,11 +2966,13 @@ impl NumericValue {
             Self::Finite { coeff, scale } => {
                 if *scale <= target_scale {
                     let factor = pow10_bigint(target_scale - *scale);
-                    return Some(Self::Finite {
-                        coeff: coeff * factor,
-                        scale: target_scale,
-                    }
-                    .normalize());
+                    return Some(
+                        Self::Finite {
+                            coeff: coeff * factor,
+                            scale: target_scale,
+                        }
+                        .normalize(),
+                    );
                 }
                 let diff = *scale - target_scale;
                 let factor = pow10_bigint(diff);
@@ -2031,11 +2983,13 @@ impl NumericValue {
                 } else {
                     quotient
                 };
-                Some(Self::Finite {
-                    coeff: rounded,
-                    scale: target_scale,
-                }
-                .normalize())
+                Some(
+                    Self::Finite {
+                        coeff: rounded,
+                        scale: target_scale,
+                    }
+                    .normalize(),
+                )
             }
         }
     }
@@ -2043,7 +2997,16 @@ impl NumericValue {
     pub(crate) fn add(&self, other: &Self) -> Self {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
-            (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
@@ -2063,13 +3026,20 @@ impl NumericValue {
     fn mul(&self, other: &Self) -> Self {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
-            (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
+            (
                 Self::Finite {
-                    coeff: lcoeff * rcoeff,
-                    scale: lscale.saturating_add(*rscale),
-                }
-                .normalize()
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => Self::Finite {
+                coeff: lcoeff * rcoeff,
+                scale: lscale.saturating_add(*rscale),
             }
+            .normalize(),
         }
     }
 
@@ -2077,15 +3047,26 @@ impl NumericValue {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
             (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
-            (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
-                Some(Self::Finite {
-                    coeff: left % right,
-                    scale,
-                }
-                .normalize())
+                Some(
+                    Self::Finite {
+                        coeff: left % right,
+                        scale,
+                    }
+                    .normalize(),
+                )
             }
         }
     }
@@ -2094,7 +3075,16 @@ impl NumericValue {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
             (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
-            (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
                 let exp = out_scale.checked_add(*rscale)?.checked_sub(*lscale)?;
                 let factor = pow10_bigint(exp);
                 let num = lcoeff * factor;
@@ -2105,21 +3095,32 @@ impl NumericValue {
                 } else {
                     quotient
                 };
-                Some(Self::Finite {
-                    coeff: rounded,
-                    scale: out_scale,
-                }
-                .normalize())
+                Some(
+                    Self::Finite {
+                        coeff: rounded,
+                        scale: out_scale,
+                    }
+                    .normalize(),
+                )
             }
         }
     }
 
-    fn cmp(&self, other: &Self) -> Ordering {
+    pub(crate) fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Self::NaN, Self::NaN) => Ordering::Equal,
             (Self::NaN, _) => Ordering::Greater,
             (_, Self::NaN) => Ordering::Less,
-            (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
                 let scale = (*lscale).max(*rscale);
                 let left = align_coeff(lcoeff.clone(), *lscale, scale);
                 let right = align_coeff(rcoeff.clone(), *rscale, scale);
@@ -2187,11 +3188,13 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
     if negative {
         coeff = -coeff;
     }
-    Some(NumericValue::Finite {
-        coeff,
-        scale: scale as u32,
-    }
-    .normalize())
+    Some(
+        NumericValue::Finite {
+            coeff,
+            scale: scale as u32,
+        }
+        .normalize(),
+    )
 }
 
 fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {

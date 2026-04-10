@@ -1,23 +1,29 @@
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::RwLock;
 
-use crate::backend::access::transam::xact::{CommandId, MvccError, TransactionId, TransactionManager};
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, DurableCatalog};
-use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, execute_readonly_statement};
-use crate::backend::parser::Statement;
-use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
-use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, lock_relations, unlock_relations};
-use crate::backend::utils::cache::plancache::PlanCache;
-use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter, WalError};
+use crate::backend::access::transam::xact::{
+    CommandId, MvccError, TransactionId, TransactionManager,
+};
+use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, DurableCatalog};
+use crate::backend::executor::{
+    ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
+};
+use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError,
-    TablePersistence, bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
+    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError, TablePersistence,
+    bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
     normalize_create_table_as_name, normalize_create_table_name,
 };
+use crate::backend::storage::lmgr::{
+    TableLockManager, TableLockMode, lock_relations, unlock_relations,
+};
+use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
+use crate::backend::utils::cache::plancache::PlanCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
@@ -80,7 +86,11 @@ impl Database {
         Self::open_with_options(base_dir, pool_size, false)
     }
 
-    pub fn open_with_options(base_dir: impl Into<PathBuf>, pool_size: usize, wal_replay: bool) -> Result<Self, DatabaseError> {
+    pub fn open_with_options(
+        base_dir: impl Into<PathBuf>,
+        pool_size: usize,
+        wal_replay: bool,
+    ) -> Result<Self, DatabaseError> {
         let base_dir = base_dir.into();
         std::fs::create_dir_all(&base_dir)
             .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
@@ -103,8 +113,11 @@ impl Database {
                 }
             }
             let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery(
-                &wal_dir, &mut recovery_smgr, &mut txns,
-            ).map_err(DatabaseError::Wal)?;
+                &wal_dir,
+                &mut recovery_smgr,
+                &mut txns,
+            )
+            .map_err(DatabaseError::Wal)?;
             if stats.records_replayed > 0 {
                 eprintln!(
                     "WAL recovery: {} records ({} FPIs, {} inserts, {} commits, {} aborted)",
@@ -116,7 +129,8 @@ impl Database {
         let smgr = MdStorageManager::new(&base_dir);
         let wal = Arc::new(WalWriter::new(&wal_dir).map_err(DatabaseError::Wal)?);
 
-        let pool = BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), pool_size, Arc::clone(&wal));
+        let pool =
+            BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), pool_size, Arc::clone(&wal));
 
         // Open storage files for all existing relations so inserts don't need to.
         {
@@ -209,27 +223,38 @@ impl Database {
         let _ = self.pool.with_storage_mut(|s| {
             use crate::backend::storage::smgr::StorageManager;
             let _ = s.smgr.open(entry.rel);
-            let _ = s.smgr.create(entry.rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+            let _ = s.smgr.create(
+                entry.rel,
+                crate::backend::storage::smgr::ForkNumber::Main,
+                false,
+            );
         });
         self.plan_cache.invalidate_all();
         Ok(entry)
     }
 
-    pub(crate) fn drop_temp_relation(&self, client_id: ClientId, table_name: &str) -> Result<CatalogEntry, ExecError> {
+    pub(crate) fn drop_temp_relation(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+    ) -> Result<CatalogEntry, ExecError> {
         let normalized = normalize_temp_lookup_name(table_name);
         let entry = {
             let mut namespaces = self.temp_relations.write();
-            let namespace = namespaces
-                .get_mut(&client_id)
-                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone())))?;
+            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
             namespace
                 .tables
                 .remove(&normalized)
                 .map(|entry| entry.entry)
-                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone())))?
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+                })?
         };
         let _ = self.pool.invalidate_relation(entry.rel);
-        self.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+        self.pool
+            .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
         self.plan_cache.invalidate_all();
         Ok(entry)
     }
@@ -253,7 +278,10 @@ impl Database {
         for rel in to_delete {
             let _ = self.pool.invalidate_relation(rel);
             self.pool
-                .with_storage_mut(|s| s.smgr.truncate(rel, crate::backend::storage::smgr::ForkNumber::Main, 0))
+                .with_storage_mut(|s| {
+                    s.smgr
+                        .truncate(rel, crate::backend::storage::smgr::ForkNumber::Main, 0)
+                })
                 .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
         }
 
@@ -268,13 +296,19 @@ impl Database {
             let mut namespaces = self.temp_relations.write();
             namespaces
                 .remove(&client_id)
-                .map(|ns| ns.tables.into_values().map(|entry| entry.entry).collect::<Vec<_>>())
+                .map(|ns| {
+                    ns.tables
+                        .into_values()
+                        .map(|entry| entry.entry)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default()
         };
         let had_entries = !entries.is_empty();
         for entry in entries {
             let _ = self.pool.invalidate_relation(entry.rel);
-            self.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+            self.pool
+                .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
         }
         if had_entries {
             self.plan_cache.invalidate_all();
@@ -307,7 +341,11 @@ impl Database {
                         let _ = self.pool.with_storage_mut(|s| {
                             use crate::backend::storage::smgr::StorageManager;
                             let _ = s.smgr.open(rel);
-                            let _ = s.smgr.create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+                            let _ = s.smgr.create(
+                                rel,
+                                crate::backend::storage::smgr::ForkNumber::Main,
+                                false,
+                            );
                         });
                     }
                     let _ = catalog_guard.persist();
@@ -316,7 +354,8 @@ impl Database {
                 result
             }
             TablePersistence::Temporary => {
-                let _ = self.create_temp_relation(client_id, table_name, desc, create_stmt.on_commit)?;
+                let _ =
+                    self.create_temp_relation(client_id, table_name, desc, create_stmt.on_commit)?;
                 Ok(StatementResult::AffectedRows(0))
             }
         }
@@ -343,7 +382,10 @@ impl Database {
 
         let snapshot = match xid {
             Some(xid) => self.txns.read().snapshot_for_command(xid, cid)?,
-            None => self.txns.read().snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)?,
+            None => self
+                .txns
+                .read()
+                .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)?,
         };
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
@@ -354,18 +396,31 @@ impl Database {
             outer_rows: Vec::new(),
             timed: false,
         };
-        let query_result = execute_readonly_statement(Statement::Select(create_stmt.query.clone()), &visible_catalog, &mut ctx);
+        let query_result = execute_readonly_statement(
+            Statement::Select(create_stmt.query.clone()),
+            &visible_catalog,
+            &mut ctx,
+        );
         if xid.is_none() {
             unlock_relations(&self.table_locks, client_id, &rels);
         }
-        let StatementResult::Query { columns, column_names, rows } = query_result? else {
+        let StatementResult::Query {
+            columns,
+            column_names,
+            rows,
+        } = query_result?
+        else {
             unreachable!("ctas query should return rows");
         };
 
         if !create_stmt.column_names.is_empty() && create_stmt.column_names.len() != columns.len() {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "column alias count matching query column count",
-                actual: format!("{} aliases for {} columns", create_stmt.column_names.len(), columns.len()),
+                actual: format!(
+                    "{} aliases for {} columns",
+                    create_stmt.column_names.len(),
+                    columns.len()
+                ),
             }));
         }
 
@@ -402,24 +457,39 @@ impl Database {
                         })
                         .collect(),
                 };
-                crate::backend::commands::tablecmds::execute_create_table(stmt, catalog_guard.catalog_mut())?;
+                crate::backend::commands::tablecmds::execute_create_table(
+                    stmt,
+                    catalog_guard.catalog_mut(),
+                )?;
                 let entry = catalog_guard
                     .catalog()
                     .get(&table_name)
                     .cloned()
-                    .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(table_name.clone()))
+                    })?;
                 let _ = self.pool.with_storage_mut(|s| {
                     use crate::backend::storage::smgr::StorageManager;
                     let _ = s.smgr.open(entry.rel);
-                    let _ = s.smgr.create(entry.rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+                    let _ = s.smgr.create(
+                        entry.rel,
+                        crate::backend::storage::smgr::ForkNumber::Main,
+                        false,
+                    );
                 });
                 let _ = catalog_guard.persist();
                 self.plan_cache.invalidate_all();
                 entry.rel
             }
-            TablePersistence::Temporary => self
-                .create_temp_relation(client_id, table_name.clone(), desc.clone(), create_stmt.on_commit)?
-                .rel,
+            TablePersistence::Temporary => {
+                self.create_temp_relation(
+                    client_id,
+                    table_name.clone(),
+                    desc.clone(),
+                    create_stmt.on_commit,
+                )?
+                .rel
+            }
         };
 
         if rows.is_empty() {
@@ -438,12 +508,7 @@ impl Database {
                 timed: false,
             };
             let inserted = crate::backend::commands::tablecmds::execute_insert_values(
-                rel,
-                &desc,
-                &rows,
-                &mut ctx,
-                xid,
-                cid,
+                rel, &desc, &rows, &mut ctx, xid, cid,
             )?;
             Ok(StatementResult::AffectedRows(inserted))
         } else {
@@ -460,12 +525,7 @@ impl Database {
                 timed: false,
             };
             let result = crate::backend::commands::tablecmds::execute_insert_values(
-                rel,
-                &desc,
-                &rows,
-                &mut ctx,
-                xid,
-                0,
+                rel, &desc, &rows, &mut ctx, xid, 0,
             )
             .map(StatementResult::AffectedRows);
             let result = self.finish_txn(client_id, xid, result);
@@ -476,17 +536,13 @@ impl Database {
 
     /// Execute a single SQL statement inside an auto-commit transaction
     /// (for DML) or without a transaction (for queries/DDL).
-    pub fn execute(
-        &self,
-        client_id: ClientId,
-        sql: &str,
-    ) -> Result<StatementResult, ExecError> {
+    pub fn execute(&self, client_id: ClientId, sql: &str) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-        use crate::backend::executor::execute_readonly_statement;
         use crate::backend::commands::tablecmds::{
-            execute_analyze, execute_delete_with_waiter, execute_drop_table,
-            execute_truncate_table, execute_vacuum, execute_insert, execute_update_with_waiter,
+            execute_analyze, execute_delete_with_waiter, execute_drop_table, execute_insert,
+            execute_truncate_table, execute_update_with_waiter, execute_vacuum,
         };
+        use crate::backend::executor::execute_readonly_statement;
 
         let stmt = self.plan_cache.get_statement(sql)?;
         let visible_catalog = self.visible_catalog(client_id);
@@ -501,12 +557,14 @@ impl Database {
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
                         Statement::Select(select) => {
-                            let plan = crate::backend::parser::build_plan(select, &visible_catalog)?;
+                            let plan =
+                                crate::backend::parser::build_plan(select, &visible_catalog)?;
                             collect_rels_from_plan(&plan, &mut rels);
                         }
                         Statement::Explain(explain) => {
                             if let Statement::Select(select) = explain.statement.as_ref() {
-                                let plan = crate::backend::parser::build_plan(select, &visible_catalog)?;
+                                let plan =
+                                    crate::backend::parser::build_plan(select, &visible_catalog)?;
                                 collect_rels_from_plan(&plan, &mut rels);
                             }
                         }
@@ -538,7 +596,8 @@ impl Database {
             Statement::Insert(ref insert_stmt) => {
                 let bound = bind_insert(insert_stmt, &visible_catalog)?;
                 let rel = bound.rel;
-                self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                self.table_locks
+                    .lock_table(rel, TableLockMode::RowExclusive, client_id);
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -563,7 +622,8 @@ impl Database {
             Statement::Update(ref update_stmt) => {
                 let bound = bind_update(update_stmt, &visible_catalog)?;
                 let rel = bound.rel;
-                self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                self.table_locks
+                    .lock_table(rel, TableLockMode::RowExclusive, client_id);
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -594,7 +654,8 @@ impl Database {
             Statement::Delete(ref delete_stmt) => {
                 let bound = bind_delete(delete_stmt, &visible_catalog)?;
                 let rel = bound.rel;
-                self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                self.table_locks
+                    .lock_table(rel, TableLockMode::RowExclusive, client_id);
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -638,7 +699,8 @@ impl Database {
                         .collect::<Vec<_>>()
                 };
                 for rel in &rels {
-                    self.table_locks.lock_table(*rel, TableLockMode::AccessExclusive, client_id);
+                    self.table_locks
+                        .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
                 }
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
@@ -702,7 +764,8 @@ impl Database {
                         .collect::<Vec<_>>()
                 };
                 for rel in &rels {
-                    self.table_locks.lock_table(*rel, TableLockMode::AccessExclusive, client_id);
+                    self.table_locks
+                        .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
                 }
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
@@ -715,7 +778,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result = execute_truncate_table(truncate_stmt.clone(), &visible_catalog, &mut ctx);
+                let result =
+                    execute_truncate_table(truncate_stmt.clone(), &visible_catalog, &mut ctx);
                 drop(ctx);
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
@@ -748,8 +812,8 @@ impl Database {
         txn_ctx: Option<(TransactionId, CommandId)>,
     ) -> Result<SelectGuard<'_>, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-        use crate::backend::parser::build_plan;
         use crate::backend::executor::executor_start;
+        use crate::backend::parser::build_plan;
 
         let (plan, rels) = {
             let catalog_guard = self.catalog.read();
@@ -789,7 +853,6 @@ impl Database {
             client_id,
         })
     }
-
 }
 
 fn normalize_temp_lookup_name(table_name: &str) -> String {
@@ -799,7 +862,10 @@ fn normalize_temp_lookup_name(table_name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn collect_rels_from_expr(expr: &crate::backend::executor::Expr, rels: &mut std::collections::BTreeSet<RelFileLocator>) {
+fn collect_rels_from_expr(
+    expr: &crate::backend::executor::Expr,
+    rels: &mut std::collections::BTreeSet<RelFileLocator>,
+) {
     use crate::backend::executor::Expr;
 
     match expr {
@@ -833,7 +899,12 @@ fn collect_rels_from_expr(expr: &crate::backend::executor::Expr, rels: &mut std:
         | Expr::JsonGet(left, right)
         | Expr::JsonGetText(left, right)
         | Expr::JsonPath(left, right)
-        | Expr::JsonPathText(left, right) => {
+        | Expr::JsonPathText(left, right)
+        | Expr::JsonbContains(left, right)
+        | Expr::JsonbContained(left, right)
+        | Expr::JsonbExists(left, right)
+        | Expr::JsonbExistsAny(left, right)
+        | Expr::JsonbExistsAll(left, right) => {
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
         }
@@ -865,7 +936,10 @@ fn collect_rels_from_expr(expr: &crate::backend::executor::Expr, rels: &mut std:
     }
 }
 
-fn collect_rels_from_plan(plan: &crate::backend::executor::Plan, rels: &mut std::collections::BTreeSet<RelFileLocator>) {
+fn collect_rels_from_plan(
+    plan: &crate::backend::executor::Plan,
+    rels: &mut std::collections::BTreeSet<RelFileLocator>,
+) {
     use crate::backend::executor::Plan;
 
     match plan {
@@ -907,7 +981,7 @@ fn collect_rels_from_plan(plan: &crate::backend::executor::Plan, rels: &mut std:
                 collect_rels_from_expr(expr, rels);
             }
             for accum in accumulators {
-                if let Some(arg) = &accum.arg {
+                for arg in &accum.args {
                     collect_rels_from_expr(arg, rels);
                 }
             }
@@ -915,7 +989,9 @@ fn collect_rels_from_plan(plan: &crate::backend::executor::Plan, rels: &mut std:
                 collect_rels_from_expr(expr, rels);
             }
         }
-        Plan::GenerateSeries { start, stop, step, .. } => {
+        Plan::GenerateSeries {
+            start, stop, step, ..
+        } => {
             collect_rels_from_expr(start, rels);
             collect_rels_from_expr(stop, rels);
             collect_rels_from_expr(step, rels);
@@ -943,16 +1019,18 @@ impl Database {
                 // CLOG even if we crash before updating it on disk.
                 self.pool.write_wal_commit(xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                        crate::backend::storage::smgr::SmgrError::Io(
-                            std::io::Error::new(std::io::ErrorKind::Other, e)
-                        )
+                        crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e,
+                        )),
                     ))
                 })?;
                 self.pool.flush_wal().map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                        crate::backend::storage::smgr::SmgrError::Io(
-                            std::io::Error::new(std::io::ErrorKind::Other, e)
-                        )
+                        crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e,
+                        )),
                     ))
                 })?;
                 self.txns.write().commit(xid).map_err(|e| {
@@ -988,8 +1066,17 @@ struct AutoCommitGuard<'a> {
 }
 
 impl<'a> AutoCommitGuard<'a> {
-    fn new(txns: &'a Arc<RwLock<TransactionManager>>, txn_waiter: &'a TransactionWaiter, xid: TransactionId) -> Self {
-        Self { txns, txn_waiter, xid, committed: false }
+    fn new(
+        txns: &'a Arc<RwLock<TransactionManager>>,
+        txn_waiter: &'a TransactionWaiter,
+        xid: TransactionId,
+    ) -> Self {
+        Self {
+            txns,
+            txn_waiter,
+            xid,
+            committed: false,
+        }
     }
 
     fn disarm(mut self) {
@@ -1025,18 +1112,20 @@ mod tests {
         ONCE.call_once(|| {
             thread::Builder::new()
                 .name("deadlock-checker".into())
-                .spawn(|| loop {
-                    thread::sleep(Duration::from_secs(1));
-                    let deadlocks = parking_lot::deadlock::check_deadlock();
-                    if !deadlocks.is_empty() {
-                        eprintln!("=== DEADLOCK DETECTED ({} cycle(s)) ===", deadlocks.len());
-                        for (i, threads) in deadlocks.iter().enumerate() {
-                            eprintln!("--- cycle {i} ---");
-                            for t in threads {
-                                eprintln!("thread {:?}:\n{:#?}", t.thread_id(), t.backtrace());
+                .spawn(|| {
+                    loop {
+                        thread::sleep(Duration::from_secs(1));
+                        let deadlocks = parking_lot::deadlock::check_deadlock();
+                        if !deadlocks.is_empty() {
+                            eprintln!("=== DEADLOCK DETECTED ({} cycle(s)) ===", deadlocks.len());
+                            for (i, threads) in deadlocks.iter().enumerate() {
+                                eprintln!("--- cycle {i} ---");
+                                for t in threads {
+                                    eprintln!("thread {:?}:\n{:#?}", t.thread_id(), t.backtrace());
+                                }
                             }
+                            // Don't panic here — just log. The test timeout will handle it.
                         }
-                        // Don't panic here — just log. The test timeout will handle it.
                     }
                 })
                 .unwrap();
@@ -1058,7 +1147,9 @@ mod tests {
             let _ = tx.send(());
         });
         match rx.recv_timeout(TEST_TIMEOUT) {
-            Ok(()) => { handle.join().unwrap(); }
+            Ok(()) => {
+                handle.join().unwrap();
+            }
             Err(_) => {
                 #[cfg(feature = "deadlock_detection")]
                 log_deadlocks();
@@ -1137,7 +1228,10 @@ mod tests {
         db.execute(1, "insert into items (id, name) values (2, 'beta')")
             .unwrap();
 
-        match db.execute(1, "select id, name from items order by id").unwrap() {
+        match db
+            .execute(1, "select id, name from items order by id")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0], vec![Value::Int32(1), Value::Text("alpha".into())]);
@@ -1268,7 +1362,11 @@ mod tests {
             .copy_from_rows(
                 &db,
                 "records",
-                &[vec!["1".into(), "{\"a\",\"b\"}".into(), "{1,NULL,3}".into()]],
+                &[vec![
+                    "1".into(),
+                    "{\"a\",\"b\"}".into(),
+                    "{1,NULL,3}".into(),
+                ]],
             )
             .unwrap();
         assert_eq!(inserted, 1);
@@ -1324,7 +1422,10 @@ mod tests {
                     vec![
                         vec![
                             Value::Int32(1),
-                            Value::Array(vec![Value::Text("a,b".into()), Value::Text("c\"d".into())]),
+                            Value::Array(vec![
+                                Value::Text("a,b".into()),
+                                Value::Text("c\"d".into())
+                            ]),
                             Value::Array(vec![]),
                         ],
                         vec![
@@ -1346,11 +1447,16 @@ mod tests {
         let mut session_a = Session::new(1);
         let mut session_b = Session::new(2);
 
-        db.execute(1, "create table items (id int4 not null)").unwrap();
+        db.execute(1, "create table items (id int4 not null)")
+            .unwrap();
         db.execute(1, "insert into items (id) values (1)").unwrap();
 
-        session_a.execute(&db, "create temp table items (id int4 not null)").unwrap();
-        session_a.execute(&db, "insert into items (id) values (2)").unwrap();
+        session_a
+            .execute(&db, "create temp table items (id int4 not null)")
+            .unwrap();
+        session_a
+            .execute(&db, "insert into items (id) values (2)")
+            .unwrap();
 
         match session_a.execute(&db, "select id from items").unwrap() {
             StatementResult::Query { rows, .. } => {
@@ -1381,28 +1487,56 @@ mod tests {
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
 
-        session.execute(&db, "create temp table keep_rows (id int4 not null)").unwrap();
-        session.execute(&db, "insert into keep_rows (id) values (1)").unwrap();
-        match session.execute(&db, "select count(*) from keep_rows").unwrap() {
+        session
+            .execute(&db, "create temp table keep_rows (id int4 not null)")
+            .unwrap();
+        session
+            .execute(&db, "insert into keep_rows (id) values (1)")
+            .unwrap();
+        match session
+            .execute(&db, "select count(*) from keep_rows")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
             other => panic!("expected query result, got {:?}", other),
         }
 
-        session.execute(&db, "create temp table delete_rows (id int4 not null) on commit delete rows").unwrap();
+        session
+            .execute(
+                &db,
+                "create temp table delete_rows (id int4 not null) on commit delete rows",
+            )
+            .unwrap();
         session.execute(&db, "begin").unwrap();
-        session.execute(&db, "insert into delete_rows (id) values (10)").unwrap();
+        session
+            .execute(&db, "insert into delete_rows (id) values (10)")
+            .unwrap();
         session.execute(&db, "commit").unwrap();
-        match session.execute(&db, "select count(*) from delete_rows").unwrap() {
+        match session
+            .execute(&db, "select count(*) from delete_rows")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(0)]]),
             other => panic!("expected query result, got {:?}", other),
         }
 
-        session.execute(&db, "create temp table drop_rows (id int4 not null) on commit drop").unwrap();
+        session
+            .execute(
+                &db,
+                "create temp table drop_rows (id int4 not null) on commit drop",
+            )
+            .unwrap();
         session.execute(&db, "begin").unwrap();
-        session.execute(&db, "insert into drop_rows (id) values (11)").unwrap();
+        session
+            .execute(&db, "insert into drop_rows (id) values (11)")
+            .unwrap();
         session.execute(&db, "commit").unwrap();
-        let err = session.execute(&db, "select count(*) from drop_rows").unwrap_err();
-        assert!(matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "drop_rows"));
+        let err = session
+            .execute(&db, "select count(*) from drop_rows")
+            .unwrap_err();
+        assert!(
+            matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "drop_rows")
+        );
     }
 
     #[test]
@@ -1411,14 +1545,25 @@ mod tests {
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
 
-        db.execute(1, "create table source_items (id int4 not null, note text)").unwrap();
-        db.execute(1, "insert into source_items (id, note) values (1, 'a'), (2, 'b')").unwrap();
+        db.execute(1, "create table source_items (id int4 not null, note text)")
+            .unwrap();
+        db.execute(
+            1,
+            "insert into source_items (id, note) values (1, 'a'), (2, 'b')",
+        )
+        .unwrap();
 
         session
             .execute(&db, "create temp table temp_items(tmp_id, tmp_note) as select id, note from source_items order by id")
             .unwrap();
 
-        match session.execute(&db, "select tmp_id, tmp_note from temp_items order by tmp_id").unwrap() {
+        match session
+            .execute(
+                &db,
+                "select tmp_id, tmp_note from temp_items order by tmp_id",
+            )
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
@@ -1437,16 +1582,22 @@ mod tests {
         let base = temp_dir("temp_cleanup");
         let db = Database::open(&base, 16).unwrap();
 
-        db.execute(1, "create temp table cleanup_me (id int4 not null)").unwrap();
-        db.execute(1, "insert into cleanup_me (id) values (1)").unwrap();
+        db.execute(1, "create temp table cleanup_me (id int4 not null)")
+            .unwrap();
+        db.execute(1, "insert into cleanup_me (id) values (1)")
+            .unwrap();
         match db.execute(1, "select count(*) from cleanup_me").unwrap() {
             StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
             other => panic!("expected query result, got {:?}", other),
         }
 
         db.cleanup_client_temp_relations(1);
-        let err = db.execute(1, "select count(*) from cleanup_me").unwrap_err();
-        assert!(matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "cleanup_me"));
+        let err = db
+            .execute(1, "select count(*) from cleanup_me")
+            .unwrap_err();
+        assert!(
+            matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "cleanup_me")
+        );
     }
 
     #[test]
@@ -1513,10 +1664,7 @@ mod tests {
                 thread::spawn(move || {
                     for _ in 0..5 {
                         match db
-                            .execute(
-                                (t + 100) as ClientId,
-                                "select count(*) from nums",
-                            )
+                            .execute((t + 100) as ClientId, "select count(*) from nums")
                             .unwrap()
                         {
                             StatementResult::Query { rows, .. } => {
@@ -1537,8 +1685,11 @@ mod tests {
         let base = temp_dir("concurrent_inserts");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table log (id int4 not null, thread_id int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table log (id int4 not null, thread_id int4 not null)",
+        )
+        .unwrap();
 
         let num_threads = 4;
         let inserts_per_thread = 5;
@@ -1551,9 +1702,7 @@ mod tests {
                         let id = t * 100 + i;
                         db.execute(
                             (t + 200) as ClientId,
-                            &format!(
-                                "insert into log (id, thread_id) values ({id}, {t})"
-                            ),
+                            &format!("insert into log (id, thread_id) values ({id}, {t})"),
                         )
                         .unwrap();
                     }
@@ -1564,10 +1713,7 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
 
         let total = num_threads * inserts_per_thread;
-        match db
-            .execute(1, "select count(*) from log")
-            .unwrap()
-        {
+        match db.execute(1, "select count(*) from log").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int64(total as i64)]]);
             }
@@ -1580,8 +1726,11 @@ mod tests {
         let base = temp_dir("mixed_concurrent");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table counters (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table counters (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         db.execute(1, "insert into counters (id, val) values (1, 0)")
             .unwrap();
 
@@ -1618,9 +1767,7 @@ mod tests {
                     let id = 1000 + t * 100 + i;
                     db.execute(
                         (t + 400) as ClientId,
-                        &format!(
-                            "insert into counters (id, val) values ({id}, {i})"
-                        ),
+                        &format!("insert into counters (id, val) values ({id}, {i})"),
                     )
                     .unwrap();
                 }
@@ -1629,10 +1776,7 @@ mod tests {
 
         join_all_with_timeout(handles, TEST_TIMEOUT);
 
-        match db
-            .execute(1, "select count(*) from counters")
-            .unwrap()
-        {
+        match db.execute(1, "select count(*) from counters").unwrap() {
             StatementResult::Query { rows, .. } => {
                 let expected = 1 + num_writers * ops_per_thread;
                 assert_eq!(rows, vec![vec![Value::Int64(expected as i64)]]);
@@ -1646,8 +1790,11 @@ mod tests {
         let base = temp_dir("concurrent_update_same_row");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table counter (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table counter (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         db.execute(1, "insert into counter (id, val) values (1, 0)")
             .unwrap();
 
@@ -1672,7 +1819,10 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
 
         let expected = num_threads * updates_per_thread;
-        match db.execute(1, "select val from counter where id = 1").unwrap() {
+        match db
+            .execute(1, "select val from counter where id = 1")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
@@ -1689,16 +1839,16 @@ mod tests {
         let base = temp_dir("concurrent_update_diff_rows");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table slots (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table slots (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
 
         let num_threads = 4;
         for i in 0..num_threads {
-            db.execute(
-                1,
-                &format!("insert into slots (id, val) values ({i}, 0)"),
-            )
-            .unwrap();
+            db.execute(1, &format!("insert into slots (id, val) values ({i}, 0)"))
+                .unwrap();
         }
 
         let updates_per_thread = 20;
@@ -1769,9 +1919,12 @@ mod tests {
                     panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock");
                 }
                 let (tx, rx) = std::sync::mpsc::channel();
-                let waiter = thread::spawn(move || { let _ = tx.send(h.join()); });
-                let result = rx.recv_timeout(remaining)
-                    .unwrap_or_else(|_| panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock"));
+                let waiter = thread::spawn(move || {
+                    let _ = tx.send(h.join());
+                });
+                let result = rx.recv_timeout(remaining).unwrap_or_else(|_| {
+                    panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock")
+                });
                 let _ = waiter.join();
                 match result.unwrap() {
                     StatementResult::AffectedRows(n) => n,
@@ -1802,8 +1955,11 @@ mod tests {
         let base = temp_dir("concurrent_flush");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table ftest (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table ftest (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
 
         let num_threads = 4;
         let handles: Vec<_> = (0..num_threads)
@@ -1884,8 +2040,11 @@ mod tests {
         let base = temp_dir("concurrent_reads_same_page");
         let db = Database::open(&base, 16).unwrap();
 
-        db.execute(1, "create table rtest (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table rtest (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         for i in 0..5 {
             db.execute(1, &format!("insert into rtest (id, val) values ({i}, {i})"))
                 .unwrap();
@@ -1898,10 +2057,7 @@ mod tests {
                 thread::spawn(move || {
                     for _ in 0..50 {
                         match db
-                            .execute(
-                                (t + 1000) as ClientId,
-                                "select count(*) from rtest",
-                            )
+                            .execute((t + 1000) as ClientId, "select count(*) from rtest")
                             .unwrap()
                         {
                             StatementResult::Query { rows, .. } => {
@@ -1926,8 +2082,11 @@ mod tests {
         let base = temp_dir("concurrent_rw_corruption");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table rwtest (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table rwtest (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         db.execute(1, "insert into rwtest (id, val) values (1, 0)")
             .unwrap();
 
@@ -1975,7 +2134,10 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
 
         let expected_val = num_writers * 20;
-        match db.execute(1, "select val from rwtest where id = 1").unwrap() {
+        match db
+            .execute(1, "select val from rwtest where id = 1")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
@@ -1997,8 +2159,11 @@ mod tests {
         let base = temp_dir("write_preferring_deadlock");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table dltest (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table dltest (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         db.execute(1, "insert into dltest (id, val) values (1, 0)")
             .unwrap();
 
@@ -2023,7 +2188,10 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
 
         let expected = num_threads * updates_per_thread;
-        match db.execute(1, "select val from dltest where id = 1").unwrap() {
+        match db
+            .execute(1, "select val from dltest where id = 1")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int32(expected as i32)]]);
             }
@@ -2104,8 +2272,11 @@ mod tests {
         let base = temp_dir("no_lost_updates_heavy");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table counter (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table counter (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         db.execute(1, "insert into counter (id, val) values (1, 0)")
             .unwrap();
 
@@ -2133,14 +2304,18 @@ mod tests {
         join_all_with_timeout(handles, Duration::from_secs(30));
 
         let expected = num_threads * increments_per_thread;
-        match db.execute(1, "select val from counter where id = 1").unwrap() {
+        match db
+            .execute(1, "select val from counter where id = 1")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 let actual = match &rows[0][0] {
                     Value::Int32(v) => *v,
                     other => panic!("expected Int32, got {:?}", other),
                 };
                 assert_eq!(
-                    actual, expected as i32,
+                    actual,
+                    expected as i32,
                     "lost {} update(s): expected {expected}, got {actual}",
                     expected as i32 - actual
                 );
@@ -2199,7 +2374,8 @@ mod tests {
                     other => panic!("expected Int32, got {:?}", other),
                 };
                 assert_eq!(
-                    actual, expected,
+                    actual,
+                    expected,
                     "LOST {} update(s): expected {expected}, got {actual}. \
                      This demonstrates the try_read contention bug — \
                      try_read returns None under txns write-lock contention, \
@@ -2217,13 +2393,22 @@ mod tests {
         let db = Database::open(&base, 64).unwrap();
         let mut session = Session::new(1);
 
-        session.execute(&db, "create table txtest (id int4 not null, val int4 not null)").unwrap();
+        session
+            .execute(
+                &db,
+                "create table txtest (id int4 not null, val int4 not null)",
+            )
+            .unwrap();
         session.execute(&db, "begin").unwrap();
         assert!(session.in_transaction());
         assert_eq!(session.ready_status(), b'T');
 
-        session.execute(&db, "insert into txtest (id, val) values (1, 10)").unwrap();
-        session.execute(&db, "insert into txtest (id, val) values (2, 20)").unwrap();
+        session
+            .execute(&db, "insert into txtest (id, val) values (1, 10)")
+            .unwrap();
+        session
+            .execute(&db, "insert into txtest (id, val) values (2, 20)")
+            .unwrap();
         session.execute(&db, "commit").unwrap();
         assert!(!session.in_transaction());
         assert_eq!(session.ready_status(), b'I');
@@ -2242,18 +2427,29 @@ mod tests {
         let db = Database::open(&base, 64).unwrap();
         let mut session = Session::new(1);
 
-        session.execute(&db, "create table rbtest (id int4 not null)").unwrap();
-        session.execute(&db, "insert into rbtest (id) values (1)").unwrap();
+        session
+            .execute(&db, "create table rbtest (id int4 not null)")
+            .unwrap();
+        session
+            .execute(&db, "insert into rbtest (id) values (1)")
+            .unwrap();
 
         session.execute(&db, "begin").unwrap();
-        session.execute(&db, "insert into rbtest (id) values (2)").unwrap();
-        session.execute(&db, "insert into rbtest (id) values (3)").unwrap();
+        session
+            .execute(&db, "insert into rbtest (id) values (2)")
+            .unwrap();
+        session
+            .execute(&db, "insert into rbtest (id) values (3)")
+            .unwrap();
         session.execute(&db, "rollback").unwrap();
 
         match session.execute(&db, "select count(*) from rbtest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(1)]],
-                    "only the autocommitted row should survive rollback");
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(1)]],
+                    "only the autocommitted row should survive rollback"
+                );
             }
             other => panic!("expected query, got {:?}", other),
         }
@@ -2265,9 +2461,13 @@ mod tests {
         let db = Database::open(&base, 64).unwrap();
         let mut session = Session::new(1);
 
-        session.execute(&db, "create table ftest (id int4 not null)").unwrap();
+        session
+            .execute(&db, "create table ftest (id int4 not null)")
+            .unwrap();
         session.execute(&db, "begin").unwrap();
-        session.execute(&db, "insert into ftest (id) values (1)").unwrap();
+        session
+            .execute(&db, "insert into ftest (id) values (1)")
+            .unwrap();
 
         let err = session.execute(&db, "select * from nonexistent");
         assert!(err.is_err());
@@ -2275,7 +2475,10 @@ mod tests {
         assert_eq!(session.ready_status(), b'E');
 
         let err = session.execute(&db, "select * from ftest");
-        assert!(err.is_err(), "commands should be rejected in failed transaction");
+        assert!(
+            err.is_err(),
+            "commands should be rejected in failed transaction"
+        );
 
         session.execute(&db, "rollback").unwrap();
         assert!(!session.in_transaction());
@@ -2283,8 +2486,11 @@ mod tests {
 
         match session.execute(&db, "select count(*) from ftest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(0)]],
-                    "all inserts should be rolled back");
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(0)]],
+                    "all inserts should be rolled back"
+                );
             }
             other => panic!("expected query, got {:?}", other),
         }
@@ -2296,9 +2502,15 @@ mod tests {
         let db = Database::open(&base, 64).unwrap();
         let mut session = Session::new(1);
 
-        session.execute(&db, "create table atest (id int4 not null)").unwrap();
-        session.execute(&db, "insert into atest (id) values (1)").unwrap();
-        session.execute(&db, "insert into atest (id) values (2)").unwrap();
+        session
+            .execute(&db, "create table atest (id int4 not null)")
+            .unwrap();
+        session
+            .execute(&db, "insert into atest (id) values (1)")
+            .unwrap();
+        session
+            .execute(&db, "insert into atest (id) values (2)")
+            .unwrap();
 
         match session.execute(&db, "select count(*) from atest").unwrap() {
             StatementResult::Query { rows, .. } => {
@@ -2316,7 +2528,9 @@ mod tests {
 
         session.execute(&db, "begin").unwrap();
         match session.execute(&db, "vacuum analyze pgbench_branches") {
-            Err(crate::backend::executor::ExecError::Parse(crate::backend::parser::ParseError::ActiveSqlTransaction(stmt))) => {
+            Err(crate::backend::executor::ExecError::Parse(
+                crate::backend::parser::ParseError::ActiveSqlTransaction(stmt),
+            )) => {
                 assert_eq!(stmt, "VACUUM");
             }
             other => panic!("expected active transaction error, got {:?}", other),
@@ -2331,26 +2545,47 @@ mod tests {
         let mut session_a = Session::new(1);
         let mut session_b = Session::new(2);
 
-        session_a.execute(&db, "create table isotest (id int4 not null, val int4 not null)").unwrap();
-        session_a.execute(&db, "insert into isotest (id, val) values (1, 100)").unwrap();
+        session_a
+            .execute(
+                &db,
+                "create table isotest (id int4 not null, val int4 not null)",
+            )
+            .unwrap();
+        session_a
+            .execute(&db, "insert into isotest (id, val) values (1, 100)")
+            .unwrap();
 
         session_a.execute(&db, "begin").unwrap();
-        session_a.execute(&db, "insert into isotest (id, val) values (2, 200)").unwrap();
+        session_a
+            .execute(&db, "insert into isotest (id, val) values (2, 200)")
+            .unwrap();
 
-        match session_b.execute(&db, "select count(*) from isotest").unwrap() {
+        match session_b
+            .execute(&db, "select count(*) from isotest")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(1)]],
-                    "session B should not see session A's uncommitted insert");
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(1)]],
+                    "session B should not see session A's uncommitted insert"
+                );
             }
             other => panic!("expected query, got {:?}", other),
         }
 
         session_a.execute(&db, "commit").unwrap();
 
-        match session_b.execute(&db, "select count(*) from isotest").unwrap() {
+        match session_b
+            .execute(&db, "select count(*) from isotest")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(2)]],
-                    "session B should see session A's committed insert");
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int64(2)]],
+                    "session B should see session A's committed insert"
+                );
             }
             other => panic!("expected query, got {:?}", other),
         }
@@ -2365,8 +2600,11 @@ mod tests {
         let base = temp_dir("txn_update_counter");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table counter (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table counter (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         db.execute(1, "insert into counter (id, val) values (1, 0)")
             .unwrap();
 
@@ -2392,7 +2630,10 @@ mod tests {
         join_all_with_timeout(handles, TEST_TIMEOUT);
 
         let expected = num_threads * iters_per_thread;
-        match db.execute(1, "select val from counter where id = 1").unwrap() {
+        match db
+            .execute(1, "select val from counter where id = 1")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
@@ -2414,7 +2655,10 @@ mod tests {
         let mut session = Session::new(1);
 
         session
-            .execute(&db, "create table rowtable (id int4 not null, val int4 not null)")
+            .execute(
+                &db,
+                "create table rowtable (id int4 not null, val int4 not null)",
+            )
             .unwrap();
 
         session.execute(&db, "begin").unwrap();
@@ -2423,7 +2667,10 @@ mod tests {
             .unwrap();
 
         // The insert is not yet committed, but the same session must see it.
-        match session.execute(&db, "select val from rowtable where id = 1").unwrap() {
+        match session
+            .execute(&db, "select val from rowtable where id = 1")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
@@ -2437,7 +2684,10 @@ mod tests {
         session.execute(&db, "commit").unwrap();
 
         // After commit the row must still be there.
-        match session.execute(&db, "select count(*) from rowtable").unwrap() {
+        match session
+            .execute(&db, "select count(*) from rowtable")
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int64(1)]]);
             }
@@ -2453,7 +2703,8 @@ mod tests {
         let base = temp_dir("txn_bulk_insert");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table bulk (id int4 not null)").unwrap();
+        db.execute(1, "create table bulk (id int4 not null)")
+            .unwrap();
 
         let num_threads = 4;
         let batch_size = 10;
@@ -2501,7 +2752,8 @@ mod tests {
         let base = temp_dir("no_dirty_reads");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table dirty (id int4 not null)").unwrap();
+        db.execute(1, "create table dirty (id int4 not null)")
+            .unwrap();
 
         // Shared flags: writer signals when it has inserted (but not committed),
         // and when it has committed.
@@ -2576,7 +2828,8 @@ mod tests {
         let base = temp_dir("mixed_commit_rollback");
         let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table mixed (id int4 not null)").unwrap();
+        db.execute(1, "create table mixed (id int4 not null)")
+            .unwrap();
 
         let num_threads = 6; // must be even
         let rows_per_thread = 5;
@@ -2633,8 +2886,11 @@ mod tests {
         let base = temp_dir("lock_ordering_deadlock");
         let db = Database::open(&base, 16).unwrap();
 
-        db.execute(1, "create table locktest (id int4 not null, val int4 not null)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table locktest (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
         db.execute(1, "insert into locktest (id, val) values (1, 0)")
             .unwrap();
 
@@ -2659,11 +2915,12 @@ mod tests {
             let db = db.clone();
             handles.push(thread::spawn(move || {
                 for _ in 0..200 {
-                    let _ = db.execute(
-                        (t + 3000) as ClientId,
-                        "select val from locktest where id = 1",
-                    )
-                    .unwrap();
+                    let _ = db
+                        .execute(
+                            (t + 3000) as ClientId,
+                            "select val from locktest where id = 1",
+                        )
+                        .unwrap();
                 }
             }));
         }
@@ -2680,11 +2937,15 @@ mod tests {
 
         // Create two tables so threads contend on the same rows from
         // different directions (readers vs writers, writers vs writers).
-        db.execute(1, "create table hot (id int4 not null, val int4 not null)").unwrap();
-        db.execute(1, "create table cold (id int4 not null, val int4 not null)").unwrap();
+        db.execute(1, "create table hot (id int4 not null, val int4 not null)")
+            .unwrap();
+        db.execute(1, "create table cold (id int4 not null, val int4 not null)")
+            .unwrap();
         for i in 0..20 {
-            db.execute(1, &format!("insert into hot (id, val) values ({i}, 0)")).unwrap();
-            db.execute(1, &format!("insert into cold (id, val) values ({i}, 0)")).unwrap();
+            db.execute(1, &format!("insert into hot (id, val) values ({i}, 0)"))
+                .unwrap();
+            db.execute(1, &format!("insert into cold (id, val) values ({i}, 0)"))
+                .unwrap();
         }
 
         let num_threads = 8;
@@ -2698,9 +2959,10 @@ mod tests {
                 let client = (t + 10) as ClientId;
                 for i in 0..iters {
                     let row = i % 5; // contend on rows 0-4
-                    let _ = db.execute(client, &format!(
-                        "update hot set val = val + 1 where id = {row}"
-                    ));
+                    let _ = db.execute(
+                        client,
+                        &format!("update hot set val = val + 1 where id = {row}"),
+                    );
                     // Full-table scan to pin many pages at once.
                     let _ = db.execute(client, "select * from hot");
                 }
@@ -2715,16 +2977,17 @@ mod tests {
                 for i in 0..iters {
                     let row = i % 5;
                     let _ = db.execute(client, "select count(*) from hot");
-                    let _ = db.execute(client, &format!(
-                        "update cold set val = val + 1 where id = {row}"
-                    ));
+                    let _ = db.execute(
+                        client,
+                        &format!("update cold set val = val + 1 where id = {row}"),
+                    );
                     // Delete + reinsert to force page layout changes.
-                    let _ = db.execute(client, &format!(
-                        "delete from cold where id = {}", (i % 20)
-                    ));
-                    let _ = db.execute(client, &format!(
-                        "insert into cold (id, val) values ({}, {})", i % 20, i
-                    ));
+                    let _ =
+                        db.execute(client, &format!("delete from cold where id = {}", (i % 20)));
+                    let _ = db.execute(
+                        client,
+                        &format!("insert into cold (id, val) values ({}, {})", i % 20, i),
+                    );
                 }
             }));
         }
@@ -2753,8 +3016,10 @@ mod tests {
     fn concurrent_same_row_updates_do_not_deadlock() {
         let base = temp_dir("no_deadlock_same_row");
         let db = Database::open(&base, 64).unwrap();
-        db.execute(1, "create table t (id int4 not null, val int4 not null)").unwrap();
-        db.execute(1, "insert into t (id, val) values (1, 0)").unwrap();
+        db.execute(1, "create table t (id int4 not null, val int4 not null)")
+            .unwrap();
+        db.execute(1, "insert into t (id, val) values (1, 0)")
+            .unwrap();
 
         let num_threads = 4;
         let iters = 200;
@@ -2764,7 +3029,8 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let client = (t + 10) as ClientId;
                 for _ in 0..iters {
-                    db.execute(client, "update t set val = val + 1 where id = 1").unwrap();
+                    db.execute(client, "update t set val = val + 1 where id = 1")
+                        .unwrap();
                 }
             }));
         }
@@ -2778,8 +3044,10 @@ mod tests {
                     crate::backend::executor::Value::Int32(v) => *v,
                     other => panic!("expected Int32, got {other:?}"),
                 };
-                assert_eq!(val, expected as i32,
-                    "expected val={expected} after {num_threads} threads x {iters} increments");
+                assert_eq!(
+                    val, expected as i32,
+                    "expected val={expected} after {num_threads} threads x {iters} increments"
+                );
             }
             other => panic!("expected query result, got {other:?}"),
         }
@@ -2792,29 +3060,55 @@ mod tests {
         let mut session = Session::new(1);
 
         // Set up schema and data.
-        session.execute(&db, "create table pintest (id int4 not null, val int4 not null)").unwrap();
+        session
+            .execute(
+                &db,
+                "create table pintest (id int4 not null, val int4 not null)",
+            )
+            .unwrap();
         for i in 0..50 {
-            session.execute(&db, &format!("insert into pintest (id, val) values ({i}, {i})")).unwrap();
+            session
+                .execute(
+                    &db,
+                    &format!("insert into pintest (id, val) values ({i}, {i})"),
+                )
+                .unwrap();
         }
 
         // Run a variety of query types.
         session.execute(&db, "select * from pintest").unwrap();
-        session.execute(&db, "select count(*) from pintest").unwrap();
-        session.execute(&db, "select id, val from pintest where id > 10").unwrap();
-        session.execute(&db, "select id + val from pintest").unwrap();
-        session.execute(&db, "update pintest set val = val + 1 where id = 1").unwrap();
+        session
+            .execute(&db, "select count(*) from pintest")
+            .unwrap();
+        session
+            .execute(&db, "select id, val from pintest where id > 10")
+            .unwrap();
+        session
+            .execute(&db, "select id + val from pintest")
+            .unwrap();
+        session
+            .execute(&db, "update pintest set val = val + 1 where id = 1")
+            .unwrap();
         session.execute(&db, "update pintest set val = 0").unwrap();
-        session.execute(&db, "delete from pintest where id > 40").unwrap();
+        session
+            .execute(&db, "delete from pintest where id > 40")
+            .unwrap();
 
         // Explicit transaction.
         session.execute(&db, "begin").unwrap();
-        session.execute(&db, "insert into pintest (id, val) values (999, 999)").unwrap();
-        session.execute(&db, "select * from pintest where id = 999").unwrap();
+        session
+            .execute(&db, "insert into pintest (id, val) values (999, 999)")
+            .unwrap();
+        session
+            .execute(&db, "select * from pintest where id = 999")
+            .unwrap();
         session.execute(&db, "commit").unwrap();
 
         // Rolled-back transaction.
         session.execute(&db, "begin").unwrap();
-        session.execute(&db, "insert into pintest (id, val) values (1000, 1000)").unwrap();
+        session
+            .execute(&db, "insert into pintest (id, val) values (1000, 1000)")
+            .unwrap();
         session.execute(&db, "rollback").unwrap();
 
         // Assert no pins are held anywhere in the buffer pool.
@@ -2845,10 +3139,16 @@ mod tests {
             .execute(&db, "create table people (id int4 not null, name text)")
             .unwrap();
         session
-            .execute(&db, "create table pets (id int4 not null, owner_id int4, name text)")
+            .execute(
+                &db,
+                "create table pets (id int4 not null, owner_id int4, name text)",
+            )
             .unwrap();
         session
-            .execute(&db, "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')")
+            .execute(
+                &db,
+                "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')",
+            )
             .unwrap();
         session
             .execute(&db, "insert into pets (id, owner_id, name) values (10, 1, 'mocha'), (11, 1, 'pixel'), (12, 2, 'otis')")
@@ -2860,7 +3160,9 @@ mod tests {
         .unwrap();
         let mut guard = session.execute_streaming(&db, &stmt).unwrap();
         let mut rows = Vec::new();
-        while let Some(slot) = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap() {
+        while let Some(slot) =
+            crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap()
+        {
             rows.push(
                 slot.values()
                     .unwrap()
@@ -2893,13 +3195,19 @@ mod tests {
             .execute(&db, "create table people (id int4 not null, name text)")
             .unwrap();
         session
-            .execute(&db, "create table pets (id int4 not null, owner_id int4, name text)")
+            .execute(
+                &db,
+                "create table pets (id int4 not null, owner_id int4, name text)",
+            )
             .unwrap();
         session
             .execute(&db, "insert into people (id, name) values (1, 'alice')")
             .unwrap();
         session
-            .execute(&db, "insert into pets (id, owner_id, name) values (10, 1, 'mocha')")
+            .execute(
+                &db,
+                "insert into pets (id, owner_id, name) values (10, 1, 'mocha')",
+            )
             .unwrap();
 
         let stmt = crate::backend::parser::parse_select(
@@ -2927,5 +3235,4 @@ mod tests {
         done_rx.recv_timeout(TEST_TIMEOUT).unwrap();
         worker.join().unwrap();
     }
-
 }
