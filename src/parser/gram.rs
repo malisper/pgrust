@@ -514,6 +514,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut func = None;
     let mut arg = None;
     let mut is_star = false;
+    let mut distinct = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::agg_func => {
@@ -532,6 +533,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     }
                 });
             }
+            Rule::agg_distinct => distinct = true,
             Rule::star => is_star = true,
             Rule::expr => arg = Some(build_expr(part)?),
             _ => {}
@@ -544,6 +546,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         } else {
             Some(Box::new(arg.ok_or(ParseError::UnexpectedEof)?))
         },
+        distinct,
     })
 }
 

@@ -201,6 +201,7 @@ pub enum SqlExpr {
     AggCall {
         func: AggFunc,
         arg: Option<Box<SqlExpr>>,
+        distinct: bool,
     },
     Random,
     CurrentTimestamp,

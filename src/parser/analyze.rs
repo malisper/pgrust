@@ -96,7 +96,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         || stmt.having.is_some();
 
     if needs_agg {
-        let mut aggs: Vec<(AggFunc, Option<SqlExpr>)> = Vec::new();
+        let mut aggs: Vec<(AggFunc, Option<SqlExpr>, bool)> = Vec::new();
         for target in &stmt.targets {
             collect_aggs(&target.expr, &mut aggs);
         }
@@ -112,10 +112,11 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
 
         let accumulators: Vec<AggAccum> = aggs
             .iter()
-            .map(|(func, arg)| {
+            .map(|(func, arg, distinct)| {
                 Ok(AggAccum {
                     func: *func,
                     arg: arg.as_ref().map(|e| bind_expr(e, &scope)).transpose()?,
+                    distinct: *distinct,
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -125,7 +126,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         for gk in &stmt.group_by {
             output_columns.push(sql_expr_name(gk));
         }
-        for (func, _) in &aggs {
+        for (func, _, _) in &aggs {
             output_columns.push(func.name().to_string());
         }
 
@@ -627,10 +628,10 @@ fn targets_contain_agg(targets: &[SelectItem]) -> bool {
     targets.iter().any(|t| expr_contains_agg(&t.expr))
 }
 
-fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>)>) {
+fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>, bool)>) {
     match expr {
-        SqlExpr::AggCall { func, arg } => {
-            let entry = (*func, arg.as_deref().cloned());
+        SqlExpr::AggCall { func, arg, distinct } => {
+            let entry = (*func, arg.as_deref().cloned(), *distinct);
             if !aggs.contains(&entry) { aggs.push(entry); }
         }
         SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => {}
@@ -654,7 +655,7 @@ fn bind_agg_output_expr(
     expr: &SqlExpr,
     group_by_exprs: &[SqlExpr],
     input_scope: &BoundScope,
-    agg_list: &[(AggFunc, Option<SqlExpr>)],
+    agg_list: &[(AggFunc, Option<SqlExpr>, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
@@ -662,8 +663,8 @@ fn bind_agg_output_expr(
     }
 
     match expr {
-        SqlExpr::AggCall { func, arg } => {
-            let entry = (*func, arg.as_deref().cloned());
+        SqlExpr::AggCall { func, arg, distinct } => {
+            let entry = (*func, arg.as_deref().cloned(), *distinct);
             for (i, agg) in agg_list.iter().enumerate() {
                 if *agg == entry { return Ok(Expr::Column(n_keys + i)); }
             }

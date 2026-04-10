@@ -81,9 +81,12 @@ impl From<MvccError> for ExecError {
     }
 }
 
+use std::collections::HashSet;
+
 #[derive(Debug, Clone)]
 pub(crate) enum AccumState {
     Count { count: i64 },
+    CountDistinct { seen: HashSet<Value> },
     Sum { sum: Option<i64> },
     Avg { sum: Option<i64>, count: i64 },
     Min { min: Option<Value> },
@@ -91,38 +94,46 @@ pub(crate) enum AccumState {
 }
 
 impl AccumState {
-    pub(crate) fn new(func: AggFunc) -> Self {
-        match func {
-            AggFunc::Count => AccumState::Count { count: 0 },
-            AggFunc::Sum => AccumState::Sum { sum: None },
-            AggFunc::Avg => AccumState::Avg { sum: None, count: 0 },
-            AggFunc::Min => AccumState::Min { min: None },
-            AggFunc::Max => AccumState::Max { max: None },
+    pub(crate) fn new(func: AggFunc, distinct: bool) -> Self {
+        match (func, distinct) {
+            (AggFunc::Count, true) => AccumState::CountDistinct { seen: HashSet::new() },
+            (AggFunc::Count, false) => AccumState::Count { count: 0 },
+            (AggFunc::Sum, _) => AccumState::Sum { sum: None },
+            (AggFunc::Avg, _) => AccumState::Avg { sum: None, count: 0 },
+            (AggFunc::Min, _) => AccumState::Min { min: None },
+            (AggFunc::Max, _) => AccumState::Max { max: None },
         }
     }
 
 /// Return a compiled transition function resolved at plan time, like PG's
     /// aggregate transition functions (e.g. int8inc_any for count(*)). Avoids
     /// per-tuple enum match dispatch in the hot loop.
-    pub(crate) fn transition_fn(func: AggFunc, has_arg: bool) -> fn(&mut AccumState, &Value) {
-        match (func, has_arg) {
-            (AggFunc::Count, false) => |state, _value| {
+    pub(crate) fn transition_fn(func: AggFunc, has_arg: bool, distinct: bool) -> fn(&mut AccumState, &Value) {
+        match (func, has_arg, distinct) {
+            (AggFunc::Count, _, true) => |state, value| {
+                if let AccumState::CountDistinct { seen } = state {
+                    if !matches!(value, Value::Null) {
+                        seen.insert(value.to_owned_value());
+                    }
+                }
+            },
+            (AggFunc::Count, false, false) => |state, _value| {
                 // count(*): unconditional increment, like PG's int8inc_any
                 if let AccumState::Count { count } = state { *count += 1; }
             },
-            (AggFunc::Count, true) => |state, value| {
+            (AggFunc::Count, true, false) => |state, value| {
                 if let AccumState::Count { count } = state {
                     if !matches!(value, Value::Null) { *count += 1; }
                 }
             },
-            (AggFunc::Sum, _) => |state, value| {
+            (AggFunc::Sum, _, _) => |state, value| {
                 if let AccumState::Sum { sum } = state {
                     if let Value::Int32(v) = value {
                         *sum = Some(sum.unwrap_or(0) + *v as i64);
                     }
                 }
             },
-            (AggFunc::Avg, _) => |state, value| {
+            (AggFunc::Avg, _, _) => |state, value| {
                 if let AccumState::Avg { sum, count } = state {
                     if let Value::Int32(v) = value {
                         *sum = Some(sum.unwrap_or(0) + *v as i64);
@@ -130,7 +141,7 @@ impl AccumState {
                     }
                 }
             },
-            (AggFunc::Min, _) => |state, value| {
+            (AggFunc::Min, _, _) => |state, value| {
                 if let AccumState::Min { min } = state {
                     if !matches!(value, Value::Null) {
                         *min = Some(match min.take() {
@@ -146,7 +157,7 @@ impl AccumState {
                     }
                 }
             },
-            (AggFunc::Max, _) => |state, value| {
+            (AggFunc::Max, _, _) => |state, value| {
                 if let AccumState::Max { max } = state {
                     if !matches!(value, Value::Null) {
                         *max = Some(match max.take() {
@@ -168,6 +179,7 @@ impl AccumState {
     pub(crate) fn finalize(&self) -> Value {
         match self {
             AccumState::Count { count } => Value::Int32(*count as i32),
+            AccumState::CountDistinct { seen } => Value::Int32(seen.len() as i32),
             AccumState::Sum { sum } => match sum {
                 Some(v) => Value::Int32(*v as i32),
                 None => Value::Null,
@@ -312,7 +324,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let key_buffer = Vec::with_capacity(group_by.len());
             let trans_fns: Vec<fn(&mut AccumState, &Value)> = accumulators
                 .iter()
-                .map(|a| AccumState::transition_fn(a.func, a.arg.is_some()))
+                .map(|a| AccumState::transition_fn(a.func, a.arg.is_some(), a.distinct))
                 .collect();
             Box::new(AggregateState {
                 input: executor_start(*input),
@@ -771,6 +783,9 @@ mod tests {
     #[test] fn sum_and_avg_skip_nulls() { let base = temp_dir("sum_avg_skip_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*), count(note), sum(id), avg(id), min(id), max(id) from people").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["count", "count", "sum", "avg", "min", "max"]); assert_eq!(rows, vec![vec![Value::Int32(3), Value::Int32(2), Value::Int32(60), Value::Int32(20), Value::Int32(10), Value::Int32(30)]]); } other => panic!("expected query result, got {:?}", other), } }
 
     // regex (~) operator tests
+    #[test] fn count_distinct_counts_unique_values() { let base = temp_dir("count_distinct"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b'), (4, 'dave', 'b'), (5, 'eve', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_distinct_skips_nulls() { let base = temp_dir("count_distinct_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'a'), (4, 'dave', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_distinct_with_group_by() { let base = temp_dir("count_distinct_group"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'alice', 'x'), (3, 'alice', 'y'), (4, 'bob', 'x'), (5, 'bob', 'x')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, count(distinct note) from people group by name order by name").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Int32(2)], vec![Value::Text("bob".into()), Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn regex_basic_match() { let base = temp_dir("regex_basic_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_basic_no_match() { let base = temp_dir("regex_basic_no_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'baz'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_start_anchor_match() { let base = temp_dir("regex_start_anchor_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ '^foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
