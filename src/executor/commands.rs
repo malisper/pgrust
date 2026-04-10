@@ -66,6 +66,7 @@ pub(crate) fn execute_explain(
     }
 
     Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
         rows: lines.into_iter().map(|line| vec![Value::Text(line.into())]).collect(),
     })
@@ -73,6 +74,7 @@ pub(crate) fn execute_explain(
 
 pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
     Ok(StatementResult::Query {
+        columns: vec![QueryColumn::text("table_name")],
         column_names: vec!["table_name".into()],
         rows: catalog
             .table_names()

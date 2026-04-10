@@ -33,12 +33,12 @@ GROUP BY om_shipments.company_id
 7. **`ARRAY[...]` constructor** — array literal syntax not in grammar
 8. **Array type syntax** (`varchar[]`) — no array type notation
 9. **`&&` (array overlap) operator** — not in `comp_op` (only `=`, `<`, `>`, `~`)
-10. **`VARCHAR` type** — `type_name` only has int4/int/integer/text/bool/boolean/timestamp/char
+10. ~~**`VARCHAR` type**~~ — DONE
 
 ## Type system gaps
 
 11. **Array types** — no concept of array columns, array storage, or array operations in the type system (`SqlType` has no array variant)
-12. **`VARCHAR(n)` type** — no variable-length character type with length constraint
+12. ~~**`VARCHAR(n)` type**~~ — DONE
 
 ## Function / Expression gaps
 

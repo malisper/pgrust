@@ -2,6 +2,7 @@ use crate::access::heap::am::VisibleHeapScan;
 use crate::access::heap::am::{heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page};
 use crate::access::heap::tuple::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::compact_string::CompactString;
+use crate::parser::{SqlType, SqlTypeKind};
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -21,11 +22,27 @@ pub struct ColumnDesc {
     pub name: String,
     pub storage: AttributeDesc,
     pub ty: ScalarType,
+    pub sql_type: SqlType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationDesc {
     pub columns: Vec<ColumnDesc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryColumn {
+    pub name: String,
+    pub sql_type: SqlType,
+}
+
+impl QueryColumn {
+    pub fn text(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            sql_type: SqlType::new(SqlTypeKind::Text),
+        }
+    }
 }
 
 impl RelationDesc {
@@ -133,6 +150,7 @@ unsafe impl Sync for Value {}
 pub struct TargetEntry {
     pub name: String,
     pub expr: Expr,
+    pub sql_type: SqlType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,7 +194,7 @@ pub enum Expr {
     Const(Value),
     Add(Box<Expr>, Box<Expr>),
     Negate(Box<Expr>),
-    Cast(Box<Expr>, ScalarType),
+    Cast(Box<Expr>, SqlType),
     Eq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
@@ -226,34 +244,51 @@ pub enum Plan {
         group_by: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         having: Option<Expr>,
-        output_columns: Vec<String>,
+        output_columns: Vec<QueryColumn>,
     },
     GenerateSeries {
         start: Expr,
         stop: Expr,
         step: Expr,
-        output_name: String,
+        output: QueryColumn,
     },
 }
 
 impl Plan {
-    /// Extract output column names from the plan tree.
-    pub fn column_names(&self) -> Vec<String> {
+    pub fn columns(&self) -> Vec<QueryColumn> {
         match self {
             Plan::Result => vec![],
-            Plan::SeqScan { desc, .. } => desc.columns.iter().map(|c| c.name.clone()).collect(),
+            Plan::SeqScan { desc, .. } => desc
+                .columns
+                .iter()
+                .map(|c| QueryColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type,
+                })
+                .collect(),
             Plan::Filter { input, .. } | Plan::OrderBy { input, .. } | Plan::Limit { input, .. } => {
-                input.column_names()
+                input.columns()
             }
-            Plan::Projection { targets, .. } => targets.iter().map(|t| t.name.clone()).collect(),
+            Plan::Projection { targets, .. } => targets
+                .iter()
+                .map(|t| QueryColumn {
+                    name: t.name.clone(),
+                    sql_type: t.sql_type,
+                })
+                .collect(),
             Plan::Aggregate { output_columns, .. } => output_columns.clone(),
             Plan::NestedLoopJoin { left, right, .. } => {
-                let mut names = left.column_names();
-                names.extend(right.column_names());
-                names
+                let mut cols = left.columns();
+                cols.extend(right.columns());
+                cols
             }
-            Plan::GenerateSeries { output_name, .. } => vec![output_name.clone()],
+            Plan::GenerateSeries { output, .. } => vec![output.clone()],
         }
+    }
+
+    /// Extract output column names from the plan tree.
+    pub fn column_names(&self) -> Vec<String> {
+        self.columns().into_iter().map(|c| c.name).collect()
     }
 }
 
