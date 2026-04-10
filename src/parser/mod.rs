@@ -350,6 +350,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_column_alias() {
+        let stmt = parse_select("select count(*) as total from people").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert_eq!(stmt.targets[0].output_name, "total");
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: None }));
+    }
+
+    #[test]
+    fn parse_mixed_aliases() {
+        let stmt = parse_select("select name, count(*) as total from people group by name").unwrap();
+        assert_eq!(stmt.targets.len(), 2);
+        assert_eq!(stmt.targets[0].output_name, "name");
+        assert_eq!(stmt.targets[1].output_name, "total");
+    }
+
+    #[test]
     fn parse_random_function() {
         let stmt = parse_select("select random()").unwrap();
         assert_eq!(stmt.targets.len(), 1);
