@@ -614,6 +614,14 @@ pub(crate) fn bind_expr_with_outer(
             outer_scopes,
             grouped_outer,
         )?,
+        SqlExpr::Concat(left, right) => bind_concat_expr(
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )?,
         SqlExpr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(bind_expr_with_outer(
             inner,
             scope,
@@ -1186,6 +1194,66 @@ fn bind_comparison_expr(
     Ok(make(Box::new(left), Box::new(right)))
 }
 
+fn bind_concat_expr(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let left_bound = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
+    let right_bound = bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?;
+    bind_concat_operands(left, left_type, left_bound, right, right_type, right_bound)
+}
+
+fn bind_concat_operands(
+    left_sql: &SqlExpr,
+    left_type: SqlType,
+    left_bound: Expr,
+    right_sql: &SqlExpr,
+    right_type: SqlType,
+    right_bound: Expr,
+) -> Result<Expr, ParseError> {
+    if left_type.kind == SqlTypeKind::Jsonb
+        && !left_type.is_array
+        && right_type.kind == SqlTypeKind::Jsonb
+        && !right_type.is_array
+    {
+        return Ok(Expr::Concat(Box::new(left_bound), Box::new(right_bound)));
+    }
+
+    if left_type.is_array || right_type.is_array {
+        let element_type = resolve_array_concat_element_type(left_type, right_type)?;
+        let left_expr = if left_type.is_array {
+            coerce_bound_expr(left_bound, left_type, SqlType::array_of(element_type))
+        } else {
+            coerce_bound_expr(left_bound, left_type, element_type)
+        };
+        let right_expr = if right_type.is_array {
+            coerce_bound_expr(right_bound, right_type, SqlType::array_of(element_type))
+        } else {
+            coerce_bound_expr(right_bound, right_type, element_type)
+        };
+        return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
+    }
+
+    if should_use_text_concat(left_sql, left_type, right_sql, right_type) {
+        let text_type = SqlType::new(SqlTypeKind::Text);
+        let left_expr = coerce_bound_expr(left_bound, left_type, text_type);
+        let right_expr = coerce_bound_expr(right_bound, right_type, text_type);
+        return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
+    }
+
+    Err(ParseError::UndefinedOperator {
+        op: "||",
+        left_type: sql_type_name(left_type),
+        right_type: sql_type_name(right_type),
+    })
+}
+
 fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
     if from.element_type() == to.element_type() {
         expr
@@ -1257,6 +1325,81 @@ fn is_numeric_family(ty: SqlType) -> bool {
             | SqlTypeKind::Float8
             | SqlTypeKind::Numeric
     )
+}
+
+fn is_text_like_type(ty: SqlType) -> bool {
+    matches!(
+        ty.element_type().kind,
+        SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
+    )
+}
+
+fn is_string_literal_expr(expr: &SqlExpr) -> bool {
+    matches!(
+        expr,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    )
+}
+
+fn should_use_text_concat(
+    left_expr: &SqlExpr,
+    left_type: SqlType,
+    right_expr: &SqlExpr,
+    right_type: SqlType,
+) -> bool {
+    if left_type.is_array || right_type.is_array {
+        return false;
+    }
+    is_text_like_type(left_type)
+        || is_text_like_type(right_type)
+        || is_string_literal_expr(left_expr)
+        || is_string_literal_expr(right_expr)
+}
+
+fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Option<SqlType> {
+    let left = left.element_type();
+    let right = right.element_type();
+    if left == right {
+        return Some(left);
+    }
+    if is_text_like_type(left) && is_text_like_type(right) {
+        return Some(SqlType::new(SqlTypeKind::Text));
+    }
+    if is_numeric_family(left) && is_numeric_family(right) {
+        return resolve_numeric_binary_type("+", left, right).ok();
+    }
+    None
+}
+
+fn resolve_array_concat_element_type(left: SqlType, right: SqlType) -> Result<SqlType, ParseError> {
+    let left_elem = left.element_type();
+    let right_elem = right.element_type();
+    if left.is_array && right.is_array {
+        return resolve_common_scalar_type(left_elem, right_elem).ok_or(ParseError::UndefinedOperator {
+            op: "||",
+            left_type: sql_type_name(left),
+            right_type: sql_type_name(right),
+        });
+    }
+    if left.is_array {
+        return resolve_common_scalar_type(left_elem, right_elem).ok_or(ParseError::UndefinedOperator {
+            op: "||",
+            left_type: sql_type_name(left),
+            right_type: sql_type_name(right),
+        });
+    }
+    if right.is_array {
+        return resolve_common_scalar_type(left_elem, right_elem).ok_or(ParseError::UndefinedOperator {
+            op: "||",
+            left_type: sql_type_name(left),
+            right_type: sql_type_name(right),
+        });
+    }
+    Err(ParseError::UndefinedOperator {
+        op: "||",
+        left_type: sql_type_name(left),
+        right_type: sql_type_name(right),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1884,6 +2027,7 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::Mul(l, r)
         | SqlExpr::Div(l, r)
         | SqlExpr::Mod(l, r)
+        | SqlExpr::Concat(l, r)
         | SqlExpr::Eq(l, r)
         | SqlExpr::NotEq(l, r)
         | SqlExpr::Lt(l, r)
@@ -1961,6 +2105,7 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>, bool)>) {
         | SqlExpr::Mul(l, r)
         | SqlExpr::Div(l, r)
         | SqlExpr::Mod(l, r)
+        | SqlExpr::Concat(l, r)
         | SqlExpr::Eq(l, r)
         | SqlExpr::NotEq(l, r)
         | SqlExpr::Lt(l, r)
@@ -2035,6 +2180,11 @@ fn infer_sql_expr_type(
         | SqlExpr::Mul(left, right)
         | SqlExpr::Div(left, right)
         | SqlExpr::Mod(left, right) => infer_arithmetic_sql_type(
+            expr,
+            infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer),
+            infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer),
+        ),
+        SqlExpr::Concat(left, right) => infer_concat_sql_type(
             expr,
             infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer),
             infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer),
@@ -2167,6 +2317,19 @@ fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: SqlType) -> S
         SqlExpr::Add(_, _) | SqlExpr::Sub(_, _) | SqlExpr::Mul(_, _) => SqlType::new(widest_int),
         _ => SqlType::new(Int4),
     }
+}
+
+fn infer_concat_sql_type(expr: &SqlExpr, left: SqlType, right: SqlType) -> SqlType {
+    let _ = expr;
+    if left.kind == SqlTypeKind::Jsonb && !left.is_array && right.kind == SqlTypeKind::Jsonb && !right.is_array {
+        return SqlType::new(SqlTypeKind::Jsonb);
+    }
+    if left.is_array || right.is_array {
+        if let Ok(element_type) = resolve_array_concat_element_type(left, right) {
+            return SqlType::array_of(element_type);
+        }
+    }
+    SqlType::new(SqlTypeKind::Text)
 }
 
 fn bind_integer_literal(value: &str) -> Result<Value, ParseError> {
@@ -2388,6 +2551,32 @@ fn bind_agg_output_expr(
                 n_keys,
             )?),
         )),
+        SqlExpr::Concat(l, r) => {
+            let left_expr = bind_agg_output_expr(
+                l,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            let right_expr = bind_agg_output_expr(
+                r,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            let left_type = infer_sql_expr_type(l, input_scope, catalog, outer_scopes, grouped_outer);
+            let right_type =
+                infer_sql_expr_type(r, input_scope, catalog, outer_scopes, grouped_outer);
+            bind_concat_operands(l, left_type, left_expr, r, right_type, right_expr)
+        }
         SqlExpr::UnaryPlus(inner) => Ok(Expr::UnaryPlus(Box::new(bind_agg_output_expr(
             inner,
             group_by_exprs,

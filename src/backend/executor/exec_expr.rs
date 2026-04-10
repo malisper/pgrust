@@ -9,8 +9,8 @@ use serde_json::Value as SerdeJsonValue;
 use super::nodes::*;
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
-    JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_contains,
-    jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value, jsonb_get,
+    JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_concat,
+    jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value, parse_jsonb_text,
     render_jsonb_bytes,
 };
@@ -110,6 +110,9 @@ pub fn eval_expr(
         }
         Expr::Mod(left, right) => {
             mod_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::Concat(left, right) => {
+            concat_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
         Expr::UnaryPlus(inner) => eval_expr(inner, slot, ctx),
         Expr::Negate(inner) => negate_value(eval_expr(inner, slot, ctx)?),
@@ -2595,6 +2598,51 @@ fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> {
             left,
             right,
         }),
+    }
+}
+
+fn concat_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Jsonb(encode_jsonb(&jsonb_concat(
+            &decode_jsonb(l)?,
+            &decode_jsonb(r)?,
+        )))),
+        (Value::Array(l), Value::Array(r)) => {
+            let mut items = l.clone();
+            items.extend(r.iter().cloned());
+            Ok(Value::Array(items))
+        }
+        (Value::Array(l), _) => {
+            let mut items = l.clone();
+            items.push(right);
+            Ok(Value::Array(items))
+        }
+        (_, Value::Array(r)) => {
+            let mut items = Vec::with_capacity(r.len() + 1);
+            items.push(left);
+            items.extend(r.iter().cloned());
+            Ok(Value::Array(items))
+        }
+        _ => {
+            let text_type = SqlType::new(SqlTypeKind::Text);
+            let left_text = cast_value(left, text_type)?;
+            let right_text = cast_value(right, text_type)?;
+            let mut out = String::new();
+            out.push_str(left_text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "||",
+                left: left_text.clone(),
+                right: right_text.clone(),
+            })?);
+            out.push_str(right_text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "||",
+                left: left_text.clone(),
+                right: right_text.clone(),
+            })?);
+            Ok(Value::Text(CompactString::from_owned(out)))
+        }
     }
 }
 

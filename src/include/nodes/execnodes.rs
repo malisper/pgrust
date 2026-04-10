@@ -488,6 +488,7 @@ pub enum Expr {
     Mul(Box<Expr>, Box<Expr>),
     Div(Box<Expr>, Box<Expr>),
     Mod(Box<Expr>, Box<Expr>),
+    Concat(Box<Expr>, Box<Expr>),
     UnaryPlus(Box<Expr>),
     Negate(Box<Expr>),
     Cast(Box<Expr>, SqlType),

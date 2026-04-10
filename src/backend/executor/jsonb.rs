@@ -315,6 +315,32 @@ pub(crate) fn jsonb_contains(left: &JsonbValue, right: &JsonbValue) -> bool {
     }
 }
 
+pub(crate) fn jsonb_concat(left: &JsonbValue, right: &JsonbValue) -> JsonbValue {
+    match (left, right) {
+        (JsonbValue::Object(left_items), JsonbValue::Object(right_items)) => {
+            let mut merged = left_items.clone();
+            merged.extend(right_items.iter().cloned());
+            JsonbValue::Object(canonicalize_object_pairs(merged))
+        }
+        (JsonbValue::Array(left_items), JsonbValue::Array(right_items)) => {
+            let mut items = left_items.clone();
+            items.extend(right_items.iter().cloned());
+            JsonbValue::Array(items)
+        }
+        _ => {
+            let mut items = match left {
+                JsonbValue::Array(items) => items.clone(),
+                other => vec![other.clone()],
+            };
+            match right {
+                JsonbValue::Array(right_items) => items.extend(right_items.iter().cloned()),
+                other => items.push(other.clone()),
+            }
+            JsonbValue::Array(items)
+        }
+    }
+}
+
 pub(crate) fn jsonb_exists(value: &JsonbValue, key: &str) -> bool {
     match value {
         JsonbValue::Object(items) => items.iter().any(|(k, _)| k == key),

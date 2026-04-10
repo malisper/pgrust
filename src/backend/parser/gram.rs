@@ -890,7 +890,12 @@ fn build_identifier(pair: Pair<'_, Rule>) -> String {
 
 pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     match pair.as_rule() {
-        Rule::expr | Rule::or_expr | Rule::and_expr | Rule::add_expr | Rule::mul_expr => {
+        Rule::expr
+        | Rule::or_expr
+        | Rule::and_expr
+        | Rule::concat_expr
+        | Rule::add_expr
+        | Rule::mul_expr => {
             let mut inner = pair.into_inner();
             let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             fold_infix(first, inner)
@@ -1206,6 +1211,7 @@ fn fold_infix(
                 "-" => SqlExpr::Sub(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
             },
+            Rule::concat_op => SqlExpr::Concat(Box::new(expr), Box::new(rhs)),
             Rule::mul_op => match op.as_str() {
                 "*" => SqlExpr::Mul(Box::new(expr), Box::new(rhs)),
                 "/" => SqlExpr::Div(Box::new(expr), Box::new(rhs)),
