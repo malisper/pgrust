@@ -376,15 +376,14 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     }
 
     let mut items = Vec::new();
-    {
-        let expr = build_expr(first)?;
-        let output_name = select_item_name(&expr, items.len());
-        items.push(SelectItem { output_name, expr });
-    }
-
-    for expr_pair in inner {
-        let expr = build_expr(expr_pair)?;
-        let output_name = select_item_name(&expr, items.len());
+    for (index, item_pair) in std::iter::once(first).chain(inner).enumerate() {
+        let mut item_inner = item_pair.into_inner();
+        let expr = build_expr(item_inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+        let output_name = if let Some(alias_pair) = item_inner.next() {
+            alias_pair.into_inner().last().ok_or(ParseError::UnexpectedEof)?.as_str().to_string()
+        } else {
+            select_item_name(&expr, index)
+        };
         items.push(SelectItem { output_name, expr });
     }
 
