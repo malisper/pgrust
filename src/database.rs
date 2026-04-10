@@ -649,22 +649,29 @@ fn extract_table_rel(
     stmt: &crate::parser::Statement,
     catalog: &crate::catalog::Catalog,
 ) -> Option<RelFileLocator> {
+    fn extract_from_item_rel(
+        from: &crate::parser::FromItem,
+        catalog: &crate::catalog::Catalog,
+    ) -> Option<RelFileLocator> {
+        match from {
+            crate::parser::FromItem::Table { name } => catalog.get(name).map(|e| e.rel),
+            crate::parser::FromItem::Alias { source, .. } => extract_from_item_rel(source, catalog),
+            _ => None,
+        }
+    }
+
     use crate::parser::Statement;
     match stmt {
         Statement::Select(s) => {
-            if let Some(crate::parser::FromItem::Table(table)) = &s.from {
-                catalog.get(&table.name).map(|e| e.rel)
-            } else {
-                None
-            }
+            s.from
+                .as_ref()
+                .and_then(|from| extract_from_item_rel(from, catalog))
         }
         Statement::Explain(e) => {
             if let Statement::Select(s) = e.statement.as_ref() {
-                if let Some(crate::parser::FromItem::Table(table)) = &s.from {
-                    catalog.get(&table.name).map(|e| e.rel)
-                } else {
-                    None
-                }
+                s.from
+                    .as_ref()
+                    .and_then(|from| extract_from_item_rel(from, catalog))
             } else {
                 None
             }

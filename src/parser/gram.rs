@@ -215,78 +215,91 @@ fn build_usize_clause(pair: Pair<'_, Rule>, expected: &'static str) -> Result<us
 
 fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
     let raw = pair.as_str().to_string();
-    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-    match inner.as_rule() {
-        Rule::table_from_item => Ok(FromItem::Table(build_table_ref(
-            inner
+    match pair.as_rule() {
+        Rule::from_item | Rule::from_primary | Rule::parenthesized_from_item => {
+            build_from_item(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
+        }
+        Rule::from_list => {
+            let mut items = pair
                 .into_inner()
-                .find(|part| part.as_rule() == Rule::table_ref)
-                .ok_or(ParseError::UnexpectedEof)?,
-        )?)),
-        Rule::cross_from_item => {
-            let tables = inner
-                .into_inner()
-                .filter(|part| part.as_rule() == Rule::table_ref)
-                .map(build_table_ref)
-                .collect::<Result<Vec<_>, _>>()?;
-            match tables.as_slice() {
-                [left, right] => Ok(FromItem::CrossJoin {
-                    left: left.clone(),
-                    right: right.clone(),
-                }),
-                _ => Err(ParseError::UnexpectedToken {
-                    expected: "cross join from clause",
-                    actual: raw,
-                }),
+                .filter(|part| part.as_rule() == Rule::joined_from_item)
+                .map(build_from_item);
+            let mut item = items.next().ok_or(ParseError::UnexpectedEof)??;
+            for next in items {
+                item = FromItem::Join {
+                    left: Box::new(item),
+                    right: Box::new(next?),
+                    kind: JoinKind::Cross,
+                    on: None,
+                };
             }
+            Ok(item)
         }
         Rule::joined_from_item => {
-            let mut tables = Vec::new();
-            let mut on = None;
-            for part in inner.into_inner() {
+            let mut parts = pair.into_inner();
+            let mut item = build_from_item(parts.next().ok_or(ParseError::UnexpectedEof)?)?;
+            for join_clause in parts {
+                let mut right = None;
+                let mut on = None;
+                for part in join_clause.into_inner() {
+                    match part.as_rule() {
+                        Rule::aliased_from_item => right = Some(build_from_item(part)?),
+                        Rule::expr => on = Some(build_expr(part)?),
+                        _ => {}
+                    }
+                }
+                item = FromItem::Join {
+                    left: Box::new(item),
+                    right: Box::new(right.ok_or(ParseError::UnexpectedEof)?),
+                    kind: JoinKind::Inner,
+                    on: Some(on.ok_or(ParseError::UnexpectedEof)?),
+                };
+            }
+            Ok(item)
+        }
+        Rule::aliased_from_item => {
+            let mut source = None;
+            let mut alias = None;
+            let mut column_aliases = Vec::new();
+            for part in pair.into_inner() {
                 match part.as_rule() {
-                    Rule::table_ref => tables.push(build_table_ref(part)?),
-                    Rule::expr => on = Some(build_expr(part)?),
+                    Rule::table_from_item
+                    | Rule::srf_from_item
+                    | Rule::derived_from_item
+                    | Rule::parenthesized_from_item
+                    | Rule::from_primary => source = Some(build_from_item(part)?),
+                    Rule::relation_alias => {
+                        let mut identifiers = Vec::new();
+                        collect_identifiers(part, &mut identifiers);
+                        alias = identifiers.first().cloned();
+                        column_aliases = identifiers.into_iter().skip(1).collect();
+                    }
                     _ => {}
                 }
             }
-            match tables.as_slice() {
-                [left, right] => Ok(FromItem::InnerJoin {
-                    left: left.clone(),
-                    right: right.clone(),
-                    on: on.ok_or(ParseError::UnexpectedEof)?,
-                }),
-                _ => Err(ParseError::UnexpectedToken {
-                    expected: "joined from clause",
-                    actual: raw,
-                }),
+            let item = source.ok_or(ParseError::UnexpectedEof)?;
+            if let Some(alias) = alias {
+                Ok(FromItem::Alias {
+                    source: Box::new(item),
+                    alias,
+                    column_aliases,
+                })
+            } else {
+                Ok(item)
             }
         }
+        Rule::table_from_item => Ok(FromItem::Table {
+            name: build_identifier(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
+        }),
         Rule::srf_from_item => {
             let mut name = None;
             let mut args = Vec::new();
-            let mut alias = None;
-            let mut column_aliases = Vec::new();
-            for part in inner.into_inner() {
+            for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::expr_list => {
                         for expr_pair in part.into_inner() {
                             args.push(build_expr(expr_pair)?);
-                        }
-                    }
-                    Rule::srf_alias => {
-                        for alias_part in part.into_inner() {
-                            match alias_part.as_rule() {
-                                Rule::identifier => alias = Some(build_identifier(alias_part)),
-                                Rule::ident_list => {
-                                    column_aliases = alias_part
-                                        .into_inner()
-                                        .map(build_identifier)
-                                        .collect();
-                                }
-                                _ => {}
-                            }
                         }
                     }
                     _ => {}
@@ -295,9 +308,14 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             Ok(FromItem::FunctionCall {
                 name: name.ok_or(ParseError::UnexpectedEof)?,
                 args,
-                alias,
-                column_aliases,
             })
+        }
+        Rule::derived_from_item => {
+            let select = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::select_stmt)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(FromItem::DerivedTable(Box::new(build_select(select)?)))
         }
         _ => Err(ParseError::UnexpectedToken {
             expected: "from clause",
@@ -306,20 +324,13 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
     }
 }
 
-fn build_table_ref(pair: Pair<'_, Rule>) -> Result<TableRef, ParseError> {
-    let mut identifiers = Vec::new();
-    collect_identifiers(pair, &mut identifiers);
-    Ok(TableRef {
-        name: identifiers.first().cloned().ok_or(ParseError::UnexpectedEof)?,
-        alias: identifiers.get(1).cloned(),
-    })
-}
-
 fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::identifier => out.push(build_identifier(part)),
-            _ => collect_identifiers(part, out),
+    match pair.as_rule() {
+        Rule::identifier => out.push(build_identifier(pair)),
+        _ => {
+            for part in pair.into_inner() {
+                collect_identifiers(part, out);
+            }
         }
     }
 }

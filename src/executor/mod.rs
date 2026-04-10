@@ -867,6 +867,168 @@ mod tests {
             other => panic!("expected query result, got {:?}", other),
         }
     }
+    #[test] fn select_from_derived_table() {
+        let base = temp_dir("derived_table_basic");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)").unwrap();
+        txns.commit(xid).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.id from (select id from people) p order by p.id").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["id"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn select_from_aliasless_derived_table() {
+        let base = temp_dir("derived_table_no_alias");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap();
+        txns.commit(xid).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select id from (select id from people)").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["id"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn derived_table_column_aliases_rename_output() {
+        let base = temp_dir("derived_table_alias_cols");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap();
+        txns.commit(xid).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.x from (select id from people) p(x)").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["x"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn derived_table_partial_column_aliases_preserve_remaining_names() {
+        let base = temp_dir("derived_table_alias_partial");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha')").unwrap();
+        txns.commit(xid).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.x, p.name from (select id, name from people) p(x) order by p.x").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["x", "name"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("alice".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn join_against_derived_table_returns_matching_rows() {
+        let base = temp_dir("join_derived_table");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let pool = test_pool_with_pets(&base);
+        let xid = txns.begin();
+        for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None), tuple(3, "carol", Some("storage"))] {
+            let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap();
+            heap_flush(&*pool, 1, rel(), tid.block_number).unwrap();
+        }
+        for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] {
+            let tid = heap_insert_mvcc(&*pool, 1, pets_rel(), xid, &row).unwrap();
+            heap_flush(&*pool, 1, pets_rel(), tid.block_number).unwrap();
+        }
+        txns.commit(xid).unwrap();
+        match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select p.name, q.owner_id from people p join (select owner_id from pets) q on p.id = q.owner_id order by q.owner_id", catalog_with_pets()).unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["name", "owner_id"]);
+                assert_eq!(rows, vec![
+                    vec![Value::Text("bob".into()), Value::Int32(2)],
+                    vec![Value::Text("carol".into()), Value::Int32(3)],
+                ]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn derived_table_can_cross_join_with_generate_series() {
+        let base = temp_dir("derived_table_cross_srf");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)").unwrap();
+        txns.commit(xid).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.id, g.generate_series from (select id from people) p, generate_series(1, 2) g order by p.id, g.generate_series").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![
+                    vec![Value::Int32(1), Value::Int32(1)],
+                    vec![Value::Int32(1), Value::Int32(2)],
+                    vec![Value::Int32(2), Value::Int32(1)],
+                    vec![Value::Int32(2), Value::Int32(2)],
+                ]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn generate_series_sources_can_cross_join_each_other() {
+        let base = temp_dir("srf_cross_join");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select g.generate_series, h.generate_series from generate_series(1, 2) g, generate_series(5, 6) h order by g.generate_series, h.generate_series").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![
+                    vec![Value::Int32(1), Value::Int32(5)],
+                    vec![Value::Int32(1), Value::Int32(6)],
+                    vec![Value::Int32(2), Value::Int32(5)],
+                    vec![Value::Int32(2), Value::Int32(6)],
+                ]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn join_alias_hides_inner_relation_names() {
+        let base = temp_dir("join_alias_hides_inner");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let pool = test_pool_with_pets(&base);
+        let xid = txns.begin();
+        let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &tuple(1, "alice", Some("alpha"))).unwrap();
+        heap_flush(&*pool, 1, rel(), tid.block_number).unwrap();
+        let tid = heap_insert_mvcc(&*pool, 1, pets_rel(), xid, &pet_tuple(10, "Kitchen", 1)).unwrap();
+        heap_flush(&*pool, 1, pets_rel(), tid.block_number).unwrap();
+        txns.commit(xid).unwrap();
+        let err = run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select p.name from (people p join pets q on p.id = q.owner_id) j", catalog_with_pets()).unwrap_err();
+        assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "p.name"));
+    }
+    #[test] fn non_lateral_derived_table_rejects_outer_refs() {
+        let base = temp_dir("derived_table_outer_ref");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from people p, (select p.id from people) q").unwrap_err();
+        assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "p.id"));
+    }
+    #[test] fn derived_table_alias_preserved_for_empty_result() {
+        let base = temp_dir("derived_table_empty_alias");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select p.x from (select id from people where id > 10) p(x)").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["x"]);
+                assert!(rows.is_empty());
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn parenthesized_join_alias_can_be_selected_from() {
+        let base = temp_dir("parenthesized_join_alias");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let pool = test_pool_with_pets(&base);
+        let xid = txns.begin();
+        let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &tuple(1, "alice", Some("alpha"))).unwrap();
+        heap_flush(&*pool, 1, rel(), tid.block_number).unwrap();
+        let tid = heap_insert_mvcc(&*pool, 1, pets_rel(), xid, &pet_tuple(10, "Kitchen", 1)).unwrap();
+        heap_flush(&*pool, 1, pets_rel(), tid.block_number).unwrap();
+        txns.commit(xid).unwrap();
+        match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select j.note, j.owner_id from (people p join pets q on p.id = q.owner_id) j", catalog_with_pets()).unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["note", "owner_id"]);
+                assert_eq!(rows, vec![vec![Value::Text("alpha".into()), Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
     #[test] fn regex_basic_match() { let base = temp_dir("regex_basic_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_basic_no_match() { let base = temp_dir("regex_basic_no_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'baz'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_start_anchor_match() { let base = temp_dir("regex_start_anchor_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ '^foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
