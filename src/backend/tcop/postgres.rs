@@ -22,6 +22,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidFloatInput(_) => "22P02",
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
+        ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => "42704",
         ExecError::Int2OutOfRange
         | ExecError::Int4OutOfRange
         | ExecError::Int8OutOfRange

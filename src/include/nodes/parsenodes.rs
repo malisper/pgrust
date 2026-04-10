@@ -29,6 +29,7 @@ pub enum ParseError {
     UngroupedColumn(String),
     AggInWhere,
     SubqueryMustReturnOneColumn,
+    UnknownConfigurationParameter(String),
 }
 
 impl fmt::Display for ParseError {
@@ -63,6 +64,9 @@ impl fmt::Display for ParseError {
             ParseError::SubqueryMustReturnOneColumn => {
                 write!(f, "subquery must return only one column")
             }
+            ParseError::UnknownConfigurationParameter(name) => {
+                write!(f, "unrecognized configuration parameter \"{name}\"")
+            }
         }
     }
 }
@@ -71,6 +75,8 @@ impl fmt::Display for ParseError {
 pub enum Statement {
     Explain(ExplainStatement),
     Select(SelectStatement),
+    Set(SetStatement),
+    Reset(ResetStatement),
     ShowTables,
     CreateTable(CreateTableStatement),
     DropTable(DropTableStatement),
@@ -82,6 +88,18 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetStatement {
+    pub name: String,
+    pub value: String,
+    pub is_local: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetStatement {
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

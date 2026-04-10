@@ -42,6 +42,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     match inner.as_rule() {
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
+        Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
+        Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::show_tables_stmt => Ok(Statement::ShowTables),
         Rule::create_table_stmt => Ok(Statement::CreateTable(build_create_table(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
@@ -57,6 +59,58 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             expected: "statement",
             actual: inner.as_str().into(),
         }),
+    }
+}
+
+fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
+    let mut is_local = false;
+    let mut name = None;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::set_scope => is_local = part.as_str().eq_ignore_ascii_case("local"),
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::set_value_list => value = Some(build_set_value_list(part)),
+            _ => {}
+        }
+    }
+    Ok(SetStatement {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        value: value.ok_or(ParseError::UnexpectedEof)?,
+        is_local,
+    })
+}
+
+fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
+    let mut name = None;
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::identifier {
+            name = Some(build_identifier(part));
+        }
+    }
+    Ok(ResetStatement { name })
+}
+
+fn build_set_value_list(pair: Pair<'_, Rule>) -> String {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::set_value_atom)
+        .map(build_set_value_atom)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn build_set_value_atom(pair: Pair<'_, Rule>) -> String {
+    let pair = pair.clone().into_inner().next().unwrap_or(pair);
+    match pair.as_rule() {
+        Rule::signed_set_value => pair.as_str().to_string(),
+        Rule::string_literal => unescape_string(pair.as_str()),
+        Rule::kw_true => "true".to_string(),
+        Rule::kw_false => "false".to_string(),
+        Rule::kw_on_value => "on".to_string(),
+        Rule::kw_off => "off".to_string(),
+        Rule::kw_default => "default".to_string(),
+        Rule::identifier | Rule::numeric_literal | Rule::integer => pair.as_str().to_string(),
+        _ => pair.as_str().to_string(),
     }
 }
 

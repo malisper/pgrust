@@ -389,6 +389,7 @@ fn run_statement(
         matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
 
     let result = match stmt {
+        Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),

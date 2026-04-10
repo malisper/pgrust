@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::backend::access::transam::xact::TransactionId;
@@ -9,6 +10,7 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement};
 use crate::backend::parser::{PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update, ParseError};
 use crate::backend::storage::smgr::ForkNumber;
+use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -40,6 +42,7 @@ struct ActiveTransaction {
 pub struct Session {
     pub client_id: ClientId,
     active_txn: Option<ActiveTransaction>,
+    gucs: HashMap<String, String>,
 }
 
 impl Session {
@@ -47,6 +50,7 @@ impl Session {
         Self {
             client_id,
             active_txn: None,
+            gucs: HashMap::new(),
         }
     }
 
@@ -70,6 +74,8 @@ impl Session {
         let stmt = db.plan_cache.get_statement(sql)?;
 
         match stmt {
+            Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
+            Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::Begin => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -181,6 +187,8 @@ impl Session {
         let client_id = self.client_id;
 
         match stmt {
+            Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
+            Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let catalog_guard = db.catalog.read();
@@ -347,6 +355,28 @@ impl Session {
             Statement::Vacuum(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Begin | Statement::Commit | Statement::Rollback => unreachable!("handled in Session::execute"),
         }
+    }
+
+    fn apply_set(&mut self, stmt: &crate::backend::parser::SetStatement) -> Result<StatementResult, ExecError> {
+        let name = normalize_guc_name(&stmt.name);
+        if !is_postgres_guc(&name) {
+            return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(name)));
+        }
+        self.gucs.insert(name, stmt.value.clone());
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_reset(&mut self, stmt: &crate::backend::parser::ResetStatement) -> Result<StatementResult, ExecError> {
+        if let Some(name) = &stmt.name {
+            let normalized = normalize_guc_name(name);
+            if !is_postgres_guc(&normalized) {
+                return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(normalized)));
+            }
+            self.gucs.remove(&normalized);
+        } else {
+            self.gucs.clear();
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub fn prepare_insert(
