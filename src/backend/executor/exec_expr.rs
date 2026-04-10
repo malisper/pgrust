@@ -450,7 +450,9 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
                 left: Value::Text(CompactString::new(text)),
                 right: Value::Float64(0.0),
             }),
-        SqlTypeKind::Numeric => Ok(Value::Numeric(CompactString::new(text))),
+        SqlTypeKind::Numeric => Ok(Value::Numeric(CompactString::from_owned(
+            coerce_numeric_string(text, ty)?,
+        ))),
         SqlTypeKind::Bool => match text.to_ascii_lowercase().as_str() {
             "true" | "t" => Ok(Value::Bool(true)),
             "false" | "f" => Ok(Value::Bool(false)),
@@ -487,6 +489,42 @@ fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<St
             ty: format!("character varying({max_chars})"),
         })
     }
+}
+
+fn coerce_numeric_string(text: &str, ty: SqlType) -> Result<String, ExecError> {
+    let Some((precision, scale)) = ty.numeric_precision_scale() else {
+        return Ok(text.to_string());
+    };
+
+    let value = text.parse::<f64>().map_err(|_| ExecError::TypeMismatch {
+        op: "::numeric",
+        left: Value::Text(CompactString::new(text)),
+        right: Value::Numeric(CompactString::new("0")),
+    })?;
+
+    let scale_usize = usize::try_from(scale).map_err(|_| ExecError::TypeMismatch {
+        op: "::numeric",
+        left: Value::Text(CompactString::new(text)),
+        right: Value::Numeric(CompactString::new("0")),
+    })?;
+    let rendered = format!("{value:.scale_usize$}");
+    let digit_count = rendered
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .trim_start_matches('0')
+        .len()
+        .max(1) as i32;
+
+    if digit_count > precision {
+        return Err(ExecError::TypeMismatch {
+            op: "::numeric",
+            left: Value::Text(CompactString::new(text)),
+            right: Value::Numeric(CompactString::new("0")),
+        });
+    }
+
+    Ok(rendered)
 }
 
 pub(crate) fn compare_order_by_keys(

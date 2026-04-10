@@ -216,6 +216,14 @@ impl SqlType {
         }
     }
 
+    pub const fn with_numeric_precision_scale(precision: i32, scale: i32) -> Self {
+        Self {
+            kind: SqlTypeKind::Numeric,
+            typmod: Self::VARHDRSZ + ((precision << 16) | (scale & 0xffff)),
+            is_array: false,
+        }
+    }
+
     pub const fn array_of(mut elem: SqlType) -> Self {
         elem.is_array = true;
         elem
@@ -234,6 +242,15 @@ impl SqlType {
             Some(self.typmod - Self::VARHDRSZ)
         } else {
             None
+        }
+    }
+
+    pub fn numeric_precision_scale(self) -> Option<(i32, i32)> {
+        if self.kind != SqlTypeKind::Numeric || self.typmod < Self::VARHDRSZ {
+            None
+        } else {
+            let packed = self.typmod - Self::VARHDRSZ;
+            Some(((packed >> 16) & 0xffff, packed & 0xffff))
         }
     }
 }

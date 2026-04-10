@@ -253,14 +253,37 @@ mod tests {
             Statement::CreateTable(create) => {
                 assert_eq!(create.columns[0].ty, SqlType::new(SqlTypeKind::Numeric));
                 assert_eq!(create.columns[1].ty, SqlType::new(SqlTypeKind::Numeric));
-                assert_eq!(create.columns[2].ty, SqlType::new(SqlTypeKind::Numeric));
-                assert_eq!(create.columns[3].ty, SqlType::new(SqlTypeKind::Numeric));
+                assert_eq!(
+                    create.columns[2].ty,
+                    SqlType::with_numeric_precision_scale(10, 0)
+                );
+                assert_eq!(
+                    create.columns[3].ty,
+                    SqlType::with_numeric_precision_scale(12, 4)
+                );
                 assert_eq!(
                     create.columns[4].ty,
                     SqlType::array_of(SqlType::new(SqlTypeKind::Numeric))
                 );
             }
             other => panic!("expected create table statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_numeric_cast_typmods() {
+        let stmt = parse_select("select '12.34'::numeric(8,2), '12'::decimal(5)").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(_, ty) => {
+                assert_eq!(*ty, SqlType::with_numeric_precision_scale(8, 2));
+            }
+            other => panic!("expected cast expression, got {other:?}"),
+        }
+        match &stmt.targets[1].expr {
+            SqlExpr::Cast(_, ty) => {
+                assert_eq!(*ty, SqlType::with_numeric_precision_scale(5, 0));
+            }
+            other => panic!("expected cast expression, got {other:?}"),
         }
     }
 
