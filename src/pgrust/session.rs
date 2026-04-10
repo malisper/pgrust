@@ -471,7 +471,7 @@ impl Session {
                                     left: Value::Null,
                                     right: Value::Text(raw.clone().into()),
                                 }),
-                            ScalarType::Numeric => Ok(Value::Numeric(raw.clone().into())),
+                            ScalarType::Numeric => Ok(Value::Numeric(raw.as_str().into())),
                             ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),

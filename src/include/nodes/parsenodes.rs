@@ -21,6 +21,11 @@ pub enum ParseError {
     TableAlreadyExists(String),
     TableDoesNotExist(String),
     UnsupportedType(String),
+    UndefinedOperator {
+        op: &'static str,
+        left_type: String,
+        right_type: String,
+    },
     UngroupedColumn(String),
     AggInWhere,
     SubqueryMustReturnOneColumn,
@@ -46,6 +51,9 @@ impl fmt::Display for ParseError {
             ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
             ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
             ParseError::UnsupportedType(name) => write!(f, "unsupported type: {name}"),
+            ParseError::UndefinedOperator { op, left_type, right_type } => {
+                write!(f, "operator does not exist: {left_type} {op} {right_type}")
+            }
             ParseError::UngroupedColumn(name) => {
                 write!(f, "column \"{name}\" must appear in the GROUP BY clause or be used in an aggregate function")
             }

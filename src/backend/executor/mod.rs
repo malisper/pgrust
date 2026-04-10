@@ -26,7 +26,7 @@ use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cmp::Ordering;
 use std::rc::Rc;
 
-use exec_expr::{compare_order_values, parse_numeric_text, render_numeric_text, ParsedNumeric};
+use exec_expr::{compare_order_values, parse_numeric_text};
 
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
@@ -71,6 +71,13 @@ pub enum ExecError {
     MissingRequiredColumn(String),
     InvalidRegex(String),
     DivisionByZero(&'static str),
+    InvalidIntegerInput { ty: &'static str, value: String },
+    InvalidNumericInput(String),
+    InvalidFloatInput(String),
+    Int2OutOfRange,
+    Int4OutOfRange,
+    Int8OutOfRange,
+    NumericFieldOverflow,
 }
 
 impl From<HeapError> for ExecError {
@@ -103,7 +110,7 @@ use std::collections::HashSet;
 pub(crate) enum NumericAccum {
     Int(i64),
     Float(f64),
-    Numeric(ParsedNumeric),
+    Numeric(NumericValue),
 }
 
 #[derive(Debug, Clone)]
@@ -205,7 +212,7 @@ impl AccumState {
                 Some(NumericAccum::Int(v)) => Value::Int64(*v),
                 Some(NumericAccum::Float(v)) => Value::Float64(*v),
                 Some(NumericAccum::Numeric(v)) => {
-                    Value::Numeric(crate::pgrust::compact_string::CompactString::new(&format_numeric_result(v.clone(), *result_type)))
+                    Value::Numeric(format_numeric_result(v.clone(), *result_type))
                 }
                 None => Value::Null,
             },
@@ -216,10 +223,10 @@ impl AccumState {
                     match sum {
                         Some(NumericAccum::Int(v)) => {
                             if matches!(result_type.kind, crate::backend::parser::SqlTypeKind::Numeric) {
-                                let avg = ParsedNumeric::from_i64(*v)
-                                    .div(&ParsedNumeric::from_i64(*count), 16)
-                                    .unwrap_or_else(|| ParsedNumeric::from_i64(*v / *count));
-                                Value::Numeric(crate::pgrust::compact_string::CompactString::new(&format_numeric_result(avg, *result_type)))
+                                let avg = NumericValue::from_i64(*v)
+                                    .div(&NumericValue::from_i64(*count), 16)
+                                    .unwrap_or_else(|| NumericValue::from_i64(*v / *count));
+                                Value::Numeric(format_numeric_result(avg, *result_type))
                             } else {
                                 Value::Int64(*v / *count)
                             }
@@ -227,9 +234,9 @@ impl AccumState {
                         Some(NumericAccum::Float(v)) => Value::Float64(*v / *count as f64),
                         Some(NumericAccum::Numeric(v)) => {
                             let avg = v
-                                .div(&ParsedNumeric::from_i64(*count), 16)
+                                .div(&NumericValue::from_i64(*count), 16)
                                 .unwrap_or_else(|| v.clone());
-                            Value::Numeric(crate::pgrust::compact_string::CompactString::new(&format_numeric_result(avg, *result_type)))
+                            Value::Numeric(format_numeric_result(avg, *result_type))
                         }
                         None => Value::Null,
                     }
@@ -253,27 +260,27 @@ fn accumulate_value(
         Value::Int64(v) => Some(accumulate_integral(sum, result_type, *v)),
         Value::Float64(v) => Some(match sum {
             Some(NumericAccum::Numeric(cur)) => {
-                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(|| ParsedNumeric::from_i64(0));
-                NumericAccum::Numeric(cur.add(&rhs).unwrap_or(cur))
+                let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);
+                NumericAccum::Numeric(cur.add(&rhs))
             }
             Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
             Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
             None => {
                 if matches!(result_type.kind, crate::backend::parser::SqlTypeKind::Numeric) {
-                    NumericAccum::Numeric(parse_numeric_text(&v.to_string()).unwrap_or_else(|| ParsedNumeric::from_i64(0)))
+                    NumericAccum::Numeric(parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero))
                 } else {
                     NumericAccum::Float(*v)
                 }
             }
         }),
         Value::Numeric(v) => {
-            let parsed = parse_numeric_text(v.as_str()).unwrap_or_else(|| ParsedNumeric::from_i64(0));
+            let parsed = v.clone();
             Some(match sum {
-                Some(NumericAccum::Numeric(cur)) => NumericAccum::Numeric(cur.add(&parsed).unwrap_or(cur)),
-                Some(NumericAccum::Int(cur)) => NumericAccum::Numeric(ParsedNumeric::from_i64(cur).add(&parsed).unwrap_or(parsed)),
+                Some(NumericAccum::Numeric(cur)) => NumericAccum::Numeric(cur.add(&parsed)),
+                Some(NumericAccum::Int(cur)) => NumericAccum::Numeric(NumericValue::from_i64(cur).add(&parsed)),
                 Some(NumericAccum::Float(cur)) => {
-                    let left = parse_numeric_text(&cur.to_string()).unwrap_or_else(|| ParsedNumeric::from_i64(0));
-                    NumericAccum::Numeric(left.add(&parsed).unwrap_or(parsed))
+                    let left = parse_numeric_text(&cur.to_string()).unwrap_or_else(NumericValue::zero);
+                    NumericAccum::Numeric(left.add(&parsed))
                 }
                 None => NumericAccum::Numeric(parsed),
             })
@@ -289,13 +296,13 @@ fn accumulate_integral(
 ) -> NumericAccum {
     match sum {
         Some(NumericAccum::Numeric(cur)) => NumericAccum::Numeric(
-            cur.add(&ParsedNumeric::from_i64(value)).unwrap_or(cur),
+            cur.add(&NumericValue::from_i64(value)),
         ),
         Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + value),
         Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + value as f64),
         None => {
             if matches!(result_type.kind, crate::backend::parser::SqlTypeKind::Numeric) {
-                NumericAccum::Numeric(ParsedNumeric::from_i64(value))
+                NumericAccum::Numeric(NumericValue::from_i64(value))
             } else {
                 NumericAccum::Int(value)
             }
@@ -303,13 +310,13 @@ fn accumulate_integral(
     }
 }
 
-fn format_numeric_result(value: ParsedNumeric, sql_type: crate::backend::parser::SqlType) -> String {
+fn format_numeric_result(value: NumericValue, sql_type: crate::backend::parser::SqlType) -> NumericValue {
     let adjusted = if let Some((_, scale)) = sql_type.numeric_precision_scale() {
         value.round_to_scale(scale as u32).unwrap_or(value)
     } else {
         value
     };
-    render_numeric_text(&adjusted)
+    adjusted
 }
 
 #[derive(Debug, Clone)]
@@ -1203,7 +1210,7 @@ mod tests {
         let txns = TransactionManager::new_durable(&base).unwrap();
         let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '1234.56'::numeric(5,2)")
             .unwrap_err();
-        assert!(matches!(err, ExecError::TypeMismatch { op: "::numeric", .. }));
+        assert!(matches!(err, ExecError::NumericFieldOverflow));
     }
 
     #[test]

@@ -87,7 +87,7 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                 | SqlTypeKind::Char
                 | SqlTypeKind::Varchar => {
                     if matches!(element_type.kind, SqlTypeKind::Numeric) {
-                        Value::Numeric(value.into())
+                        Value::Numeric(value.as_str().into())
                     } else {
                         Value::Text(value.into())
                     }
