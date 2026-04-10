@@ -181,6 +181,7 @@ pub enum SqlTypeKind {
     Int8,
     Float4,
     Float8,
+    Numeric,
     Text,
     Bool,
     Timestamp,

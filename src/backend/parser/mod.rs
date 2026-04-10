@@ -223,21 +223,44 @@ mod tests {
     #[test]
     fn parse_extended_numeric_type_cast_expressions() {
         let stmt = parse_select(
-            "select '7'::int2, '9'::bigint, '1.5'::real, '2.5'::double precision",
+            "select '7'::int2, '9'::bigint, '1.5'::real, '2.5'::double precision, '3.25'::numeric, '4.5'::decimal(10,2)",
         )
         .unwrap();
-        assert_eq!(stmt.targets.len(), 4);
+        assert_eq!(stmt.targets.len(), 6);
         let expected = [
             SqlTypeKind::Int2,
             SqlTypeKind::Int8,
             SqlTypeKind::Float4,
             SqlTypeKind::Float8,
+            SqlTypeKind::Numeric,
+            SqlTypeKind::Numeric,
         ];
         for (target, kind) in stmt.targets.iter().zip(expected) {
             match &target.expr {
                 SqlExpr::Cast(_, ty) => assert_eq!(ty.kind, kind),
                 other => panic!("expected cast expression, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn parse_create_table_with_numeric_types() {
+        let stmt = parse_statement(
+            "create table metrics (a numeric, b decimal, c numeric(10), d decimal(12,4), e numeric[])",
+        )
+        .unwrap();
+        match stmt {
+            Statement::CreateTable(create) => {
+                assert_eq!(create.columns[0].ty, SqlType::new(SqlTypeKind::Numeric));
+                assert_eq!(create.columns[1].ty, SqlType::new(SqlTypeKind::Numeric));
+                assert_eq!(create.columns[2].ty, SqlType::new(SqlTypeKind::Numeric));
+                assert_eq!(create.columns[3].ty, SqlType::new(SqlTypeKind::Numeric));
+                assert_eq!(
+                    create.columns[4].ty,
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Numeric))
+                );
+            }
+            other => panic!("expected create table statement, got {other:?}"),
         }
     }
 

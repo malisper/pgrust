@@ -317,6 +317,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v as i32)),
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -337,6 +338,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v)),
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -351,7 +353,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(if v { "true" } else { "false" }, ty, true)
             }
-            SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Err(ExecError::TypeMismatch {
+            SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Float4 | SqlTypeKind::Float8 | SqlTypeKind::Numeric, .. } => Err(ExecError::TypeMismatch {
                 op: "::int4",
                 left: Value::Bool(v),
                 right: Value::Int32(0),
@@ -381,6 +383,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                 }),
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -392,6 +395,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
         },
         Value::Float64(v) => match ty {
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v)),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -407,6 +411,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                 },
             }),
         },
+        Value::Numeric(text) => cast_text_value(text.as_str(), ty, true),
         Value::Array(items) => Ok(Value::Array(items)),
     }
 }
@@ -445,6 +450,7 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
                 left: Value::Text(CompactString::new(text)),
                 right: Value::Float64(0.0),
             }),
+        SqlTypeKind::Numeric => Ok(Value::Numeric(CompactString::new(text))),
         SqlTypeKind::Bool => match text.to_ascii_lowercase().as_str() {
             "true" | "t" => Ok(Value::Bool(true)),
             "false" | "f" => Ok(Value::Bool(false)),
@@ -781,6 +787,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((*v as f32).to_le_bytes().to_vec())),
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Numeric, v) => {
+            let coerced = coerce_assignment_value(v, column.sql_type)?;
+            Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
+        }
         (ScalarType::Text, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
             Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
@@ -832,6 +842,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
         Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Numeric(text) => cast_text_value(text.as_str(), target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::Array(items) => Ok(Value::Array(items.clone())),
@@ -928,6 +939,18 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                         details: "float8 must be exactly 8 bytes".into(),
                     })?,
             )))
+        }
+        ScalarType::Numeric => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Numeric(CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            })))
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -1279,6 +1302,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
+        Value::Numeric(text) => Ok(text.as_bytes().to_vec()),
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
         Value::Float64(v) => Ok(v.to_string().into_bytes()),
@@ -1368,6 +1392,11 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
                 Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
             }
         }
+        SqlTypeKind::Numeric => {
+            Ok(Value::Numeric(CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            })))
+        }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1395,6 +1424,7 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Int32(v) => out.push_str(&v.to_string()),
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Float64(v) => out.push_str(&v.to_string()),
+            Value::Numeric(v) => out.push_str(v.as_str()),
             Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
             Value::Text(_) | Value::TextRef(_, _) => {
                 out.push('"');

@@ -17,6 +17,7 @@ pub enum ScalarType {
     Int64,
     Float32,
     Float64,
+    Numeric,
     Text,
     Bool,
     Array(Box<ScalarType>),
@@ -62,6 +63,7 @@ pub enum Value {
     Int32(i32),
     Int64(i64),
     Float64(f64),
+    Numeric(CompactString),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned
     /// (the slot's `Rc<OwnedBufferPin>` keeps the pin alive). User data on the
@@ -89,13 +91,20 @@ impl Value {
     pub fn to_owned_value(&self) -> Value {
         match self {
             Value::Int16(v) => Value::Int16(*v),
+            Value::Int32(v) => Value::Int32(*v),
+            Value::Int64(v) => Value::Int64(*v),
+            Value::Float64(v) => Value::Float64(*v),
+            Value::Numeric(v) => Value::Numeric(v.clone()),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
                 };
                 Value::Text(CompactString::new(s))
             }
+            Value::Text(s) => Value::Text(s.clone()),
+            Value::Bool(v) => Value::Bool(*v),
             Value::Array(values) => Value::Array(values.iter().map(Value::to_owned_value).collect()),
+            Value::Null => Value::Null,
             other => other.clone(),
         }
     }
@@ -124,6 +133,7 @@ impl PartialEq for Value {
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
+            (Value::Numeric(a), Value::Numeric(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -144,21 +154,22 @@ impl std::hash::Hash for Value {
             Value::Int32(v) => { 1u8.hash(state); v.hash(state); }
             Value::Int64(v) => { 2u8.hash(state); v.hash(state); }
             Value::Float64(v) => { 3u8.hash(state); v.to_bits().hash(state); }
+            Value::Numeric(v) => { 4u8.hash(state); v.hash(state); }
             // Text and TextRef hash the same way so equal values get the same hash
-            Value::Text(s) => { 4u8.hash(state); s.as_str().hash(state); }
+            Value::Text(s) => { 5u8.hash(state); s.as_str().hash(state); }
             Value::TextRef(ptr, len) => {
-                4u8.hash(state);
+                5u8.hash(state);
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
                 };
                 s.hash(state);
             }
-            Value::Bool(v) => { 5u8.hash(state); v.hash(state); }
+            Value::Bool(v) => { 6u8.hash(state); v.hash(state); }
             Value::Array(values) => {
-                6u8.hash(state);
+                7u8.hash(state);
                 values.hash(state);
             }
-            Value::Null => { 7u8.hash(state); }
+            Value::Null => { 8u8.hash(state); }
         }
     }
 }

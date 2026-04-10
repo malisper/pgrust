@@ -1115,6 +1115,7 @@ fn infer_sql_expr_type(
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
+        SqlExpr::Const(Value::Numeric(_)) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) | SqlExpr::Const(Value::Null) => {
             SqlType::new(SqlTypeKind::Text)
         }
