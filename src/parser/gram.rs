@@ -511,14 +511,44 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
 }
 
 fn build_type(pair: Pair<'_, Rule>) -> SqlType {
-    match pair.as_str().to_ascii_lowercase().as_str() {
-        "int4" | "int" | "integer" => SqlType::Int4,
-        "text" => SqlType::Text,
-        "bool" | "boolean" => SqlType::Bool,
-        "timestamp" => SqlType::Timestamp,
-        ty if ty.starts_with("char(") => SqlType::Char,
-        _ => unreachable!(),
+    match pair.as_rule() {
+        Rule::type_name => build_type(pair.into_inner().next().expect("type_name inner")),
+        Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
+        Rule::kw_text => SqlType::new(SqlTypeKind::Text),
+        Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
+        Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
+        Rule::char_type => {
+            let len = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("char length");
+            match len {
+                Some(len) => SqlType::with_char_len(SqlTypeKind::Char, len),
+                None => SqlType::new(SqlTypeKind::Char),
+            }
+        }
+        Rule::varchar_type | Rule::character_varying_type => {
+            let len = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("varchar length");
+            match len {
+                Some(len) => SqlType::with_char_len(SqlTypeKind::Varchar, len),
+                None => SqlType::new(SqlTypeKind::Varchar),
+            }
+        }
+        _ => unreachable!("unexpected type rule {:?}", pair.as_rule()),
     }
+}
+
+fn build_type_len(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
+    pair.as_str()
+        .parse::<i32>()
+        .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
 }
 
 fn build_identifier(pair: Pair<'_, Rule>) -> String {

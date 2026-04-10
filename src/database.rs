@@ -603,6 +603,7 @@ impl Database {
             Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
             None => (self.txns.read().snapshot(INVALID_TRANSACTION_ID)?, 0),
         };
+        let columns = plan.columns();
         let column_names = plan.column_names();
         let state = executor_start(plan);
         let ctx = ExecutorContext {
@@ -617,6 +618,7 @@ impl Database {
         Ok(SelectGuard {
             state,
             ctx,
+            columns,
             column_names,
             table_rel,
             table_locks: &self.table_locks,
@@ -631,6 +633,7 @@ impl Database {
 pub struct SelectGuard<'a> {
     pub state: crate::executor::nodes::PlanState,
     pub ctx: ExecutorContext,
+    pub columns: Vec<crate::executor::QueryColumn>,
     pub column_names: Vec<String>,
     table_rel: Option<RelFileLocator>,
     table_locks: &'a TableLockManager,

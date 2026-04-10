@@ -54,8 +54,10 @@ column_def = { identifier ~ type_name ~ nullability? }
 nullability = { not_null | nullable }
 not_null = { kw_not ~ kw_null }
 nullable = { kw_null }
-type_name = { kw_int4 | kw_int | kw_integer | kw_text | kw_bool | kw_boolean | kw_timestamp | char_type }
-char_type = { kw_char ~ "(" ~ integer ~ ")" }
+type_name = { kw_int4 | kw_int | kw_integer | kw_text | kw_bool | kw_boolean | kw_timestamp | char_type | varchar_type | character_varying_type }
+char_type = { kw_char ~ ("(" ~ integer ~ ")")? }
+varchar_type = { kw_varchar ~ ("(" ~ integer ~ ")")? }
+character_varying_type = { kw_character ~ kw_varying ~ ("(" ~ integer ~ ")")? }
 
 assignment = { identifier ~ "=" ~ expr }
 
@@ -155,6 +157,9 @@ kw_bool = { kw_bool_atom }
 kw_boolean = { kw_boolean_atom }
 kw_timestamp = { kw_timestamp_atom }
 kw_char = { kw_char_atom }
+kw_character = { kw_character_atom }
+kw_varchar = { kw_varchar_atom }
+kw_varying = { kw_varying_atom }
 kw_asc = { kw_asc_atom }
 kw_desc = { kw_desc_atom }
 kw_first = { kw_first_atom }
@@ -230,6 +235,9 @@ kw_bool_atom = @{ ^"bool" ~ keyword_end }
 kw_boolean_atom = @{ ^"boolean" ~ keyword_end }
 kw_timestamp_atom = @{ ^"timestamp" ~ keyword_end }
 kw_char_atom = @{ ^"char" ~ keyword_end }
+kw_character_atom = @{ ^"character" ~ keyword_end }
+kw_varchar_atom = @{ ^"varchar" ~ keyword_end }
+kw_varying_atom = @{ ^"varying" ~ keyword_end }
 kw_asc_atom = @{ ^"asc" ~ keyword_end }
 kw_desc_atom = @{ ^"desc" ~ keyword_end }
 kw_first_atom = @{ ^"first" ~ keyword_end }

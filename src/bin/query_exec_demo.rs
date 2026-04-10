@@ -4,11 +4,13 @@
 
 use pgrust::access::heap::am::{heap_flush, heap_insert_mvcc};
 use pgrust::access::heap::mvcc::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::access::heap::tuple::{AttributeAlign, AttributeDesc, HeapTuple, TupleValue};
+use pgrust::access::heap::tuple::{HeapTuple, TupleValue};
+use pgrust::catalog::column_desc;
 use pgrust::executor::{
-    ColumnDesc, ExecError, ExecutorContext, Expr, Plan, RelationDesc, ScalarType, TargetEntry,
+    ExecError, ExecutorContext, Expr, Plan, RelationDesc, TargetEntry,
     Value, exec_next, executor_start,
 };
+use pgrust::parser::{SqlType, SqlTypeKind};
 use pgrust::storage::smgr::MdStorageManager;
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
@@ -27,36 +29,9 @@ fn rel() -> RelFileLocator {
 fn desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
-            ColumnDesc {
-                name: "id".into(),
-                storage: AttributeDesc {
-                    name: "id".into(),
-                    attlen: 4,
-                    attalign: AttributeAlign::Int,
-                    nullable: false,
-                },
-                ty: ScalarType::Int32,
-            },
-            ColumnDesc {
-                name: "name".into(),
-                storage: AttributeDesc {
-                    name: "name".into(),
-                    attlen: -1,
-                    attalign: AttributeAlign::Int,
-                    nullable: false,
-                },
-                ty: ScalarType::Text,
-            },
-            ColumnDesc {
-                name: "note".into(),
-                storage: AttributeDesc {
-                    name: "note".into(),
-                    attlen: -1,
-                    attalign: AttributeAlign::Int,
-                    nullable: true,
-                },
-                ty: ScalarType::Text,
-            },
+            column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+            column_desc("name", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("note", SqlType::new(SqlTypeKind::Text), true),
         ],
     }
 }
@@ -137,10 +112,12 @@ fn main() -> Result<(), ExecError> {
             TargetEntry {
                 name: "name".into(),
                 expr: Expr::Column(1),
+                sql_type: SqlType::new(SqlTypeKind::Text),
             },
             TargetEntry {
                 name: "note".into(),
                 expr: Expr::Column(2),
+                sql_type: SqlType::new(SqlTypeKind::Text),
             },
         ],
     };

@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crate::access::heap::tuple::AttributeAlign;
 use crate::executor::{ColumnDesc, RelationDesc, ScalarType};
+use crate::parser::{SqlType, SqlTypeKind};
 use crate::storage::smgr::RelFileLocator;
 
-const CATALOG_FORMAT_VERSION: &str = "v1";
 const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
 const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
@@ -125,9 +125,7 @@ impl DurableCatalog {
 
 fn persist_catalog_file(path: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(
-        format!("{CATALOG_FORMAT_VERSION}\t{}\n", catalog.next_rel_number).as_bytes(),
-    );
+    bytes.extend_from_slice(format!("{}\n", catalog.next_rel_number).as_bytes());
 
     for (name, entry) in &catalog.tables {
         bytes.extend_from_slice(
@@ -143,10 +141,11 @@ fn persist_catalog_file(path: &Path, catalog: &Catalog) -> Result<(), CatalogErr
         for column in &entry.desc.columns {
             bytes.extend_from_slice(
                 format!(
-                    "col\t{}\t{}\t{}\n",
+                    "col\t{}\t{}\t{}\t{}\n",
                     column.name,
-                    encode_scalar_type(column.ty),
-                    if column.storage.nullable { "null" } else { "not_null" }
+                    encode_sql_type(column.sql_type),
+                    if column.storage.nullable { "null" } else { "not_null" },
+                    column.sql_type.typmod,
                 )
                 .as_bytes(),
             );
@@ -163,12 +162,17 @@ fn load_catalog_file(path: &Path) -> Result<Catalog, CatalogError> {
         return Err(CatalogError::Corrupt("missing catalog header"));
     };
     let mut header_parts = header.split('\t');
-    if header_parts.next() != Some(CATALOG_FORMAT_VERSION) {
-        return Err(CatalogError::Corrupt("unknown catalog format version"));
-    }
-    let next_rel_number = header_parts
+    let first_part = header_parts
         .next()
-        .ok_or(CatalogError::Corrupt("missing next rel number"))?
+        .ok_or(CatalogError::Corrupt("missing next rel number"))?;
+    let next_rel_number_part = if first_part == "v2" {
+        header_parts
+            .next()
+            .ok_or(CatalogError::Corrupt("missing next rel number"))?
+    } else {
+        first_part
+    };
+    let next_rel_number = next_rel_number_part
         .parse::<u32>()
         .map_err(|_| CatalogError::Corrupt("invalid next rel number"))?;
 
@@ -200,11 +204,9 @@ fn load_catalog_file(path: &Path) -> Result<Catalog, CatalogError> {
                 .next()
                 .ok_or(CatalogError::Corrupt("missing column name"))?
                 .to_string();
-            let ty = decode_scalar_type(
-                col_parts
-                    .next()
-                    .ok_or(CatalogError::Corrupt("missing column type"))?,
-            )?;
+            let type_name = col_parts
+                .next()
+                .ok_or(CatalogError::Corrupt("missing column type"))?;
             let nullable = match col_parts
                 .next()
                 .ok_or(CatalogError::Corrupt("missing nullable flag"))?
@@ -213,7 +215,13 @@ fn load_catalog_file(path: &Path) -> Result<Catalog, CatalogError> {
                 "not_null" => false,
                 _ => return Err(CatalogError::Corrupt("invalid nullable flag")),
             };
-            columns.push(column_desc(column_name, ty, nullable));
+            let typmod = col_parts
+                .next()
+                .ok_or(CatalogError::Corrupt("missing typmod"))?
+                .parse::<i32>()
+                .map_err(|_| CatalogError::Corrupt("invalid typmod"))?;
+            let sql_type = decode_sql_type(type_name, typmod)?;
+            columns.push(column_desc(column_name, sql_type, nullable));
         }
 
         tables.insert(
@@ -241,8 +249,9 @@ fn parse_u32(part: Option<&str>, err: &'static str) -> Result<u32, CatalogError>
         .map_err(|_| CatalogError::Corrupt(err))
 }
 
-pub fn column_desc(name: impl Into<String>, ty: ScalarType, nullable: bool) -> ColumnDesc {
+pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();
+    let ty = scalar_type_for_sql_type(sql_type);
     let (attlen, attalign) = match ty {
         ScalarType::Int32 => (4, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
@@ -257,22 +266,39 @@ pub fn column_desc(name: impl Into<String>, ty: ScalarType, nullable: bool) -> C
             nullable,
         },
         ty,
+        sql_type,
     }
 }
 
-fn encode_scalar_type(ty: ScalarType) -> &'static str {
-    match ty {
-        ScalarType::Int32 => "int4",
-        ScalarType::Text => "text",
-        ScalarType::Bool => "bool",
+fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
+    match sql_type.kind {
+        SqlTypeKind::Int4 => ScalarType::Int32,
+        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+            ScalarType::Text
+        }
+        SqlTypeKind::Bool => ScalarType::Bool,
     }
 }
 
-fn decode_scalar_type(name: &str) -> Result<ScalarType, CatalogError> {
+fn encode_sql_type(sql_type: SqlType) -> &'static str {
+    match sql_type.kind {
+        SqlTypeKind::Int4 => "int4",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Bool => "bool",
+        SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::Char => "char",
+        SqlTypeKind::Varchar => "varchar",
+    }
+}
+
+fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
     match name {
-        "int4" => Ok(ScalarType::Int32),
-        "text" => Ok(ScalarType::Text),
-        "bool" => Ok(ScalarType::Bool),
+        "int4" => Ok(SqlType { kind: SqlTypeKind::Int4, typmod }),
+        "text" => Ok(SqlType { kind: SqlTypeKind::Text, typmod }),
+        "bool" => Ok(SqlType { kind: SqlTypeKind::Bool, typmod }),
+        "timestamp" => Ok(SqlType { kind: SqlTypeKind::Timestamp, typmod }),
+        "char" => Ok(SqlType { kind: SqlTypeKind::Char, typmod }),
+        "varchar" => Ok(SqlType { kind: SqlTypeKind::Varchar, typmod }),
         other => Err(CatalogError::UnknownType(other.to_string())),
     }
 }
@@ -300,9 +326,9 @@ mod tests {
                 "people",
                 RelationDesc {
                     columns: vec![
-                        column_desc("id", ScalarType::Int32, false),
-                        column_desc("name", ScalarType::Text, false),
-                        column_desc("note", ScalarType::Text, true),
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("name", SqlType::new(SqlTypeKind::Text), false),
+                        column_desc("note", SqlType::new(SqlTypeKind::Text), true),
                     ],
                 },
             )
@@ -315,6 +341,8 @@ mod tests {
         assert_eq!(reopened_entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert_eq!(reopened_entry.desc.columns.len(), 3);
         assert!(reopened_entry.desc.columns[2].storage.nullable);
+        let persisted = fs::read_to_string(base.join("catalog").join("schema")).unwrap();
+        assert!(persisted.starts_with("16001\n"));
     }
 
     #[test]
@@ -326,7 +354,7 @@ mod tests {
             .create_table(
                 "widgets",
                 RelationDesc {
-                    columns: vec![column_desc("id", ScalarType::Int32, false)],
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
                 },
             )
             .unwrap();
@@ -337,5 +365,61 @@ mod tests {
 
         let reopened = DurableCatalog::load(&base).unwrap();
         assert!(reopened.catalog().get("widgets").is_none());
+    }
+
+    #[test]
+    fn durable_catalog_roundtrips_varchar_typmod() {
+        let base = temp_dir("varchar_roundtrip");
+        let mut store = DurableCatalog::load(&base).unwrap();
+        store
+            .catalog_mut()
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc(
+                        "name",
+                        SqlType::with_char_len(SqlTypeKind::Varchar, 5),
+                        false,
+                    )],
+                },
+            )
+            .unwrap();
+        store.persist().unwrap();
+
+        let reopened = DurableCatalog::load(&base).unwrap();
+        let column = &reopened.catalog().get("people").unwrap().desc.columns[0];
+        assert_eq!(column.sql_type, SqlType::with_char_len(SqlTypeKind::Varchar, 5));
+    }
+
+    #[test]
+    fn durable_catalog_loads_existing_v2_header() {
+        let base = temp_dir("legacy_v2");
+        let schema_dir = base.join("catalog");
+        fs::create_dir_all(&schema_dir).unwrap();
+        fs::write(
+            schema_dir.join("schema"),
+            "v2\t16001\ntable\tpeople\t0\t1\t16000\t2\ncol\tid\tint4\tnot_null\t-1\ncol\tname\ttext\tnull\t-1\n",
+        )
+        .unwrap();
+
+        let reopened = DurableCatalog::load(&base).unwrap();
+        let entry = reopened.catalog().get("people").unwrap();
+        assert_eq!(entry.desc.columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
+        assert_eq!(entry.desc.columns[1].sql_type, SqlType::new(SqlTypeKind::Text));
+    }
+
+    #[test]
+    fn durable_catalog_rejects_legacy_v1_files() {
+        let base = temp_dir("legacy_v1");
+        let schema_dir = base.join("catalog");
+        fs::create_dir_all(&schema_dir).unwrap();
+        fs::write(
+            schema_dir.join("schema"),
+            "v1\t16001\ntable\tpeople\t0\t1\t16000\t2\ncol\tid\tint4\tnot_null\ncol\tname\ttext\tnull\n",
+        )
+        .unwrap();
+
+        let err = DurableCatalog::load(&base).unwrap_err();
+        assert_eq!(err, CatalogError::Corrupt("invalid next rel number"));
     }
 }

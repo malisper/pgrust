@@ -8,13 +8,13 @@ use parking_lot::RwLock;
 
 use pgrust::access::heap::am::{heap_flush, heap_insert_mvcc};
 use pgrust::access::heap::mvcc::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::access::heap::tuple::{AttributeAlign, AttributeDesc, HeapTuple, TupleValue};
-use pgrust::catalog::{Catalog, DurableCatalog};
+use pgrust::access::heap::tuple::{HeapTuple, TupleValue};
+use pgrust::catalog::{Catalog, DurableCatalog, column_desc};
 use pgrust::executor::{
-    ColumnDesc, ExecError, ExecutorContext, RelationDesc, ScalarType, StatementResult, Value,
+    ExecError, ExecutorContext, RelationDesc, StatementResult, Value,
     execute_statement,
 };
-use pgrust::parser::{ParseError, Statement, parse_statement};
+use pgrust::parser::{ParseError, SqlType, SqlTypeKind, Statement, parse_statement};
 use pgrust::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use pgrust::{BufferPool, SmgrStorageBackend};
 
@@ -98,36 +98,9 @@ fn append_history(path: &std::path::Path, line: &str) -> Result<(), String> {
 fn desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
-            ColumnDesc {
-                name: "id".into(),
-                storage: AttributeDesc {
-                    name: "id".into(),
-                    attlen: 4,
-                    attalign: AttributeAlign::Int,
-                    nullable: false,
-                },
-                ty: ScalarType::Int32,
-            },
-            ColumnDesc {
-                name: "name".into(),
-                storage: AttributeDesc {
-                    name: "name".into(),
-                    attlen: -1,
-                    attalign: AttributeAlign::Int,
-                    nullable: false,
-                },
-                ty: ScalarType::Text,
-            },
-            ColumnDesc {
-                name: "note".into(),
-                storage: AttributeDesc {
-                    name: "note".into(),
-                    attlen: -1,
-                    attalign: AttributeAlign::Int,
-                    nullable: true,
-                },
-                ty: ScalarType::Text,
-            },
+            column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+            column_desc("name", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("note", SqlType::new(SqlTypeKind::Text), true),
         ],
     }
 }
@@ -172,7 +145,7 @@ fn print_result(result: StatementResult) {
         StatementResult::AffectedRows(count) => {
             println!("AFFECTED ROWS: {}", count);
         }
-        StatementResult::Query { column_names, rows } => {
+        StatementResult::Query { column_names, rows, .. } => {
             if column_names.is_empty() {
                 println!("({} rows)", rows.len());
                 return;

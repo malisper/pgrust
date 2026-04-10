@@ -20,42 +20,15 @@ pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access::heap::tuple::{AttributeAlign, AttributeDesc};
-    use crate::executor::{AggFunc, ColumnDesc, Expr, Plan, RelationDesc, ScalarType};
+    use crate::catalog::column_desc;
+    use crate::executor::{AggFunc, Expr, Plan, RelationDesc};
 
     fn desc() -> RelationDesc {
         RelationDesc {
             columns: vec![
-                ColumnDesc {
-                    name: "id".into(),
-                    storage: AttributeDesc {
-                        name: "id".into(),
-                        attlen: 4,
-                        attalign: AttributeAlign::Int,
-                        nullable: false,
-                    },
-                    ty: ScalarType::Int32,
-                },
-                ColumnDesc {
-                    name: "name".into(),
-                    storage: AttributeDesc {
-                        name: "name".into(),
-                        attlen: -1,
-                        attalign: AttributeAlign::Int,
-                        nullable: false,
-                    },
-                    ty: ScalarType::Text,
-                },
-                ColumnDesc {
-                    name: "note".into(),
-                    storage: AttributeDesc {
-                        name: "note".into(),
-                        attlen: -1,
-                        attalign: AttributeAlign::Int,
-                        nullable: true,
-                    },
-                    ty: ScalarType::Text,
-                },
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("name", SqlType::new(SqlTypeKind::Text), false),
+                column_desc("note", SqlType::new(SqlTypeKind::Text), true),
             ],
         }
     }
@@ -225,11 +198,24 @@ mod tests {
     fn parse_type_cast_expression() {
         let stmt = parse_select("select (p.name)::text from people p").unwrap();
         assert_eq!(stmt.targets[0].output_name, "name");
-        assert!(matches!(
-            &stmt.targets[0].expr,
-            SqlExpr::Cast(inner, SqlType::Text)
-                if matches!(**inner, SqlExpr::Column(ref name) if name == "p.name")
-        ));
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
+                assert!(matches!(**inner, SqlExpr::Column(ref name) if name == "p.name"));
+            }
+            other => panic!("expected cast expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_varchar_type_cast_expression() {
+        let stmt = parse_select("select 'abc'::varchar(2)").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(_, ty) => {
+                assert_eq!(*ty, SqlType::with_char_len(SqlTypeKind::Varchar, 2));
+            }
+            other => panic!("expected cast expression, got {other:?}"),
+        }
     }
 
     #[test]
@@ -366,8 +352,8 @@ mod tests {
             rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
             desc: RelationDesc {
                 columns: vec![
-                    ColumnDesc { name: "id".into(), storage: AttributeDesc { name: "id".into(), attlen: 4, attalign: AttributeAlign::Int, nullable: false }, ty: ScalarType::Int32 },
-                    ColumnDesc { name: "owner_id".into(), storage: AttributeDesc { name: "owner_id".into(), attlen: 4, attalign: AttributeAlign::Int, nullable: false }, ty: ScalarType::Int32 },
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
                 ],
             },
         });
@@ -434,6 +420,24 @@ mod tests {
         assert!(matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, .. }) if table_name == "people"));
         assert!(matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, .. }) if table_name == "people"));
         assert!(matches!(parse_statement("show tables").unwrap(), Statement::ShowTables));
+    }
+
+    #[test]
+    fn parse_create_table_with_varchar_types() {
+        match parse_statement(
+            "create table widgets (a varchar, b varchar(5), c character varying, d character varying(7))",
+        )
+        .unwrap()
+        {
+            Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+                assert_eq!(columns.len(), 4);
+                assert_eq!(columns[0].ty, SqlType::new(SqlTypeKind::Varchar));
+                assert_eq!(columns[1].ty, SqlType::with_char_len(SqlTypeKind::Varchar, 5));
+                assert_eq!(columns[2].ty, SqlType::new(SqlTypeKind::Varchar));
+                assert_eq!(columns[3].ty, SqlType::with_char_len(SqlTypeKind::Varchar, 7));
+            }
+            other => panic!("expected create table, got {other:?}"),
+        }
     }
 
     #[test]
@@ -687,8 +691,8 @@ mod tests {
             rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
             desc: RelationDesc {
                 columns: vec![
-                    ColumnDesc { name: "id".into(), storage: AttributeDesc { name: "id".into(), attlen: 4, attalign: AttributeAlign::Int, nullable: false }, ty: ScalarType::Int32 },
-                    ColumnDesc { name: "owner_id".into(), storage: AttributeDesc { name: "owner_id".into(), attlen: 4, attalign: AttributeAlign::Int, nullable: false }, ty: ScalarType::Int32 },
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
                 ],
             },
         });

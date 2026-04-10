@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use crate::database::{Database, Session};
-use crate::executor::{ExecError, StatementResult, Value};
-use crate::parser::{parse_statement, Statement};
+use crate::executor::{ExecError, QueryColumn, StatementResult, Value};
+use crate::parser::{parse_statement, SqlTypeKind, Statement};
 use crate::ClientId;
 
 const SSL_REQUEST_CODE: i32 = 80877103;
@@ -236,7 +236,7 @@ fn handle_query(
         match state.session.execute_streaming(db, select_stmt) {
             Ok(mut guard) => {
                 use crate::executor::exec_next;
-                let column_names = guard.column_names.clone();
+                let columns = guard.columns.clone();
                 let mut row_buf = Vec::new();
                 let mut row_count = 0usize;
                 let mut header_sent = false;
@@ -246,7 +246,7 @@ fn handle_query(
                     match exec_next(&mut guard.state, &mut guard.ctx) {
                         Ok(Some(slot)) => {
                             if !header_sent {
-                                send_row_description(stream, &column_names)?;
+                                send_row_description(stream, &columns)?;
                                 header_sent = true;
                             }
                             match slot.values() {
@@ -268,7 +268,7 @@ fn handle_query(
                     send_error(stream, "XX000", &msg)?;
                 } else {
                     if !header_sent {
-                        send_row_description(stream, &column_names)?;
+                        send_row_description(stream, &columns)?;
                     }
                     send_command_complete(stream, &format!("SELECT {row_count}"))?;
                 }
@@ -284,8 +284,8 @@ fn handle_query(
         }
     } else {
         match state.session.execute(db, sql) {
-            Ok(StatementResult::Query { column_names, rows }) => {
-                send_query_result(stream, &column_names, &rows, &format!("SELECT {}", rows.len()))?;
+            Ok(StatementResult::Query { columns, rows, .. }) => {
+                send_query_result(stream, &columns, &rows, &format!("SELECT {}", rows.len()))?;
             }
             Ok(StatementResult::AffectedRows(n)) => {
                 let tag = infer_command_tag(sql, n);
@@ -523,7 +523,7 @@ fn execute_portal(
 
     let sql = substitute_params(&portal.sql, &portal.params);
     match session.execute(db, &sql) {
-        Ok(StatementResult::Query { column_names: _, rows }) => {
+        Ok(StatementResult::Query { rows, .. }) => {
             // Extended protocol: Execute sends DataRows + CommandComplete only.
             for row in &rows {
                 send_data_row(stream, row, &mut row_buf)?;
@@ -546,22 +546,27 @@ fn execute_portal(
     Ok(())
 }
 
-fn describe_sql(db: &Database, sql: &str, params: &[Option<String>]) -> Option<Vec<String>> {
+fn describe_sql(db: &Database, sql: &str, params: &[Option<String>]) -> Option<Vec<QueryColumn>> {
     // Match special queries by SQL pattern first — params may not be bound yet at
     // Describe-Statement time, so we cannot call execute_special_query here.
     let normalized = sql.trim().to_ascii_lowercase();
     if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
-        return Some(vec!["relkind".to_string()]);
+        return Some(vec![QueryColumn::text("relkind")]);
     }
 
     if execute_special_query(db, sql, params).is_some() {
-        return Some(vec!["relkind".to_string()]);
+        return Some(vec![QueryColumn::text("relkind")]);
     }
     let sql = substitute_params(sql, params);
     match parse_statement(&sql).ok()? {
-        Statement::Select(stmt) => Some(stmt.targets.iter().map(|t| t.output_name.clone()).collect()),
-        Statement::ShowTables => Some(vec!["table_name".to_string()]),
-        Statement::Explain(_) => Some(vec!["QUERY PLAN".to_string()]),
+        Statement::Select(stmt) => {
+            let catalog = db.catalog.read();
+            crate::parser::build_plan(&stmt, catalog.catalog())
+                .ok()
+                .map(|plan| plan.columns())
+        }
+        Statement::ShowTables => Some(vec![QueryColumn::text("table_name")]),
+        Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
         _ => None,
     }
 }
@@ -603,11 +608,11 @@ fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
 
 fn send_query_result(
     stream: &mut impl Write,
-    column_names: &[String],
+    columns: &[QueryColumn],
     rows: &[Vec<Value>],
     tag: &str,
 ) -> io::Result<()> {
-    send_row_description(stream, column_names)?;
+    send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
     for row in rows {
         send_data_row(stream, row, &mut row_buf)?;
@@ -637,6 +642,7 @@ fn infer_command_tag(sql: &str, affected: usize) -> String {
 fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
+        ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
         other => format!("{other:?}"),
     }
 }
@@ -676,17 +682,18 @@ fn send_ready_for_query(w: &mut impl Write, status: u8) -> io::Result<()> {
     Ok(())
 }
 
-fn send_row_description(w: &mut impl Write, columns: &[String]) -> io::Result<()> {
+fn send_row_description(w: &mut impl Write, columns: &[QueryColumn]) -> io::Result<()> {
     let mut body = Vec::new();
     body.extend_from_slice(&(columns.len() as i16).to_be_bytes());
     for col in columns {
-        body.extend_from_slice(col.as_bytes());
+        body.extend_from_slice(col.name.as_bytes());
         body.push(0); // name NUL
         body.extend_from_slice(&0_i32.to_be_bytes()); // table OID
         body.extend_from_slice(&0_i16.to_be_bytes()); // column attr number
-        body.extend_from_slice(&25_i32.to_be_bytes()); // type OID (TEXT=25)
-        body.extend_from_slice(&(-1_i16).to_be_bytes()); // type size (-1 = varlena)
-        body.extend_from_slice(&(-1_i32).to_be_bytes()); // type modifier
+        let (oid, typlen, typmod) = wire_type_info(col);
+        body.extend_from_slice(&oid.to_be_bytes());
+        body.extend_from_slice(&typlen.to_be_bytes());
+        body.extend_from_slice(&typmod.to_be_bytes());
         body.extend_from_slice(&0_i16.to_be_bytes()); // format code (text)
     }
 
@@ -694,6 +701,15 @@ fn send_row_description(w: &mut impl Write, columns: &[String]) -> io::Result<()
     w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
     w.write_all(&body)?;
     Ok(())
+}
+
+fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
+    match col.sql_type.kind {
+        SqlTypeKind::Int4 => (23, 4, -1),
+        SqlTypeKind::Bool => (16, 1, -1),
+        SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
+        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => (25, -1, col.sql_type.typmod),
+    }
 }
 
 fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<u8>) -> io::Result<()> {
@@ -999,6 +1015,28 @@ mod tests {
         values
     }
 
+    fn row_description_fields(body: &[u8]) -> Vec<(String, i32, i16, i32)> {
+        let mut offset = 0;
+        let ncols = read_i16_bytes(body, &mut offset).unwrap() as usize;
+        let mut fields = Vec::with_capacity(ncols);
+        for _ in 0..ncols {
+            let name_start = offset;
+            while body[offset] != 0 {
+                offset += 1;
+            }
+            let name = String::from_utf8_lossy(&body[name_start..offset]).into_owned();
+            offset += 1;
+            let _table_oid = read_i32_bytes(body, &mut offset).unwrap();
+            let _attr_num = read_i16_bytes(body, &mut offset).unwrap();
+            let type_oid = read_i32_bytes(body, &mut offset).unwrap();
+            let typlen = read_i16_bytes(body, &mut offset).unwrap();
+            let typmod = read_i32_bytes(body, &mut offset).unwrap();
+            let _format = read_i16_bytes(body, &mut offset).unwrap();
+            fields.push((name, type_oid, typlen, typmod));
+        }
+        fields
+    }
+
     #[test]
     fn copy_from_stdin_round_trips_over_wire_protocol() {
         let (mut stream, server) = start_test_connection();
@@ -1087,6 +1125,29 @@ mod tests {
             .map(|(_, body)| data_row_values(body))
             .collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Some("1".into()), Some("alice".into())]]);
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn row_description_reports_varchar_typmod() {
+        let (mut stream, server) = start_test_connection();
+
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "select 'foo'::varchar(4)");
+        let response = read_until_ready(&mut stream, "select_varchar");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].1, 1043);
+        assert_eq!(fields[0].2, -1);
+        assert_eq!(fields[0].3, 8);
 
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();

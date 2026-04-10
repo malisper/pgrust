@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact_string::CompactString;
+use crate::parser::{SqlType, SqlTypeKind};
 use super::nodes::*;
 use super::ExecError;
 
@@ -70,60 +71,69 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
     }
 }
 
-fn cast_value(value: Value, ty: ScalarType) -> Result<Value, ExecError> {
+fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int32(v) => match ty {
-            ScalarType::Int32 => Ok(Value::Int32(v)),
-            ScalarType::Text => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
-            ScalarType::Bool => Err(ExecError::TypeMismatch {
+            SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v)),
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+                cast_text_value(&v.to_string(), ty, true)
+            }
+            SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
                 op: "::bool",
                 left: Value::Int32(v),
                 right: Value::Bool(false),
             }),
         },
         Value::Bool(v) => match ty {
-            ScalarType::Bool => Ok(Value::Bool(v)),
-            ScalarType::Text => Ok(Value::Text(CompactString::new(if v { "true" } else { "false" }))),
-            ScalarType::Int32 => Err(ExecError::TypeMismatch {
+            SqlType { kind: SqlTypeKind::Bool, .. } => Ok(Value::Bool(v)),
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+                cast_text_value(if v { "true" } else { "false" }, ty, true)
+            }
+            SqlType { kind: SqlTypeKind::Int4, .. } => Err(ExecError::TypeMismatch {
                 op: "::int4",
                 left: Value::Bool(v),
                 right: Value::Int32(0),
             }),
         },
-        Value::Text(text) => cast_text_value(text.as_str(), ty),
+        Value::Text(text) => cast_text_value(text.as_str(), ty, true),
         Value::TextRef(ptr, len) => {
             let text = unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
             };
-            cast_text_value(text, ty)
+            cast_text_value(text, ty, true)
         }
         Value::Float64(v) => match ty {
-            ScalarType::Text => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
-            ScalarType::Int32 | ScalarType::Bool => Err(ExecError::TypeMismatch {
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+                cast_text_value(&v.to_string(), ty, true)
+            }
+            SqlType { kind: SqlTypeKind::Int4 | SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
                 op: "::",
                 left: Value::Float64(v),
                 right: match ty {
-                    ScalarType::Int32 => Value::Int32(0),
-                    ScalarType::Bool => Value::Bool(false),
-                    ScalarType::Text => Value::Text(CompactString::new("")),
+                    SqlType { kind: SqlTypeKind::Int4, .. } => Value::Int32(0),
+                    SqlType { kind: SqlTypeKind::Bool, .. } => Value::Bool(false),
+                    _ => Value::Text(CompactString::new("")),
                 },
             }),
         },
     }
 }
 
-fn cast_text_value(text: &str, ty: ScalarType) -> Result<Value, ExecError> {
-    match ty {
-        ScalarType::Text => Ok(Value::Text(CompactString::new(text))),
-        ScalarType::Int32 => text.parse::<i32>()
+fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
+    match ty.kind {
+        SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::new(text))),
+        SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+            coerce_character_string(text, ty, explicit)?,
+        ))),
+        SqlTypeKind::Int4 => text.parse::<i32>()
             .map(Value::Int32)
             .map_err(|_| ExecError::TypeMismatch {
                 op: "::int4",
                 left: Value::Text(CompactString::new(text)),
                 right: Value::Int32(0),
             }),
-        ScalarType::Bool => match text.to_ascii_lowercase().as_str() {
+        SqlTypeKind::Bool => match text.to_ascii_lowercase().as_str() {
             "true" | "t" => Ok(Value::Bool(true)),
             "false" | "f" => Ok(Value::Bool(false)),
             _ => Err(ExecError::TypeMismatch {
@@ -132,6 +142,32 @@ fn cast_text_value(text: &str, ty: ScalarType) -> Result<Value, ExecError> {
                 right: Value::Bool(false),
             }),
         },
+    }
+}
+
+fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<String, ExecError> {
+    let Some(max_chars) = ty.char_len() else {
+        return Ok(text.to_string());
+    };
+
+    let char_count = text.chars().count() as i32;
+    if char_count <= max_chars {
+        return Ok(text.to_string());
+    }
+
+    let clip_idx = text
+        .char_indices()
+        .nth(max_chars as usize)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
+    let truncated = &text[..clip_idx];
+    let remainder = &text[clip_idx..];
+    if explicit || remainder.chars().all(|ch| ch == ' ') {
+        Ok(truncated.to_string())
+    } else {
+        Err(ExecError::StringDataRightTruncation {
+            ty: format!("character varying({max_chars})"),
+        })
     }
 }
 
@@ -428,13 +464,27 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
             }
         }
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Text, v) if v.as_text().is_some() => Ok(TupleValue::Bytes(v.as_text().unwrap().as_bytes().to_vec())),
+        (ScalarType::Text, v) => {
+            let coerced = coerce_assignment_value(v, column.sql_type)?;
+            Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
+        }
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(*v)])),
         (_, other) => Err(ExecError::TypeMismatch {
             op: "assignment",
             left: Value::Null,
             right: other.clone(),
         }),
+    }
+}
+
+fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, ExecError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
+        Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Text(text) => cast_text_value(text.as_str(), target, false),
+        Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
     }
 }
 

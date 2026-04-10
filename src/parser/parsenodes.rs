@@ -169,12 +169,46 @@ pub struct ColumnDef {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqlType {
+pub enum SqlTypeKind {
     Int4,
     Text,
     Bool,
     Timestamp,
     Char,
+    Varchar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SqlType {
+    pub kind: SqlTypeKind,
+    pub typmod: i32,
+}
+
+impl SqlType {
+    pub const NO_TYPEMOD: i32 = -1;
+    pub const VARHDRSZ: i32 = 4;
+
+    pub const fn new(kind: SqlTypeKind) -> Self {
+        Self {
+            kind,
+            typmod: Self::NO_TYPEMOD,
+        }
+    }
+
+    pub const fn with_char_len(kind: SqlTypeKind, len: i32) -> Self {
+        Self {
+            kind,
+            typmod: Self::VARHDRSZ + len,
+        }
+    }
+
+    pub const fn char_len(self) -> Option<i32> {
+        if self.typmod >= Self::VARHDRSZ {
+            Some(self.typmod - Self::VARHDRSZ)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

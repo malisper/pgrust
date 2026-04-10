@@ -1,6 +1,6 @@
 use crate::RelFileLocator;
 use crate::catalog::column_desc;
-use crate::executor::{AggAccum, AggFunc, Expr, Plan, RelationDesc, TargetEntry, Value};
+use crate::executor::{AggAccum, AggFunc, Expr, Plan, QueryColumn, RelationDesc, TargetEntry, Value};
 
 pub use crate::catalog::{Catalog, CatalogEntry};
 use super::parsenodes::*;
@@ -15,14 +15,6 @@ pub(crate) struct BoundScope {
 pub(crate) struct ScopeColumn {
     pub(crate) output_name: String,
     pub(crate) relation_name: Option<String>,
-}
-
-fn scalar_type_for_sql_type(ty: SqlType) -> crate::executor::ScalarType {
-    match ty {
-        SqlType::Int4 => crate::executor::ScalarType::Int32,
-        SqlType::Text | SqlType::Timestamp | SqlType::Char => crate::executor::ScalarType::Text,
-        SqlType::Bool => crate::executor::ScalarType::Bool,
-    }
 }
 
 fn empty_scope() -> BoundScope {
@@ -40,7 +32,7 @@ pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
             .map(|column| {
                 column_desc(
                     column.name.clone(),
-                    scalar_type_for_sql_type(column.ty),
+                    column.ty,
                     column.nullable,
                 )
             })
@@ -125,12 +117,18 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
             .collect::<Result<_, _>>()?;
 
         let n_keys = group_keys.len();
-        let mut output_columns = Vec::new();
+        let mut output_columns: Vec<QueryColumn> = Vec::new();
         for gk in &stmt.group_by {
-            output_columns.push(sql_expr_name(gk));
+            output_columns.push(QueryColumn {
+                name: sql_expr_name(gk),
+                sql_type: infer_sql_expr_type(gk, &scope),
+            });
         }
         for (func, _, _) in &aggs {
-            output_columns.push(func.name().to_string());
+            output_columns.push(QueryColumn {
+                name: func.name().to_string(),
+                sql_type: aggregate_sql_type(*func),
+            });
         }
 
         let having = stmt
@@ -185,8 +183,9 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
                 .iter()
                 .enumerate()
                 .map(|(i, name)| TargetEntry {
-                    name: name.clone(),
+                    name: name.name.clone(),
                     expr: Expr::Column(i),
+                    sql_type: name.sql_type,
                 })
                 .collect()
         } else {
@@ -202,6 +201,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
                             &aggs,
                             n_keys,
                         )?,
+                        sql_type: infer_sql_expr_type(&item.expr, &scope),
                     })
                 })
                 .collect::<Result<_, _>>()?
@@ -269,6 +269,7 @@ fn bind_select_targets(
             .map(|(index, column)| TargetEntry {
                 name: column.output_name.clone(),
                 expr: Expr::Column(index),
+                sql_type: scope.desc.columns[index].sql_type,
             })
             .collect());
     }
@@ -279,6 +280,7 @@ fn bind_select_targets(
             Ok(TargetEntry {
                 name: item.output_name.clone(),
                 expr: bind_expr(&item.expr, scope)?,
+                sql_type: infer_sql_expr_type(&item.expr, scope),
             })
         })
         .collect()
@@ -295,7 +297,7 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
         SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr(inner, scope)?)),
         SqlExpr::Cast(inner, ty) => Expr::Cast(
             Box::new(bind_expr(inner, scope)?),
-            scalar_type_for_sql_type(*ty),
+            *ty,
         ),
         SqlExpr::Eq(left, right) => Expr::Eq(
             Box::new(bind_expr(left, scope)?),
@@ -592,7 +594,7 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                 let desc = RelationDesc {
                     columns: vec![column_desc(
                         "generate_series",
-                        crate::executor::ScalarType::Int32,
+                        SqlType::new(SqlTypeKind::Int4),
                         false,
                     )],
                 };
@@ -602,7 +604,10 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                         start,
                         stop,
                         step,
-                        output_name: "generate_series".to_string(),
+                        output: QueryColumn {
+                            name: "generate_series".to_string(),
+                            sql_type: SqlType::new(SqlTypeKind::Int4),
+                        },
                     },
                     scope,
                 ))
@@ -676,7 +681,8 @@ fn synthetic_desc_from_plan(plan: &Plan) -> RelationDesc {
         columns: plan
             .column_names()
             .into_iter()
-            .map(|name| column_desc(name, crate::executor::ScalarType::Text, true))
+            .zip(plan.columns().into_iter())
+            .map(|(name, col)| column_desc(name, col.sql_type, true))
             .collect(),
     }
 }
@@ -717,6 +723,7 @@ fn apply_relation_alias(
                 .map(|(index, column)| TargetEntry {
                     name: column.output_name.clone(),
                     expr: Expr::Column(index),
+                    sql_type: desc.columns[index].sql_type,
                 })
                 .collect(),
         };
@@ -766,6 +773,45 @@ fn sql_expr_name(expr: &SqlExpr) -> String {
     }
 }
 
+fn infer_sql_expr_type(expr: &SqlExpr, scope: &BoundScope) -> SqlType {
+    match expr {
+        SqlExpr::Column(name) => resolve_column(scope, name)
+            .ok()
+            .and_then(|idx| scope.desc.columns.get(idx).map(|c| c.sql_type))
+            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
+        SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) | SqlExpr::Const(Value::Null) => {
+            SqlType::new(SqlTypeKind::Text)
+        }
+        SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::Add(_, _) => SqlType::new(SqlTypeKind::Int4),
+        SqlExpr::Negate(inner) => infer_sql_expr_type(inner, scope),
+        SqlExpr::Cast(_, ty) => *ty,
+        SqlExpr::Eq(_, _)
+        | SqlExpr::Lt(_, _)
+        | SqlExpr::Gt(_, _)
+        | SqlExpr::RegexMatch(_, _)
+        | SqlExpr::And(_, _)
+        | SqlExpr::Or(_, _)
+        | SqlExpr::Not(_)
+        | SqlExpr::IsNull(_)
+        | SqlExpr::IsNotNull(_)
+        | SqlExpr::IsDistinctFrom(_, _)
+        | SqlExpr::IsNotDistinctFrom(_, _) => SqlType::new(SqlTypeKind::Bool),
+        SqlExpr::AggCall { func, .. } => aggregate_sql_type(*func),
+        SqlExpr::Random => SqlType::new(SqlTypeKind::Text),
+        SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
+    }
+}
+
+fn aggregate_sql_type(func: AggFunc) -> SqlType {
+    match func {
+        AggFunc::Count | AggFunc::Sum | AggFunc::Avg => SqlType::new(SqlTypeKind::Int4),
+        AggFunc::Min | AggFunc::Max => SqlType::new(SqlTypeKind::Text),
+    }
+}
+
 fn bind_agg_output_expr(
     expr: &SqlExpr,
     group_by_exprs: &[SqlExpr],
@@ -801,7 +847,7 @@ fn bind_agg_output_expr(
         SqlExpr::Negate(inner) => Ok(Expr::Negate(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Cast(inner, ty) => Ok(Expr::Cast(
             Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?),
-            scalar_type_for_sql_type(*ty),
+            *ty,
         )),
         SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
         SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
