@@ -585,6 +585,35 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                 scope,
             ))
         }
+        FromItem::FunctionCall { name, args } => {
+            match name.as_str() {
+                "generate_series" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "generate_series(start, stop[, step])",
+                            actual: format!("generate_series with {} arguments", args.len()),
+                        });
+                    }
+                    let empty_scope = BoundScope {
+                        desc: RelationDesc { columns: Vec::new() },
+                        columns: Vec::new(),
+                    };
+                    let start = bind_expr(&args[0], &empty_scope)?;
+                    let stop = bind_expr(&args[1], &empty_scope)?;
+                    let step = if args.len() == 3 {
+                        bind_expr(&args[2], &empty_scope)?
+                    } else {
+                        Expr::Const(Value::Int32(1))
+                    };
+                    let desc = RelationDesc {
+                        columns: vec![column_desc("generate_series", crate::executor::ScalarType::Int32, false)],
+                    };
+                    let scope = scope_for_relation("generate_series", &desc, false);
+                    Ok((Plan::GenerateSeries { start, stop, step }, scope))
+                }
+                other => Err(ParseError::UnknownTable(other.to_string())),
+            }
+        }
     }
 }
 

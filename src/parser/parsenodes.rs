@@ -102,6 +102,10 @@ pub enum FromItem {
         left_table: String,
         right_table: String,
     },
+    FunctionCall {
+        name: String,
+        args: Vec<SqlExpr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

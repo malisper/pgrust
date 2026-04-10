@@ -227,6 +227,11 @@ pub enum Plan {
         having: Option<Expr>,
         output_columns: Vec<String>,
     },
+    GenerateSeries {
+        start: Expr,
+        stop: Expr,
+        step: Expr,
+    },
 }
 
 impl Plan {
@@ -245,6 +250,7 @@ impl Plan {
                 names.extend(right.column_names());
                 names
             }
+            Plan::GenerateSeries { .. } => vec!["generate_series".into()],
         }
     }
 }
@@ -505,6 +511,20 @@ pub struct AggregateState {
     /// Compiled transition functions resolved at plan time, like PG's
     /// aggregate transfn pointers. Avoids per-tuple enum dispatch.
     pub(crate) trans_fns: Vec<fn(&mut AccumState, &Value)>,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct GenerateSeriesState {
+    pub(crate) start: Expr,
+    pub(crate) stop: Expr,
+    pub(crate) step: Expr,
+    pub(crate) current: i32,
+    pub(crate) end: i32,
+    pub(crate) step_val: i32,
+    pub(crate) initialized: bool,
+    pub(crate) slot: TupleSlot,
+    pub(crate) column_names: Vec<String>,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -914,6 +934,52 @@ impl PlanNode for AggregateState {
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         super::explain::format_explain_lines(&*self.input, indent, analyze, lines);
     }
+}
+
+impl PlanNode for GenerateSeriesState {
+    fn exec_proc_node<'a>(&'a mut self, _ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if !self.initialized {
+            let mut dummy = TupleSlot::empty(0);
+            self.current = match eval_expr(&self.start, &mut dummy)? {
+                Value::Int32(v) => v,
+                other => return Err(ExecError::TypeMismatch { op: "generate_series start", left: other, right: Value::Null }),
+            };
+            self.end = match eval_expr(&self.stop, &mut dummy)? {
+                Value::Int32(v) => v,
+                other => return Err(ExecError::TypeMismatch { op: "generate_series stop", left: other, right: Value::Null }),
+            };
+            self.step_val = match eval_expr(&self.step, &mut dummy)? {
+                Value::Int32(v) => v,
+                other => return Err(ExecError::TypeMismatch { op: "generate_series step", left: other, right: Value::Null }),
+            };
+            self.initialized = true;
+        }
+
+        let done = if self.step_val > 0 {
+            self.current > self.end
+        } else if self.step_val < 0 {
+            self.current < self.end
+        } else {
+            return Err(ExecError::TypeMismatch { op: "generate_series step must be non-zero", left: Value::Int32(0), right: Value::Null });
+        };
+
+        if done {
+            return Ok(None);
+        }
+
+        self.slot.kind = SlotKind::Virtual;
+        self.slot.tts_values.clear();
+        self.slot.tts_values.push(Value::Int32(self.current));
+        self.slot.tts_nvalid = 1;
+        self.current += self.step_val;
+        Ok(Some(&mut self.slot))
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> { Some(&mut self.slot) }
+    fn column_names(&self) -> &[String] { &self.column_names }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Function Scan on generate_series".into() }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
 impl TupleSlot {

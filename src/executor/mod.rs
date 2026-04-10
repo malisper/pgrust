@@ -339,6 +339,20 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
+        Plan::GenerateSeries { start, stop, step } => {
+            Box::new(GenerateSeriesState {
+                start,
+                stop,
+                step,
+                current: 0,
+                end: 0,
+                step_val: 0,
+                initialized: false,
+                slot: TupleSlot::empty(1),
+                column_names: vec!["generate_series".into()],
+                stats: NodeExecStats::default(),
+            })
+        }
     }
 }
 
@@ -786,6 +800,11 @@ mod tests {
     #[test] fn count_distinct_counts_unique_values() { let base = temp_dir("count_distinct"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b'), (4, 'dave', 'b'), (5, 'eve', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn count_distinct_skips_nulls() { let base = temp_dir("count_distinct_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'a'), (4, 'dave', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn count_distinct_with_group_by() { let base = temp_dir("count_distinct_group"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'alice', 'x'), (3, 'alice', 'y'), (4, 'bob', 'x'), (5, 'bob', 'x')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, count(distinct note) from people group by name order by name").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Int32(2)], vec![Value::Text("bob".into()), Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn generate_series_basic() { let base = temp_dir("gen_series_basic"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 5)").unwrap() { StatementResult::Query { column_names, rows } => { assert_eq!(column_names, vec!["generate_series"]); assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)], vec![Value::Int32(3)], vec![Value::Int32(4)], vec![Value::Int32(5)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn generate_series_with_step() { let base = temp_dir("gen_series_step"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(0, 10, 3)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(0)], vec![Value::Int32(3)], vec![Value::Int32(6)], vec![Value::Int32(9)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn generate_series_negative_step() { let base = temp_dir("gen_series_neg"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(5, 1, -1)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(5)], vec![Value::Int32(4)], vec![Value::Int32(3)], vec![Value::Int32(2)], vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn generate_series_empty() { let base = temp_dir("gen_series_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 0)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, Vec::<Vec<Value>>::new()); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn generate_series_with_where() { let base = temp_dir("gen_series_where"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 10) where generate_series > 8").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(9)], vec![Value::Int32(10)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn regex_basic_match() { let base = temp_dir("regex_basic_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_basic_no_match() { let base = temp_dir("regex_basic_no_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'baz'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_start_anchor_match() { let base = temp_dir("regex_start_anchor_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ '^foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }

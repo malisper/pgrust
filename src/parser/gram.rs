@@ -246,6 +246,25 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 }),
             }
         }
+        Rule::srf_from_item => {
+            let mut name = None;
+            let mut args = Vec::new();
+            for part in inner.into_inner() {
+                match part.as_rule() {
+                    Rule::identifier => name = Some(build_identifier(part)),
+                    Rule::expr_list => {
+                        for expr_pair in part.into_inner() {
+                            args.push(build_expr(expr_pair)?);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(FromItem::FunctionCall {
+                name: name.ok_or(ParseError::UnexpectedEof)?,
+                args,
+            })
+        }
         _ => Err(ParseError::UnexpectedToken {
             expected: "from clause",
             actual: raw,
