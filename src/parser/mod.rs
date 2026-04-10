@@ -87,7 +87,13 @@ mod tests {
         let stmt = parse_statement("select id from people").unwrap();
         match stmt {
             Statement::Select(stmt) => {
-                assert_eq!(stmt.from, Some(FromItem::Table("people".into())));
+                assert_eq!(
+                    stmt.from,
+                    Some(FromItem::Table(TableRef {
+                        name: "people".into(),
+                        alias: None,
+                    }))
+                );
                 assert_eq!(stmt.targets.len(), 1);
             }
             other => panic!("expected select statement, got {other:?}"),
@@ -98,7 +104,13 @@ mod tests {
     fn parse_select_with_where() {
         let stmt =
             parse_select("select name, note from people where id > 1 and note is null").unwrap();
-        assert_eq!(stmt.from, Some(FromItem::Table("people".into())));
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Table(TableRef {
+                name: "people".into(),
+                alias: None,
+            }))
+        );
         assert_eq!(stmt.targets.len(), 2);
         assert!(matches!(stmt.where_clause, Some(SqlExpr::And(_, _))));
     }
@@ -128,8 +140,14 @@ mod tests {
         assert_eq!(
             stmt.from,
             Some(FromItem::InnerJoin {
-                left_table: "people".into(),
-                right_table: "pets".into(),
+                left: TableRef {
+                    name: "people".into(),
+                    alias: None,
+                },
+                right: TableRef {
+                    name: "pets".into(),
+                    alias: None,
+                },
                 on: SqlExpr::Eq(
                     Box::new(SqlExpr::Column("people.id".into())),
                     Box::new(SqlExpr::Column("pets.owner_id".into()))
@@ -144,8 +162,77 @@ mod tests {
         assert_eq!(
             stmt.from,
             Some(FromItem::CrossJoin {
-                left_table: "people".into(),
-                right_table: "pets".into(),
+                left: TableRef {
+                    name: "people".into(),
+                    alias: None,
+                },
+                right: TableRef {
+                    name: "pets".into(),
+                    alias: None,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn parse_table_alias() {
+        let stmt = parse_select("select s.name from people s").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "name");
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Table(TableRef {
+                name: "people".into(),
+                alias: Some("s".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_table_alias_with_as() {
+        let stmt = parse_select("select s.name from people as s").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "name");
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Table(TableRef {
+                name: "people".into(),
+                alias: Some("s".into()),
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_select_star_with_table_alias() {
+        let stmt = parse_select("select * from people p").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Table(TableRef {
+                name: "people".into(),
+                alias: Some("p".into()),
+            }))
+        );
+        assert_eq!(stmt.targets[0].output_name, "*");
+    }
+
+    #[test]
+    fn parse_select_alias_overrides_qualified_column_name() {
+        let stmt = parse_select("select p.name as w from people p").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "w");
+    }
+
+    #[test]
+    fn parse_cross_join_with_aliases() {
+        let stmt = parse_select("select p.name, q.name from people p, pets q").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::CrossJoin {
+                left: TableRef {
+                    name: "people".into(),
+                    alias: Some("p".into()),
+                },
+                right: TableRef {
+                    name: "pets".into(),
+                    alias: Some("q".into()),
+                },
             })
         );
     }
@@ -160,7 +247,13 @@ mod tests {
     #[test]
     fn parse_select_without_targets_but_with_from() {
         let stmt = parse_select("select from people").unwrap();
-        assert_eq!(stmt.from, Some(FromItem::Table("people".into())));
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Table(TableRef {
+                name: "people".into(),
+                alias: None,
+            }))
+        );
         assert!(stmt.targets.is_empty());
     }
 
@@ -221,6 +314,25 @@ mod tests {
                     Plan::Filter { input, predicate } => {
                         assert!(matches!(predicate, Expr::Gt(_, _)));
                         assert!(matches!(*input, Plan::SeqScan { .. }));
+                    }
+                    other => panic!("expected filter, got {:?}", other),
+                }
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_resolves_aliased_columns() {
+        let stmt = parse_select("select s.name from people s where s.id > 1").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].name, "name");
+                match *input {
+                    Plan::Filter { predicate, .. } => {
+                        assert!(matches!(predicate, Expr::Gt(_, _)));
                     }
                     other => panic!("expected filter, got {:?}", other),
                 }

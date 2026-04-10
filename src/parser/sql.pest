@@ -38,9 +38,12 @@ ident_list = { identifier ~ ("," ~ identifier)* }
 from_item = { joined_from_item | cross_from_item | srf_from_item | table_from_item }
 srf_from_item = { identifier ~ "(" ~ expr_list ~ ")" ~ srf_alias? }
 srf_alias = { kw_as ~ identifier ~ ("(" ~ ident_list ~ ")")? | identifier ~ "(" ~ ident_list ~ ")" }
-table_from_item = { identifier }
-cross_from_item = { identifier ~ "," ~ identifier }
-joined_from_item = { identifier ~ kw_join ~ identifier ~ kw_on ~ expr }
+table_from_item = { table_ref }
+cross_from_item = { table_ref ~ "," ~ table_ref }
+joined_from_item = { table_ref ~ kw_join ~ table_ref ~ kw_on ~ expr }
+table_ref = { identifier ~ relation_alias? }
+relation_alias = { kw_as ~ identifier | bare_relation_alias }
+bare_relation_alias = { !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_order ~ !kw_limit ~ !kw_offset ~ identifier }
 
 column_def = { identifier ~ type_name ~ nullability? }
 nullability = { not_null | nullable }

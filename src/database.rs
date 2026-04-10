@@ -652,16 +652,16 @@ fn extract_table_rel(
     use crate::parser::Statement;
     match stmt {
         Statement::Select(s) => {
-            if let Some(crate::parser::FromItem::Table(name)) = &s.from {
-                catalog.get(name).map(|e| e.rel)
+            if let Some(crate::parser::FromItem::Table(table)) = &s.from {
+                catalog.get(&table.name).map(|e| e.rel)
             } else {
                 None
             }
         }
         Statement::Explain(e) => {
             if let Statement::Select(s) = e.statement.as_ref() {
-                if let Some(crate::parser::FromItem::Table(name)) = &s.from {
-                    catalog.get(name).map(|e| e.rel)
+                if let Some(crate::parser::FromItem::Table(table)) = &s.from {
+                    catalog.get(&table.name).map(|e| e.rel)
                 } else {
                     None
                 }

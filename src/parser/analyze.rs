@@ -238,7 +238,10 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
 
         // Optimization: skip Projection if it's an identity mapping (select *)
         let is_identity = targets.len() == scope.columns.len()
-            && targets.iter().enumerate().all(|(i, t)| matches!(&t.expr, Expr::Column(c) if *c == i));
+            && targets.iter().enumerate().all(|(i, t)| {
+                matches!(&t.expr, Expr::Column(c) if *c == i)
+                    && t.name == scope.columns[i].output_name
+            });
 
         if is_identity {
             Ok(plan)
@@ -541,24 +544,27 @@ fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
 
 fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScope), ParseError> {
     match stmt {
-        FromItem::Table(name) => {
+        FromItem::Table(table) => {
             let entry = catalog
-                .get(name)
-                .ok_or_else(|| ParseError::UnknownTable(name.clone()))?;
+                .get(&table.name)
+                .ok_or_else(|| ParseError::UnknownTable(table.name.clone()))?;
             let desc = entry.desc.clone();
+            let relation_name = table.alias.as_deref().unwrap_or(&table.name);
             Ok((
                 Plan::SeqScan {
                     rel: entry.rel,
                     desc: desc.clone(),
                 },
-                scope_for_relation(name, &desc, false),
+                scope_for_relation(relation_name, &desc, false),
             ))
         }
-        FromItem::InnerJoin { left_table, right_table, on } => {
-            let left_entry = catalog.get(left_table).ok_or_else(|| ParseError::UnknownTable(left_table.clone()))?;
-            let right_entry = catalog.get(right_table).ok_or_else(|| ParseError::UnknownTable(right_table.clone()))?;
-            let left_scope = scope_for_relation(left_table, &left_entry.desc, true);
-            let right_scope = scope_for_relation(right_table, &right_entry.desc, true);
+        FromItem::InnerJoin { left, right, on } => {
+            let left_entry = catalog.get(&left.name).ok_or_else(|| ParseError::UnknownTable(left.name.clone()))?;
+            let right_entry = catalog.get(&right.name).ok_or_else(|| ParseError::UnknownTable(right.name.clone()))?;
+            let left_name = left.alias.as_deref().unwrap_or(&left.name);
+            let right_name = right.alias.as_deref().unwrap_or(&right.name);
+            let left_scope = scope_for_relation(left_name, &left_entry.desc, true);
+            let right_scope = scope_for_relation(right_name, &right_entry.desc, true);
             let scope = combine_scopes(&left_scope, &right_scope);
             let on = bind_expr(on, &scope)?;
             Ok((
@@ -570,11 +576,13 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                 scope,
             ))
         }
-        FromItem::CrossJoin { left_table, right_table } => {
-            let left_entry = catalog.get(left_table).ok_or_else(|| ParseError::UnknownTable(left_table.clone()))?;
-            let right_entry = catalog.get(right_table).ok_or_else(|| ParseError::UnknownTable(right_table.clone()))?;
-            let left_scope = scope_for_relation(left_table, &left_entry.desc, true);
-            let right_scope = scope_for_relation(right_table, &right_entry.desc, true);
+        FromItem::CrossJoin { left, right } => {
+            let left_entry = catalog.get(&left.name).ok_or_else(|| ParseError::UnknownTable(left.name.clone()))?;
+            let right_entry = catalog.get(&right.name).ok_or_else(|| ParseError::UnknownTable(right.name.clone()))?;
+            let left_name = left.alias.as_deref().unwrap_or(&left.name);
+            let right_name = right.alias.as_deref().unwrap_or(&right.name);
+            let left_scope = scope_for_relation(left_name, &left_entry.desc, true);
+            let right_scope = scope_for_relation(right_name, &right_entry.desc, true);
             let scope = combine_scopes(&left_scope, &right_scope);
             Ok((
                 Plan::NestedLoopJoin {
