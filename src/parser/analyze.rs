@@ -1,6 +1,6 @@
 use crate::RelFileLocator;
 use crate::catalog::column_desc;
-use crate::executor::{AggAccum, AggFunc, ColumnDesc, Expr, Plan, RelationDesc, TargetEntry, Value};
+use crate::executor::{AggAccum, AggFunc, Expr, Plan, RelationDesc, TargetEntry, Value};
 
 pub use crate::catalog::{Catalog, CatalogEntry};
 use super::parsenodes::*;
@@ -14,7 +14,7 @@ pub(crate) struct BoundScope {
 #[derive(Debug, Clone)]
 pub(crate) struct ScopeColumn {
     pub(crate) output_name: String,
-    pub(crate) qualified_name: String,
+    pub(crate) relation_name: Option<String>,
 }
 
 fn scalar_type_for_sql_type(ty: SqlType) -> crate::executor::ScalarType {
@@ -22,6 +22,13 @@ fn scalar_type_for_sql_type(ty: SqlType) -> crate::executor::ScalarType {
         SqlType::Int4 => crate::executor::ScalarType::Int32,
         SqlType::Text | SqlType::Timestamp | SqlType::Char => crate::executor::ScalarType::Text,
         SqlType::Bool => crate::executor::ScalarType::Bool,
+    }
+}
+
+fn empty_scope() -> BoundScope {
+    BoundScope {
+        desc: RelationDesc { columns: Vec::new() },
+        columns: Vec::new(),
     }
 }
 
@@ -69,13 +76,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
     let (base, scope) = if let Some(from) = &stmt.from {
         bind_from_item(from, catalog)?
     } else {
-        (
-            Plan::Result,
-            BoundScope {
-                desc: RelationDesc { columns: Vec::new() },
-                columns: Vec::new(),
-            },
-        )
+        (Plan::Result, empty_scope())
     };
 
     if let Some(predicate) = &stmt.where_clause {
@@ -371,7 +372,7 @@ pub fn bind_insert_prepared(
         .ok_or_else(|| ParseError::UnknownTable(table_name.to_string()))?;
 
     let target_columns = if let Some(columns) = columns {
-        let scope = scope_for_relation(table_name, &entry.desc, false);
+        let scope = scope_for_relation(Some(table_name), &entry.desc);
         columns
             .iter()
             .map(|column| resolve_column(&scope, column))
@@ -423,7 +424,7 @@ pub fn bind_insert(
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
-    let scope = scope_for_relation(&stmt.table_name, &entry.desc, false);
+    let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
 
     let target_columns = if let Some(columns) = &stmt.columns {
         columns
@@ -466,7 +467,7 @@ pub fn bind_update(
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
-    let scope = scope_for_relation(&stmt.table_name, &entry.desc, false);
+    let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
 
     Ok(BoundUpdateStatement {
         rel: entry.rel,
@@ -496,7 +497,7 @@ pub fn bind_delete(
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
-    let scope = scope_for_relation(&stmt.table_name, &entry.desc, false);
+    let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
 
     Ok(BoundDeleteStatement {
         rel: entry.rel,
@@ -516,26 +517,35 @@ fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
             actual: "*".into(),
         });
     }
-    if name.contains('.') {
-        return scope
+    if let Some((relation, column_name)) = name.rsplit_once('.') {
+        let mut matches = scope
             .columns
             .iter()
-            .position(|column| column.qualified_name.eq_ignore_ascii_case(name))
-            .ok_or_else(|| ParseError::UnknownColumn(name.to_string()));
+            .enumerate()
+            .filter(|(_, column)| {
+                column
+                    .relation_name
+                    .as_deref()
+                    .is_some_and(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
+                    && column.output_name.eq_ignore_ascii_case(column_name)
+            });
+        let first = matches
+            .next()
+            .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
+        if matches.next().is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "unambiguous column reference",
+                actual: name.to_string(),
+            });
+        }
+        return Ok(first.0);
     }
 
     let mut matches = scope
         .columns
         .iter()
         .enumerate()
-        .filter(|(_, column)| {
-            column
-                .qualified_name
-                .rsplit('.')
-                .next()
-                .unwrap_or(&column.qualified_name)
-                .eq_ignore_ascii_case(name)
-        });
+        .filter(|(_, column)| column.output_name.eq_ignore_ascii_case(name));
     let first = matches
         .next()
         .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
@@ -550,104 +560,105 @@ fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
 
 fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScope), ParseError> {
     match stmt {
-        FromItem::Table(table) => {
+        FromItem::Table { name } => {
             let entry = catalog
-                .get(&table.name)
-                .ok_or_else(|| ParseError::UnknownTable(table.name.clone()))?;
+                .get(name)
+                .ok_or_else(|| ParseError::UnknownTable(name.clone()))?;
             let desc = entry.desc.clone();
-            let relation_name = table.alias.as_deref().unwrap_or(&table.name);
             Ok((
                 Plan::SeqScan {
                     rel: entry.rel,
                     desc: desc.clone(),
                 },
-                scope_for_relation(relation_name, &desc, false),
+                scope_for_relation(Some(name), &desc),
             ))
         }
-        FromItem::InnerJoin { left, right, on } => {
-            let left_entry = catalog.get(&left.name).ok_or_else(|| ParseError::UnknownTable(left.name.clone()))?;
-            let right_entry = catalog.get(&right.name).ok_or_else(|| ParseError::UnknownTable(right.name.clone()))?;
-            let left_name = left.alias.as_deref().unwrap_or(&left.name);
-            let right_name = right.alias.as_deref().unwrap_or(&right.name);
-            let left_scope = scope_for_relation(left_name, &left_entry.desc, true);
-            let right_scope = scope_for_relation(right_name, &right_entry.desc, true);
+        FromItem::FunctionCall { name, args } => match name.as_str() {
+            "generate_series" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "generate_series(start, stop[, step])",
+                        actual: format!("generate_series with {} arguments", args.len()),
+                    });
+                }
+                let empty_scope = empty_scope();
+                let start = bind_expr(&args[0], &empty_scope)?;
+                let stop = bind_expr(&args[1], &empty_scope)?;
+                let step = if args.len() == 3 {
+                    bind_expr(&args[2], &empty_scope)?
+                } else {
+                    Expr::Const(Value::Int32(1))
+                };
+                let desc = RelationDesc {
+                    columns: vec![column_desc(
+                        "generate_series",
+                        crate::executor::ScalarType::Int32,
+                        false,
+                    )],
+                };
+                let scope = scope_for_relation(Some(name), &desc);
+                Ok((
+                    Plan::GenerateSeries {
+                        start,
+                        stop,
+                        step,
+                        output_name: "generate_series".to_string(),
+                    },
+                    scope,
+                ))
+            }
+            other => Err(ParseError::UnknownTable(other.to_string())),
+        },
+        FromItem::DerivedTable(select) => {
+            let plan = build_plan(select, catalog)?;
+            let desc = synthetic_desc_from_plan(&plan);
+            Ok((plan, scope_for_relation(None, &desc)))
+        }
+        FromItem::Join {
+            left,
+            right,
+            kind,
+            on,
+        } => {
+            let (left_plan, left_scope) = bind_from_item(left, catalog)?;
+            let (right_plan, right_scope) = bind_from_item(right, catalog)?;
             let scope = combine_scopes(&left_scope, &right_scope);
-            let on = bind_expr(on, &scope)?;
+            let on = match (kind, on) {
+                (JoinKind::Inner, Some(on)) => bind_expr(on, &scope)?,
+                (JoinKind::Cross, None) => Expr::Const(Value::Bool(true)),
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "valid join clause",
+                        actual: format!("{stmt:?}"),
+                    })
+                }
+            };
             Ok((
                 Plan::NestedLoopJoin {
-                    left: Box::new(Plan::SeqScan { rel: left_entry.rel, desc: left_entry.desc.clone() }),
-                    right: Box::new(Plan::SeqScan { rel: right_entry.rel, desc: right_entry.desc.clone() }),
+                    left: Box::new(left_plan),
+                    right: Box::new(right_plan),
                     on,
                 },
                 scope,
             ))
         }
-        FromItem::CrossJoin { left, right } => {
-            let left_entry = catalog.get(&left.name).ok_or_else(|| ParseError::UnknownTable(left.name.clone()))?;
-            let right_entry = catalog.get(&right.name).ok_or_else(|| ParseError::UnknownTable(right.name.clone()))?;
-            let left_name = left.alias.as_deref().unwrap_or(&left.name);
-            let right_name = right.alias.as_deref().unwrap_or(&right.name);
-            let left_scope = scope_for_relation(left_name, &left_entry.desc, true);
-            let right_scope = scope_for_relation(right_name, &right_entry.desc, true);
-            let scope = combine_scopes(&left_scope, &right_scope);
-            Ok((
-                Plan::NestedLoopJoin {
-                    left: Box::new(Plan::SeqScan { rel: left_entry.rel, desc: left_entry.desc.clone() }),
-                    right: Box::new(Plan::SeqScan { rel: right_entry.rel, desc: right_entry.desc.clone() }),
-                    on: Expr::Const(Value::Bool(true)),
-                },
-                scope,
-            ))
-        }
-        FromItem::FunctionCall { name, args, alias, column_aliases } => {
-            match name.as_str() {
-                "generate_series" => {
-                    if args.len() < 2 || args.len() > 3 {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "generate_series(start, stop[, step])",
-                            actual: format!("generate_series with {} arguments", args.len()),
-                        });
-                    }
-                    let empty_scope = BoundScope {
-                        desc: RelationDesc { columns: Vec::new() },
-                        columns: Vec::new(),
-                    };
-                    let start = bind_expr(&args[0], &empty_scope)?;
-                    let stop = bind_expr(&args[1], &empty_scope)?;
-                    let step = if args.len() == 3 {
-                        bind_expr(&args[2], &empty_scope)?
-                    } else {
-                        Expr::Const(Value::Int32(1))
-                    };
-                    let col_name = column_aliases
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "generate_series".to_string());
-                    let relation_name = alias.as_deref().unwrap_or("generate_series");
-                    let desc = RelationDesc {
-                        columns: vec![column_desc(&col_name, crate::executor::ScalarType::Int32, false)],
-                    };
-                    let scope = scope_for_relation(relation_name, &desc, false);
-                    Ok((Plan::GenerateSeries { start, stop, step, output_name: col_name }, scope))
-                }
-                other => Err(ParseError::UnknownTable(other.to_string())),
-            }
+        FromItem::Alias {
+            source,
+            alias,
+            column_aliases,
+        } => {
+            let (plan, scope) = bind_from_item(source, catalog)?;
+            apply_relation_alias(plan, scope, alias, column_aliases)
         }
     }
 }
 
-fn scope_for_relation(table_name: &str, desc: &RelationDesc, qualify_output: bool) -> BoundScope {
+fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDesc) -> BoundScope {
     BoundScope {
-        desc: RelationDesc {
-            columns: desc.columns.iter().map(|column| ColumnDesc {
-                name: if qualify_output { format!("{table_name}.{}", column.name) } else { column.name.clone() },
-                storage: column.storage.clone(),
-                ty: column.ty,
-            }).collect(),
-        },
+        desc: desc.clone(),
         columns: desc.columns.iter().map(|column| ScopeColumn {
-            output_name: if qualify_output { format!("{table_name}.{}", column.name) } else { column.name.clone() },
-            qualified_name: format!("{table_name}.{}", column.name),
+            output_name: column.name.clone(),
+            relation_name: relation_name.map(str::to_string),
         }).collect(),
     }
 }
@@ -658,6 +669,60 @@ fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScope {
     let mut columns = left.columns.clone();
     columns.extend(right.columns.clone());
     BoundScope { desc, columns }
+}
+
+fn synthetic_desc_from_plan(plan: &Plan) -> RelationDesc {
+    RelationDesc {
+        columns: plan
+            .column_names()
+            .into_iter()
+            .map(|name| column_desc(name, crate::executor::ScalarType::Text, true))
+            .collect(),
+    }
+}
+
+fn apply_relation_alias(
+    mut plan: Plan,
+    scope: BoundScope,
+    alias: &str,
+    column_aliases: &[String],
+) -> Result<(Plan, BoundScope), ParseError> {
+    if column_aliases.len() > scope.columns.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "column alias count to be less than or equal to source column count",
+            actual: format!("{} aliases for {} columns", column_aliases.len(), scope.columns.len()),
+        });
+    }
+
+    let mut desc = scope.desc.clone();
+    let mut columns = scope.columns.clone();
+    let mut renamed = false;
+
+    for (index, column) in columns.iter_mut().enumerate() {
+        if let Some(new_name) = column_aliases.get(index) {
+            renamed |= column.output_name != *new_name;
+            column.output_name = new_name.clone();
+            desc.columns[index].name = new_name.clone();
+            desc.columns[index].storage.name = new_name.clone();
+        }
+        column.relation_name = Some(alias.to_string());
+    }
+
+    if renamed {
+        plan = Plan::Projection {
+            input: Box::new(plan),
+            targets: columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| TargetEntry {
+                    name: column.output_name.clone(),
+                    expr: Expr::Column(index),
+                })
+                .collect(),
+        };
+    }
+
+    Ok((plan, BoundScope { desc, columns }))
 }
 
 fn expr_contains_agg(expr: &SqlExpr) -> bool {

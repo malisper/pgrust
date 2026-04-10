@@ -92,28 +92,31 @@ pub struct SelectStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FromItem {
-    Table(TableRef),
-    InnerJoin {
-        left: TableRef,
-        right: TableRef,
-        on: SqlExpr,
-    },
-    CrossJoin {
-        left: TableRef,
-        right: TableRef,
+    Table {
+        name: String,
     },
     FunctionCall {
         name: String,
         args: Vec<SqlExpr>,
-        alias: Option<String>,
+    },
+    DerivedTable(Box<SelectStatement>),
+    Join {
+        left: Box<FromItem>,
+        right: Box<FromItem>,
+        kind: JoinKind,
+        on: Option<SqlExpr>,
+    },
+    Alias {
+        source: Box<FromItem>,
+        alias: String,
         column_aliases: Vec<String>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableRef {
-    pub name: String,
-    pub alias: Option<String>,
+pub enum JoinKind {
+    Inner,
+    Cross,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

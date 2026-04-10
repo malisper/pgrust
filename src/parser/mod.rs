@@ -89,10 +89,7 @@ mod tests {
             Statement::Select(stmt) => {
                 assert_eq!(
                     stmt.from,
-                    Some(FromItem::Table(TableRef {
-                        name: "people".into(),
-                        alias: None,
-                    }))
+                    Some(FromItem::Table { name: "people".into() })
                 );
                 assert_eq!(stmt.targets.len(), 1);
             }
@@ -106,10 +103,7 @@ mod tests {
             parse_select("select name, note from people where id > 1 and note is null").unwrap();
         assert_eq!(
             stmt.from,
-            Some(FromItem::Table(TableRef {
-                name: "people".into(),
-                alias: None,
-            }))
+            Some(FromItem::Table { name: "people".into() })
         );
         assert_eq!(stmt.targets.len(), 2);
         assert!(matches!(stmt.where_clause, Some(SqlExpr::And(_, _))));
@@ -139,19 +133,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             stmt.from,
-            Some(FromItem::InnerJoin {
-                left: TableRef {
+            Some(FromItem::Join {
+                left: Box::new(FromItem::Table {
                     name: "people".into(),
-                    alias: None,
-                },
-                right: TableRef {
+                }),
+                right: Box::new(FromItem::Table {
                     name: "pets".into(),
-                    alias: None,
-                },
-                on: SqlExpr::Eq(
+                }),
+                kind: JoinKind::Inner,
+                on: Some(SqlExpr::Eq(
                     Box::new(SqlExpr::Column("people.id".into())),
                     Box::new(SqlExpr::Column("pets.owner_id".into()))
-                ),
+                )),
             })
         );
     }
@@ -161,15 +154,15 @@ mod tests {
         let stmt = parse_select("select people.name, pets.name from people, pets").unwrap();
         assert_eq!(
             stmt.from,
-            Some(FromItem::CrossJoin {
-                left: TableRef {
+            Some(FromItem::Join {
+                left: Box::new(FromItem::Table {
                     name: "people".into(),
-                    alias: None,
-                },
-                right: TableRef {
+                }),
+                right: Box::new(FromItem::Table {
                     name: "pets".into(),
-                    alias: None,
-                },
+                }),
+                kind: JoinKind::Cross,
+                on: None,
             })
         );
     }
@@ -180,10 +173,13 @@ mod tests {
         assert_eq!(stmt.targets[0].output_name, "name");
         assert_eq!(
             stmt.from,
-            Some(FromItem::Table(TableRef {
-                name: "people".into(),
-                alias: Some("s".into()),
-            }))
+            Some(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                alias: "s".into(),
+                column_aliases: vec![],
+            })
         );
     }
 
@@ -193,10 +189,13 @@ mod tests {
         assert_eq!(stmt.targets[0].output_name, "name");
         assert_eq!(
             stmt.from,
-            Some(FromItem::Table(TableRef {
-                name: "people".into(),
-                alias: Some("s".into()),
-            }))
+            Some(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                alias: "s".into(),
+                column_aliases: vec![],
+            })
         );
     }
 
@@ -205,10 +204,13 @@ mod tests {
         let stmt = parse_select("select * from people p").unwrap();
         assert_eq!(
             stmt.from,
-            Some(FromItem::Table(TableRef {
-                name: "people".into(),
-                alias: Some("p".into()),
-            }))
+            Some(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                alias: "p".into(),
+                column_aliases: vec![],
+            })
         );
         assert_eq!(stmt.targets[0].output_name, "*");
     }
@@ -235,15 +237,23 @@ mod tests {
         let stmt = parse_select("select p.name, q.name from people p, pets q").unwrap();
         assert_eq!(
             stmt.from,
-            Some(FromItem::CrossJoin {
-                left: TableRef {
-                    name: "people".into(),
-                    alias: Some("p".into()),
-                },
-                right: TableRef {
-                    name: "pets".into(),
-                    alias: Some("q".into()),
-                },
+            Some(FromItem::Join {
+                left: Box::new(FromItem::Alias {
+                    source: Box::new(FromItem::Table {
+                        name: "people".into(),
+                    }),
+                    alias: "p".into(),
+                    column_aliases: vec![],
+                }),
+                right: Box::new(FromItem::Alias {
+                    source: Box::new(FromItem::Table {
+                        name: "pets".into(),
+                    }),
+                    alias: "q".into(),
+                    column_aliases: vec![],
+                }),
+                kind: JoinKind::Cross,
+                on: None,
             })
         );
     }
@@ -260,10 +270,7 @@ mod tests {
         let stmt = parse_select("select from people").unwrap();
         assert_eq!(
             stmt.from,
-            Some(FromItem::Table(TableRef {
-                name: "people".into(),
-                alias: None,
-            }))
+            Some(FromItem::Table { name: "people".into() })
         );
         assert!(stmt.targets.is_empty());
     }
@@ -498,26 +505,29 @@ mod tests {
     #[test]
     fn parse_generate_series() {
         let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
-        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args, .. }) if name == "generate_series" && args.len() == 2));
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 2));
     }
 
     #[test]
     fn parse_generate_series_with_step() {
         let stmt = parse_select("select * from generate_series(1, 10, 2)").unwrap();
-        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args, .. }) if name == "generate_series" && args.len() == 3));
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 3));
     }
 
     #[test]
     fn parse_srf_with_column_alias() {
         let stmt = parse_select("select * from generate_series(1, 3) as g(val)").unwrap();
         match &stmt.from {
-            Some(FromItem::FunctionCall { name, args, alias, column_aliases }) => {
+            Some(FromItem::Alias { source, alias, column_aliases }) => {
+                let FromItem::FunctionCall { name, args } = source.as_ref() else {
+                    panic!("expected FunctionCall source, got {:?}", source);
+                };
                 assert_eq!(name, "generate_series");
                 assert_eq!(args.len(), 2);
-                assert_eq!(alias.as_deref(), Some("g"));
+                assert_eq!(alias, "g");
                 assert_eq!(column_aliases, &["val"]);
             }
-            other => panic!("expected FunctionCall, got {:?}", other),
+            other => panic!("expected Alias, got {:?}", other),
         }
     }
 
@@ -525,12 +535,179 @@ mod tests {
     fn parse_srf_with_table_alias_only() {
         let stmt = parse_select("select * from generate_series(1, 3) as g").unwrap();
         match &stmt.from {
-            Some(FromItem::FunctionCall { alias, column_aliases, .. }) => {
-                assert_eq!(alias.as_deref(), Some("g"));
+            Some(FromItem::Alias { alias, column_aliases, .. }) => {
+                assert_eq!(alias, "g");
                 assert!(column_aliases.is_empty());
             }
-            other => panic!("expected FunctionCall, got {:?}", other),
+            other => panic!("expected Alias, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_derived_table_with_alias() {
+        let stmt = parse_select("select * from (select id from people) p").unwrap();
+        match stmt.from {
+            Some(FromItem::Alias { source, alias, column_aliases }) => {
+                assert_eq!(alias, "p");
+                assert!(column_aliases.is_empty());
+                assert!(matches!(*source, FromItem::DerivedTable(_)));
+            }
+            other => panic!("expected aliased derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_derived_table_with_column_aliases() {
+        let stmt = parse_select("select * from (select id, name from people) p(x, y)").unwrap();
+        match stmt.from {
+            Some(FromItem::Alias { source, alias, column_aliases }) => {
+                assert_eq!(alias, "p");
+                assert_eq!(column_aliases, vec!["x", "y"]);
+                assert!(matches!(*source, FromItem::DerivedTable(_)));
+            }
+            other => panic!("expected aliased derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_aliasless_derived_table() {
+        let stmt = parse_select("select * from (select id from people)").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::DerivedTable(_))));
+    }
+
+    #[test]
+    fn parse_join_with_derived_table() {
+        let stmt = parse_select(
+            "select * from people p join (select owner_id from pets) q on p.id = q.owner_id",
+        )
+        .unwrap();
+        match stmt.from {
+            Some(FromItem::Join { left, right, kind, on }) => {
+                assert_eq!(kind, JoinKind::Inner);
+                assert!(on.is_some());
+                assert!(matches!(*left, FromItem::Alias { .. }));
+                assert!(matches!(*right, FromItem::Alias { .. }));
+            }
+            other => panic!("expected join with derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cross_join_with_derived_table() {
+        let stmt = parse_select("select * from people p, (select owner_id from pets) q").unwrap();
+        match stmt.from {
+            Some(FromItem::Join { left, right, kind, on }) => {
+                assert_eq!(kind, JoinKind::Cross);
+                assert!(on.is_none());
+                assert!(matches!(*left, FromItem::Alias { .. }));
+                assert!(matches!(*right, FromItem::Alias { .. }));
+            }
+            other => panic!("expected cross join with derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_join_precedence_binds_tighter_than_comma() {
+        let stmt = parse_select("select * from a, b join c on b.id = c.id").unwrap();
+        match stmt.from {
+            Some(FromItem::Join { left, right, kind: JoinKind::Cross, on: None }) => {
+                assert!(matches!(*left, FromItem::Table { name } if name == "a"));
+                match *right {
+                    FromItem::Join { left, right, kind: JoinKind::Inner, on: Some(_) } => {
+                        assert!(matches!(*left, FromItem::Table { name } if name == "b"));
+                        assert!(matches!(*right, FromItem::Table { name } if name == "c"));
+                    }
+                    other => panic!("expected inner join on right side, got {:?}", other),
+                }
+            }
+            other => panic!("expected cross join tree, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_parenthesized_join_alias() {
+        let stmt =
+            parse_select("select * from (people p join pets q on p.id = q.owner_id) j").unwrap();
+        match stmt.from {
+            Some(FromItem::Alias { source, alias, .. }) => {
+                assert_eq!(alias, "j");
+                assert!(matches!(*source, FromItem::Join { .. }));
+            }
+            other => panic!("expected aliased parenthesized join, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_resolves_columns_from_derived_table_alias() {
+        let stmt = parse_select("select p.id from (select id from people) p").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { targets, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].name, "id");
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_aliasless_derived_table_exposes_unqualified_columns() {
+        let stmt = parse_select("select id from (select id from people)").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        assert!(matches!(plan, Plan::Projection { .. } | Plan::SeqScan { .. }));
+    }
+
+    #[test]
+    fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
+        let stmt = parse_select("select p.x, p.name from (select id, name from people) p(x)").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { targets, .. } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].name, "x");
+                assert_eq!(targets[1].name, "name");
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_rejects_too_many_derived_table_column_aliases() {
+        let stmt = parse_select("select * from (select id from people) p(x, y)").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnexpectedToken { .. })
+        ));
+    }
+
+    #[test]
+    fn build_plan_join_alias_hides_inner_relation_names() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    ColumnDesc { name: "id".into(), storage: AttributeDesc { name: "id".into(), attlen: 4, attalign: AttributeAlign::Int, nullable: false }, ty: ScalarType::Int32 },
+                    ColumnDesc { name: "owner_id".into(), storage: AttributeDesc { name: "owner_id".into(), attlen: 4, attalign: AttributeAlign::Int, nullable: false }, ty: ScalarType::Int32 },
+                ],
+            },
+        });
+        let stmt =
+            parse_select("select p.id from (people p join pets q on p.id = q.owner_id) j").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog),
+            Err(ParseError::UnknownColumn(name)) if name == "p.id"
+        ));
+    }
+
+    #[test]
+    fn build_plan_non_lateral_derived_table_rejects_outer_refs() {
+        let stmt =
+            parse_select("select * from people p, (select p.id from people) q").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnknownColumn(name)) if name == "p.id"
+        ));
     }
 
     #[test]
