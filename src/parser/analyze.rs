@@ -585,7 +585,7 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                 scope,
             ))
         }
-        FromItem::FunctionCall { name, args } => {
+        FromItem::FunctionCall { name, args, alias, column_aliases } => {
             match name.as_str() {
                 "generate_series" => {
                     if args.len() < 2 || args.len() > 3 {
@@ -605,11 +605,16 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                     } else {
                         Expr::Const(Value::Int32(1))
                     };
+                    let col_name = column_aliases
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "generate_series".to_string());
+                    let relation_name = alias.as_deref().unwrap_or("generate_series");
                     let desc = RelationDesc {
-                        columns: vec![column_desc("generate_series", crate::executor::ScalarType::Int32, false)],
+                        columns: vec![column_desc(&col_name, crate::executor::ScalarType::Int32, false)],
                     };
-                    let scope = scope_for_relation("generate_series", &desc, false);
-                    Ok((Plan::GenerateSeries { start, stop, step }, scope))
+                    let scope = scope_for_relation(relation_name, &desc, false);
+                    Ok((Plan::GenerateSeries { start, stop, step, output_name: col_name }, scope))
                 }
                 other => Err(ParseError::UnknownTable(other.to_string())),
             }

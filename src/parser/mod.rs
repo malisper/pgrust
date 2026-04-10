@@ -375,13 +375,39 @@ mod tests {
     #[test]
     fn parse_generate_series() {
         let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
-        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 2));
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args, .. }) if name == "generate_series" && args.len() == 2));
     }
 
     #[test]
     fn parse_generate_series_with_step() {
         let stmt = parse_select("select * from generate_series(1, 10, 2)").unwrap();
-        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 3));
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args, .. }) if name == "generate_series" && args.len() == 3));
+    }
+
+    #[test]
+    fn parse_srf_with_column_alias() {
+        let stmt = parse_select("select * from generate_series(1, 3) as g(val)").unwrap();
+        match &stmt.from {
+            Some(FromItem::FunctionCall { name, args, alias, column_aliases }) => {
+                assert_eq!(name, "generate_series");
+                assert_eq!(args.len(), 2);
+                assert_eq!(alias.as_deref(), Some("g"));
+                assert_eq!(column_aliases, &["val"]);
+            }
+            other => panic!("expected FunctionCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_srf_with_table_alias_only() {
+        let stmt = parse_select("select * from generate_series(1, 3) as g").unwrap();
+        match &stmt.from {
+            Some(FromItem::FunctionCall { alias, column_aliases, .. }) => {
+                assert_eq!(alias.as_deref(), Some("g"));
+                assert!(column_aliases.is_empty());
+            }
+            other => panic!("expected FunctionCall, got {:?}", other),
+        }
     }
 
     #[test]
