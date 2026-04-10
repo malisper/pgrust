@@ -294,6 +294,17 @@ y$tag$"#).unwrap();
     }
 
     #[test]
+    fn parse_concat_has_lower_precedence_than_addition() {
+        let stmt = parse_select("select 'four: ' || 2 + 2").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Concat(_, right) => {
+                assert!(matches!(**right, SqlExpr::Add(_, _)));
+            }
+            other => panic!("expected concat expression, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_extended_numeric_type_cast_expressions() {
         let stmt = parse_select(
             "select '7'::int2, '9'::bigint, '1.5'::real, '2.5'::double precision, '3.25'::numeric, '4.5'::decimal(10,2)",

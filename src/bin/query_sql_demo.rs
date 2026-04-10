@@ -4,21 +4,20 @@
 //!   cargo run --bin query_sql_demo
 //!   cargo run --bin query_sql_demo -- "select name, note from people where id > 1"
 
+use parking_lot::RwLock;
 use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::include::access::htup::{HeapTuple, TupleValue};
 use pgrust::backend::catalog::catalog::column_desc;
-use pgrust::executor::{
-    ExecError, ExecutorContext, RelationDesc, StatementResult, Value,
-    execute_sql,
-};
-use pgrust::parser::{Catalog, CatalogEntry, SqlType, SqlTypeKind};
 use pgrust::backend::storage::smgr::MdStorageManager;
+use pgrust::executor::{
+    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_sql,
+};
+use pgrust::include::access::htup::{HeapTuple, TupleValue};
+use pgrust::parser::{Catalog, CatalogEntry, SqlType, SqlTypeKind};
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 fn rel() -> RelFileLocator {
     RelFileLocator {
@@ -65,12 +64,18 @@ fn render_value(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Json(v) => v.to_string(),
+        Value::Jsonb(v) => format!("{:?}", v),
         Value::Text(v) => format!("{:?}", v),
         Value::TextRef(_, _) => format!("{:?}", value.as_text().unwrap()),
         Value::Bool(v) => v.to_string(),
         Value::Array(items) => format!(
             "{{{}}}",
-            items.iter().map(render_value).collect::<Vec<_>>().join(", ")
+            items
+                .iter()
+                .map(render_value)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Value::Null => "NULL".into(),
     }
@@ -126,7 +131,9 @@ fn main() -> Result<(), ExecError> {
     };
 
     match execute_sql(&sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)? {
-        StatementResult::Query { column_names, rows, .. } => {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
             println!("=== Output Rows ===");
             for row in rows {
                 println!(

@@ -4,12 +4,12 @@ use mimalloc::MiMalloc;
 static GLOBAL: MiMalloc = MiMalloc;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use pgrust::pgrust::database::{Database, Session};
 use pgrust::executor::{StatementResult, Value};
+use pgrust::pgrust::database::{Database, Session};
 
 fn main() -> Result<(), String> {
     let args = parse_args()?;
@@ -22,22 +22,34 @@ fn main() -> Result<(), String> {
     let db = Database::open(&args.base_dir, args.pool_size).map_err(|e| format!("{e:?}"))?;
     if !args.skip_load {
         let mut session = Session::new(1);
-        session.execute(&db, "create table scanbench (id int not null, payload text not null)")
-            .map_err(|e| format!("{e:?}"))?;
-
-        session.execute(&db, "begin").map_err(|e| format!("{e:?}"))?;
-        for i in 0..args.row_count {
-            session.execute(
+        session
+            .execute(
                 &db,
-                &format!("insert into scanbench (id, payload) values ({i}, 'row-{i}')"),
+                "create table scanbench (id int not null, payload text not null)",
             )
             .map_err(|e| format!("{e:?}"))?;
+
+        session
+            .execute(&db, "begin")
+            .map_err(|e| format!("{e:?}"))?;
+        for i in 0..args.row_count {
+            session
+                .execute(
+                    &db,
+                    &format!("insert into scanbench (id, payload) values ({i}, 'row-{i}')"),
+                )
+                .map_err(|e| format!("{e:?}"))?;
         }
-        session.execute(&db, "commit").map_err(|e| format!("{e:?}"))?;
+        session
+            .execute(&db, "commit")
+            .map_err(|e| format!("{e:?}"))?;
     }
 
     if args.pause_before_scan_secs > 0 {
-        println!("setup_complete: pausing {}s before timed scans", args.pause_before_scan_secs);
+        println!(
+            "setup_complete: pausing {}s before timed scans",
+            args.pause_before_scan_secs
+        );
         std::thread::sleep(std::time::Duration::from_secs(args.pause_before_scan_secs));
     }
 
@@ -50,9 +62,7 @@ fn main() -> Result<(), String> {
     if args.clients <= 1 {
         // Single-threaded path.
         for _ in 0..args.iterations {
-            let result = db
-                .execute(2, &args.query)
-                .map_err(|e| format!("{e:?}"))?;
+            let result = db.execute(2, &args.query).map_err(|e| format!("{e:?}"))?;
             let StatementResult::Query { rows, .. } = result else {
                 return Err("expected query result".into());
             };
@@ -229,7 +239,8 @@ fn parse_args() -> Result<Args, String> {
                     args.pool_size = raw[i + 3].parse().map_err(|_| "invalid pool_size")?;
                 }
                 if i + 4 < raw.len() {
-                    args.pause_before_scan_secs = raw[i + 4].parse().map_err(|_| "invalid pause")?;
+                    args.pause_before_scan_secs =
+                        raw[i + 4].parse().map_err(|_| "invalid pause")?;
                 }
                 break;
             }
@@ -260,6 +271,8 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Int64(v) => *v,
         Value::Float64(v) => *v as i64,
         Value::Numeric(v) => v.render().bytes().map(i64::from).sum(),
+        Value::Json(v) => v.bytes().map(i64::from).sum(),
+        Value::Jsonb(v) => v.iter().copied().map(i64::from).sum(),
         Value::Text(v) => v.bytes().map(i64::from).sum(),
         Value::TextRef(_, _) => value.as_text().unwrap().bytes().map(i64::from).sum(),
         Value::Bool(v) => i64::from(*v),

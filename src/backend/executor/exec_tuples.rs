@@ -1,10 +1,10 @@
 //! Compiled tuple decoder — precomputes decode steps at plan time to eliminate
 //! per-tuple type dispatch, alignment computation, and branch overhead.
 
+use super::ExecError;
+use super::exec_expr::parse_numeric_text;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
-use super::exec_expr::parse_numeric_text;
-use super::ExecError;
 
 /// A precomputed decode step for one column, eliminating per-tuple type
 /// dispatch and alignment computation.
@@ -12,10 +12,16 @@ use super::ExecError;
 enum DecodeStep {
     /// Fixed-length column at a known offset from the start of the data area.
     /// Only possible when all preceding columns are also fixed-width and NOT NULL.
-    FixedInt32 { data_offset: usize },
-    FixedBool { data_offset: usize },
+    FixedInt32 {
+        data_offset: usize,
+    },
+    FixedBool {
+        data_offset: usize,
+    },
     /// Variable-length text column.
-    VarlenText { align: crate::include::access::htup::AttributeAlign },
+    VarlenText {
+        align: crate::include::access::htup::AttributeAlign,
+    },
     /// Generic fallback for columns that can't be precomputed.
     Generic {
         attlen: i16,
@@ -44,8 +50,12 @@ impl CompiledTupleDecoder {
                 if attr.attlen > 0 && !attr.nullable {
                     // Fixed-width NOT NULL — we know the exact byte offset.
                     let step = match (&column.ty, attr.attlen) {
-                        (ScalarType::Int32, 4) => DecodeStep::FixedInt32 { data_offset: aligned },
-                        (ScalarType::Bool, 1) => DecodeStep::FixedBool { data_offset: aligned },
+                        (ScalarType::Int32, 4) => DecodeStep::FixedInt32 {
+                            data_offset: aligned,
+                        },
+                        (ScalarType::Bool, 1) => DecodeStep::FixedBool {
+                            data_offset: aligned,
+                        },
                         _ => DecodeStep::Generic {
                             attlen: attr.attlen,
                             align: attr.attalign,
@@ -57,7 +67,9 @@ impl CompiledTupleDecoder {
                     continue;
                 } else if attr.attlen == -1 {
                     let step = match &column.ty {
-                        ScalarType::Text => DecodeStep::VarlenText { align: attr.attalign },
+                        ScalarType::Text => DecodeStep::VarlenText {
+                            align: attr.attalign,
+                        },
                         _ => DecodeStep::Generic {
                             attlen: attr.attlen,
                             align: attr.attalign,
@@ -95,14 +107,16 @@ impl CompiledTupleDecoder {
     /// Used by the predicate compiler to read int32 values directly from
     /// raw tuple bytes, bypassing the full decode path.
     pub(crate) fn fixed_int32_offset(&self, col: usize) -> Option<usize> {
-        if col >= self.steps.len() { return None; }
+        if col >= self.steps.len() {
+            return None;
+        }
         match &self.steps[col] {
             DecodeStep::FixedInt32 { data_offset } => Some(*data_offset),
             _ => None,
         }
     }
 
-/// Incrementally decode columns `start_attr..end_attr` into `values`,
+    /// Incrementally decode columns `start_attr..end_attr` into `values`,
     /// resuming from `byte_offset` in the tuple data area.
     ///
     /// Like PostgreSQL's `slot_deform_heap_tuple`: only decodes the columns
@@ -123,7 +137,9 @@ impl CompiledTupleDecoder {
         }
 
         if tuple_bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
-            return Err(ExecError::Tuple(crate::include::access::htup::TupleError::HeaderTooShort));
+            return Err(ExecError::Tuple(
+                crate::include::access::htup::TupleError::HeaderTooShort,
+            ));
         }
         let hoff = tuple_bytes[22] as usize;
         let infomask = u16::from_le_bytes([tuple_bytes[20], tuple_bytes[21]]);
@@ -149,7 +165,10 @@ impl CompiledTupleDecoder {
                 DecodeStep::FixedInt32 { data_offset } => {
                     let o = *data_offset;
                     values.push(Value::Int32(i32::from_le_bytes([
-                        data[o], data[o + 1], data[o + 2], data[o + 3],
+                        data[o],
+                        data[o + 1],
+                        data[o + 2],
+                        data[o + 3],
                     ])));
                     off = o + 4;
                 }
@@ -163,131 +182,171 @@ impl CompiledTupleDecoder {
                         let total_len = (data[off] >> 1) as usize;
                         let start = off + 1;
                         let end = off + total_len;
-                        values.push(Value::TextRef(data[start..end].as_ptr(), (end - start) as u32));
+                        values.push(Value::TextRef(
+                            data[start..end].as_ptr(),
+                            (end - start) as u32,
+                        ));
                         off = end;
                     } else {
                         off = align.align_offset(off);
                         let raw = u32::from_le_bytes([
-                            data[off], data[off + 1], data[off + 2], data[off + 3],
+                            data[off],
+                            data[off + 1],
+                            data[off + 2],
+                            data[off + 3],
                         ]);
                         let total_len = (raw >> 2) as usize;
                         let start = off + 4;
                         let end = off + total_len;
-                        values.push(Value::TextRef(data[start..end].as_ptr(), (end - start) as u32));
+                        values.push(Value::TextRef(
+                            data[start..end].as_ptr(),
+                            (end - start) as u32,
+                        ));
                         off = end;
                     }
                 }
-                DecodeStep::Generic { attlen, align, ty } => {
-                    match *attlen {
-                        len if len > 0 => {
-                            off = align.align_offset(off);
-                            let end = off + len as usize;
-                            let bytes = &data[off..end];
-                            off = end;
-                            values.push(match ty {
-                                ScalarType::Int16 => Value::Int16(i16::from_le_bytes([
-                                    bytes[0], bytes[1],
-                                ])),
-                                ScalarType::Int32 => Value::Int32(i32::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3],
-                                ])),
-                                ScalarType::Int64 => Value::Int64(i64::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                                ])),
-                                ScalarType::Float32 => Value::Float64(f32::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3],
-                                ]) as f64),
-                                ScalarType::Float64 => Value::Float64(f64::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-                                ])),
-                                ScalarType::Bool => Value::Bool(bytes[0] != 0),
-                                ScalarType::Numeric => {
-                                    values.push(Value::Null);
-                                    continue;
-                                }
-                                ScalarType::Json => {
-                                    values.push(Value::Null);
-                                    continue;
-                                }
-                                ScalarType::Text => {
-                                    values.push(Value::Null);
-                                    continue;
-                                }
-                                ScalarType::Array(_) => {
-                                    values.push(Value::Null);
-                                    continue;
-                                }
-                            });
-                        }
-                        -1 => {
-                            let (bytes_slice, new_off) = if data[off] & 0x01 != 0 {
-                                let total_len = (data[off] >> 1) as usize;
-                                (&data[off + 1..off + total_len], off + total_len)
-                            } else {
-                                off = align.align_offset(off);
-                                let raw = u32::from_le_bytes([
-                                    data[off], data[off + 1], data[off + 2], data[off + 3],
-                                ]);
-                                let total_len = (raw >> 2) as usize;
-                                (&data[off + 4..off + total_len], off + total_len)
-                            };
-                            off = new_off;
-                            match ty {
-                                ScalarType::Numeric => {
-                                    values.push(Value::Numeric(parse_numeric_text(unsafe {
-                                        std::str::from_utf8_unchecked(bytes_slice)
-                                    }).ok_or_else(|| ExecError::InvalidStorageValue {
-                                        column: "<tuple>".into(),
-                                        details: "invalid numeric text".into(),
-                                    })?));
-                                }
-                                ScalarType::Json => {
-                                    values.push(Value::Json(crate::pgrust::compact_string::CompactString::new(unsafe {
-                                        std::str::from_utf8_unchecked(bytes_slice)
-                                    })));
-                                }
-                                ScalarType::Text => {
-                                    values.push(Value::TextRef(bytes_slice.as_ptr(), bytes_slice.len() as u32));
-                                }
-                                ScalarType::Array(elem_ty) => {
-                                    values.push(decode_array_value(elem_ty, bytes_slice)?);
-                                }
-                                _ => values.push(Value::Null),
+                DecodeStep::Generic { attlen, align, ty } => match *attlen {
+                    len if len > 0 => {
+                        off = align.align_offset(off);
+                        let end = off + len as usize;
+                        let bytes = &data[off..end];
+                        off = end;
+                        values.push(match ty {
+                            ScalarType::Int16 => {
+                                Value::Int16(i16::from_le_bytes([bytes[0], bytes[1]]))
                             }
-                        }
-                        -2 => {
-                            let mut end = off;
-                            while data[end] != 0 {
-                                end += 1;
+                            ScalarType::Int32 => Value::Int32(i32::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3],
+                            ])),
+                            ScalarType::Int64 => Value::Int64(i64::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                bytes[6], bytes[7],
+                            ])),
+                            ScalarType::Float32 => Value::Float64(f32::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3],
+                            ])
+                                as f64),
+                            ScalarType::Float64 => Value::Float64(f64::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                bytes[6], bytes[7],
+                            ])),
+                            ScalarType::Bool => Value::Bool(bytes[0] != 0),
+                            ScalarType::Numeric => {
+                                values.push(Value::Null);
+                                continue;
                             }
-                            let bytes = &data[off..end];
-                            off = end + 1;
-                            match ty {
-                                ScalarType::Numeric => {
-                                    values.push(Value::Numeric(parse_numeric_text(unsafe {
-                                        std::str::from_utf8_unchecked(bytes)
-                                    }).ok_or_else(|| ExecError::InvalidStorageValue {
-                                        column: "<tuple>".into(),
-                                        details: "invalid numeric text".into(),
-                                    })?));
-                                }
-                                ScalarType::Json => {
-                                    values.push(Value::Json(crate::pgrust::compact_string::CompactString::new(unsafe {
-                                        std::str::from_utf8_unchecked(bytes)
-                                    })));
-                                }
-                                ScalarType::Text => {
-                                    values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
-                                }
-                                ScalarType::Array(elem_ty) => {
-                                    values.push(decode_array_value(elem_ty, bytes)?);
-                                }
-                                _ => values.push(Value::Null),
+                            ScalarType::Json => {
+                                values.push(Value::Null);
+                                continue;
                             }
-                        }
-                        _ => values.push(Value::Null),
+                            ScalarType::Jsonb => {
+                                values.push(Value::Null);
+                                continue;
+                            }
+                            ScalarType::Text => {
+                                values.push(Value::Null);
+                                continue;
+                            }
+                            ScalarType::Array(_) => {
+                                values.push(Value::Null);
+                                continue;
+                            }
+                        });
                     }
-                }
+                    -1 => {
+                        let (bytes_slice, new_off) = if data[off] & 0x01 != 0 {
+                            let total_len = (data[off] >> 1) as usize;
+                            (&data[off + 1..off + total_len], off + total_len)
+                        } else {
+                            off = align.align_offset(off);
+                            let raw = u32::from_le_bytes([
+                                data[off],
+                                data[off + 1],
+                                data[off + 2],
+                                data[off + 3],
+                            ]);
+                            let total_len = (raw >> 2) as usize;
+                            (&data[off + 4..off + total_len], off + total_len)
+                        };
+                        off = new_off;
+                        match ty {
+                            ScalarType::Numeric => {
+                                values.push(Value::Numeric(
+                                    parse_numeric_text(unsafe {
+                                        std::str::from_utf8_unchecked(bytes_slice)
+                                    })
+                                    .ok_or_else(|| {
+                                        ExecError::InvalidStorageValue {
+                                            column: "<tuple>".into(),
+                                            details: "invalid numeric text".into(),
+                                        }
+                                    })?,
+                                ));
+                            }
+                            ScalarType::Json => {
+                                values.push(Value::Json(
+                                    crate::pgrust::compact_string::CompactString::new(unsafe {
+                                        std::str::from_utf8_unchecked(bytes_slice)
+                                    }),
+                                ));
+                            }
+                            ScalarType::Jsonb => {
+                                values.push(Value::Jsonb(bytes_slice.to_vec()));
+                            }
+                            ScalarType::Text => {
+                                values.push(Value::TextRef(
+                                    bytes_slice.as_ptr(),
+                                    bytes_slice.len() as u32,
+                                ));
+                            }
+                            ScalarType::Array(elem_ty) => {
+                                values.push(decode_array_value(elem_ty, bytes_slice)?);
+                            }
+                            _ => values.push(Value::Null),
+                        }
+                    }
+                    -2 => {
+                        let mut end = off;
+                        while data[end] != 0 {
+                            end += 1;
+                        }
+                        let bytes = &data[off..end];
+                        off = end + 1;
+                        match ty {
+                            ScalarType::Numeric => {
+                                values.push(Value::Numeric(
+                                    parse_numeric_text(unsafe {
+                                        std::str::from_utf8_unchecked(bytes)
+                                    })
+                                    .ok_or_else(|| {
+                                        ExecError::InvalidStorageValue {
+                                            column: "<tuple>".into(),
+                                            details: "invalid numeric text".into(),
+                                        }
+                                    })?,
+                                ));
+                            }
+                            ScalarType::Json => {
+                                values.push(Value::Json(
+                                    crate::pgrust::compact_string::CompactString::new(unsafe {
+                                        std::str::from_utf8_unchecked(bytes)
+                                    }),
+                                ));
+                            }
+                            ScalarType::Jsonb => {
+                                values.push(Value::Jsonb(bytes.to_vec()));
+                            }
+                            ScalarType::Text => {
+                                values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
+                            }
+                            ScalarType::Array(elem_ty) => {
+                                values.push(decode_array_value(elem_ty, bytes)?);
+                            }
+                            _ => values.push(Value::Null),
+                        }
+                    }
+                    _ => values.push(Value::Null),
+                },
             }
         }
 
@@ -326,7 +385,10 @@ fn decode_array_value(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, 
                 details: "array element payload truncated".into(),
             });
         }
-        items.push(decode_array_element(element_type, &bytes[offset..offset + len])?);
+        items.push(decode_array_element(
+            element_type,
+            &bytes[offset..offset + len],
+        )?);
         offset += len;
     }
     Ok(Value::Array(items))
@@ -368,7 +430,9 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
                     details: "float4 array element must be 4 bytes".into(),
                 });
             }
-            Ok(Value::Float64(f32::from_le_bytes(bytes.try_into().unwrap()) as f64))
+            Ok(Value::Float64(
+                f32::from_le_bytes(bytes.try_into().unwrap()) as f64,
+            ))
         }
         ScalarType::Float64 => {
             if bytes.len() != 8 {
@@ -377,14 +441,19 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
                     details: "float8 array element must be 8 bytes".into(),
                 });
             }
-            Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
+            Ok(Value::Float64(f64::from_le_bytes(
+                bytes.try_into().unwrap(),
+            )))
         }
         ScalarType::Numeric => Ok(Value::Numeric(
             unsafe { std::str::from_utf8_unchecked(bytes) }.into(),
         )),
-        ScalarType::Json => Ok(Value::Json(crate::pgrust::compact_string::CompactString::new(unsafe {
-            std::str::from_utf8_unchecked(bytes)
-        }))),
+        ScalarType::Json => Ok(Value::Json(
+            crate::pgrust::compact_string::CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            }),
+        )),
+        ScalarType::Jsonb => Ok(Value::Jsonb(bytes.to_vec())),
         ScalarType::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {
@@ -394,9 +463,11 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
             }
             Ok(Value::Bool(bytes[0] != 0))
         }
-        ScalarType::Text => Ok(Value::Text(crate::pgrust::compact_string::CompactString::new(unsafe {
-            std::str::from_utf8_unchecked(bytes)
-        }))),
+        ScalarType::Text => Ok(Value::Text(
+            crate::pgrust::compact_string::CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            }),
+        )),
         ScalarType::Array(_) => Err(ExecError::InvalidStorageValue {
             column: "<array>".into(),
             details: "nested arrays are not supported".into(),

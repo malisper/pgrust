@@ -33,7 +33,9 @@ mod tests {
         });
 
         let stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         (stream, server)
     }
 
@@ -41,14 +43,18 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(&PROTOCOL_VERSION_3_0.to_be_bytes());
         body.extend_from_slice(b"user\0postgres\0database\0postgres\0\0");
-        stream.write_all(&((body.len() + 4) as i32).to_be_bytes()).unwrap();
+        stream
+            .write_all(&((body.len() + 4) as i32).to_be_bytes())
+            .unwrap();
         stream.write_all(&body).unwrap();
         stream.flush().unwrap();
     }
 
     fn send_typed_message(stream: &mut TcpStream, kind: u8, body: &[u8]) {
         stream.write_all(&[kind]).unwrap();
-        stream.write_all(&((body.len() + 4) as i32).to_be_bytes()).unwrap();
+        stream
+            .write_all(&((body.len() + 4) as i32).to_be_bytes())
+            .unwrap();
         stream.write_all(body).unwrap();
         stream.flush().unwrap();
     }
@@ -69,12 +75,21 @@ mod tests {
 
     fn read_message(stream: &mut TcpStream, label: &str) -> (u8, Vec<u8>) {
         let mut kind = [0u8; 1];
-        stream.read_exact(&mut kind).unwrap_or_else(|e| panic!("{label}: failed reading kind: {e}"));
+        stream
+            .read_exact(&mut kind)
+            .unwrap_or_else(|e| panic!("{label}: failed reading kind: {e}"));
         let mut len = [0u8; 4];
-        stream.read_exact(&mut len).unwrap_or_else(|e| panic!("{label}: failed reading length: {e}"));
+        stream
+            .read_exact(&mut len)
+            .unwrap_or_else(|e| panic!("{label}: failed reading length: {e}"));
         let len = i32::from_be_bytes(len) as usize;
         let mut body = vec![0u8; len - 4];
-        stream.read_exact(&mut body).unwrap_or_else(|e| panic!("{label}: failed reading body for message '{}' len {len}: {e}", kind[0] as char));
+        stream.read_exact(&mut body).unwrap_or_else(|e| {
+            panic!(
+                "{label}: failed reading body for message '{}' len {len}: {e}",
+                kind[0] as char
+            )
+        });
         (kind[0], body)
     }
 
@@ -104,7 +119,9 @@ mod tests {
                 values.push(None);
             } else {
                 let end = offset + len as usize;
-                values.push(Some(String::from_utf8_lossy(&body[offset..end]).into_owned()));
+                values.push(Some(
+                    String::from_utf8_lossy(&body[offset..end]).into_owned(),
+                ));
                 offset = end;
             }
         }
@@ -143,7 +160,10 @@ mod tests {
             while body[offset] != 0 {
                 offset += 1;
             }
-            fields.push((code, String::from_utf8_lossy(&body[start..offset]).into_owned()));
+            fields.push((
+                code,
+                String::from_utf8_lossy(&body[start..offset]).into_owned(),
+            ));
             offset += 1;
         }
         fields
@@ -158,19 +178,41 @@ mod tests {
         assert!(matches!(startup.last(), Some((b'Z', _))));
         send_query(&mut stream, "create table t (id int, name text)");
         let create = read_until_ready(&mut stream, "create");
-        assert_eq!(create.iter().find(|(kind, _)| *kind == b'C').map(|(_, body)| command_tag(body)), Some("CREATE TABLE".to_string()));
+        assert_eq!(
+            create
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("CREATE TABLE".to_string())
+        );
         send_query(&mut stream, "copy t from stdin");
         let copy_start = read_message(&mut stream, "copy_start");
         assert_eq!(copy_start.0, b'G');
         send_copy_data(&mut stream, b"1\talice\n");
         send_copy_done(&mut stream);
         let copy_finish = read_until_ready(&mut stream, "copy_finish");
-        assert_eq!(copy_finish.iter().find(|(kind, _)| *kind == b'C').map(|(_, body)| command_tag(body)), Some("COPY".to_string()));
+        assert_eq!(
+            copy_finish
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("COPY".to_string())
+        );
         send_query(&mut stream, "select id, name from t");
         let select = read_until_ready(&mut stream, "select");
-        let rows = select.iter().filter(|(kind, _)| *kind == b'D').map(|(_, body)| data_row_values(body)).collect::<Vec<_>>();
+        let rows = select
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Some("1".into()), Some("alice".into())]]);
-        assert_eq!(select.iter().find(|(kind, _)| *kind == b'C').map(|(_, body)| command_tag(body)), Some("SELECT 1".to_string()));
+        assert_eq!(
+            select
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("SELECT 1".to_string())
+        );
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }
@@ -189,10 +231,20 @@ mod tests {
         send_copy_data(&mut stream, b"\\.\n");
         send_copy_done(&mut stream);
         let copy_finish = read_until_ready(&mut stream, "copy_finish");
-        assert_eq!(copy_finish.iter().find(|(kind, _)| *kind == b'C').map(|(_, body)| command_tag(body)), Some("COPY".to_string()));
+        assert_eq!(
+            copy_finish
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("COPY".to_string())
+        );
         send_query(&mut stream, "select id, name from t");
         let select = read_until_ready(&mut stream, "select");
-        let rows = select.iter().filter(|(kind, _)| *kind == b'D').map(|(_, body)| data_row_values(body)).collect::<Vec<_>>();
+        let rows = select
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Some("1".into()), Some("alice".into())]]);
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
@@ -205,7 +257,11 @@ mod tests {
         let _ = read_until_ready(&mut stream, "startup");
         send_query(&mut stream, "select 'foo'::varchar(4)");
         let response = read_until_ready(&mut stream, "select_varchar");
-        let fields = response.iter().find(|(kind, _)| *kind == b'T').map(|(_, body)| row_description_fields(body)).unwrap();
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].1, 1043);
         assert_eq!(fields[0].2, -1);
@@ -219,18 +275,44 @@ mod tests {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
-        send_query(&mut stream, "create table people (id int4 not null, name text)");
+        send_query(
+            &mut stream,
+            "create table people (id int4 not null, name text)",
+        );
         let _ = read_until_ready(&mut stream, "create_people");
-        send_query(&mut stream, "create table pets (id int4 not null, owner_id int4, name text)");
+        send_query(
+            &mut stream,
+            "create table pets (id int4 not null, owner_id int4, name text)",
+        );
         let _ = read_until_ready(&mut stream, "create_pets");
-        send_query(&mut stream, "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')");
+        send_query(
+            &mut stream,
+            "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')",
+        );
         let _ = read_until_ready(&mut stream, "insert_people");
-        send_query(&mut stream, "insert into pets (id, owner_id, name) values (10, 1, 'mocha'), (11, 1, 'pixel'), (12, 2, 'otis')");
+        send_query(
+            &mut stream,
+            "insert into pets (id, owner_id, name) values (10, 1, 'mocha'), (11, 1, 'pixel'), (12, 2, 'otis')",
+        );
         let _ = read_until_ready(&mut stream, "insert_pets");
-        send_query(&mut stream, "select p.id, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id");
+        send_query(
+            &mut stream,
+            "select p.id, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
+        );
         let response = read_until_ready(&mut stream, "correlated_select");
-        let rows = response.iter().filter(|(kind, _)| *kind == b'D').map(|(_, body)| data_row_values(body)).collect::<Vec<_>>();
-        assert_eq!(rows, vec![vec![Some("1".into()), Some("2".into())], vec![Some("2".into()), Some("1".into())], vec![Some("3".into()), Some("0".into())]]);
+        let rows = response
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                vec![Some("1".into()), Some("2".into())],
+                vec![Some("2".into()), Some("1".into())],
+                vec![Some("3".into()), Some("0".into())]
+            ]
+        );
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }
@@ -240,9 +322,16 @@ mod tests {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
-        send_query(&mut stream, "select (select 1), exists (select 1), (select 'x'::text)");
+        send_query(
+            &mut stream,
+            "select (select 1), exists (select 1), (select 'x'::text)",
+        );
         let response = read_until_ready(&mut stream, "subquery_row_description");
-        let fields = response.iter().find(|(kind, _)| *kind == b'T').map(|(_, body)| row_description_fields(body)).unwrap();
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0].1, 23);
         assert_eq!(fields[1].1, 16);
@@ -258,7 +347,11 @@ mod tests {
         let _ = read_until_ready(&mut stream, "startup");
         send_query(&mut stream, "select ARRAY[1, 2]::int4[]");
         let response = read_until_ready(&mut stream, "array_row_description");
-        let fields = response.iter().find(|(kind, _)| *kind == b'T').map(|(_, body)| row_description_fields(body)).unwrap();
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].1, 1007);
         assert_eq!(fields[0].2, -1);
@@ -297,9 +390,35 @@ mod tests {
         let _ = read_until_ready(&mut stream, "startup");
         send_query(&mut stream, "select ARRAY['x']::varchar[]");
         let response = read_until_ready(&mut stream, "varchar_array_row_description");
-        let fields = response.iter().find(|(kind, _)| *kind == b'T').map(|(_, body)| row_description_fields(body)).unwrap();
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].1, 1015);
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn row_description_reports_jsonb_oids() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+        send_query(
+            &mut stream,
+            "select '{\"a\":1}'::jsonb, ARRAY['{\"a\":1}']::jsonb[]",
+        );
+        let response = read_until_ready(&mut stream, "jsonb_row_description");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].1, 3802);
+        assert_eq!(fields[1].1, 3807);
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }
@@ -309,10 +428,23 @@ mod tests {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
-        send_query(&mut stream, "select ARRAY['a,b', 'c']::varchar[], ARRAY[1, null, 3]::int4[]");
+        send_query(
+            &mut stream,
+            "select ARRAY['a,b', 'c']::varchar[], ARRAY[1, null, 3]::int4[]",
+        );
         let response = read_until_ready(&mut stream, "array_data_row");
-        let rows = response.iter().filter(|(kind, _)| *kind == b'D').map(|(_, body)| data_row_values(body)).collect::<Vec<_>>();
-        assert_eq!(rows, vec![vec![Some("{\"a,b\",\"c\"}".into()), Some("{1,NULL,3}".into())]]);
+        let rows = response
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![vec![
+                Some("{\"a,b\",\"c\"}".into()),
+                Some("{1,NULL,3}".into())
+            ]]
+        );
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }
@@ -325,21 +457,55 @@ mod tests {
 
         send_query(&mut stream, "select 'abc'::numeric");
         let response = read_until_ready(&mut stream, "invalid_numeric");
-        let error = response.iter().find(|(kind, _)| *kind == b'E').map(|(_, body)| error_fields(body)).unwrap();
-        assert!(error.iter().any(|(code, value)| *code == b'C' && value == "22P02"));
-        assert!(error.iter().any(|(code, value)| *code == b'M' && value == "invalid input syntax for type numeric: \"abc\""));
+        let error = response
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .map(|(_, body)| error_fields(body))
+            .unwrap();
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "22P02")
+        );
+        assert!(error.iter().any(|(code, value)| *code == b'M'
+            && value == "invalid input syntax for type numeric: \"abc\""));
 
         send_query(&mut stream, "select '1234.56'::numeric(5,2)");
         let response = read_until_ready(&mut stream, "numeric_overflow");
-        let error = response.iter().find(|(kind, _)| *kind == b'E').map(|(_, body)| error_fields(body)).unwrap();
-        assert!(error.iter().any(|(code, value)| *code == b'C' && value == "22003"));
-        assert!(error.iter().any(|(code, value)| *code == b'M' && value == "numeric field overflow"));
+        let error = response
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .map(|(_, body)| error_fields(body))
+            .unwrap();
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "22003")
+        );
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'M' && value == "numeric field overflow")
+        );
 
         send_query(&mut stream, "select 1.5::real % 1.0::real");
         let response = read_until_ready(&mut stream, "undefined_operator");
-        let error = response.iter().find(|(kind, _)| *kind == b'E').map(|(_, body)| error_fields(body)).unwrap();
-        assert!(error.iter().any(|(code, value)| *code == b'C' && value == "42883"));
-        assert!(error.iter().any(|(code, value)| *code == b'M' && value == "operator does not exist: real % real"));
+        let error = response
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .map(|(_, body)| error_fields(body))
+            .unwrap();
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "42883")
+        );
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'M'
+                    && value == "operator does not exist: real % real")
+        );
 
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();

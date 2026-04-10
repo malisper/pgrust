@@ -1,21 +1,20 @@
+use parking_lot::RwLock;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::include::access::htup::{HeapTuple, TupleValue};
 use pgrust::backend::catalog::catalog::{Catalog, DurableCatalog, column_desc};
-use pgrust::executor::{
-    ExecError, ExecutorContext, RelationDesc, StatementResult, Value,
-    execute_statement,
-};
-use pgrust::parser::{ParseError, SqlType, SqlTypeKind, Statement, parse_statement};
 use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
+use pgrust::executor::{
+    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_statement,
+};
+use pgrust::include::access::htup::{HeapTuple, TupleValue};
+use pgrust::parser::{ParseError, SqlType, SqlTypeKind, Statement, parse_statement};
 use pgrust::{BufferPool, SmgrStorageBackend};
 
 struct RawModeGuard {
@@ -136,12 +135,18 @@ fn render_value(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Json(v) => v.to_string(),
+        Value::Jsonb(v) => format!("{:?}", v),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap().to_string(),
         Value::Bool(v) => v.to_string(),
         Value::Array(items) => format!(
             "{{{}}}",
-            items.iter().map(render_value).collect::<Vec<_>>().join(", ")
+            items
+                .iter()
+                .map(render_value)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         Value::Null => "NULL".into(),
     }
@@ -152,16 +157,25 @@ fn print_result(result: StatementResult) {
         StatementResult::AffectedRows(count) => {
             println!("AFFECTED ROWS: {}", count);
         }
-        StatementResult::Query { column_names, rows, .. } => {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
             if column_names.is_empty() {
                 println!("({} rows)", rows.len());
                 return;
             }
 
-            let mut widths = column_names.iter().map(|name| name.len()).collect::<Vec<_>>();
+            let mut widths = column_names
+                .iter()
+                .map(|name| name.len())
+                .collect::<Vec<_>>();
             let rendered_rows = rows
                 .into_iter()
-                .map(|row| row.into_iter().map(|value| render_value(&value)).collect::<Vec<_>>())
+                .map(|row| {
+                    row.into_iter()
+                        .map(|value| render_value(&value))
+                        .collect::<Vec<_>>()
+                })
                 .collect::<Vec<_>>();
 
             for row in &rendered_rows {
@@ -385,8 +399,7 @@ fn run_statement(
     catalog_store: &mut DurableCatalog,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
-    let needs_catalog_persist =
-        matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
+    let needs_catalog_persist = matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
 
     let result = match stmt {
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
