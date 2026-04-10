@@ -1335,6 +1335,36 @@ mod tests {
             other => panic!("expected query result, got {:?}", other),
         }
     }
+
+    #[test]
+    fn float_and_numeric_special_values_parse() {
+        let base = temp_dir("float_numeric_special_values");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 'Infinity'::float8, '-Infinity'::float8, 'NaN'::numeric",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, columns, .. } => {
+                assert_eq!(columns[0].sql_type, crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Float8));
+                assert_eq!(columns[1].sql_type, crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Float8));
+                assert_eq!(columns[2].sql_type, crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Numeric));
+                match &rows[0][0] {
+                    Value::Float64(v) => assert!(v.is_infinite() && *v > 0.0),
+                    other => panic!("expected positive infinity, got {:?}", other),
+                }
+                match &rows[0][1] {
+                    Value::Float64(v) => assert!(v.is_infinite() && *v < 0.0),
+                    other => panic!("expected negative infinity, got {:?}", other),
+                }
+                assert_eq!(rows[0][2], Value::Numeric("NaN".into()));
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
     #[test] fn all_array_semantics_match_empty_false_and_null_cases() { let base = temp_dir("all_array_semantics"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 < all(ARRAY[2, 3]), 1 < all(ARRAY[]::int4[]), 3 < all(ARRAY[2, null]::int4[]), 1 < all(ARRAY[2, null]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn any_array_empty_and_null_array_cases() { let base = temp_dir("any_array_empty_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 = any(ARRAY[]::int4[]), 1 = any((null)::int4[]), (null)::int4 = any(ARRAY[1]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Null, Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn array_overlap_false_and_null_cases() { let base = temp_dir("array_overlap_false_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a']::varchar[] && ARRAY['b']::varchar[], ARRAY['a', null]::varchar[] && ARRAY['b', null]::varchar[], ARRAY['a']::varchar[] && (null)::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
