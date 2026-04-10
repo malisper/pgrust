@@ -13,6 +13,26 @@ use crate::backend::libpq::pqformat::{
     send_parameter_status, send_parse_complete, send_query_result, send_ready_for_query,
     send_row_description,
 };
+
+fn exec_error_sqlstate(e: &ExecError) -> &'static str {
+    match e {
+        ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
+        | ExecError::InvalidIntegerInput { .. }
+        | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidFloatInput(_) => "22P02",
+        ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
+        ExecError::Int2OutOfRange
+        | ExecError::Int4OutOfRange
+        | ExecError::Int8OutOfRange
+        | ExecError::NumericFieldOverflow => "22003",
+        ExecError::DivisionByZero(_) => "22012",
+        ExecError::StringDataRightTruncation { .. } => "22001",
+        ExecError::CardinalityViolation(_) => "21000",
+        ExecError::Parse(_) => "42601",
+        _ => "XX000",
+    }
+}
 use crate::backend::parser::{parse_statement, Statement};
 use crate::pgrust::database::Database;
 use crate::pgrust::session::Session;
@@ -244,7 +264,7 @@ fn handle_query(stream: &mut impl Write, db: &Database, state: &mut ConnectionSt
                 drop(guard);
 
                 if let Some(e) = err {
-                    send_error(stream, "XX000", &format_exec_error(&e))?;
+                    send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
                 } else {
                     if !header_sent {
                         send_row_description(stream, &columns)?;
@@ -253,11 +273,7 @@ fn handle_query(stream: &mut impl Write, db: &Database, state: &mut ConnectionSt
                 }
             }
             Err(e) => {
-                let sqlstate = match &e {
-                    ExecError::Parse(_) => "42601",
-                    _ => "XX000",
-                };
-                send_error(stream, sqlstate, &format_exec_error(&e))?;
+                send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
             }
         }
     } else {
@@ -269,11 +285,7 @@ fn handle_query(stream: &mut impl Write, db: &Database, state: &mut ConnectionSt
                 send_command_complete(stream, &infer_command_tag(sql, n))?;
             }
             Err(e) => {
-                let sqlstate = match &e {
-                    ExecError::Parse(_) => "42601",
-                    _ => "XX000",
-                };
-                send_error(stream, sqlstate, &format_exec_error(&e))?;
+                send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
             }
         }
     }
@@ -447,11 +459,7 @@ fn execute_portal(stream: &mut impl Write, db: &Database, session: &mut Session,
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
         }
         Err(e) => {
-            let sqlstate = match &e {
-                ExecError::Parse(_) => "42601",
-                _ => "XX000",
-            };
-            send_error(stream, sqlstate, &format_exec_error(&e))?;
+            send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
         }
     }
     Ok(())

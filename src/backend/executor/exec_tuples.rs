@@ -348,9 +348,9 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
             }
             Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
         }
-        ScalarType::Numeric => Ok(Value::Numeric(crate::pgrust::compact_string::CompactString::new(
-            unsafe { std::str::from_utf8_unchecked(bytes) },
-        ))),
+        ScalarType::Numeric => Ok(Value::Numeric(
+            unsafe { std::str::from_utf8_unchecked(bytes) }.into(),
+        )),
         ScalarType::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {

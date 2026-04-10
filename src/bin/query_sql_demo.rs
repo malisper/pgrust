@@ -64,6 +64,7 @@ fn render_value(value: &Value) -> String {
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
         Value::Text(v) => format!("{:?}", v),
         Value::TextRef(_, _) => format!("{:?}", value.as_text().unwrap()),
         Value::Bool(v) => v.to_string(),

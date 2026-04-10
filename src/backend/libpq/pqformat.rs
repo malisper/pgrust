@@ -8,6 +8,14 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
+        ExecError::InvalidIntegerInput { ty, value } => format!("invalid input syntax for type {ty}: \"{value}\""),
+        ExecError::InvalidNumericInput(value) => format!("invalid input syntax for type numeric: \"{value}\""),
+        ExecError::InvalidFloatInput(value) => format!("invalid input syntax for type double precision: \"{value}\""),
+        ExecError::Int2OutOfRange => "smallint out of range".to_string(),
+        ExecError::Int4OutOfRange => "integer out of range".to_string(),
+        ExecError::Int8OutOfRange => "bigint out of range".to_string(),
+        ExecError::NumericFieldOverflow => "numeric field overflow".to_string(),
+        ExecError::DivisionByZero(_) => "division by zero".to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -169,8 +177,9 @@ pub(crate) fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }
             Value::Numeric(v) => {
-                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
-                buf.extend_from_slice(v.as_bytes());
+                let text = v.render();
+                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
             }
             Value::Text(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());

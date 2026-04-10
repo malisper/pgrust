@@ -4,6 +4,9 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::pgrust::compact_string::CompactString;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_traits::{Signed, Zero};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -63,7 +66,7 @@ pub enum Value {
     Int32(i32),
     Int64(i64),
     Float64(f64),
-    Numeric(CompactString),
+    Numeric(NumericValue),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned
     /// (the slot's `Rc<OwnedBufferPin>` keeps the pin alive). User data on the
@@ -72,6 +75,156 @@ pub enum Value {
     Bool(bool),
     Array(Vec<Value>),
     Null,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NumericValue {
+    Finite { coeff: BigInt, scale: u32 },
+    NaN,
+}
+
+impl NumericValue {
+    pub fn zero() -> Self {
+        Self::Finite {
+            coeff: BigInt::zero(),
+            scale: 0,
+        }
+    }
+
+    pub fn from_i64(value: i64) -> Self {
+        Self::Finite {
+            coeff: BigInt::from(value),
+            scale: 0,
+        }
+    }
+
+    pub fn normalize(self) -> Self {
+        match self {
+            Self::NaN => Self::NaN,
+            Self::Finite { mut coeff, mut scale } => {
+                if coeff.is_zero() {
+                    return Self::zero();
+                }
+                let ten = BigInt::from(10u8);
+                while scale > 0 {
+                    let (q, r) = coeff.div_rem(&ten);
+                    if !r.is_zero() {
+                        break;
+                    }
+                    coeff = q;
+                    scale -= 1;
+                }
+                Self::Finite { coeff, scale }
+            }
+        }
+    }
+
+    pub fn digit_count(&self) -> i32 {
+        match self {
+            Self::NaN => 0,
+            Self::Finite { coeff, .. } => coeff.to_str_radix(10).trim_start_matches('-').trim_start_matches('0').len().max(1) as i32,
+        }
+    }
+
+    pub fn negate(&self) -> Self {
+        match self {
+            Self::NaN => Self::NaN,
+            Self::Finite { coeff, scale } => Self::Finite {
+                coeff: -coeff.clone(),
+                scale: *scale,
+            },
+        }
+    }
+
+    pub fn render(&self) -> String {
+        match self {
+            Self::NaN => "NaN".to_string(),
+            Self::Finite { coeff, scale } => {
+                let negative = coeff.is_negative();
+                let digits = coeff.abs().to_str_radix(10);
+                if *scale == 0 {
+                    if negative { format!("-{digits}") } else { digits }
+                } else {
+                    let scale = *scale as usize;
+                    let mut out = String::new();
+                    if negative {
+                        out.push('-');
+                    }
+                    if digits.len() <= scale {
+                        out.push('0');
+                        out.push('.');
+                        for _ in 0..(scale - digits.len()) {
+                            out.push('0');
+                        }
+                        out.push_str(&digits);
+                    } else {
+                        let split = digits.len() - scale;
+                        out.push_str(&digits[..split]);
+                        out.push('.');
+                        out.push_str(&digits[split..]);
+                    }
+                    out
+                }
+            }
+        }
+    }
+}
+
+impl From<&str> for NumericValue {
+    fn from(value: &str) -> Self {
+        parse_numeric_literal(value).unwrap_or_else(NumericValue::zero)
+    }
+}
+
+impl From<String> for NumericValue {
+    fn from(value: String) -> Self {
+        NumericValue::from(value.as_str())
+    }
+}
+
+fn parse_numeric_literal(text: &str) -> Option<NumericValue> {
+    if text.eq_ignore_ascii_case("nan") {
+        return Some(NumericValue::NaN);
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
+        Some(index) => (&trimmed[..index], trimmed[index + 1..].parse::<i32>().ok()?),
+        None => (trimmed, 0),
+    };
+    let negative = mantissa.starts_with('-');
+    let unsigned = mantissa.strip_prefix(['+', '-']).unwrap_or(mantissa);
+    let parts: Vec<&str> = unsigned.split('.').collect();
+    if parts.len() > 2 {
+        return None;
+    }
+    let whole = parts[0];
+    let frac = parts.get(1).copied().unwrap_or("");
+    if (!whole.is_empty() && !whole.chars().all(|ch| ch.is_ascii_digit()))
+        || !frac.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = format!("{whole}{frac}");
+    if digits.is_empty() {
+        digits.push('0');
+    }
+    let mut scale = frac.len() as i32 - exponent;
+    if scale < 0 {
+        digits.extend(std::iter::repeat_n('0', (-scale) as usize));
+        scale = 0;
+    }
+    let mut coeff = digits.parse::<BigInt>().ok()?;
+    if negative {
+        coeff = -coeff;
+    }
+    Some(NumericValue::Finite {
+        coeff,
+        scale: scale as u32,
+    }
+    .normalize())
 }
 
 impl Value {
@@ -105,7 +258,6 @@ impl Value {
             Value::Bool(v) => Value::Bool(*v),
             Value::Array(values) => Value::Array(values.iter().map(Value::to_owned_value).collect()),
             Value::Null => Value::Null,
-            other => other.clone(),
         }
     }
 

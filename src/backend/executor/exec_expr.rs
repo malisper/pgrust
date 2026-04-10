@@ -1,6 +1,10 @@
 use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_traits::{Signed, Zero};
+
 use crate::pgrust::compact_string::CompactString;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use super::nodes::*;
@@ -317,7 +321,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v as i32)),
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -338,7 +342,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v)),
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -383,7 +387,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                 }),
             SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v)),
             SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(NumericValue::from_i64(v))),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -394,8 +398,8 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             }),
         },
         Value::Float64(v) => match ty {
-            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v)),
-            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(CompactString::new(&v.to_string()))),
+            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) { (v as f32) as f64 } else { v })),
+            SqlType { kind: SqlTypeKind::Numeric, .. } => Ok(Value::Numeric(parse_numeric_text(&v.to_string()).ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?)),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -411,7 +415,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                 },
             }),
         },
-        Value::Numeric(text) => cast_text_value(text.as_str(), ty, true),
+        Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Array(items) => Ok(Value::Array(items)),
     }
 }
@@ -444,15 +448,12 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
                 right: Value::Int64(0),
             }),
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text)
-            .map(Value::Float64)
-            .map_err(|_| ExecError::TypeMismatch {
-                op: "::float8",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Float64(0.0),
-            }),
-        SqlTypeKind::Numeric => Ok(Value::Numeric(CompactString::from_owned(
-            coerce_numeric_string(text, ty)?,
-        ))),
+            .map(|v| Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) { (v as f32) as f64 } else { v }))
+            .map_err(|_| ExecError::InvalidFloatInput(text.to_string())),
+        SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(
+            parse_numeric_text(text).ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))?,
+            ty,
+        )?)),
         SqlTypeKind::Bool => match text.to_ascii_lowercase().as_str() {
             "true" | "t" => Ok(Value::Bool(true)),
             "false" | "f" => Ok(Value::Bool(false)),
@@ -462,6 +463,43 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
                 right: Value::Bool(false),
             }),
         },
+    }
+}
+
+fn cast_numeric_value(value: NumericValue, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
+    match ty.kind {
+        SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
+        SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::from_owned(value.render()))),
+        SqlTypeKind::Char | SqlTypeKind::Varchar => {
+            cast_text_value(&value.render(), ty, explicit)
+        }
+        SqlTypeKind::Float4 => {
+            let rendered = value.render();
+            let v = parse_pg_float(&rendered).map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
+            Ok(Value::Float64((v as f32) as f64))
+        }
+        SqlTypeKind::Float8 => {
+            let rendered = value.render();
+            let v = parse_pg_float(&rendered).map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
+            Ok(Value::Float64(v))
+        }
+        SqlTypeKind::Int2 => {
+            let rendered = value.render();
+            rendered.parse::<i16>().map(Value::Int16).map_err(|_| ExecError::Int2OutOfRange)
+        }
+        SqlTypeKind::Int4 => {
+            let rendered = value.render();
+            rendered.parse::<i32>().map(Value::Int32).map_err(|_| ExecError::Int4OutOfRange)
+        }
+        SqlTypeKind::Int8 => {
+            let rendered = value.render();
+            rendered.parse::<i64>().map(Value::Int64).map_err(|_| ExecError::Int8OutOfRange)
+        }
+        SqlTypeKind::Bool => Err(ExecError::TypeMismatch {
+            op: "::bool",
+            left: Value::Numeric(value),
+            right: Value::Bool(false),
+        }),
     }
 }
 
@@ -491,34 +529,20 @@ fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<St
     }
 }
 
-fn coerce_numeric_string(text: &str, ty: SqlType) -> Result<String, ExecError> {
-    let parsed = parse_numeric_text(text).ok_or_else(|| ExecError::TypeMismatch {
-        op: "::numeric",
-        left: Value::Text(CompactString::new(text)),
-        right: Value::Numeric(CompactString::new("0")),
-    })?;
-
+fn coerce_numeric_value(parsed: NumericValue, ty: SqlType) -> Result<NumericValue, ExecError> {
     let Some((precision, scale)) = ty.numeric_precision_scale() else {
-        return Ok(render_numeric_text(&parsed));
+        return Ok(parsed);
     };
 
     let rounded = parsed
         .round_to_scale(scale as u32)
-        .ok_or_else(|| ExecError::TypeMismatch {
-            op: "::numeric",
-            left: Value::Text(CompactString::new(text)),
-            right: Value::Numeric(CompactString::new("0")),
-        })?;
+        .ok_or_else(|| ExecError::NumericFieldOverflow)?;
 
     if rounded.digit_count() > precision {
-        return Err(ExecError::TypeMismatch {
-            op: "::numeric",
-            left: Value::Text(CompactString::new(text)),
-            right: Value::Numeric(CompactString::new("0")),
-        });
+        return Err(ExecError::NumericFieldOverflow);
     }
 
-    Ok(render_numeric_text(&rounded))
+    Ok(rounded)
 }
 
 fn parse_pg_float(text: &str) -> Result<f64, ()> {
@@ -575,7 +599,7 @@ pub(crate) fn compare_order_values(
         (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
         (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
             parsed_numeric_value(a)
-                .and_then(|left| parsed_numeric_value(b).and_then(|right| left.cmp(&right)))
+                .and_then(|left| parsed_numeric_value(b).map(|right| left.cmp(&right)))
                 .unwrap_or(Ordering::Equal)
         }
         (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
@@ -889,7 +913,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
         Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
-        Value::Numeric(text) => cast_text_value(text.as_str(), target, false),
+        Value::Numeric(numeric) => cast_numeric_value(numeric.clone(), target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::Array(items) => Ok(Value::Array(items.clone())),
@@ -995,9 +1019,12 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Numeric(CompactString::new(unsafe {
+            Ok(Value::Numeric(parse_numeric_text(unsafe {
                 std::str::from_utf8_unchecked(bytes)
-            })))
+            }).ok_or_else(|| ExecError::InvalidStorageValue {
+                column: column.name.clone(),
+                details: "invalid numeric text".into(),
+            })?))
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -1086,7 +1113,7 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            Ok(Value::Bool(parsed_numeric_value(l).unwrap().cmp(&parsed_numeric_value(r).unwrap()) == Some(Ordering::Equal)))
+            Ok(Value::Bool(parsed_numeric_value(l).unwrap().cmp(&parsed_numeric_value(r).unwrap()) == Ordering::Equal))
         }
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(l.as_text() == r.as_text())),
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
@@ -1120,7 +1147,7 @@ fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int64(l), Value::Int64(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            parsed_numeric_value(l).unwrap().cmp(&parsed_numeric_value(r).unwrap()) != Some(Ordering::Equal)
+            parsed_numeric_value(l).unwrap().cmp(&parsed_numeric_value(r).unwrap()) != Ordering::Equal
         }
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
@@ -1144,10 +1171,7 @@ fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l + (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l + r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            if matches!(left, Value::Numeric(_)) || matches!(right, Value::Numeric(_)) {
-                return exact_numeric_binary(l, r, |lv, rv| lv.add(rv), "+");
-            }
-            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() + numeric_as_f64(r).unwrap()))
+            exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
         }
         _ => Err(ExecError::TypeMismatch {
             op: "+",
@@ -1172,10 +1196,7 @@ fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l - (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            if matches!(left, Value::Numeric(_)) || matches!(right, Value::Numeric(_)) {
-                return exact_numeric_binary(l, r, |lv, rv| lv.sub(rv), "-");
-            }
-            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() - numeric_as_f64(r).unwrap()))
+            exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
         }
         _ => Err(ExecError::TypeMismatch { op: "-", left, right }),
     }
@@ -1196,10 +1217,7 @@ fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l * (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l * r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            if matches!(left, Value::Numeric(_)) || matches!(right, Value::Numeric(_)) {
-                return exact_numeric_binary(l, r, |lv, rv| lv.mul(rv), "*");
-            }
-            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() * numeric_as_f64(r).unwrap()))
+            exact_numeric_binary(l, r, |lv, rv| Some(lv.mul(rv)), "*")
         }
         _ => Err(ExecError::TypeMismatch { op: "*", left, right }),
     }
@@ -1214,7 +1232,7 @@ fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
         Value::Int32(v) => *v == 0,
         Value::Int64(v) => *v == 0,
         Value::Float64(v) => *v == 0.0,
-        Value::Numeric(v) => parse_numeric_text(v.as_str()) == Some(ParsedNumeric::zero()),
+        Value::Numeric(v) => *v == NumericValue::zero(),
         _ => false,
     };
     if zero {
@@ -1231,14 +1249,7 @@ fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l / (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l / r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
-            if matches!(left, Value::Numeric(_)) || matches!(right, Value::Numeric(_)) {
-                if let Some(result) = parsed_numeric_value(l)
-                    .and_then(|lv| parsed_numeric_value(r).and_then(|rv| lv.div(&rv, 16)))
-                {
-                    return Ok(Value::Numeric(CompactString::new(&render_numeric_text(&result))));
-                }
-            }
-            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() / numeric_as_f64(r).unwrap()))
+            exact_numeric_binary(l, r, |lv, rv| lv.div(rv, 16), "/")
         }
         _ => Err(ExecError::TypeMismatch { op: "/", left, right }),
     }
@@ -1252,7 +1263,7 @@ fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> {
         Value::Int16(v) => *v == 0,
         Value::Int32(v) => *v == 0,
         Value::Int64(v) => *v == 0,
-        Value::Numeric(v) => parse_numeric_text(v.as_str()) == Some(ParsedNumeric::zero()),
+        Value::Numeric(v) => *v == NumericValue::zero(),
         _ => false,
     };
     if zero {
@@ -1283,12 +1294,7 @@ fn negate_value(value: Value) -> Result<Value, ExecError> {
         Value::Int64(v) => Ok(Value::Int64(-v)),
         Value::Float64(v) => Ok(Value::Float64(-v)),
         Value::Numeric(v) => {
-            let parsed = parse_numeric_text(v.as_str()).ok_or_else(|| ExecError::TypeMismatch {
-                op: "unary -",
-                left: Value::Numeric(v.clone()),
-                right: Value::Null,
-            })?;
-            Ok(Value::Numeric(CompactString::new(&render_numeric_text(&parsed.negate()))))
+            Ok(Value::Numeric(v.negate()))
         }
         other => Err(ExecError::TypeMismatch {
             op: "unary -",
@@ -1321,7 +1327,8 @@ fn order_values(op: &'static str, left: Value, right: Value) -> Result<Value, Ex
         })),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             let ordering = parsed_numeric_value(l)
-                .and_then(|lv| parsed_numeric_value(r).and_then(|rv| lv.cmp(&rv)))
+                .zip(parsed_numeric_value(r))
+                .map(|(lv, rv)| lv.cmp(&rv))
                 .ok_or_else(|| ExecError::TypeMismatch { op, left: left.clone(), right: right.clone() })?;
             Ok(Value::Bool(match op {
                 "<" => ordering == Ordering::Less,
@@ -1404,7 +1411,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
-        Value::Numeric(text) => Ok(text.as_bytes().to_vec()),
+        Value::Numeric(text) => Ok(text.render().into_bytes()),
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
         Value::Float64(v) => Ok(v.to_string().into_bytes()),
@@ -1495,9 +1502,12 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             }
         }
         SqlTypeKind::Numeric => {
-            Ok(Value::Numeric(CompactString::new(unsafe {
+            Ok(Value::Numeric(parse_numeric_text(unsafe {
                 std::str::from_utf8_unchecked(bytes)
-            })))
+            }).ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "invalid numeric array element".into(),
+            })?))
         }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
@@ -1526,7 +1536,7 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Int32(v) => out.push_str(&v.to_string()),
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Float64(v) => out.push_str(&v.to_string()),
-            Value::Numeric(v) => out.push_str(v.as_str()),
+            Value::Numeric(v) => out.push_str(&v.render()),
             Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
             Value::Text(_) | Value::TextRef(_, _) => {
                 out.push('"');
@@ -1548,114 +1558,25 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
     out
 }
 
-fn numeric_as_f64(value: &Value) -> Option<f64> {
-    match value {
-        Value::Int16(v) => Some(*v as f64),
-        Value::Int32(v) => Some(*v as f64),
-        Value::Int64(v) => Some(*v as f64),
-        Value::Float64(v) => Some(*v),
-        Value::Numeric(v) => v.parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ParsedNumeric {
-    Finite { coeff: i128, scale: u32 },
-    NaN,
-}
-
-impl ParsedNumeric {
-    pub(crate) fn zero() -> Self {
-        Self::Finite { coeff: 0, scale: 0 }
-    }
-
-    pub(crate) fn from_i64(value: i64) -> Self {
-        Self::Finite {
-            coeff: value as i128,
-            scale: 0,
-        }
-    }
-
-    fn normalize(self) -> Self {
-        match self {
-            Self::Finite { mut coeff, mut scale } => {
-                if coeff == 0 {
-                    return Self::zero();
-                }
-                while scale > 0 && coeff % 10 == 0 {
-                    coeff /= 10;
-                    scale -= 1;
-                }
-                Self::Finite { coeff, scale }
-            }
-            Self::NaN => Self::NaN,
-        }
-    }
-
-    fn render(&self) -> String {
-        match self {
-            Self::NaN => "NaN".to_string(),
-            Self::Finite { coeff, scale } => {
-                let negative = *coeff < 0;
-                let digits = coeff.abs().to_string();
-                if *scale == 0 {
-                    if negative {
-                        format!("-{digits}")
-                    } else {
-                        digits
-                    }
-                } else {
-                    let scale = *scale as usize;
-                    let mut out = String::new();
-                    if negative {
-                        out.push('-');
-                    }
-                    if digits.len() <= scale {
-                        out.push('0');
-                        out.push('.');
-                        for _ in 0..(scale - digits.len()) {
-                            out.push('0');
-                        }
-                        out.push_str(&digits);
-                    } else {
-                        let split = digits.len() - scale;
-                        out.push_str(&digits[..split]);
-                        out.push('.');
-                        out.push_str(&digits[split..]);
-                    }
-                    out
-                }
-            }
-        }
-    }
-
-    fn digit_count(&self) -> i32 {
-        match self {
-            Self::NaN => 0,
-            Self::Finite { coeff, .. } => coeff.abs().to_string().trim_start_matches('0').len().max(1) as i32,
-        }
-    }
-
+impl NumericValue {
     pub(crate) fn round_to_scale(&self, target_scale: u32) -> Option<Self> {
         match self {
             Self::NaN => Some(Self::NaN),
             Self::Finite { coeff, scale } => {
                 if *scale <= target_scale {
-                    let factor = pow10_i128(target_scale - *scale)?;
+                    let factor = pow10_bigint(target_scale - *scale);
                     return Some(Self::Finite {
-                        coeff: coeff.checked_mul(factor)?,
+                        coeff: coeff * factor,
                         scale: target_scale,
                     }
                     .normalize());
                 }
                 let diff = *scale - target_scale;
-                let factor = pow10_i128(diff)?;
-                let quotient = coeff / factor;
-                let remainder = coeff % factor;
-                let twice = remainder.abs().checked_mul(2)?;
+                let factor = pow10_bigint(diff);
+                let (quotient, remainder) = coeff.div_rem(&factor);
+                let twice = remainder.abs() * 2u8;
                 let rounded = if twice >= factor.abs() {
-                    quotient.checked_add(coeff.signum())?
+                    quotient + coeff.signum()
                 } else {
                     quotient
                 };
@@ -1668,35 +1589,35 @@ impl ParsedNumeric {
         }
     }
 
-    pub(crate) fn add(&self, other: &Self) -> Option<Self> {
+    pub(crate) fn add(&self, other: &Self) -> Self {
         match (self, other) {
-            (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
+            (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
             (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
                 let scale = (*lscale).max(*rscale);
-                let left = align_coeff(*lcoeff, *lscale, scale)?;
-                let right = align_coeff(*rcoeff, *rscale, scale)?;
-                Some(Self::Finite {
-                    coeff: left.checked_add(right)?,
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                Self::Finite {
+                    coeff: left + right,
                     scale,
                 }
-                .normalize())
+                .normalize()
             }
         }
     }
 
-    fn sub(&self, other: &Self) -> Option<Self> {
+    fn sub(&self, other: &Self) -> Self {
         self.add(&other.negate())
     }
 
-    fn mul(&self, other: &Self) -> Option<Self> {
+    fn mul(&self, other: &Self) -> Self {
         match (self, other) {
-            (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
+            (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
             (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
-                Some(Self::Finite {
-                    coeff: lcoeff.checked_mul(*rcoeff)?,
-                    scale: lscale.checked_add(*rscale)?,
+                Self::Finite {
+                    coeff: lcoeff * rcoeff,
+                    scale: lscale.saturating_add(*rscale),
                 }
-                .normalize())
+                .normalize()
             }
         }
     }
@@ -1704,11 +1625,11 @@ impl ParsedNumeric {
     fn rem(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
-            (_, Self::Finite { coeff: 0, .. }) => None,
+            (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
             (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
                 let scale = (*lscale).max(*rscale);
-                let left = align_coeff(*lcoeff, *lscale, scale)?;
-                let right = align_coeff(*rcoeff, *rscale, scale)?;
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
                 Some(Self::Finite {
                     coeff: left % right,
                     scale,
@@ -1721,16 +1642,15 @@ impl ParsedNumeric {
     pub(crate) fn div(&self, other: &Self, out_scale: u32) -> Option<Self> {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
-            (_, Self::Finite { coeff: 0, .. }) => None,
+            (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
             (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
                 let exp = out_scale.checked_add(*rscale)?.checked_sub(*lscale)?;
-                let factor = pow10_i128(exp)?;
-                let num = lcoeff.checked_mul(factor)?;
-                let quotient = num / rcoeff;
-                let remainder = num % rcoeff;
-                let twice = remainder.abs().checked_mul(2)?;
+                let factor = pow10_bigint(exp);
+                let num = lcoeff * factor;
+                let (quotient, remainder) = num.div_rem(rcoeff);
+                let twice = remainder.abs() * 2u8;
                 let rounded = if twice >= rcoeff.abs() {
-                    quotient.checked_add((num.signum() * rcoeff.signum()) as i128)?
+                    quotient + (num.signum() * rcoeff.signum())
                 } else {
                     quotient
                 };
@@ -1743,47 +1663,36 @@ impl ParsedNumeric {
         }
     }
 
-    fn negate(&self) -> Self {
-        match self {
-            Self::NaN => Self::NaN,
-            Self::Finite { coeff, scale } => Self::Finite {
-                coeff: -*coeff,
-                scale: *scale,
-            },
-        }
-    }
-
-    fn cmp(&self, other: &Self) -> Option<Ordering> {
+    fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
-            (Self::NaN, Self::NaN) => Some(Ordering::Equal),
-            (Self::NaN, _) => Some(Ordering::Greater),
-            (_, Self::NaN) => Some(Ordering::Less),
+            (Self::NaN, Self::NaN) => Ordering::Equal,
+            (Self::NaN, _) => Ordering::Greater,
+            (_, Self::NaN) => Ordering::Less,
             (Self::Finite { coeff: lcoeff, scale: lscale }, Self::Finite { coeff: rcoeff, scale: rscale }) => {
                 let scale = (*lscale).max(*rscale);
-                let left = align_coeff(*lcoeff, *lscale, scale)?;
-                let right = align_coeff(*rcoeff, *rscale, scale)?;
-                Some(left.cmp(&right))
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                left.cmp(&right)
             }
         }
     }
 }
 
-fn align_coeff(coeff: i128, from_scale: u32, to_scale: u32) -> Option<i128> {
-    let factor = pow10_i128(to_scale.checked_sub(from_scale)?)?;
-    coeff.checked_mul(factor)
+fn align_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
+    coeff * pow10_bigint(to_scale - from_scale)
 }
 
-fn pow10_i128(exp: u32) -> Option<i128> {
-    let mut value = 1_i128;
+fn pow10_bigint(exp: u32) -> BigInt {
+    let mut value = BigInt::from(1u8);
     for _ in 0..exp {
-        value = value.checked_mul(10)?;
+        value *= 10u8;
     }
-    Some(value)
+    value
 }
 
-pub(crate) fn parse_numeric_text(text: &str) -> Option<ParsedNumeric> {
+pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
     if text.eq_ignore_ascii_case("nan") {
-        return Some(ParsedNumeric::NaN);
+        return Some(NumericValue::NaN);
     }
 
     let trimmed = text.trim();
@@ -1823,27 +1732,23 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<ParsedNumeric> {
         digits.extend(std::iter::repeat_n('0', (-scale) as usize));
         scale = 0;
     }
-    let mut coeff = digits.parse::<i128>().ok()?;
+    let mut coeff = digits.parse::<BigInt>().ok()?;
     if negative {
         coeff = -coeff;
     }
-    Some(ParsedNumeric::Finite {
+    Some(NumericValue::Finite {
         coeff,
         scale: scale as u32,
     }
     .normalize())
 }
 
-pub(crate) fn render_numeric_text(value: &ParsedNumeric) -> String {
-    value.render()
-}
-
-fn parsed_numeric_value(value: &Value) -> Option<ParsedNumeric> {
+fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {
     match value {
-        Value::Int16(v) => Some(ParsedNumeric::from_i64(*v as i64)),
-        Value::Int32(v) => Some(ParsedNumeric::from_i64(*v as i64)),
-        Value::Int64(v) => Some(ParsedNumeric::from_i64(*v)),
-        Value::Numeric(v) => parse_numeric_text(v.as_str()),
+        Value::Int16(v) => Some(NumericValue::from_i64(*v as i64)),
+        Value::Int32(v) => Some(NumericValue::from_i64(*v as i64)),
+        Value::Int64(v) => Some(NumericValue::from_i64(*v)),
+        Value::Numeric(v) => Some(v.clone()),
         Value::Float64(_) => None,
         _ => None,
     }
@@ -1852,7 +1757,7 @@ fn parsed_numeric_value(value: &Value) -> Option<ParsedNumeric> {
 fn exact_numeric_binary(
     left: &Value,
     right: &Value,
-    op: impl Fn(&ParsedNumeric, &ParsedNumeric) -> Option<ParsedNumeric>,
+    op: impl Fn(&NumericValue, &NumericValue) -> Option<NumericValue>,
     opname: &'static str,
 ) -> Result<Value, ExecError> {
     let left_num = parsed_numeric_value(left).ok_or_else(|| ExecError::TypeMismatch {
@@ -1870,13 +1775,5 @@ fn exact_numeric_binary(
         left: left.clone(),
         right: right.clone(),
     })?;
-    Ok(Value::Numeric(CompactString::new(&render_numeric_text(&result))))
-}
-
-fn numeric_result(left: &Value, right: &Value, result: f64) -> Value {
-    if matches!(left, Value::Numeric(_)) || matches!(right, Value::Numeric(_)) {
-        Value::Numeric(CompactString::new(&result.to_string()))
-    } else {
-        Value::Float64(result)
-    }
+    Ok(Value::Numeric(result))
 }

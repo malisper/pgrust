@@ -259,6 +259,7 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Int32(v) => *v as i64,
         Value::Int64(v) => *v,
         Value::Float64(v) => *v as i64,
+        Value::Numeric(v) => v.render().bytes().map(i64::from).sum(),
         Value::Text(v) => v.bytes().map(i64::from).sum(),
         Value::TextRef(_, _) => value.as_text().unwrap().bytes().map(i64::from).sum(),
         Value::Bool(v) => i64::from(*v),

@@ -15,6 +15,9 @@ crc32c = "0.6.8"
 itoa = "1"
 libc = "0.2"
 mimalloc = "0.1.48"
+num-bigint = "0.4.6"
+num-integer = "0.1.46"
+num-traits = "0.2.19"
 parking_lot = "0.12"
 pest = "2.7"
 pest_derive = "2.7"
@@ -24,4 +27,3 @@ rustc-hash = "2.1.2"
 
 [profile.release]
 debug = true
-

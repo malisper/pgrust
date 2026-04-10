@@ -343,26 +343,11 @@ pub(crate) fn bind_expr_with_outer(
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
         SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),
-        SqlExpr::Add(left, right) => Expr::Add(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::Sub(left, right) => Expr::Sub(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::Mul(left, right) => Expr::Mul(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::Div(left, right) => Expr::Div(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::Mod(left, right) => Expr::Mod(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
+        SqlExpr::Add(left, right) => bind_arithmetic_expr("+", Expr::Add, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::Sub(left, right) => bind_arithmetic_expr("-", Expr::Sub, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::Mul(left, right) => bind_arithmetic_expr("*", Expr::Mul, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::Div(left, right) => bind_arithmetic_expr("/", Expr::Div, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::Mod(left, right) => bind_arithmetic_expr("%", Expr::Mod, left, right, scope, catalog, outer_scopes, grouped_outer)?,
         SqlExpr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(bind_expr_with_outer(
             inner,
             scope,
@@ -385,30 +370,12 @@ pub(crate) fn bind_expr_with_outer(
             };
             Expr::Cast(Box::new(bound_inner), *ty)
         }
-        SqlExpr::Eq(left, right) => Expr::Eq(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::NotEq(left, right) => Expr::NotEq(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::Lt(left, right) => Expr::Lt(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::LtEq(left, right) => Expr::LtEq(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::Gt(left, right) => Expr::Gt(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
-        SqlExpr::GtEq(left, right) => Expr::GtEq(
-            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
-            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
-        ),
+        SqlExpr::Eq(left, right) => bind_comparison_expr(Expr::Eq, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::NotEq(left, right) => bind_comparison_expr(Expr::NotEq, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::Lt(left, right) => bind_comparison_expr(Expr::Lt, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::LtEq(left, right) => bind_comparison_expr(Expr::LtEq, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::Gt(left, right) => bind_comparison_expr(Expr::Gt, left, right, scope, catalog, outer_scopes, grouped_outer)?,
+        SqlExpr::GtEq(left, right) => bind_comparison_expr(Expr::GtEq, left, right, scope, catalog, outer_scopes, grouped_outer)?,
         SqlExpr::RegexMatch(left, right) => Expr::RegexMatch(
             Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
             Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
@@ -518,6 +485,123 @@ pub(crate) fn bind_expr_with_outer(
         SqlExpr::Random => Expr::Random,
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
+}
+
+fn bind_arithmetic_expr(
+    op: &'static str,
+    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let common = resolve_numeric_binary_type(op, left_type, right_type)?;
+    let left = coerce_bound_expr(
+        bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?,
+        left_type,
+        common,
+    );
+    let right = coerce_bound_expr(
+        bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
+        right_type,
+        common,
+    );
+    Ok(make(Box::new(left), Box::new(right)))
+}
+
+fn bind_comparison_expr(
+    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let left_bound = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
+    let right_bound = bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?;
+    let (left, right) = if is_numeric_family(left_type) && is_numeric_family(right_type) {
+        let common = resolve_numeric_binary_type("=", left_type, right_type)?;
+        (
+            coerce_bound_expr(left_bound, left_type, common),
+            coerce_bound_expr(right_bound, right_type, common),
+        )
+    } else {
+        (left_bound, right_bound)
+    };
+    Ok(make(Box::new(left), Box::new(right)))
+}
+
+fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
+    if from.element_type() == to.element_type() {
+        expr
+    } else {
+        Expr::Cast(Box::new(expr), to)
+    }
+}
+
+fn resolve_numeric_binary_type(op: &'static str, left: SqlType, right: SqlType) -> Result<SqlType, ParseError> {
+    use SqlTypeKind::*;
+    let left = left.element_type();
+    let right = right.element_type();
+    if op == "%" && (matches!(left.kind, Float4 | Float8) || matches!(right.kind, Float4 | Float8)) {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left),
+            right_type: sql_type_name(right),
+        });
+    }
+    if matches!(left.kind, Float8) || matches!(right.kind, Float8) {
+        return Ok(SqlType::new(Float8));
+    }
+    if matches!(left.kind, Float4) || matches!(right.kind, Float4) {
+        return Ok(SqlType::new(Float4));
+    }
+    if matches!(left.kind, Numeric) || matches!(right.kind, Numeric) {
+        return Ok(SqlType::new(Numeric));
+    }
+    if matches!(left.kind, Int8) || matches!(right.kind, Int8) {
+        return Ok(SqlType::new(Int8));
+    }
+    if matches!(left.kind, Int4) || matches!(right.kind, Int4) {
+        return Ok(SqlType::new(Int4));
+    }
+    Ok(SqlType::new(Int2))
+}
+
+fn sql_type_name(ty: SqlType) -> String {
+    match ty.kind {
+        SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int4 => "integer",
+        SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Float4 => "real",
+        SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::Char => "character",
+        SqlTypeKind::Varchar => "character varying",
+    }
+    .to_string()
+}
+
+fn is_numeric_family(ty: SqlType) -> bool {
+    matches!(
+        ty.element_type().kind,
+        SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Float8
+            | SqlTypeKind::Numeric
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1195,17 +1279,16 @@ fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: SqlType) -> S
     let left = left.element_type();
     let right = right.element_type();
 
-    let has_numeric = matches!(left.kind, Numeric) || matches!(right.kind, Numeric);
     let has_float8 = matches!(left.kind, Float8) || matches!(right.kind, Float8);
     let has_float4 = matches!(left.kind, Float4) || matches!(right.kind, Float4);
-    if has_numeric {
-        return SqlType::new(Numeric);
-    }
     if has_float8 {
         return SqlType::new(Float8);
     }
     if has_float4 {
         return SqlType::new(Float4);
+    }
+    if matches!(left.kind, Numeric) || matches!(right.kind, Numeric) {
+        return SqlType::new(Numeric);
     }
 
     let widest_int = if matches!(left.kind, Int8) || matches!(right.kind, Int8) {
@@ -1258,7 +1341,8 @@ fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> SqlType {
         AggFunc::Sum => match arg_type.map(|t| t.element_type().kind) {
             Some(Int2 | Int4) => SqlType::new(Int8),
             Some(Int8 | Numeric) => SqlType::new(Numeric),
-            Some(Float4 | Float8) => SqlType::new(Float8),
+            Some(Float4) => SqlType::new(Float4),
+            Some(Float8) => SqlType::new(Float8),
             Some(kind) => SqlType::new(kind),
             None => SqlType::new(Int8),
         },
