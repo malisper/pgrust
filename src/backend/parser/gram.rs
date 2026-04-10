@@ -145,7 +145,10 @@ fn parse_option_scalar(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
 fn build_option_scalar_value(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
     let pair = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     Ok(match pair.as_rule() {
-        Rule::string_literal => unescape_string(pair.as_str()),
+        Rule::quoted_string_literal
+        | Rule::string_literal
+        | Rule::escape_string_literal
+        | Rule::dollar_string_literal => decode_string_literal(pair.as_str())?,
         Rule::option_bool_value => {
             let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
             inner.as_str().to_string()
@@ -195,7 +198,10 @@ fn build_set_value_atom(pair: Pair<'_, Rule>) -> String {
     let pair = pair.clone().into_inner().next().unwrap_or(pair);
     match pair.as_rule() {
         Rule::signed_set_value => pair.as_str().to_string(),
-        Rule::string_literal => unescape_string(pair.as_str()),
+        Rule::quoted_string_literal
+        | Rule::string_literal
+        | Rule::escape_string_literal
+        | Rule::dollar_string_literal => decode_string_literal(pair.as_str()).unwrap_or_default(),
         Rule::kw_true => "true".to_string(),
         Rule::kw_false => "false".to_string(),
         Rule::kw_on_value => "on".to_string(),
@@ -1088,8 +1094,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
-        Rule::string_literal => Ok(SqlExpr::Const(Value::Text(
-            unescape_string(pair.as_str()).into(),
+        Rule::quoted_string_literal
+        | Rule::string_literal
+        | Rule::escape_string_literal
+        | Rule::dollar_string_literal => Ok(SqlExpr::Const(Value::Text(
+            decode_string_literal(pair.as_str())?.into(),
         ))),
         Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
@@ -1209,6 +1218,123 @@ fn fold_infix(
     Ok(expr)
 }
 
-fn unescape_string(raw: &str) -> String {
-    raw[1..raw.len() - 1].replace("''", "'")
+fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
+    if raw.starts_with('\'') {
+        return Ok(raw[1..raw.len() - 1].replace("''", "'"));
+    }
+
+    if raw.len() >= 2 && matches!(raw.as_bytes()[0], b'e' | b'E') && raw.as_bytes()[1] == b'\'' {
+        return decode_escape_string(&raw[1..]);
+    }
+
+    if raw.starts_with('$') {
+        return decode_dollar_string(raw);
+    }
+
+    Err(ParseError::UnexpectedToken {
+        expected: "string literal",
+        actual: raw.into(),
+    })
+}
+
+fn decode_escape_string(raw: &str) -> Result<String, ParseError> {
+    let text = raw[1..raw.len() - 1].replace("''", "'");
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let escaped = chars.next().ok_or(ParseError::UnexpectedEof)?;
+        match escaped {
+            '\'' => out.push('\''),
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            'b' => out.push('\u{0008}'),
+            'f' => out.push('\u{000c}'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'v' => out.push('\u{000b}'),
+            'a' => out.push('\u{0007}'),
+            'x' => {
+                let hi = chars.next().ok_or(ParseError::UnexpectedEof)?;
+                let lo = chars.next().ok_or(ParseError::UnexpectedEof)?;
+                let value = u8::from_str_radix(&format!("{hi}{lo}"), 16).map_err(|_| {
+                    ParseError::UnexpectedToken {
+                        expected: "valid hex escape",
+                        actual: raw.into(),
+                    }
+                })?;
+                out.push(value as char);
+            }
+            'u' => {
+                let code = collect_escape_digits(&mut chars, 4, raw)?;
+                let ch = char::from_u32(code).ok_or(ParseError::UnexpectedToken {
+                    expected: "valid unicode escape",
+                    actual: raw.into(),
+                })?;
+                out.push(ch);
+            }
+            'U' => {
+                let code = collect_escape_digits(&mut chars, 8, raw)?;
+                let ch = char::from_u32(code).ok_or(ParseError::UnexpectedToken {
+                    expected: "valid unicode escape",
+                    actual: raw.into(),
+                })?;
+                out.push(ch);
+            }
+            '0'..='7' => {
+                let mut digits = String::from(escaped);
+                for _ in 0..2 {
+                    if let Some(next) = chars.peek().copied() {
+                        if ('0'..='7').contains(&next) {
+                            digits.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                let value = u8::from_str_radix(&digits, 8).map_err(|_| ParseError::UnexpectedToken {
+                    expected: "valid octal escape",
+                    actual: raw.into(),
+                })?;
+                out.push(value as char);
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+fn collect_escape_digits(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    len: usize,
+    raw: &str,
+) -> Result<u32, ParseError> {
+    let mut digits = String::with_capacity(len);
+    for _ in 0..len {
+        digits.push(chars.next().ok_or(ParseError::UnexpectedEof)?);
+    }
+    u32::from_str_radix(&digits, 16).map_err(|_| ParseError::UnexpectedToken {
+        expected: "valid unicode escape",
+        actual: raw.into(),
+    })
+}
+
+fn decode_dollar_string(raw: &str) -> Result<String, ParseError> {
+    let end_tag_start = raw[1..]
+        .find('$')
+        .map(|idx| idx + 1)
+        .ok_or(ParseError::UnexpectedEof)?;
+    let tag = &raw[..=end_tag_start];
+    let suffix = &raw[end_tag_start + 1..];
+    let closing = suffix
+        .rfind(tag)
+        .ok_or(ParseError::UnexpectedToken {
+            expected: "matching dollar-quote terminator",
+            actual: raw.into(),
+        })?;
+    Ok(suffix[..closing].to_string())
 }

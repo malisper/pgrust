@@ -23,7 +23,7 @@ pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
 mod tests {
     use super::*;
     use crate::backend::catalog::catalog::column_desc;
-    use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc};
+    use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 
     fn desc() -> RelationDesc {
         RelationDesc {
@@ -96,6 +96,19 @@ mod tests {
                 name: "client_min_messages".into(),
                 value: "warning".into(),
                 is_local: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_set_statement_with_escape_string() {
+        let stmt = parse_statement(r#"set application_name to E'line\nbreak'"#).unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Set(SetStatement {
+                name: "application_name".into(),
+                value: "line\nbreak".into(),
+                is_local: false,
             })
         );
     }
@@ -259,6 +272,25 @@ mod tests {
             }
             other => panic!("expected cast expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_escape_and_dollar_quoted_strings() {
+        let stmt = parse_select(r#"select E'abc\tdef', $$a'b$$, $tag$x
+y$tag$"#).unwrap();
+        assert_eq!(stmt.targets.len(), 3);
+        assert!(matches!(
+            &stmt.targets[0].expr,
+            SqlExpr::Const(Value::Text(text)) if text.as_str() == "abc\tdef"
+        ));
+        assert!(matches!(
+            &stmt.targets[1].expr,
+            SqlExpr::Const(Value::Text(text)) if text.as_str() == "a'b"
+        ));
+        assert!(matches!(
+            &stmt.targets[2].expr,
+            SqlExpr::Const(Value::Text(text)) if text.as_str() == "x\ny"
+        ));
     }
 
     #[test]

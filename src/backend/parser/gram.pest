@@ -21,7 +21,7 @@ set_stmt = { kw_set ~ set_scope? ~ identifier ~ (("=" | kw_to) ~ set_value_list)
 reset_stmt = { kw_reset ~ (kw_all | identifier) }
 set_scope = { kw_session | kw_local }
 set_value_list = { set_value_atom ~ ("," ~ set_value_atom)* }
-set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | string_literal | identifier | numeric_literal | integer }
+set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | quoted_string_literal | identifier | numeric_literal | integer }
 signed_set_value = { ("+" | "-") ~ (numeric_literal | integer | identifier) }
 
 show_tables_stmt = { kw_show ~ kw_tables }
@@ -49,7 +49,7 @@ vacuum_option = { vacuum_analyze_option | vacuum_full_option | analyze_verbose_o
 vacuum_analyze_option = { kw_analyze ~ option_bool_value? }
 vacuum_full_option = { kw_full ~ option_bool_value? }
 option_bool_value = { kw_true | kw_false | kw_on_value | kw_off }
-option_scalar_value = { option_bool_value | string_literal | numeric_literal | integer | identifier }
+option_scalar_value = { option_bool_value | quoted_string_literal | numeric_literal | integer | identifier }
 maintenance_target_list = { maintenance_target ~ ("," ~ maintenance_target)* }
 maintenance_target = { only_clause? ~ identifier ~ maintenance_column_list? }
 maintenance_column_list = { "(" ~ ident_list ~ ")" }
@@ -85,7 +85,7 @@ nullability = { not_null | nullable }
 not_null = { kw_not ~ kw_null }
 nullable = { kw_null }
 type_name = { base_type_name ~ array_suffix? }
-base_type_name = { kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | kw_json | char_type | varchar_type | character_varying_type }
+base_type_name = { kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | kw_json | kw_jsonb | char_type | varchar_type | character_varying_type }
 array_suffix = { "[" ~ "]" }
 double_precision_type = { kw_double ~ kw_precision }
 numeric_type = { (kw_numeric | kw_decimal) ~ ("(" ~ integer ~ ("," ~ integer)? ~ ")")? }
@@ -112,19 +112,19 @@ is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ select_stmt ~ ")" }
 quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 quantified_comp_op = { "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
-comp_op = { "&&" | "#>>" | "#>" | "->>" | "->" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+comp_op = { "@>" | "<@" | "?|" | "?&" | "?" | "&&" | "#>>" | "#>" | "->>" | "->" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ cast_suffix* }
 cast_suffix = { "::" ~ type_name }
 positive_expr = { "+" ~ unary_expr }
 negated_expr = { "-" ~ unary_expr }
-primary_expr = { kw_null | kw_true | kw_false | kw_current_timestamp | exists_expr | scalar_subquery_expr | array_expr | agg_call | func_call | identifier | numeric_literal | integer | string_literal | "(" ~ expr ~ ")" }
+primary_expr = { kw_null | kw_true | kw_false | kw_current_timestamp | exists_expr | scalar_subquery_expr | array_expr | agg_call | func_call | quoted_string_literal | identifier | numeric_literal | integer | "(" ~ expr ~ ")" }
 scalar_subquery_expr = { "(" ~ select_stmt ~ ")" }
 exists_expr = { kw_exists ~ "(" ~ select_stmt ~ ")" }
 array_expr = { kw_array ~ "[" ~ expr_list? ~ "]" }
-agg_call = { agg_func ~ "(" ~ (agg_distinct ~ expr | star | expr) ~ ")" }
+agg_call = { agg_func ~ "(" ~ (agg_distinct ~ expr_list | star | expr_list) ~ ")" }
 agg_distinct = { kw_distinct_atom }
-agg_func = { kw_count | kw_sum | kw_avg | kw_min | kw_max | kw_json_agg }
+agg_func = { kw_count | kw_sum | kw_avg | kw_min | kw_max | kw_json_agg | kw_jsonb_agg | kw_json_object_agg | kw_jsonb_object_agg }
 func_call = { identifier ~ "(" ~ expr_list? ~ ")" }
 
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
@@ -137,7 +137,13 @@ numeric_literal = @{
 }
 integer = @{ ASCII_DIGIT+ }
 exponent = _{ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+quoted_string_literal = _{ escape_string_literal | dollar_string_literal | string_literal }
 string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
+escape_string_literal = @{ ^"e" ~ string_literal }
+dollar_string_literal = @{ dollar_quote_start ~ dollar_string_body ~ dollar_quote_end }
+dollar_quote_start = ${ "$" ~ PUSH(identifier?) ~ "$" }
+dollar_quote_end = ${ "$" ~ POP ~ "$" }
+dollar_string_body = { (!( "$" ~ PEEK ~ "$") ~ ANY)* }
 star = { "*" }
 
 kw_select = _{ kw_select_atom }
@@ -164,6 +170,7 @@ kw_on_value = { kw_on_value_atom }
 kw_on_value_atom = @{ ^"on" ~ keyword_end }
 kw_off = { kw_off_atom }
 kw_json = { kw_json_atom }
+kw_jsonb = { kw_jsonb_atom }
 kw_yaml = { kw_yaml_atom }
 kw_xml = { kw_xml_atom }
 kw_order = _{ kw_order_atom }
@@ -212,6 +219,9 @@ kw_avg = { kw_avg_atom }
 kw_min = { kw_min_atom }
 kw_max = { kw_max_atom }
 kw_json_agg = { kw_json_agg_atom }
+kw_jsonb_agg = { kw_jsonb_agg_atom }
+kw_json_object_agg = { kw_json_object_agg_atom }
+kw_jsonb_object_agg = { kw_jsonb_object_agg_atom }
 
 kw_int4 = { kw_int4_atom }
 kw_int2 = { kw_int2_atom }
@@ -271,6 +281,7 @@ kw_summary_atom = @{ ^"summary" ~ keyword_end }
 kw_format_atom = @{ ^"format" ~ keyword_end }
 kw_off_atom = @{ ^"off" ~ keyword_end }
 kw_json_atom = @{ ^"json" ~ keyword_end }
+kw_jsonb_atom = @{ ^"jsonb" ~ keyword_end }
 kw_yaml_atom = @{ ^"yaml" ~ keyword_end }
 kw_xml_atom = @{ ^"xml" ~ keyword_end }
 kw_order_atom = @{ ^"order" ~ keyword_end }
@@ -319,6 +330,9 @@ kw_avg_atom = @{ ^"avg" ~ keyword_end }
 kw_min_atom = @{ ^"min" ~ keyword_end }
 kw_max_atom = @{ ^"max" ~ keyword_end }
 kw_json_agg_atom = @{ ^"json_agg" ~ keyword_end }
+kw_jsonb_agg_atom = @{ ^"jsonb_agg" ~ keyword_end }
+kw_json_object_agg_atom = @{ ^"json_object_agg" ~ keyword_end }
+kw_jsonb_object_agg_atom = @{ ^"jsonb_object_agg" ~ keyword_end }
 
 kw_int2_atom = @{ ^"int2" ~ keyword_end }
 kw_int4_atom = @{ ^"int4" ~ keyword_end }
