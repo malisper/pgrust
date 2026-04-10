@@ -1093,7 +1093,7 @@ fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l + (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l + r)),
         (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
-            Ok(Value::Float64(numeric_as_f64(l).unwrap() + numeric_as_f64(r).unwrap()))
+            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() + numeric_as_f64(r).unwrap()))
         }
         _ => Err(ExecError::TypeMismatch {
             op: "+",
@@ -1118,7 +1118,7 @@ fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l - (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l - r)),
         (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
-            Ok(Value::Float64(numeric_as_f64(l).unwrap() - numeric_as_f64(r).unwrap()))
+            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() - numeric_as_f64(r).unwrap()))
         }
         _ => Err(ExecError::TypeMismatch { op: "-", left, right }),
     }
@@ -1139,7 +1139,7 @@ fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l * (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l * r)),
         (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
-            Ok(Value::Float64(numeric_as_f64(l).unwrap() * numeric_as_f64(r).unwrap()))
+            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() * numeric_as_f64(r).unwrap()))
         }
         _ => Err(ExecError::TypeMismatch { op: "*", left, right }),
     }
@@ -1154,6 +1154,7 @@ fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
         Value::Int32(v) => *v == 0,
         Value::Int64(v) => *v == 0,
         Value::Float64(v) => *v == 0.0,
+        Value::Numeric(v) => v.as_str() == "0" || v.as_str() == "0.0",
         _ => false,
     };
     if zero {
@@ -1170,7 +1171,7 @@ fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l / (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l / r)),
         (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
-            Ok(Value::Float64(numeric_as_f64(l).unwrap() / numeric_as_f64(r).unwrap()))
+            Ok(numeric_result(l, r, numeric_as_f64(l).unwrap() / numeric_as_f64(r).unwrap()))
         }
         _ => Err(ExecError::TypeMismatch { op: "/", left, right }),
     }
@@ -1184,6 +1185,7 @@ fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> {
         Value::Int16(v) => *v == 0,
         Value::Int32(v) => *v == 0,
         Value::Int64(v) => *v == 0,
+        Value::Numeric(v) => v.as_str() == "0" || v.as_str() == "0.0",
         _ => false,
     };
     if zero {
@@ -1452,6 +1454,15 @@ fn numeric_as_f64(value: &Value) -> Option<f64> {
         Value::Int32(v) => Some(*v as f64),
         Value::Int64(v) => Some(*v as f64),
         Value::Float64(v) => Some(*v),
+        Value::Numeric(v) => v.parse::<f64>().ok(),
         _ => None,
+    }
+}
+
+fn numeric_result(left: &Value, right: &Value, result: f64) -> Value {
+    if matches!(left, Value::Numeric(_)) || matches!(right, Value::Numeric(_)) {
+        Value::Numeric(CompactString::new(&result.to_string()))
+    } else {
+        Value::Float64(result)
     }
 }

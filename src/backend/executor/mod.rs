@@ -1133,7 +1133,29 @@ mod tests {
         let txns = TransactionManager::new_durable(&base).unwrap();
         match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1e2, 2.5e1").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Float64(100.0), Value::Float64(25.0)]]);
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Numeric("1e2".into()), Value::Numeric("2.5e1".into())]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn numeric_literals_and_arithmetic_bind_as_numeric_values() {
+        let base = temp_dir("numeric_literal_arithmetic");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1.5, 2.5 + 2, 1e2 - 5").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("1.5".into()),
+                        Value::Numeric("4.5".into()),
+                        Value::Numeric("95".into()),
+                    ]]
+                );
             }
             other => panic!("expected query result, got {:?}", other),
         }
