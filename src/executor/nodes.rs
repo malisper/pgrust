@@ -103,6 +103,26 @@ impl PartialEq for Value {
 
 impl Eq for Value {}
 
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Value::Int32(v) => { 0u8.hash(state); v.hash(state); }
+            Value::Float64(v) => { 1u8.hash(state); v.to_bits().hash(state); }
+            // Text and TextRef hash the same way so equal values get the same hash
+            Value::Text(s) => { 2u8.hash(state); s.as_str().hash(state); }
+            Value::TextRef(ptr, len) => {
+                2u8.hash(state);
+                let s = unsafe {
+                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
+                };
+                s.hash(state);
+            }
+            Value::Bool(v) => { 3u8.hash(state); v.hash(state); }
+            Value::Null => { 4u8.hash(state); }
+        }
+    }
+}
+
 // SAFETY: TextRef points to immutable user data on a pinned buffer page.
 // The pin (via Rc<OwnedBufferPin>) ensures the page stays alive. The data
 // is never written after insertion (heap_page_replace_tuple only writes headers).
@@ -147,6 +167,7 @@ impl AggFunc {
 pub struct AggAccum {
     pub func: AggFunc,
     pub arg: Option<Expr>,
+    pub distinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -817,7 +838,7 @@ impl PlanNode for AggregateState {
                         let accum_states = self
                             .accumulators
                             .iter()
-                            .map(|a| AccumState::new(a.func))
+                            .map(|a| AccumState::new(a.func, a.distinct))
                             .collect();
                         groups.push(AggGroup {
                             key_values: self.key_buffer.clone(),
@@ -842,7 +863,7 @@ impl PlanNode for AggregateState {
                 let accum_states = self
                     .accumulators
                     .iter()
-                    .map(|a| AccumState::new(a.func))
+                    .map(|a| AccumState::new(a.func, a.distinct))
                     .collect();
                 groups.push(AggGroup {
                     key_values: Vec::new(),

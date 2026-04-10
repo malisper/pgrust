@@ -310,7 +310,7 @@ mod tests {
     fn parse_aggregate_select() {
         let stmt = parse_select("select count(*) from people").unwrap();
         assert_eq!(stmt.targets.len(), 1);
-        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: None }));
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: None, distinct: false }));
         assert_eq!(stmt.targets[0].output_name, "count");
     }
 
@@ -354,7 +354,7 @@ mod tests {
         let stmt = parse_select("select count(*) as total from people").unwrap();
         assert_eq!(stmt.targets.len(), 1);
         assert_eq!(stmt.targets[0].output_name, "total");
-        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: None }));
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: None, distinct: false }));
     }
 
     #[test]
@@ -363,6 +363,13 @@ mod tests {
         assert_eq!(stmt.targets.len(), 2);
         assert_eq!(stmt.targets[0].output_name, "name");
         assert_eq!(stmt.targets[1].output_name, "total");
+    }
+
+    #[test]
+    fn parse_count_distinct() {
+        let stmt = parse_select("select count(distinct name) from people").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: Some(_), distinct: true }));
     }
 
     #[test]
