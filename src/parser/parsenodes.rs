@@ -92,15 +92,15 @@ pub struct SelectStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FromItem {
-    Table(String),
+    Table(TableRef),
     InnerJoin {
-        left_table: String,
-        right_table: String,
+        left: TableRef,
+        right: TableRef,
         on: SqlExpr,
     },
     CrossJoin {
-        left_table: String,
-        right_table: String,
+        left: TableRef,
+        right: TableRef,
     },
     FunctionCall {
         name: String,
@@ -108,6 +108,12 @@ pub enum FromItem {
         alias: Option<String>,
         column_aliases: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableRef {
+    pub name: String,
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -24,7 +24,7 @@ GROUP BY om_shipments.company_id
 
 ## Parser / Grammar gaps
 
-1. **Table aliases** — `FROM om_shipments om_shipments` — `table_from_item` is just `identifier`, no optional alias
+1. ~~**Table aliases**~~ — DONE
 2. ~~**Column aliases (AS in SELECT list)**~~ — DONE
 3. ~~**COUNT(DISTINCT expr)**~~ — DONE
 4. **Scalar subqueries** — `SUM((SELECT ...))` — no subquery expression support anywhere

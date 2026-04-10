@@ -200,23 +200,22 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
     let raw = pair.as_str().to_string();
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
-        Rule::table_from_item => Ok(FromItem::Table(
+        Rule::table_from_item => Ok(FromItem::Table(build_table_ref(
             inner
                 .into_inner()
-                .find(|part| part.as_rule() == Rule::identifier)
-                .map(build_identifier)
+                .find(|part| part.as_rule() == Rule::table_ref)
                 .ok_or(ParseError::UnexpectedEof)?,
-        )),
+        )?)),
         Rule::cross_from_item => {
-            let identifiers = inner
+            let tables = inner
                 .into_inner()
-                .filter(|part| part.as_rule() == Rule::identifier)
-                .map(build_identifier)
-                .collect::<Vec<_>>();
-            match identifiers.as_slice() {
-                [left_table, right_table] => Ok(FromItem::CrossJoin {
-                    left_table: left_table.clone(),
-                    right_table: right_table.clone(),
+                .filter(|part| part.as_rule() == Rule::table_ref)
+                .map(build_table_ref)
+                .collect::<Result<Vec<_>, _>>()?;
+            match tables.as_slice() {
+                [left, right] => Ok(FromItem::CrossJoin {
+                    left: left.clone(),
+                    right: right.clone(),
                 }),
                 _ => Err(ParseError::UnexpectedToken {
                     expected: "cross join from clause",
@@ -225,19 +224,19 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             }
         }
         Rule::joined_from_item => {
-            let mut identifiers = Vec::new();
+            let mut tables = Vec::new();
             let mut on = None;
             for part in inner.into_inner() {
                 match part.as_rule() {
-                    Rule::identifier => identifiers.push(build_identifier(part)),
+                    Rule::table_ref => tables.push(build_table_ref(part)?),
                     Rule::expr => on = Some(build_expr(part)?),
                     _ => {}
                 }
             }
-            match identifiers.as_slice() {
-                [left_table, right_table] => Ok(FromItem::InnerJoin {
-                    left_table: left_table.clone(),
-                    right_table: right_table.clone(),
+            match tables.as_slice() {
+                [left, right] => Ok(FromItem::InnerJoin {
+                    left: left.clone(),
+                    right: right.clone(),
                     on: on.ok_or(ParseError::UnexpectedEof)?,
                 }),
                 _ => Err(ParseError::UnexpectedToken {
@@ -287,6 +286,24 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             expected: "from clause",
             actual: raw,
         }),
+    }
+}
+
+fn build_table_ref(pair: Pair<'_, Rule>) -> Result<TableRef, ParseError> {
+    let mut identifiers = Vec::new();
+    collect_identifiers(pair, &mut identifiers);
+    Ok(TableRef {
+        name: identifiers.first().cloned().ok_or(ParseError::UnexpectedEof)?,
+        alias: identifiers.get(1).cloned(),
+    })
+}
+
+fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => out.push(build_identifier(part)),
+            _ => collect_identifiers(part, out),
+        }
     }
 }
 
@@ -429,7 +446,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
 
 fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     match expr {
-        SqlExpr::Column(name) => name.clone(),
+        SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::Random => "random".to_string(),
         _ => format!("expr{}", index + 1),
