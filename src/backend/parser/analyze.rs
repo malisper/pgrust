@@ -1122,7 +1122,7 @@ fn infer_sql_expr_type(
         SqlExpr::Const(Value::Array(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Float8),
         SqlExpr::IntegerLiteral(value) => infer_integer_literal_type(value),
-        SqlExpr::NumericLiteral(_) => SqlType::new(SqlTypeKind::Float8),
+        SqlExpr::NumericLiteral(_) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)
         | SqlExpr::Mul(left, right)
@@ -1185,8 +1185,12 @@ fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: SqlType) -> S
     let left = left.element_type();
     let right = right.element_type();
 
+    let has_numeric = matches!(left.kind, Numeric) || matches!(right.kind, Numeric);
     let has_float8 = matches!(left.kind, Float8) || matches!(right.kind, Float8);
     let has_float4 = matches!(left.kind, Float4) || matches!(right.kind, Float4);
+    if has_numeric {
+        return SqlType::new(Numeric);
+    }
     if has_float8 {
         return SqlType::new(Float8);
     }
@@ -1222,7 +1226,7 @@ fn bind_integer_literal(value: &str) -> Result<Value, ParseError> {
 fn bind_numeric_literal(value: &str) -> Result<Value, ParseError> {
     value
         .parse::<f64>()
-        .map(Value::Float64)
+        .map(|_| Value::Numeric(value.into()))
         .map_err(|_| ParseError::InvalidNumeric(value.to_string()))
 }
 
