@@ -42,6 +42,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     match inner.as_rule() {
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
+        Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::show_tables_stmt => Ok(Statement::ShowTables),
@@ -60,6 +61,94 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             actual: inner.as_str().into(),
         }),
     }
+}
+
+fn build_analyze(pair: Pair<'_, Rule>) -> Result<AnalyzeStatement, ParseError> {
+    let mut targets = Vec::new();
+    let mut verbose = false;
+    let mut skip_locked = false;
+    let mut buffer_usage_limit = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::analyze_option_block => {
+                let opts = build_analyze_options(part)?;
+                verbose = opts.verbose;
+                skip_locked = opts.skip_locked;
+                buffer_usage_limit = opts.buffer_usage_limit;
+            }
+            Rule::maintenance_target_list => targets = build_maintenance_target_list(part)?,
+            _ => {}
+        }
+    }
+    Ok(AnalyzeStatement {
+        targets,
+        verbose,
+        skip_locked,
+        buffer_usage_limit,
+    })
+}
+
+#[derive(Default)]
+struct AnalyzeOptionsBuilder {
+    verbose: bool,
+    skip_locked: bool,
+    buffer_usage_limit: Option<String>,
+}
+
+fn build_analyze_options(pair: Pair<'_, Rule>) -> Result<AnalyzeOptionsBuilder, ParseError> {
+    let mut options = AnalyzeOptionsBuilder::default();
+    for part in pair.into_inner() {
+        let part = if part.as_rule() == Rule::analyze_option {
+            part.into_inner().next().ok_or(ParseError::UnexpectedEof)?
+        } else {
+            part
+        };
+        match part.as_rule() {
+            Rule::analyze_verbose_option => {
+                options.verbose = parse_option_bool(part)?;
+            }
+            Rule::analyze_skip_locked_option => {
+                options.skip_locked = parse_option_bool(part)?;
+            }
+            Rule::analyze_buffer_usage_limit_option => {
+                options.buffer_usage_limit = Some(parse_option_scalar(part)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(options)
+}
+
+fn parse_option_bool(pair: Pair<'_, Rule>) -> Result<bool, ParseError> {
+    let mut inner = pair.into_inner();
+    match inner.next() {
+        None => Ok(true),
+        Some(part) if part.as_rule() == Rule::option_bool_value => {
+            let value = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            Ok(!matches!(value.as_rule(), Rule::kw_false | Rule::kw_off))
+        }
+        Some(_) => Ok(true),
+    }
+}
+
+fn parse_option_scalar(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let scalar = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::option_scalar_value)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_option_scalar_value(scalar)
+}
+
+fn build_option_scalar_value(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let pair = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    Ok(match pair.as_rule() {
+        Rule::string_literal => unescape_string(pair.as_str()),
+        Rule::option_bool_value => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            inner.as_str().to_string()
+        }
+        _ => pair.as_str().to_string(),
+    })
 }
 
 fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
@@ -458,12 +547,78 @@ fn build_truncate_table(pair: Pair<'_, Rule>) -> Result<TruncateTableStatement, 
 }
 
 fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {
-    let table_names = pair
-        .into_inner()
-        .find(|part| part.as_rule() == Rule::ident_list)
-        .map(|part| part.into_inner().map(build_identifier).collect::<Vec<_>>())
-        .ok_or(ParseError::UnexpectedEof)?;
-    Ok(VacuumStatement { table_names })
+    let mut targets = Vec::new();
+    let mut analyze = false;
+    let mut full = false;
+    let mut verbose = false;
+    let mut skip_locked = false;
+    let mut buffer_usage_limit = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_analyze => analyze = true,
+            Rule::vacuum_option_block => {
+                for opt in part.into_inner() {
+                    let opt = if opt.as_rule() == Rule::vacuum_option {
+                        opt.into_inner().next().ok_or(ParseError::UnexpectedEof)?
+                    } else {
+                        opt
+                    };
+                    match opt.as_rule() {
+                        Rule::vacuum_analyze_option => analyze = parse_option_bool(opt)?,
+                        Rule::vacuum_full_option => full = parse_option_bool(opt)?,
+                        Rule::analyze_verbose_option => verbose = parse_option_bool(opt)?,
+                        Rule::analyze_skip_locked_option => skip_locked = parse_option_bool(opt)?,
+                        Rule::analyze_buffer_usage_limit_option => {
+                            buffer_usage_limit = Some(parse_option_scalar(opt)?)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Rule::maintenance_target_list => targets = build_maintenance_target_list(part)?,
+            _ => {}
+        }
+    }
+    Ok(VacuumStatement {
+        targets,
+        analyze,
+        full,
+        verbose,
+        skip_locked,
+        buffer_usage_limit,
+    })
+}
+
+fn build_maintenance_target_list(pair: Pair<'_, Rule>) -> Result<Vec<MaintenanceTarget>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::maintenance_target)
+        .map(build_maintenance_target)
+        .collect()
+}
+
+fn build_maintenance_target(pair: Pair<'_, Rule>) -> Result<MaintenanceTarget, ParseError> {
+    let mut only = false;
+    let mut table_name = None;
+    let mut columns = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::only_clause => only = true,
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::maintenance_column_list => {
+                columns = part
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::ident_list)
+                    .map(|p| p.into_inner().map(build_identifier).collect())
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+    }
+    Ok(MaintenanceTarget {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        columns,
+        only,
+    })
 }
 
 fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {

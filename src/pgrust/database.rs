@@ -136,8 +136,8 @@ impl Database {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::execute_readonly_statement;
         use crate::backend::commands::tablecmds::{
-            execute_create_table, execute_delete_with_waiter, execute_drop_table,
-            execute_truncate_table,
+            execute_analyze, execute_create_table, execute_delete_with_waiter, execute_drop_table,
+            execute_truncate_table, execute_vacuum,
             execute_insert, execute_update_with_waiter,
         };
         use crate::backend::parser::{
@@ -147,6 +147,10 @@ impl Database {
         let stmt = self.plan_cache.get_statement(sql)?;
 
         match stmt {
+            Statement::Analyze(ref analyze_stmt) => {
+                let catalog_guard = self.catalog.read();
+                execute_analyze(analyze_stmt.clone(), catalog_guard.catalog())
+            }
             Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let (plan_or_stmt, rels) = {
@@ -376,7 +380,10 @@ impl Database {
                 result
             }
 
-            Statement::Vacuum(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::Vacuum(ref vacuum_stmt) => {
+                let catalog_guard = self.catalog.read();
+                execute_vacuum(vacuum_stmt.clone(), catalog_guard.catalog())
+            }
 
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Ok(StatementResult::AffectedRows(0))
@@ -1828,6 +1835,22 @@ mod tests {
             }
             other => panic!("expected query, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn vacuum_analyze_is_rejected_inside_transaction_block() {
+        let base = temp_dir("vacuum_txn_block");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "begin").unwrap();
+        match session.execute(&db, "vacuum analyze pgbench_branches") {
+            Err(crate::backend::executor::ExecError::Parse(crate::backend::parser::ParseError::ActiveSqlTransaction(stmt))) => {
+                assert_eq!(stmt, "VACUUM");
+            }
+            other => panic!("expected active transaction error, got {:?}", other),
+        }
+        session.execute(&db, "rollback").unwrap();
     }
 
     #[test]

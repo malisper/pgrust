@@ -13,8 +13,9 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::catalog::catalog::Catalog;
 use crate::pgrust::database::TransactionWaiter;
 use crate::backend::parser::{
-    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, DropTableStatement,
-    ExplainStatement, ParseError, Statement, TruncateTableStatement, bind_create_table, build_plan,
+    AnalyzeStatement, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement,
+    DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
+    TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -81,6 +82,39 @@ pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecErr
             .map(|name| vec![Value::Text(name.to_string().into())])
             .collect(),
     })
+}
+
+fn validate_maintenance_targets(
+    targets: &[MaintenanceTarget],
+    catalog: &Catalog,
+) -> Result<(), ExecError> {
+    for target in targets {
+        let entry = catalog
+            .get(&target.table_name)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.table_name.clone())))?;
+        for column in &target.columns {
+            if !entry.desc.columns.iter().any(|desc| desc.name.eq_ignore_ascii_case(column)) {
+                return Err(ExecError::Parse(ParseError::UnknownColumn(column.clone())));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn execute_analyze(
+    stmt: AnalyzeStatement,
+    catalog: &Catalog,
+) -> Result<StatementResult, ExecError> {
+    validate_maintenance_targets(&stmt.targets, catalog)?;
+    Ok(StatementResult::AffectedRows(0))
+}
+
+pub fn execute_vacuum(
+    stmt: VacuumStatement,
+    catalog: &Catalog,
+) -> Result<StatementResult, ExecError> {
+    validate_maintenance_targets(&stmt.targets, catalog)?;
+    Ok(StatementResult::AffectedRows(0))
 }
 
 pub fn execute_create_table(

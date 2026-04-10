@@ -30,6 +30,7 @@ pub enum ParseError {
     AggInWhere,
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
+    ActiveSqlTransaction(&'static str),
 }
 
 impl fmt::Display for ParseError {
@@ -67,6 +68,9 @@ impl fmt::Display for ParseError {
             ParseError::UnknownConfigurationParameter(name) => {
                 write!(f, "unrecognized configuration parameter \"{name}\"")
             }
+            ParseError::ActiveSqlTransaction(stmt) => {
+                write!(f, "{stmt} cannot run inside a transaction block")
+            }
         }
     }
 }
@@ -75,6 +79,7 @@ impl fmt::Display for ParseError {
 pub enum Statement {
     Explain(ExplainStatement),
     Select(SelectStatement),
+    Analyze(AnalyzeStatement),
     Set(SetStatement),
     Reset(ResetStatement),
     ShowTables,
@@ -108,6 +113,21 @@ pub struct ExplainStatement {
     pub buffers: bool,
     pub timing: bool,
     pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceTarget {
+    pub table_name: String,
+    pub columns: Vec<String>,
+    pub only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalyzeStatement {
+    pub targets: Vec<MaintenanceTarget>,
+    pub verbose: bool,
+    pub skip_locked: bool,
+    pub buffer_usage_limit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +210,12 @@ pub struct TruncateTableStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VacuumStatement {
-    pub table_names: Vec<String>,
+    pub targets: Vec<MaintenanceTarget>,
+    pub analyze: bool,
+    pub full: bool,
+    pub verbose: bool,
+    pub skip_locked: bool,
+    pub buffer_usage_limit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
