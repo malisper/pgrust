@@ -860,7 +860,14 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Numeric, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
-            Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
+            match coerced {
+                Value::Numeric(numeric) => Ok(TupleValue::Bytes(numeric.render().into_bytes())),
+                other => Err(ExecError::TypeMismatch {
+                    op: "assignment",
+                    left: Value::Null,
+                    right: other,
+                }),
+            }
         }
         (ScalarType::Text, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
@@ -1239,15 +1246,15 @@ fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
         return Err(ExecError::DivisionByZero("/"));
     }
     match (&left, &right) {
-        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l / r)),
-        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) / *r)),
-        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) / *r)),
-        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l / (*r as i32))),
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l / r)),
-        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) / *r)),
-        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l / (*r as i64))),
-        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l / (*r as i64))),
-        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l / r)),
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_div_i16(*l, *r)?)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_div_i32(*l as i32, *r)?)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l as i64, *r)?)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(checked_div_i32(*l, *r as i32)?)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(checked_div_i32(*l, *r)?)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l as i64, *r)?)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l, *r)?)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| lv.div(rv, 16), "/")
         }
@@ -1270,20 +1277,44 @@ fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> {
         return Err(ExecError::DivisionByZero("%"));
     }
     match (&left, &right) {
-        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l % r)),
-        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) % *r)),
-        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) % *r)),
-        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l % (*r as i32))),
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l % r)),
-        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) % *r)),
-        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l % (*r as i64))),
-        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l % (*r as i64))),
-        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l % r)),
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_rem_i16(*l, *r)?)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_rem_i32(*l as i32, *r)?)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64(checked_rem_i64(*l as i64, *r)?)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(checked_rem_i32(*l, *r as i32)?)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(checked_rem_i32(*l, *r)?)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64(checked_rem_i64(*l as i64, *r)?)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r)?)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| lv.rem(rv), "%")
         }
         _ => Err(ExecError::TypeMismatch { op: "%", left, right }),
     }
+}
+
+fn checked_div_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    left.checked_div(right).ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_div_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    left.checked_div(right).ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_div_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    left.checked_div(right).ok_or(ExecError::Int8OutOfRange)
+}
+
+fn checked_rem_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    left.checked_rem(right).ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_rem_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    left.checked_rem(right).ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_rem_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    left.checked_rem(right).ok_or(ExecError::Int8OutOfRange)
 }
 
 fn negate_value(value: Value) -> Result<Value, ExecError> {

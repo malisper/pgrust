@@ -3,6 +3,7 @@
 
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
+use super::exec_expr::parse_numeric_text;
 use super::ExecError;
 
 /// A precomputed decode step for one column, eliminating per-tuple type
@@ -228,6 +229,14 @@ impl CompiledTupleDecoder {
                             };
                             off = new_off;
                             match ty {
+                                ScalarType::Numeric => {
+                                    values.push(Value::Numeric(parse_numeric_text(unsafe {
+                                        std::str::from_utf8_unchecked(bytes_slice)
+                                    }).ok_or_else(|| ExecError::InvalidStorageValue {
+                                        column: "<tuple>".into(),
+                                        details: "invalid numeric text".into(),
+                                    })?));
+                                }
                                 ScalarType::Text => {
                                     values.push(Value::TextRef(bytes_slice.as_ptr(), bytes_slice.len() as u32));
                                 }
@@ -245,6 +254,14 @@ impl CompiledTupleDecoder {
                             let bytes = &data[off..end];
                             off = end + 1;
                             match ty {
+                                ScalarType::Numeric => {
+                                    values.push(Value::Numeric(parse_numeric_text(unsafe {
+                                        std::str::from_utf8_unchecked(bytes)
+                                    }).ok_or_else(|| ExecError::InvalidStorageValue {
+                                        column: "<tuple>".into(),
+                                        details: "invalid numeric text".into(),
+                                    })?));
+                                }
                                 ScalarType::Text => {
                                     values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
                                 }

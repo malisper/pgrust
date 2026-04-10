@@ -678,6 +678,28 @@ mod tests {
         catalog
     }
 
+    fn numeric_catalog(name: &str) -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.insert(
+            name,
+            CatalogEntry {
+                rel: crate::RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15004,
+                },
+                desc: RelationDesc {
+                    columns: vec![crate::backend::catalog::catalog::column_desc(
+                        "value",
+                        crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Numeric),
+                        false,
+                    )],
+                },
+            },
+        );
+        catalog
+    }
+
     fn shipments_rel() -> RelFileLocator {
         RelFileLocator {
             spc_oid: 0,
@@ -1126,6 +1148,44 @@ mod tests {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn integer_division_overflow_returns_sql_error() {
+        let base = temp_dir("integer_division_overflow");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (-32768::int2) / (-1::int2)").unwrap_err(),
+            ExecError::Int2OutOfRange
+        ));
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (-2147483648::int4) / (-1::int4)").unwrap_err(),
+            ExecError::Int4OutOfRange
+        ));
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (-9223372036854775808::int8) / (-1::int8)").unwrap_err(),
+            ExecError::Int8OutOfRange
+        ));
+    }
+
+    #[test]
+    fn integer_modulo_overflow_returns_sql_error() {
+        let base = temp_dir("integer_modulo_overflow");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (-32768::int2) % (-1::int2)").unwrap_err(),
+            ExecError::Int2OutOfRange
+        ));
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (-2147483648::int4) % (-1::int4)").unwrap_err(),
+            ExecError::Int4OutOfRange
+        ));
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (-9223372036854775808::int8) % (-1::int8)").unwrap_err(),
+            ExecError::Int8OutOfRange
+        ));
     }
 
     #[test]
@@ -1750,6 +1810,37 @@ mod tests {
             err,
             ExecError::StringDataRightTruncation { ref ty } if ty == "character varying(2)"
         ));
+    }
+
+    #[test]
+    fn insert_sql_numeric_round_trips_through_storage() {
+        let base = temp_dir("insert_numeric_roundtrip");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t (value) values (1.25::numeric)",
+            numeric_catalog("t"),
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select value from t",
+            numeric_catalog("t"),
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Numeric("1.25".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
     }
 
     #[test]
