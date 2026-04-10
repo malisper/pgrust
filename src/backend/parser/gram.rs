@@ -46,7 +46,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::show_tables_stmt => Ok(Statement::ShowTables),
-        Rule::create_table_stmt => Ok(Statement::CreateTable(build_create_table(inner)?)),
+        Rule::create_table_stmt => build_create_table(inner),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
@@ -499,20 +499,95 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     })
 }
 
-fn build_create_table(pair: Pair<'_, Rule>) -> Result<CreateTableStatement, ParseError> {
-    let mut table_name = None;
+fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
+    let mut relation_name = None;
+    let mut persistence = TablePersistence::Permanent;
+    let mut on_commit = OnCommitAction::PreserveRows;
     let mut columns = Vec::new();
+    let mut ctas_columns = Vec::new();
+    let mut query = None;
+    let mut is_ctas = false;
     for part in pair.into_inner() {
+        let part = if part.as_rule() == Rule::create_table_tail {
+            part.into_inner().next().ok_or(ParseError::UnexpectedEof)?
+        } else {
+            part
+        };
         match part.as_rule() {
-            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
-            Rule::column_def => columns.push(build_column_def(part)?),
+            Rule::temp_clause => persistence = TablePersistence::Temporary,
+            Rule::identifier if relation_name.is_none() => relation_name = Some(build_relation_name(part)),
+            Rule::create_table_column_form => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::column_def => columns.push(build_column_def(inner)?),
+                        Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
+                        _ => {}
+                    }
+                }
+            }
+            Rule::create_table_as_form => {
+                is_ctas = true;
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::ctas_column_list => {
+                            ctas_columns = inner
+                                .into_inner()
+                                .find(|p| p.as_rule() == Rule::ident_list)
+                                .map(|p| p.into_inner().map(build_identifier).collect())
+                                .unwrap_or_default();
+                        }
+                        Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
+                        Rule::select_stmt => query = Some(build_select(inner)?),
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
-    Ok(CreateTableStatement {
-        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
-        columns,
-    })
+    let (schema_name, table_name) = relation_name.ok_or(ParseError::UnexpectedEof)?;
+    if is_ctas {
+        Ok(Statement::CreateTableAs(CreateTableAsStatement {
+            schema_name,
+            table_name,
+            persistence,
+            on_commit,
+            column_names: ctas_columns,
+            query: query.ok_or(ParseError::UnexpectedEof)?,
+        }))
+    } else {
+        Ok(Statement::CreateTable(CreateTableStatement {
+            schema_name,
+            table_name,
+            persistence,
+            on_commit,
+            columns,
+        }))
+    }
+}
+
+fn build_relation_name(pair: Pair<'_, Rule>) -> (Option<String>, String) {
+    let name = build_identifier(pair);
+    if let Some((schema, rel)) = name.split_once('.') {
+        (Some(schema.to_string()), rel.to_string())
+    } else {
+        (None, name)
+    }
+}
+
+fn build_on_commit_action(pair: Pair<'_, Rule>) -> Result<OnCommitAction, ParseError> {
+    let action = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::on_commit_action)
+        .ok_or(ParseError::UnexpectedEof)?;
+    let text = action.as_str();
+    if text.eq_ignore_ascii_case("drop") {
+        Ok(OnCommitAction::Drop)
+    } else if text.eq_ignore_ascii_case("delete rows") {
+        Ok(OnCommitAction::DeleteRows)
+    } else {
+        Ok(OnCommitAction::PreserveRows)
+    }
 }
 
 fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseError> {

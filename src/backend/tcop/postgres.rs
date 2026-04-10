@@ -143,16 +143,16 @@ pub(crate) fn handle_connection(stream: TcpStream, db: &Database, client_id: Cli
         copy_in: None,
     };
 
-    loop {
+    let result = loop {
         let msg_type = match read_byte(&mut reader) {
             Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e),
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break Ok(()),
+            Err(e) => break Err(e),
         };
 
         let len = read_i32(&mut reader)? as usize;
         if len < 4 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "message too short"));
+                break Err(io::Error::new(io::ErrorKind::InvalidData, "message too short"));
         }
         let mut body = vec![0u8; len - 4];
         reader.read_exact(&mut body)?;
@@ -210,7 +210,9 @@ pub(crate) fn handle_connection(stream: TcpStream, db: &Database, client_id: Cli
                 writer.flush()?;
             }
         }
-    }
+    };
+    db.cleanup_client_temp_relations(client_id);
+    result
 }
 
 fn handle_query(stream: &mut impl Write, db: &Database, state: &mut ConnectionState, sql: &str) -> io::Result<()> {
@@ -398,12 +400,12 @@ fn handle_describe(stream: &mut impl Write, db: &Database, state: &ConnectionSta
     match target_type {
         b'S' => {
             send_parameter_description(stream, &[])?;
-            match state.prepared.get(&name).and_then(|stmt| describe_sql(db, &stmt.sql, &[])) {
+            match state.prepared.get(&name).and_then(|stmt| describe_sql(db, state.session.client_id, &stmt.sql, &[])) {
                 Some(cols) => send_row_description(stream, &cols),
                 None => send_no_data(stream),
             }
         }
-        b'P' => match state.portals.get(&name).and_then(|portal| describe_sql(db, &portal.sql, &portal.params)) {
+        b'P' => match state.portals.get(&name).and_then(|portal| describe_sql(db, state.session.client_id, &portal.sql, &portal.params)) {
             Some(cols) => send_row_description(stream, &cols),
             None => send_no_data(stream),
         },
@@ -441,7 +443,7 @@ fn handle_close(stream: &mut impl Write, state: &mut ConnectionState, body: &[u8
 
 fn execute_portal(stream: &mut impl Write, db: &Database, session: &mut Session, portal: &BoundPortal) -> io::Result<()> {
     let mut row_buf = Vec::new();
-    if let Some((_columns, rows, tag)) = execute_special_query(db, &portal.sql, &portal.params) {
+    if let Some((_columns, rows, tag)) = execute_special_query(db, session.client_id, &portal.sql, &portal.params) {
         for row in &rows {
             send_data_row(stream, row, &mut row_buf)?;
         }
@@ -467,20 +469,20 @@ fn execute_portal(stream: &mut impl Write, db: &Database, session: &mut Session,
     Ok(())
 }
 
-fn describe_sql(db: &Database, sql: &str, params: &[Option<String>]) -> Option<Vec<QueryColumn>> {
+fn describe_sql(db: &Database, client_id: ClientId, sql: &str, params: &[Option<String>]) -> Option<Vec<QueryColumn>> {
     let normalized = sql.trim().to_ascii_lowercase();
     if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
         return Some(vec![QueryColumn::text("relkind")]);
     }
 
-    if execute_special_query(db, sql, params).is_some() {
+    if execute_special_query(db, client_id, sql, params).is_some() {
         return Some(vec![QueryColumn::text("relkind")]);
     }
     let sql = substitute_params(sql, params);
     match parse_statement(&sql).ok()? {
         Statement::Select(stmt) => {
-            let catalog = db.catalog.read();
-            crate::backend::parser::build_plan(&stmt, catalog.catalog()).ok().map(|plan| plan.columns())
+            let catalog = db.visible_catalog(client_id);
+            crate::backend::parser::build_plan(&stmt, &catalog).ok().map(|plan| plan.columns())
         }
         Statement::ShowTables => Some(vec![QueryColumn::text("table_name")]),
         Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
@@ -488,11 +490,11 @@ fn describe_sql(db: &Database, sql: &str, params: &[Option<String>]) -> Option<V
     }
 }
 
-fn execute_special_query(db: &Database, sql: &str, params: &[Option<String>]) -> Option<(Vec<String>, Vec<Vec<Value>>, String)> {
+fn execute_special_query(db: &Database, client_id: ClientId, sql: &str, params: &[Option<String>]) -> Option<(Vec<String>, Vec<Vec<Value>>, String)> {
     let normalized = sql.trim().to_ascii_lowercase();
     if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
         let table_name = params.first()?.as_ref()?.to_ascii_lowercase();
-        let exists = db.catalog.read().catalog().get(&table_name).is_some();
+        let exists = db.visible_catalog(client_id).get(&table_name).is_some();
         let rows = if exists { vec![vec![Value::Text("r".into())]] } else { Vec::new() };
         return Some((vec!["relkind".to_string()], rows.clone(), format!("SELECT {}", rows.len())));
     }

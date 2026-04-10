@@ -540,9 +540,14 @@ mod tests {
         assert!(matches!(parse_statement("analyze (verbose, skip_locked, buffer_usage_limit '512 kB') vacparted").unwrap(), Statement::Analyze(AnalyzeStatement { verbose: true, skip_locked: true, buffer_usage_limit: Some(limit), .. }) if limit == "512 kB"));
         assert!(matches!(parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(), Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people"));
         assert!(matches!(parse_statement("insert into people (id, name) values (1, 'alice'), (2, 'bob')").unwrap(), Statement::Insert(InsertStatement { table_name, values, .. }) if table_name == "people" && values.len() == 2));
-        assert!(matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "widgets" && columns.len() == 2));
-        assert!(matches!(parse_statement("create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "pgbench_history" && columns.len() == 6));
-        assert!(matches!(parse_statement("create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "pgbench_tellers" && columns.len() == 4));
+        assert!(matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns, .. }) if table_name == "widgets" && columns.len() == 2));
+        assert!(matches!(parse_statement("create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns, .. }) if table_name == "pgbench_history" && columns.len() == 6));
+        assert!(matches!(parse_statement("create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns, .. }) if table_name == "pgbench_tellers" && columns.len() == 4));
+        assert!(matches!(parse_statement("create temp table tempy ()").unwrap(), Statement::CreateTable(CreateTableStatement { persistence: TablePersistence::Temporary, table_name, columns, .. }) if table_name == "tempy" && columns.is_empty()));
+        assert!(matches!(parse_statement("create table pg_temp.tempy (id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { schema_name: Some(schema), table_name, persistence: TablePersistence::Permanent, .. }) if schema == "pg_temp" && table_name == "tempy"));
+        assert!(matches!(parse_statement("create temp table tempy (id int4) on commit delete rows").unwrap(), Statement::CreateTable(CreateTableStatement { on_commit: OnCommitAction::DeleteRows, .. })));
+        assert!(matches!(parse_statement("create temp table tempy (id int4) on commit drop").unwrap(), Statement::CreateTable(CreateTableStatement { on_commit: OnCommitAction::Drop, .. })));
+        assert!(matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"]));
         assert!(matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names }) if table_names == vec!["widgets"]));
         assert!(matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"]));
         assert!(matches!(parse_statement("truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"]));
@@ -571,6 +576,29 @@ mod tests {
             }
             other => panic!("expected create table, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn create_table_temp_name_validation() {
+        let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
+            schema_name: Some("public".into()),
+            table_name: "t".into(),
+            persistence: TablePersistence::Temporary,
+            on_commit: OnCommitAction::PreserveRows,
+            columns: vec![],
+        })
+        .unwrap_err();
+        assert!(matches!(err, ParseError::TempTableInNonTempSchema(_)));
+
+        let err = crate::backend::parser::normalize_create_table_name(&CreateTableStatement {
+            schema_name: None,
+            table_name: "t".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::DeleteRows,
+            columns: vec![],
+        })
+        .unwrap_err();
+        assert!(matches!(err, ParseError::OnCommitOnlyForTempTables));
     }
 
     #[test]

@@ -52,12 +52,61 @@ pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
     }
 }
 
+fn normalize_create_table_name_parts(
+    schema_name: Option<&str>,
+    table_name: &str,
+    persistence: TablePersistence,
+    on_commit: OnCommitAction,
+) -> Result<(String, TablePersistence), ParseError> {
+    let effective_persistence = match schema_name.map(|s| s.to_ascii_lowercase()) {
+        Some(schema) if schema == "pg_temp" => TablePersistence::Temporary,
+        Some(schema) => {
+            if persistence == TablePersistence::Temporary {
+                return Err(ParseError::TempTableInNonTempSchema(schema));
+            }
+            return Err(ParseError::UnsupportedQualifiedName(format!("{schema}.{table_name}")));
+        }
+        None => persistence,
+    };
+
+    if on_commit != OnCommitAction::PreserveRows
+        && effective_persistence != TablePersistence::Temporary
+    {
+        return Err(ParseError::OnCommitOnlyForTempTables);
+    }
+
+    Ok((table_name.to_ascii_lowercase(), effective_persistence))
+}
+
+pub fn normalize_create_table_name(
+    stmt: &CreateTableStatement,
+) -> Result<(String, TablePersistence), ParseError> {
+    normalize_create_table_name_parts(
+        stmt.schema_name.as_deref(),
+        &stmt.table_name,
+        stmt.persistence,
+        stmt.on_commit,
+    )
+}
+
+pub fn normalize_create_table_as_name(
+    stmt: &CreateTableAsStatement,
+) -> Result<(String, TablePersistence), ParseError> {
+    normalize_create_table_name_parts(
+        stmt.schema_name.as_deref(),
+        &stmt.table_name,
+        stmt.persistence,
+        stmt.on_commit,
+    )
+}
+
 pub fn bind_create_table(
     stmt: &CreateTableStatement,
     catalog: &mut Catalog,
 ) -> Result<CatalogEntry, ParseError> {
+    let (table_name, _) = normalize_create_table_name(stmt)?;
     catalog
-        .create_table(stmt.table_name.clone(), create_relation_desc(stmt))
+        .create_table(table_name, create_relation_desc(stmt))
         .map_err(|err| match err {
             crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name) => {
                 ParseError::TableAlreadyExists(name)

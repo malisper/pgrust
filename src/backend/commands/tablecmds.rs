@@ -74,11 +74,15 @@ pub(crate) fn execute_explain(
 }
 
 pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
+    let names = catalog
+        .table_names()
+        .filter(|name| !name.starts_with("pg_temp."))
+        .collect::<std::collections::BTreeSet<_>>();
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("table_name")],
         column_names: vec!["table_name".into()],
-        rows: catalog
-            .table_names()
+        rows: names
+            .into_iter()
             .map(|name| vec![Value::Text(name.to_string().into())])
             .collect(),
     })

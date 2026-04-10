@@ -441,6 +441,23 @@ fn run_statement(
                 INVALID_TRANSACTION_ID,
             )
         }
+        Statement::Analyze(stmt) => {
+            let mut ctx = ExecutorContext {
+                pool: std::sync::Arc::clone(pool),
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                client_id: 21,
+                next_command_id: 0,
+                outer_rows: Vec::new(),
+                timed: false,
+            };
+            execute_statement(
+                Statement::Analyze(stmt),
+                catalog_store.catalog_mut(),
+                &mut ctx,
+                INVALID_TRANSACTION_ID,
+            )
+        }
         Statement::CreateTable(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
@@ -458,6 +475,10 @@ fn run_statement(
                 INVALID_TRANSACTION_ID,
             )
         }
+        Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE TABLE AS through Database/session path",
+            actual: "CREATE TABLE AS".into(),
+        })),
         Statement::DropTable(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
