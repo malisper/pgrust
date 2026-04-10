@@ -72,6 +72,17 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
             &eval_expr(left, slot, ctx)?,
             &eval_expr(right, slot, ctx)?,
         ))),
+        Expr::ArrayLiteral { elements, array_type } => {
+            let element_type = array_type.element_type();
+            let mut values = Vec::with_capacity(elements.len());
+            for expr in elements {
+                values.push(cast_value(eval_expr(expr, slot, ctx)?, element_type)?);
+            }
+            Ok(Value::Array(values))
+        }
+        Expr::ArrayOverlap(left, right) => {
+            eval_array_overlap(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
         Expr::ScalarSubquery(plan) => eval_scalar_subquery(plan, slot, ctx),
         Expr::ExistsSubquery(plan) => eval_exists_subquery(plan, slot, ctx),
         Expr::AnySubquery { left, op, subquery } => {
@@ -82,8 +93,85 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
             let left_value = eval_expr(left, slot, ctx)?;
             eval_quantified_subquery(&left_value, *op, true, subquery, slot, ctx)
         }
+        Expr::AnyArray { left, op, right } => {
+            let left_value = eval_expr(left, slot, ctx)?;
+            let right_value = eval_expr(right, slot, ctx)?;
+            eval_quantified_array(&left_value, *op, false, &right_value)
+        }
+        Expr::AllArray { left, op, right } => {
+            let left_value = eval_expr(left, slot, ctx)?;
+            let right_value = eval_expr(right, slot, ctx)?;
+            eval_quantified_array(&left_value, *op, true, &right_value)
+        }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
         Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(render_current_timestamp()))),
+    }
+}
+
+fn eval_quantified_array(
+    left_value: &Value,
+    op: SubqueryComparisonOp,
+    is_all: bool,
+    array_value: &Value,
+) -> Result<Value, ExecError> {
+    match array_value {
+        Value::Null => Ok(Value::Null),
+        Value::Array(items) => {
+            let mut saw_null = false;
+            for item in items {
+                match compare_subquery_values(left_value, item, op)? {
+                    Value::Bool(result) => {
+                        if !is_all && result {
+                            return Ok(Value::Bool(true));
+                        }
+                        if is_all && !result {
+                            return Ok(Value::Bool(false));
+                        }
+                    }
+                    Value::Null => saw_null = true,
+                    other => return Err(ExecError::NonBoolQual(other)),
+                }
+            }
+            if items.is_empty() {
+                Ok(Value::Bool(is_all))
+            } else if saw_null {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::Bool(is_all))
+            }
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: if is_all { "ALL" } else { "ANY" },
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn eval_array_overlap(left: Value, right: Value) -> Result<Value, ExecError> {
+    match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Array(left_items), Value::Array(right_items)) => {
+            for left_item in &left_items {
+                if matches!(left_item, Value::Null) {
+                    continue;
+                }
+                for right_item in &right_items {
+                    if matches!(right_item, Value::Null) {
+                        continue;
+                    }
+                    if matches!(compare_values("=", left_item.clone(), right_item.clone())?, Value::Bool(true)) {
+                        return Ok(Value::Bool(true));
+                    }
+                }
+            }
+            Ok(Value::Bool(false))
+        }
+        (left, right) => Err(ExecError::TypeMismatch {
+            op: "&&",
+            left,
+            right,
+        }),
     }
 }
 
@@ -184,6 +272,25 @@ fn compare_subquery_values(
 }
 
 fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
+    if ty.is_array {
+        return match value {
+            Value::Null => Ok(Value::Null),
+            Value::Array(items) => {
+                let element_type = ty.element_type();
+                let mut casted = Vec::with_capacity(items.len());
+                for item in items {
+                    casted.push(cast_value(item, element_type)?);
+                }
+                Ok(Value::Array(casted))
+            }
+            other => Err(ExecError::TypeMismatch {
+                op: "::array",
+                left: other,
+                right: Value::Null,
+            }),
+        };
+    }
+
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int32(v) => match ty {
@@ -229,6 +336,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                 },
             }),
         },
+        Value::Array(items) => Ok(Value::Array(items)),
     }
 }
 
@@ -329,6 +437,7 @@ pub(crate) fn compare_order_values(
             a.as_text().unwrap().cmp(b.as_text().unwrap())
         }
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Array(a), Value::Array(b)) => format_array_text(a).cmp(&format_array_text(b)),
         _ => Ordering::Equal,
     }
 }
@@ -567,7 +676,7 @@ pub(crate) fn tuple_from_values(desc: &RelationDesc, values: &[Value]) -> Result
 
 pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::access::heap::tuple::TupleValue, ExecError> {
     use crate::access::heap::tuple::TupleValue;
-    match (column.ty, value) {
+    match (&column.ty, value) {
         (_, Value::Null) => {
             if !column.storage.nullable {
                 Err(ExecError::MissingRequiredColumn(column.name.clone()))
@@ -581,6 +690,17 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
             Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
         }
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(*v)])),
+        (ScalarType::Array(_), v) => {
+            let coerced = coerce_assignment_value(v, column.sql_type)?;
+            match coerced {
+                Value::Array(items) => Ok(TupleValue::Bytes(encode_array_bytes(column.sql_type.element_type(), &items)?)),
+                other => Err(ExecError::TypeMismatch {
+                    op: "assignment",
+                    left: Value::Null,
+                    right: other,
+                }),
+            }
+        }
         (_, other) => Err(ExecError::TypeMismatch {
             op: "assignment",
             left: Value::Null,
@@ -590,6 +710,25 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
 }
 
 fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, ExecError> {
+    if target.is_array {
+        return match value {
+            Value::Null => Ok(Value::Null),
+            Value::Array(items) => {
+                let element_type = target.element_type();
+                let mut coerced = Vec::with_capacity(items.len());
+                for item in items {
+                    coerced.push(coerce_assignment_value(item, element_type)?);
+                }
+                Ok(Value::Array(coerced))
+            }
+            other => Err(ExecError::TypeMismatch {
+                op: "copy assignment",
+                left: Value::Null,
+                right: other.clone(),
+            }),
+        };
+    }
+
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
@@ -597,6 +736,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
+        Value::Array(items) => Ok(Value::Array(items.clone())),
     }
 }
 
@@ -610,7 +750,7 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
             if column.storage.attlen != 4 || bytes.len() != 4 {
                 return Err(ExecError::UnsupportedStorageType {
                     column: column.name.clone(),
-                    ty: column.ty,
+                    ty: column.ty.clone(),
                     attlen: column.storage.attlen,
                 });
             }
@@ -627,7 +767,7 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(ExecError::UnsupportedStorageType {
                     column: column.name.clone(),
-                    ty: column.ty,
+                    ty: column.ty.clone(),
                     attlen: column.storage.attlen,
                 });
             }
@@ -638,7 +778,7 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
             if column.storage.attlen != 1 || bytes.len() != 1 {
                 return Err(ExecError::UnsupportedStorageType {
                     column: column.name.clone(),
-                    ty: column.ty,
+                    ty: column.ty.clone(),
                     attlen: column.storage.attlen,
                 });
             }
@@ -650,6 +790,16 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     details: format!("invalid bool byte {}", other),
                 }),
             }
+        }
+        ScalarType::Array(_) => {
+            if column.storage.attlen != -1 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            decode_array_bytes(column.sql_type.element_type(), bytes)
         }
     }
 }
@@ -693,6 +843,7 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(l.to_bits() == r.to_bits())),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(l.as_text() == r.as_text())),
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
+        (Value::Array(l), Value::Array(r)) => Ok(Value::Bool(l == r)),
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
 }
@@ -705,6 +856,7 @@ fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Float64(l), Value::Float64(r)) => l.to_bits() != r.to_bits(),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
+        (Value::Array(l), Value::Array(r)) => l != r,
         _ => true,
     }
 }
@@ -754,6 +906,141 @@ where
             ">" => l.as_text().unwrap() > r.as_text().unwrap(),
             _ => unreachable!(),
         })),
+        (Value::Array(l), Value::Array(r)) => {
+            let left = format_array_text(l);
+            let right = format_array_text(r);
+            Ok(Value::Bool(match op {
+                "<" => left < right,
+                ">" => left > right,
+                _ => unreachable!(),
+            }))
+        }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
+}
+
+fn encode_array_bytes(element_type: SqlType, items: &[Value]) -> Result<Vec<u8>, ExecError> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    for item in items {
+        match item {
+            Value::Null => bytes.extend_from_slice(&(-1_i32).to_le_bytes()),
+            _ => {
+                let payload = encode_array_element(element_type, item)?;
+                bytes.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+                bytes.extend_from_slice(&payload);
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>, ExecError> {
+    let coerced = coerce_assignment_value(value, element_type)?;
+    match coerced {
+        Value::Null => Ok(Vec::new()),
+        Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Bool(v) => Ok(vec![u8::from(v)]),
+        Value::Text(text) => Ok(text.as_bytes().to_vec()),
+        Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
+        Value::Float64(v) => Ok(v.to_string().into_bytes()),
+        Value::Array(_) => Err(ExecError::TypeMismatch {
+            op: "array element",
+            left: coerced,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
+    if bytes.len() < 4 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array payload too short".into(),
+        });
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let mut offset = 4usize;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        if offset + 4 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array length header truncated".into(),
+            });
+        }
+        let len = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        if len == -1 {
+            items.push(Value::Null);
+            continue;
+        }
+        let len = len as usize;
+        if offset + len > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array element payload truncated".into(),
+            });
+        }
+        items.push(decode_array_element(element_type, &bytes[offset..offset + len])?);
+        offset += len;
+    }
+    Ok(Value::Array(items))
+}
+
+fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
+    match element_type.kind {
+        SqlTypeKind::Int4 => {
+            if bytes.len() != 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int4 array element must be 4 bytes".into(),
+                });
+            }
+            Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        SqlTypeKind::Bool => {
+            if bytes.len() != 1 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "bool array element must be 1 byte".into(),
+                });
+            }
+            Ok(Value::Bool(bytes[0] != 0))
+        }
+        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+            Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
+        }
+    }
+}
+
+pub(crate) fn format_array_text(items: &[Value]) -> String {
+    let mut out = String::from("{");
+    for (idx, item) in items.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        match item {
+            Value::Null => out.push_str("NULL"),
+            Value::Int32(v) => out.push_str(&v.to_string()),
+            Value::Float64(v) => out.push_str(&v.to_string()),
+            Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+            Value::Text(_) | Value::TextRef(_, _) => {
+                out.push('"');
+                for ch in item.as_text().unwrap().chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
+            Value::Array(nested) => out.push_str(&format_array_text(nested)),
+        }
+    }
+    out.push('}');
+    out
 }

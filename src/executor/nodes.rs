@@ -10,11 +10,12 @@ use std::time::{Duration, Instant};
 use super::expr::{decode_value, eval_expr, compare_order_by_keys};
 use super::{ExecError, ExecutorContext, AggGroup, AccumState};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarType {
     Int32,
     Text,
     Bool,
+    Array(Box<ScalarType>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +62,7 @@ pub enum Value {
     /// page is immutable after insertion.
     TextRef(*const u8, u32),
     Bool(bool),
+    Array(Vec<Value>),
     Null,
 }
 
@@ -86,6 +88,7 @@ impl Value {
                 };
                 Value::Text(CompactString::new(s))
             }
+            Value::Array(values) => Value::Array(values.iter().map(Value::to_owned_value).collect()),
             other => other.clone(),
         }
     }
@@ -98,6 +101,10 @@ impl Value {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
                 };
                 *v = Value::Text(CompactString::new(s));
+            } else if let Value::Array(items) = v {
+                for item in items.iter_mut() {
+                    *item = item.to_owned_value();
+                }
             }
         }
     }
@@ -109,6 +116,7 @@ impl PartialEq for Value {
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
                 a.as_text().unwrap() == b.as_text().unwrap()
@@ -135,7 +143,11 @@ impl std::hash::Hash for Value {
                 s.hash(state);
             }
             Value::Bool(v) => { 3u8.hash(state); v.hash(state); }
-            Value::Null => { 4u8.hash(state); }
+            Value::Array(values) => {
+                4u8.hash(state);
+                values.hash(state);
+            }
+            Value::Null => { 5u8.hash(state); }
         }
     }
 }
@@ -207,6 +219,11 @@ pub enum Expr {
     IsNotNull(Box<Expr>),
     IsDistinctFrom(Box<Expr>, Box<Expr>),
     IsNotDistinctFrom(Box<Expr>, Box<Expr>),
+    ArrayLiteral {
+        elements: Vec<Expr>,
+        array_type: SqlType,
+    },
+    ArrayOverlap(Box<Expr>, Box<Expr>),
     ScalarSubquery(Box<Plan>),
     ExistsSubquery(Box<Plan>),
     AnySubquery {
@@ -218,6 +235,16 @@ pub enum Expr {
         left: Box<Expr>,
         op: SubqueryComparisonOp,
         subquery: Box<Plan>,
+    },
+    AnyArray {
+        left: Box<Expr>,
+        op: SubqueryComparisonOp,
+        right: Box<Expr>,
+    },
+    AllArray {
+        left: Box<Expr>,
+        op: SubqueryComparisonOp,
+        right: Box<Expr>,
     },
     Random,
     CurrentTimestamp,
@@ -265,6 +292,10 @@ pub enum Plan {
         step: Expr,
         output: QueryColumn,
     },
+    Unnest {
+        args: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
 }
 
 impl Plan {
@@ -296,6 +327,7 @@ impl Plan {
                 cols
             }
             Plan::GenerateSeries { output, .. } => vec![output.clone()],
+            Plan::Unnest { output_columns, .. } => output_columns.clone(),
         }
     }
 
@@ -575,6 +607,15 @@ pub struct GenerateSeriesState {
     pub(crate) initialized: bool,
     pub(crate) slot: TupleSlot,
     pub(crate) column_names: Vec<String>,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct UnnestState {
+    pub(crate) args: Vec<Expr>,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) rows: Option<Vec<TupleSlot>>,
+    pub(crate) next_index: usize,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -1029,6 +1070,66 @@ impl PlanNode for GenerateSeriesState {
     fn node_stats(&self) -> &NodeExecStats { &self.stats }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
     fn node_label(&self) -> String { "Function Scan on generate_series".into() }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for UnnestState {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.rows.is_none() {
+            let mut dummy = TupleSlot::empty(0);
+            let mut arrays = Vec::with_capacity(self.args.len());
+            let mut max_len = 0usize;
+            for arg in &self.args {
+                match eval_expr(arg, &mut dummy, ctx)? {
+                    Value::Null => arrays.push(None),
+                    Value::Array(values) => {
+                        max_len = max_len.max(values.len());
+                        arrays.push(Some(values));
+                    }
+                    other => {
+                        return Err(ExecError::TypeMismatch {
+                            op: "unnest",
+                            left: other,
+                            right: Value::Null,
+                        });
+                    }
+                }
+            }
+
+            let mut rows = Vec::with_capacity(max_len);
+            for idx in 0..max_len {
+                let mut row = Vec::with_capacity(arrays.len());
+                for array in &arrays {
+                    match array {
+                        Some(values) => row.push(values.get(idx).cloned().unwrap_or(Value::Null)),
+                        None => row.push(Value::Null),
+                    }
+                }
+                rows.push(TupleSlot::virtual_row(row));
+            }
+            self.rows = Some(rows);
+        }
+
+        let rows = self.rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+
+    fn column_names(&self) -> &[String] { &self.output_columns }
+    fn node_stats(&self) -> &NodeExecStats { &self.stats }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats { &mut self.stats }
+    fn node_label(&self) -> String { "Function Scan on unnest".into() }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 

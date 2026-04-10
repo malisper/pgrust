@@ -364,6 +364,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
+        Plan::Unnest { args, output_columns } => {
+            let column_names = output_columns.into_iter().map(|c| c.name).collect();
+            Box::new(UnnestState {
+                args,
+                output_columns: column_names,
+                rows: None,
+                next_index: 0,
+                stats: NodeExecStats::default(),
+            })
+        }
     }
 }
 
@@ -451,7 +461,7 @@ mod tests {
     use super::*;
     use crate::access::heap::am::{heap_flush, heap_insert_mvcc, heap_update};
     use crate::access::heap::mvcc::INVALID_TRANSACTION_ID;
-    use crate::access::heap::tuple::{AttributeAlign, TupleValue};
+    use crate::access::heap::tuple::TupleValue;
     use crate::parser::{Catalog, CatalogEntry};
     use crate::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
     use crate::access::heap::tuple::{AttributeDesc, HeapTuple};
@@ -551,6 +561,41 @@ mod tests {
                         false,
                     )],
                 },
+            },
+        );
+        catalog
+    }
+
+    fn records_rel() -> RelFileLocator {
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: 15003,
+        }
+    }
+
+    fn records_relation_desc() -> RelationDesc {
+        use crate::parser::{SqlType, SqlTypeKind};
+
+        RelationDesc {
+            columns: vec![
+                crate::catalog::column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                crate::catalog::column_desc("company_id", SqlType::new(SqlTypeKind::Text), false),
+                crate::catalog::column_desc("year", SqlType::new(SqlTypeKind::Text), false),
+                crate::catalog::column_desc("tags", SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)), true),
+                crate::catalog::column_desc("category_tags", SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)), true),
+                crate::catalog::column_desc("size_tags", SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)), true),
+            ],
+        }
+    }
+
+    fn records_catalog() -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.insert(
+            "orders",
+            CatalogEntry {
+                rel: records_rel(),
+                desc: records_relation_desc(),
             },
         );
         catalog
@@ -839,6 +884,17 @@ mod tests {
     #[test] fn generate_series_negative_step() { let base = temp_dir("gen_series_neg"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(5, 1, -1)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(5)], vec![Value::Int32(4)], vec![Value::Int32(3)], vec![Value::Int32(2)], vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_empty() { let base = temp_dir("gen_series_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 0)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, Vec::<Vec<Value>>::new()); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_with_where() { let base = temp_dir("gen_series_where"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 10) where generate_series > 8").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(9)], vec![Value::Int32(10)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn select_array_literal_round_trips() { let base = temp_dir("array_literal_round_trip"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a', 'b']::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())])]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn any_array_truth_table_and_overlap_work() { let base = temp_dir("array_any_overlap"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'b' = any(ARRAY['a', 'b']::varchar[]), 'z' = any(ARRAY['a', null]::varchar[]), ARRAY['a']::varchar[] && ARRAY['b', 'a']::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Null, Value::Bool(true)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn unnest_single_and_multi_arg_work() { let base = temp_dir("unnest_multi"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from unnest(ARRAY[1, 2], ARRAY['x']::varchar[]) as u(a, b)").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["a", "b"]); assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("x".into())], vec![Value::Int32(2), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn record_shaped_array_query_runs() { let base = temp_dir("record_arrays"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql_with_catalog(&base, &txns, xid, "insert into orders (id, company_id, year, tags, category_tags, size_tags) values (1, 'acme', '2024', ARRAY['c1', 'c2']::varchar[], ARRAY['dry', 'dry']::varchar[], ARRAY['large', 'medium']::varchar[]), (2, 'acme', '2024', ARRAY['c3']::varchar[], ARRAY['dry']::varchar[], ARRAY['large']::varchar[]), (3, 'beta', '2024', ARRAY['c4']::varchar[], ARRAY['dry']::varchar[], ARRAY['medium']::varchar[])", records_catalog()).unwrap(); txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select orders.company_id, count(distinct orders.id) as records_filtered, sum((select count(*) from unnest(orders.tags, orders.category_tags, orders.size_tags) as c(num, type_cat, size_cat) where (c.size_cat)::text = any(ARRAY['large']::varchar[]))) as containers_filtered from orders where orders.year = '2024' and orders.size_tags && ARRAY['large']::varchar[] group by orders.company_id order by orders.company_id", records_catalog()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("acme".into()), Value::Int32(2), Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn all_array_semantics_match_empty_false_and_null_cases() { let base = temp_dir("all_array_semantics"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 < all(ARRAY[2, 3]), 1 < all(ARRAY[]::int4[]), 3 < all(ARRAY[2, null]::int4[]), 1 < all(ARRAY[2, null]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn any_array_empty_and_null_array_cases() { let base = temp_dir("any_array_empty_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 = any(ARRAY[]::int4[]), 1 = any((null)::int4[]), (null)::int4 = any(ARRAY[1]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Null, Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn array_overlap_false_and_null_cases() { let base = temp_dir("array_overlap_false_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a']::varchar[] && ARRAY['b']::varchar[], ARRAY['a', null]::varchar[] && ARRAY['b', null]::varchar[], ARRAY['a']::varchar[] && (null)::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn typed_empty_array_selects_as_empty_value() { let base = temp_dir("typed_empty_array"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY[]::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Array(vec![])]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn unnest_null_and_empty_arrays_return_no_rows() { let base = temp_dir("unnest_null_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from unnest((null)::int4[])").unwrap() { StatementResult::Query { rows, .. } => assert!(rows.is_empty()), other => panic!("expected query result, got {:?}", other), } match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from unnest(ARRAY[]::int4[])").unwrap() { StatementResult::Query { rows, .. } => assert!(rows.is_empty()), other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn unnest_null_array_zips_with_longer_input() { let base = temp_dir("unnest_null_zip"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from unnest((null)::int4[], ARRAY['x', 'y']::varchar[]) as u(a, b)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Null, Value::Text("x".into())], vec![Value::Null, Value::Text("y".into())]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn array_columns_round_trip_through_storage() { let base = temp_dir("array_storage_roundtrip"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); assert_eq!(run_sql_with_catalog(&base, &txns, xid, "insert into orders (id, company_id, year, tags, category_tags, size_tags) values (1, 'acme', '2024', ARRAY['n1', null]::varchar[], ARRAY['dry']::varchar[], ARRAY['large']::varchar[])", records_catalog()).unwrap(), StatementResult::AffectedRows(1)); txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select tags from orders", records_catalog()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Array(vec![Value::Text("n1".into()), Value::Null])]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_column_alias() {
         let base = temp_dir("gen_series_alias");
         let txns = TransactionManager::new_durable(&base).unwrap();

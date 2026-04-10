@@ -512,7 +512,16 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
 
 fn build_type(pair: Pair<'_, Rule>) -> SqlType {
     match pair.as_rule() {
-        Rule::type_name => build_type(pair.into_inner().next().expect("type_name inner")),
+        Rule::type_name => {
+            let mut inner = pair.into_inner();
+            let base = build_type(inner.next().expect("type_name base"));
+            if inner.next().is_some() {
+                SqlType::array_of(base)
+            } else {
+                base
+            }
+        }
+        Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
         Rule::kw_text => SqlType::new(SqlTypeKind::Text),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
@@ -620,9 +629,15 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         negated,
                     })
                 }
-                Rule::quantified_subquery_suffix => {
+                Rule::quantified_suffix => {
                     let mut parts = next.into_inner();
                     let op = match parts.next().ok_or(ParseError::UnexpectedEof)?.as_str() {
+                        "&&" => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "comparison operator for ANY/ALL",
+                                actual: "&&".into(),
+                            })
+                        }
                         "=" => SubqueryComparisonOp::Eq,
                         "<" => SubqueryComparisonOp::Lt,
                         ">" => SubqueryComparisonOp::Gt,
@@ -644,21 +659,32 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             })
                         }
                     };
-                    let subquery = build_select(
-                        parts
-                            .find(|part| part.as_rule() == Rule::select_stmt)
-                            .ok_or(ParseError::UnexpectedEof)?,
-                    )?;
-                    Ok(SqlExpr::QuantifiedSubquery {
-                        left: Box::new(left),
-                        op,
-                        is_all,
-                        subquery: Box::new(subquery),
+                    let rhs = parts.next().ok_or(ParseError::UnexpectedEof)?;
+                    Ok(match rhs.as_rule() {
+                        Rule::select_stmt => SqlExpr::QuantifiedSubquery {
+                            left: Box::new(left),
+                            op,
+                            is_all,
+                            subquery: Box::new(build_select(rhs)?),
+                        },
+                        Rule::expr => SqlExpr::QuantifiedArray {
+                            left: Box::new(left),
+                            op,
+                            is_all,
+                            array: Box::new(build_expr(rhs)?),
+                        },
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "subquery or array expression",
+                                actual: rhs.as_str().into(),
+                            })
+                        }
                     })
                 }
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
+                        "&&" => SqlExpr::ArrayOverlap(Box::new(left), Box::new(right)),
                         "=" => SqlExpr::Eq(Box::new(left), Box::new(right)),
                         "<" => SqlExpr::Lt(Box::new(left), Box::new(right)),
                         ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
@@ -689,6 +715,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             )?;
             Ok(SqlExpr::Exists(Box::new(subquery)))
         }
+        Rule::array_expr => Ok(SqlExpr::ArrayLiteral(
+            pair.into_inner()
+                .find(|part| part.as_rule() == Rule::expr_list)
+                .map(|list| {
+                    list.into_inner()
+                        .filter(|part| part.as_rule() == Rule::expr)
+                        .map(build_expr)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
+        )),
         Rule::agg_call => build_agg_call(pair),
         Rule::func_call => Ok(SqlExpr::Random),
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),

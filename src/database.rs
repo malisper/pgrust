@@ -6,7 +6,7 @@ use parking_lot::{Condvar, Mutex, RwLock};
 
 use crate::access::heap::mvcc::{CommandId, MvccError, TransactionId, TransactionManager};
 use crate::catalog::{CatalogError, DurableCatalog};
-use crate::executor::{ExecError, ExecutorContext, StatementResult};
+use crate::executor::{ExecError, ExecutorContext, StatementResult, Value};
 use crate::executor::nodes::Plan;
 use crate::parser::Statement;
 use crate::storage::smgr::{MdStorageManager, RelFileLocator};
@@ -687,12 +687,25 @@ fn collect_rels_from_expr(expr: &crate::executor::Expr, rels: &mut std::collecti
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
         }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_rels_from_expr(element, rels);
+            }
+        }
+        Expr::ArrayOverlap(left, right) => {
+            collect_rels_from_expr(left, rels);
+            collect_rels_from_expr(right, rels);
+        }
         Expr::ScalarSubquery(plan) | Expr::ExistsSubquery(plan) => {
             collect_rels_from_plan(plan, rels);
         }
         Expr::AnySubquery { left, subquery, .. } | Expr::AllSubquery { left, subquery, .. } => {
             collect_rels_from_expr(left, rels);
             collect_rels_from_plan(subquery, rels);
+        }
+        Expr::AnyArray { left, right, .. } | Expr::AllArray { left, right, .. } => {
+            collect_rels_from_expr(left, rels);
+            collect_rels_from_expr(right, rels);
         }
     }
 }
@@ -751,6 +764,11 @@ fn collect_rels_from_plan(plan: &crate::executor::Plan, rels: &mut std::collecti
             collect_rels_from_expr(start, rels);
             collect_rels_from_expr(stop, rels);
             collect_rels_from_expr(step, rels);
+        }
+        Plan::Unnest { args, .. } => {
+            for arg in args {
+                collect_rels_from_expr(arg, rels);
+            }
         }
     }
 }
@@ -1339,6 +1357,7 @@ impl Session {
                                     right: Value::Text(raw.clone().into()),
                                 }),
                             },
+                            ScalarType::Array(_) => parse_text_array_literal(raw, column.sql_type.element_type()),
                         }
                     })
                     .collect::<Result<Vec<_>, ExecError>>()
@@ -1405,6 +1424,86 @@ impl Session {
             result
         }
     }
+}
+
+fn parse_text_array_literal(raw: &str, element_type: crate::parser::SqlType) -> Result<Value, ExecError> {
+    if raw == "{}" {
+        return Ok(Value::Array(Vec::new()));
+    }
+    if !raw.starts_with('{') || !raw.ends_with('}') {
+        return Err(ExecError::TypeMismatch {
+            op: "copy assignment",
+            left: Value::Null,
+            right: Value::Text(raw.into()),
+        });
+    }
+
+    let mut chars = raw[1..raw.len() - 1].chars().peekable();
+    let mut items = Vec::new();
+    while chars.peek().is_some() {
+        let value = if chars.peek() == Some(&'"') {
+            chars.next();
+            let mut text = String::new();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '"' => break,
+                    '\\' => {
+                        let escaped = chars.next().ok_or_else(|| ExecError::TypeMismatch {
+                            op: "copy assignment",
+                            left: Value::Null,
+                            right: Value::Text(raw.into()),
+                        })?;
+                        text.push(escaped);
+                    }
+                    other => text.push(other),
+                }
+            }
+            text
+        } else {
+            let mut text = String::new();
+            while let Some(&ch) = chars.peek() {
+                if ch == ',' {
+                    break;
+                }
+                text.push(ch);
+                chars.next();
+            }
+            text
+        };
+
+        let value = if value == "NULL" {
+            Value::Null
+        } else {
+            match element_type.kind {
+                crate::parser::SqlTypeKind::Int4 => value
+                    .parse::<i32>()
+                    .map(Value::Int32)
+                    .map_err(|_| ExecError::Parse(crate::parser::ParseError::InvalidInteger(value.clone())))?,
+                crate::parser::SqlTypeKind::Bool => match value.as_str() {
+                    "t" | "true" | "1" => Value::Bool(true),
+                    "f" | "false" | "0" => Value::Bool(false),
+                    _ => {
+                        return Err(ExecError::TypeMismatch {
+                            op: "copy assignment",
+                            left: Value::Null,
+                            right: Value::Text(value.into()),
+                        })
+                    }
+                },
+                crate::parser::SqlTypeKind::Text
+                | crate::parser::SqlTypeKind::Timestamp
+                | crate::parser::SqlTypeKind::Char
+                | crate::parser::SqlTypeKind::Varchar => Value::Text(value.into()),
+            }
+        };
+        items.push(value);
+
+        if chars.peek() == Some(&',') {
+            chars.next();
+        }
+    }
+
+    Ok(Value::Array(items))
 }
 
 #[cfg(test)]
@@ -1647,6 +1746,93 @@ mod tests {
                         Value::Int32(0),
                         Value::Null,
                     ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn copy_from_rows_parses_array_literals() {
+        let base = temp_dir("copy_from_rows_arrays");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        db.execute(
+            1,
+            "create table records (id int not null, tags varchar[], sizes int4[])",
+        )
+        .unwrap();
+
+        let inserted = session
+            .copy_from_rows(
+                &db,
+                "records",
+                &[vec!["1".into(), "{\"a\",\"b\"}".into(), "{1,NULL,3}".into()]],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+
+        match db
+            .execute(1, "select id, tags, sizes from records")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int32(1),
+                        Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())]),
+                        Value::Array(vec![Value::Int32(1), Value::Null, Value::Int32(3)]),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn copy_from_rows_parses_quoted_array_text_and_empty_arrays() {
+        let base = temp_dir("copy_from_rows_arrays_quoted");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        db.execute(
+            1,
+            "create table records (id int not null, tags varchar[], sizes int4[])",
+        )
+        .unwrap();
+
+        session
+            .copy_from_rows(
+                &db,
+                "records",
+                &[
+                    vec!["1".into(), "{\"a,b\",\"c\\\"d\"}".into(), "{}".into()],
+                    vec!["2".into(), "{}".into(), "{NULL}".into()],
+                ],
+            )
+            .unwrap();
+
+        match db
+            .execute(1, "select id, tags, sizes from records order by id")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![
+                            Value::Int32(1),
+                            Value::Array(vec![Value::Text("a,b".into()), Value::Text("c\"d".into())]),
+                            Value::Array(vec![]),
+                        ],
+                        vec![
+                            Value::Int32(2),
+                            Value::Array(vec![]),
+                            Value::Array(vec![Value::Null]),
+                        ],
+                    ]
                 );
             }
             other => panic!("expected query result, got {:?}", other),

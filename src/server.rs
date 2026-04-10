@@ -6,6 +6,7 @@ use std::thread;
 
 use crate::database::{Database, Session};
 use crate::executor::{ExecError, QueryColumn, StatementResult, Value};
+use crate::executor::expr::format_array_text;
 use crate::parser::{parse_statement, SqlTypeKind, Statement};
 use crate::ClientId;
 
@@ -704,6 +705,15 @@ fn send_row_description(w: &mut impl Write, columns: &[QueryColumn]) -> io::Resu
 }
 
 fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
+    if col.sql_type.is_array {
+        let oid = match col.sql_type.kind {
+            SqlTypeKind::Int4 => 1007,
+            SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => 1009,
+            SqlTypeKind::Bool => 1000,
+            SqlTypeKind::Varchar => 1015,
+        };
+        return (oid, -1, -1);
+    }
     match col.sql_type.kind {
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Bool => (16, 1, -1),
@@ -753,6 +763,11 @@ fn send_data_row(w: &mut impl Write, values: &[Value], buf: &mut Vec<u8>) -> io:
             Value::Bool(false) => {
                 buf.extend_from_slice(&1_i32.to_be_bytes());
                 buf.push(b'f');
+            }
+            Value::Array(items) => {
+                let rendered = format_array_text(items);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
             }
         }
     }
@@ -1210,6 +1225,72 @@ mod tests {
         assert_eq!(fields[0].1, 23);
         assert_eq!(fields[1].1, 16);
         assert_eq!(fields[2].1, 25);
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn row_description_reports_array_oid() {
+        let (mut stream, server) = start_test_connection();
+
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "select ARRAY[1, 2]::int4[]");
+        let response = read_until_ready(&mut stream, "array_row_description");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].1, 1007);
+        assert_eq!(fields[0].2, -1);
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn row_description_reports_varchar_array_oid() {
+        let (mut stream, server) = start_test_connection();
+
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "select ARRAY['x']::varchar[]");
+        let response = read_until_ready(&mut stream, "varchar_array_row_description");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].1, 1015);
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn simple_query_protocol_renders_array_text_values() {
+        let (mut stream, server) = start_test_connection();
+
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "select ARRAY['a,b', 'c']::varchar[], ARRAY[1, null, 3]::int4[]");
+        let response = read_until_ready(&mut stream, "array_data_row");
+        let rows = response
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![vec![Some("{\"a,b\",\"c\"}".into()), Some("{1,NULL,3}".into())]]
+        );
 
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();

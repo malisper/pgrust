@@ -186,6 +186,7 @@ pub enum SqlTypeKind {
 pub struct SqlType {
     pub kind: SqlTypeKind,
     pub typmod: i32,
+    pub is_array: bool,
 }
 
 impl SqlType {
@@ -196,6 +197,7 @@ impl SqlType {
         Self {
             kind,
             typmod: Self::NO_TYPEMOD,
+            is_array: false,
         }
     }
 
@@ -203,6 +205,20 @@ impl SqlType {
         Self {
             kind,
             typmod: Self::VARHDRSZ + len,
+            is_array: false,
+        }
+    }
+
+    pub const fn array_of(mut elem: SqlType) -> Self {
+        elem.is_array = true;
+        elem
+    }
+
+    pub const fn element_type(self) -> Self {
+        Self {
+            kind: self.kind,
+            typmod: self.typmod,
+            is_array: false,
         }
     }
 
@@ -259,6 +275,8 @@ pub enum SqlExpr {
     IsNotNull(Box<SqlExpr>),
     IsDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
+    ArrayLiteral(Vec<SqlExpr>),
+    ArrayOverlap(Box<SqlExpr>, Box<SqlExpr>),
     AggCall {
         func: AggFunc,
         arg: Option<Box<SqlExpr>>,
@@ -276,6 +294,12 @@ pub enum SqlExpr {
         op: SubqueryComparisonOp,
         is_all: bool,
         subquery: Box<SelectStatement>,
+    },
+    QuantifiedArray {
+        left: Box<SqlExpr>,
+        op: SubqueryComparisonOp,
+        is_all: bool,
+        array: Box<SqlExpr>,
     },
     Random,
     CurrentTimestamp,

@@ -42,25 +42,25 @@ impl CompiledTupleDecoder {
                 let aligned = attr.attalign.align_offset(off);
                 if attr.attlen > 0 && !attr.nullable {
                     // Fixed-width NOT NULL — we know the exact byte offset.
-                    let step = match (column.ty, attr.attlen) {
+                    let step = match (&column.ty, attr.attlen) {
                         (ScalarType::Int32, 4) => DecodeStep::FixedInt32 { data_offset: aligned },
                         (ScalarType::Bool, 1) => DecodeStep::FixedBool { data_offset: aligned },
                         _ => DecodeStep::Generic {
                             attlen: attr.attlen,
                             align: attr.attalign,
-                            ty: column.ty,
+                            ty: column.ty.clone(),
                         },
                     };
                     steps.push(step);
                     fixed_offset = Some(aligned + attr.attlen as usize);
                     continue;
                 } else if attr.attlen == -1 {
-                    let step = match column.ty {
+                    let step = match &column.ty {
                         ScalarType::Text => DecodeStep::VarlenText { align: attr.attalign },
                         _ => DecodeStep::Generic {
                             attlen: attr.attlen,
                             align: attr.attalign,
-                            ty: column.ty,
+                            ty: column.ty.clone(),
                         },
                     };
                     steps.push(step);
@@ -73,7 +73,7 @@ impl CompiledTupleDecoder {
             steps.push(DecodeStep::Generic {
                 attlen: attr.attlen,
                 align: attr.attalign,
-                ty: column.ty,
+                ty: column.ty.clone(),
             });
             if attr.attlen <= 0 || attr.nullable {
                 fixed_offset = None;
@@ -192,6 +192,10 @@ impl CompiledTupleDecoder {
                                     values.push(Value::Null);
                                     continue;
                                 }
+                                ScalarType::Array(_) => {
+                                    values.push(Value::Null);
+                                    continue;
+                                }
                             });
                         }
                         -1 => {
@@ -211,6 +215,9 @@ impl CompiledTupleDecoder {
                                 ScalarType::Text => {
                                     values.push(Value::TextRef(bytes_slice.as_ptr(), bytes_slice.len() as u32));
                                 }
+                                ScalarType::Array(elem_ty) => {
+                                    values.push(decode_array_value(elem_ty, bytes_slice)?);
+                                }
                                 _ => values.push(Value::Null),
                             }
                         }
@@ -225,6 +232,9 @@ impl CompiledTupleDecoder {
                                 ScalarType::Text => {
                                     values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
                                 }
+                                ScalarType::Array(elem_ty) => {
+                                    values.push(decode_array_value(elem_ty, bytes)?);
+                                }
                                 _ => values.push(Value::Null),
                             }
                         }
@@ -236,5 +246,71 @@ impl CompiledTupleDecoder {
 
         *byte_offset = off;
         Ok(())
+    }
+}
+
+fn decode_array_value(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, ExecError> {
+    if bytes.len() < 4 {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array payload too short".into(),
+        });
+    }
+    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let mut offset = 4usize;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        if offset + 4 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array length header truncated".into(),
+            });
+        }
+        let len = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        if len == -1 {
+            items.push(Value::Null);
+            continue;
+        }
+        let len = len as usize;
+        if offset + len > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array element payload truncated".into(),
+            });
+        }
+        items.push(decode_array_element(element_type, &bytes[offset..offset + len])?);
+        offset += len;
+    }
+    Ok(Value::Array(items))
+}
+
+fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, ExecError> {
+    match element_type {
+        ScalarType::Int32 => {
+            if bytes.len() != 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int4 array element must be 4 bytes".into(),
+                });
+            }
+            Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        ScalarType::Bool => {
+            if bytes.len() != 1 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "bool array element must be 1 byte".into(),
+                });
+            }
+            Ok(Value::Bool(bytes[0] != 0))
+        }
+        ScalarType::Text => Ok(Value::Text(crate::compact_string::CompactString::new(unsafe {
+            std::str::from_utf8_unchecked(bytes)
+        }))),
+        ScalarType::Array(_) => Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "nested arrays are not supported".into(),
+        }),
     }
 }
