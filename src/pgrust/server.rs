@@ -133,6 +133,22 @@ mod tests {
         fields
     }
 
+    fn error_fields(body: &[u8]) -> Vec<(u8, String)> {
+        let mut fields = Vec::new();
+        let mut offset = 0usize;
+        while offset < body.len() && body[offset] != 0 {
+            let code = body[offset];
+            offset += 1;
+            let start = offset;
+            while body[offset] != 0 {
+                offset += 1;
+            }
+            fields.push((code, String::from_utf8_lossy(&body[start..offset]).into_owned()));
+            offset += 1;
+        }
+        fields
+    }
+
     #[test]
     fn copy_from_stdin_round_trips_over_wire_protocol() {
         let (mut stream, server) = start_test_connection();
@@ -297,6 +313,34 @@ mod tests {
         let response = read_until_ready(&mut stream, "array_data_row");
         let rows = response.iter().filter(|(kind, _)| *kind == b'D').map(|(_, body)| data_row_values(body)).collect::<Vec<_>>();
         assert_eq!(rows, vec![vec![Some("{\"a,b\",\"c\"}".into()), Some("{1,NULL,3}".into())]]);
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn simple_query_reports_numeric_sqlstates() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "select 'abc'::numeric");
+        let response = read_until_ready(&mut stream, "invalid_numeric");
+        let error = response.iter().find(|(kind, _)| *kind == b'E').map(|(_, body)| error_fields(body)).unwrap();
+        assert!(error.iter().any(|(code, value)| *code == b'C' && value == "22P02"));
+        assert!(error.iter().any(|(code, value)| *code == b'M' && value == "invalid input syntax for type numeric: \"abc\""));
+
+        send_query(&mut stream, "select '1234.56'::numeric(5,2)");
+        let response = read_until_ready(&mut stream, "numeric_overflow");
+        let error = response.iter().find(|(kind, _)| *kind == b'E').map(|(_, body)| error_fields(body)).unwrap();
+        assert!(error.iter().any(|(code, value)| *code == b'C' && value == "22003"));
+        assert!(error.iter().any(|(code, value)| *code == b'M' && value == "numeric field overflow"));
+
+        send_query(&mut stream, "select 1.5::real % 1.0::real");
+        let response = read_until_ready(&mut stream, "undefined_operator");
+        let error = response.iter().find(|(kind, _)| *kind == b'E').map(|(_, body)| error_fields(body)).unwrap();
+        assert!(error.iter().any(|(code, value)| *code == b'C' && value == "42883"));
+        assert!(error.iter().any(|(code, value)| *code == b'M' && value == "operator does not exist: real % real"));
+
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }

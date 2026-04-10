@@ -1256,6 +1256,27 @@ mod tests {
     }
 
     #[test]
+    fn sum_real_and_avg_real_follow_postgres_result_types() {
+        let base = temp_dir("sum_avg_real");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select sum(x), avg(x) from unnest(ARRAY[1.25::real, 2.5::real]::real[]) as u(x)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, columns, .. } => {
+                assert_eq!(columns[0].sql_type, crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Float4));
+                assert_eq!(columns[1].sql_type, crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Float8));
+                assert_eq!(rows, vec![vec![Value::Float64(3.75), Value::Float64(1.875)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn numeric_arithmetic_stays_exact_for_simple_decimals() {
         let base = temp_dir("numeric_exact_decimal_math");
         let txns = TransactionManager::new_durable(&base).unwrap();

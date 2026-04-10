@@ -371,6 +371,15 @@ mod tests {
     }
 
     #[test]
+    fn float_mod_is_rejected_at_bind_time() {
+        let err = build_plan(&parse_select("select 1.5::real % 1.0::real").unwrap(), &catalog()).unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::UndefinedOperator { op: "%", .. }
+        ));
+    }
+
+    #[test]
     fn parse_select_with_order_limit_offset() {
         let stmt =
             parse_select("select name from people order by id desc limit 2 offset 1").unwrap();
