@@ -1152,4 +1152,66 @@ mod tests {
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }
+
+    #[test]
+    fn simple_query_protocol_supports_correlated_scalar_subqueries() {
+        let (mut stream, server) = start_test_connection();
+
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "create table people (id int4 not null, name text)");
+        let _ = read_until_ready(&mut stream, "create_people");
+        send_query(&mut stream, "create table pets (id int4 not null, owner_id int4, name text)");
+        let _ = read_until_ready(&mut stream, "create_pets");
+        send_query(&mut stream, "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')");
+        let _ = read_until_ready(&mut stream, "insert_people");
+        send_query(&mut stream, "insert into pets (id, owner_id, name) values (10, 1, 'mocha'), (11, 1, 'pixel'), (12, 2, 'otis')");
+        let _ = read_until_ready(&mut stream, "insert_pets");
+
+        send_query(
+            &mut stream,
+            "select p.id, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
+        );
+        let response = read_until_ready(&mut stream, "correlated_select");
+        let rows = response
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                vec![Some("1".into()), Some("2".into())],
+                vec![Some("2".into()), Some("1".into())],
+                vec![Some("3".into()), Some("0".into())],
+            ]
+        );
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn row_description_reports_scalar_and_exists_subquery_types() {
+        let (mut stream, server) = start_test_connection();
+
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "select (select 1), exists (select 1), (select 'x'::text)");
+        let response = read_until_ready(&mut stream, "subquery_row_description");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].1, 23);
+        assert_eq!(fields[1].1, 16);
+        assert_eq!(fields[2].1, 25);
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
 }

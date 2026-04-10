@@ -349,16 +349,28 @@ impl Database {
 
         match stmt {
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
-                let (plan_or_stmt, table_rel) = {
+                let (plan_or_stmt, rels) = {
                     let catalog_guard = self.catalog.read();
                     let catalog = catalog_guard.catalog();
-                    let table_rel = extract_table_rel(&stmt, catalog);
-                    (stmt, table_rel)
+                    let mut rels = std::collections::BTreeSet::new();
+                    match &stmt {
+                        Statement::Select(select) => {
+                            let plan = crate::parser::build_plan(select, catalog)?;
+                            collect_rels_from_plan(&plan, &mut rels);
+                        }
+                        Statement::Explain(explain) => {
+                            if let Statement::Select(select) = explain.statement.as_ref() {
+                                let plan = crate::parser::build_plan(select, catalog)?;
+                                collect_rels_from_plan(&plan, &mut rels);
+                            }
+                        }
+                        Statement::ShowTables => {}
+                        _ => unreachable!(),
+                    }
+                    (stmt, rels.into_iter().collect::<Vec<_>>())
                 };
 
-                if let Some(rel) = table_rel {
-                    self.table_locks.lock_table(rel, TableLockMode::AccessShare, client_id);
-                }
+                lock_relations(&self.table_locks, client_id, &rels);
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let catalog_guard = self.catalog.read();
@@ -368,15 +380,14 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 let result = execute_readonly_statement(plan_or_stmt, catalog_guard.catalog(), &mut ctx);
                 drop(ctx);
                 drop(catalog_guard);
 
-                if let Some(rel) = table_rel {
-                    self.table_locks.unlock_table(rel, client_id);
-                }
+                unlock_relations(&self.table_locks, client_id, &rels);
                 result
             }
 
@@ -397,6 +408,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 let result = execute_insert(bound, &mut ctx, xid, 0);
@@ -424,6 +436,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 let result = execute_update_with_waiter(
@@ -457,6 +470,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 let result = execute_delete_with_waiter(
@@ -512,6 +526,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
@@ -548,6 +563,7 @@ impl Database {
                     snapshot,
                     client_id,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 let result =
@@ -586,18 +602,16 @@ impl Database {
         use crate::parser::build_plan;
         use crate::executor::executor_start;
 
-        let (plan, table_rel) = {
+        let (plan, rels) = {
             let catalog_guard = self.catalog.read();
             let catalog = catalog_guard.catalog();
-            let stmt = crate::parser::Statement::Select(select_stmt.clone());
-            let table_rel = extract_table_rel(&stmt, catalog);
             let plan = build_plan(select_stmt, catalog)?;
-            (plan, table_rel)
+            let mut rels = std::collections::BTreeSet::new();
+            collect_rels_from_plan(&plan, &mut rels);
+            (plan, rels.into_iter().collect::<Vec<_>>())
         };
 
-        if let Some(rel) = table_rel {
-            self.table_locks.lock_table(rel, TableLockMode::AccessShare, client_id);
-        }
+        lock_relations(&self.table_locks, client_id, &rels);
 
         let (snapshot, command_id) = match txn_ctx {
             Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
@@ -612,6 +626,7 @@ impl Database {
             snapshot,
             client_id,
             next_command_id: command_id,
+            outer_rows: Vec::new(),
             timed: false,
         };
 
@@ -620,7 +635,7 @@ impl Database {
             ctx,
             columns,
             column_names,
-            table_rel,
+            rels,
             table_locks: &self.table_locks,
             client_id,
         })
@@ -635,51 +650,120 @@ pub struct SelectGuard<'a> {
     pub ctx: ExecutorContext,
     pub columns: Vec<crate::executor::QueryColumn>,
     pub column_names: Vec<String>,
-    table_rel: Option<RelFileLocator>,
+    rels: Vec<RelFileLocator>,
     table_locks: &'a TableLockManager,
     client_id: ClientId,
 }
 
 impl Drop for SelectGuard<'_> {
     fn drop(&mut self) {
-        if let Some(rel) = self.table_rel {
-            self.table_locks.unlock_table(rel, self.client_id);
+        unlock_relations(self.table_locks, self.client_id, &self.rels);
+    }
+}
+
+fn collect_rels_from_expr(expr: &crate::executor::Expr, rels: &mut std::collections::BTreeSet<RelFileLocator>) {
+    use crate::executor::Expr;
+
+    match expr {
+        Expr::Column(_)
+        | Expr::OuterColumn { .. }
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentTimestamp => {}
+        Expr::Negate(inner)
+        | Expr::Cast(inner, _)
+        | Expr::Not(inner)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
+        Expr::Add(left, right)
+        | Expr::Eq(left, right)
+        | Expr::Lt(left, right)
+        | Expr::Gt(left, right)
+        | Expr::RegexMatch(left, right)
+        | Expr::And(left, right)
+        | Expr::Or(left, right)
+        | Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right) => {
+            collect_rels_from_expr(left, rels);
+            collect_rels_from_expr(right, rels);
+        }
+        Expr::ScalarSubquery(plan) | Expr::ExistsSubquery(plan) => {
+            collect_rels_from_plan(plan, rels);
+        }
+        Expr::AnySubquery { left, subquery, .. } | Expr::AllSubquery { left, subquery, .. } => {
+            collect_rels_from_expr(left, rels);
+            collect_rels_from_plan(subquery, rels);
         }
     }
 }
 
-fn extract_table_rel(
-    stmt: &crate::parser::Statement,
-    catalog: &crate::catalog::Catalog,
-) -> Option<RelFileLocator> {
-    fn extract_from_item_rel(
-        from: &crate::parser::FromItem,
-        catalog: &crate::catalog::Catalog,
-    ) -> Option<RelFileLocator> {
-        match from {
-            crate::parser::FromItem::Table { name } => catalog.get(name).map(|e| e.rel),
-            crate::parser::FromItem::Alias { source, .. } => extract_from_item_rel(source, catalog),
-            _ => None,
-        }
-    }
+fn collect_rels_from_plan(plan: &crate::executor::Plan, rels: &mut std::collections::BTreeSet<RelFileLocator>) {
+    use crate::executor::Plan;
 
-    use crate::parser::Statement;
-    match stmt {
-        Statement::Select(s) => {
-            s.from
-                .as_ref()
-                .and_then(|from| extract_from_item_rel(from, catalog))
+    match plan {
+        Plan::Result => {}
+        Plan::SeqScan { rel, .. } => {
+            rels.insert(*rel);
         }
-        Statement::Explain(e) => {
-            if let Statement::Select(s) = e.statement.as_ref() {
-                s.from
-                    .as_ref()
-                    .and_then(|from| extract_from_item_rel(from, catalog))
-            } else {
-                None
+        Plan::NestedLoopJoin { left, right, on } => {
+            collect_rels_from_plan(left, rels);
+            collect_rels_from_plan(right, rels);
+            collect_rels_from_expr(on, rels);
+        }
+        Plan::Filter { input, predicate } => {
+            collect_rels_from_plan(input, rels);
+            collect_rels_from_expr(predicate, rels);
+        }
+        Plan::OrderBy { input, items } => {
+            collect_rels_from_plan(input, rels);
+            for item in items {
+                collect_rels_from_expr(&item.expr, rels);
             }
         }
-        _ => None,
+        Plan::Limit { input, .. } => collect_rels_from_plan(input, rels),
+        Plan::Projection { input, targets } => {
+            collect_rels_from_plan(input, rels);
+            for target in targets {
+                collect_rels_from_expr(&target.expr, rels);
+            }
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            accumulators,
+            having,
+            ..
+        } => {
+            collect_rels_from_plan(input, rels);
+            for expr in group_by {
+                collect_rels_from_expr(expr, rels);
+            }
+            for accum in accumulators {
+                if let Some(arg) = &accum.arg {
+                    collect_rels_from_expr(arg, rels);
+                }
+            }
+            if let Some(expr) = having {
+                collect_rels_from_expr(expr, rels);
+            }
+        }
+        Plan::GenerateSeries { start, stop, step, .. } => {
+            collect_rels_from_expr(start, rels);
+            collect_rels_from_expr(stop, rels);
+            collect_rels_from_expr(step, rels);
+        }
+    }
+}
+
+fn lock_relations(table_locks: &TableLockManager, client_id: ClientId, rels: &[RelFileLocator]) {
+    for rel in rels {
+        table_locks.lock_table(*rel, TableLockMode::AccessShare, client_id);
+    }
+}
+
+fn unlock_relations(table_locks: &TableLockManager, client_id: ClientId, rels: &[RelFileLocator]) {
+    for rel in rels {
+        table_locks.unlock_table(*rel, client_id);
     }
 }
 
@@ -939,6 +1023,7 @@ impl Session {
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    outer_rows: Vec::new(),
                 };
                 execute_readonly_statement(stmt, catalog_guard.catalog(), &mut ctx)
             }
@@ -962,6 +1047,7 @@ impl Session {
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    outer_rows: Vec::new(),
                 };
                 execute_insert(bound, &mut ctx, xid, cid)
             }
@@ -985,6 +1071,7 @@ impl Session {
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    outer_rows: Vec::new(),
                 };
                 execute_update_with_waiter(
                     bound, &mut ctx, xid, cid,
@@ -1011,6 +1098,7 @@ impl Session {
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    outer_rows: Vec::new(),
                 };
                 execute_delete_with_waiter(
                     bound, &mut ctx, xid,
@@ -1061,6 +1149,7 @@ impl Session {
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    outer_rows: Vec::new(),
                 };
                 let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
                 if result.is_ok() {
@@ -1095,6 +1184,7 @@ impl Session {
                     client_id,
                     next_command_id: cid,
                     timed: false,
+                    outer_rows: Vec::new(),
                 };
                 execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx)
             }
@@ -1162,6 +1252,7 @@ impl Session {
             client_id,
             next_command_id: cid,
             timed: false,
+            outer_rows: Vec::new(),
         };
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
     }
@@ -1263,6 +1354,7 @@ impl Session {
                 client_id: self.client_id,
                 next_command_id: cid,
                 timed: false,
+                outer_rows: Vec::new(),
             };
             crate::executor::commands::execute_insert_values(
                 rel,
@@ -2887,6 +2979,99 @@ mod tests {
             pinned.len(),
             pinned,
         );
+    }
+
+    #[test]
+    fn streaming_select_supports_correlated_subqueries() {
+        let base = temp_dir("streaming_correlated_subquery");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table people (id int4 not null, name text)")
+            .unwrap();
+        session
+            .execute(&db, "create table pets (id int4 not null, owner_id int4, name text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')")
+            .unwrap();
+        session
+            .execute(&db, "insert into pets (id, owner_id, name) values (10, 1, 'mocha'), (11, 1, 'pixel'), (12, 2, 'otis')")
+            .unwrap();
+
+        let stmt = crate::parser::parse_select(
+            "select p.id, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
+        )
+        .unwrap();
+        let mut guard = session.execute_streaming(&db, &stmt).unwrap();
+        let mut rows = Vec::new();
+        while let Some(slot) = crate::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap() {
+            rows.push(
+                slot.values()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.to_owned_value())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        drop(guard);
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(1), Value::Int32(2)],
+                vec![Value::Int32(2), Value::Int32(1)],
+                vec![Value::Int32(3), Value::Int32(0)],
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_correlated_subquery_holds_access_share_lock_on_inner_relation() {
+        use std::sync::mpsc;
+
+        let base = temp_dir("streaming_correlated_subquery_lock");
+        let db = Database::open(&base, 64).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table people (id int4 not null, name text)")
+            .unwrap();
+        session
+            .execute(&db, "create table pets (id int4 not null, owner_id int4, name text)")
+            .unwrap();
+        session
+            .execute(&db, "insert into people (id, name) values (1, 'alice')")
+            .unwrap();
+        session
+            .execute(&db, "insert into pets (id, owner_id, name) values (10, 1, 'mocha')")
+            .unwrap();
+
+        let stmt = crate::parser::parse_select(
+            "select p.id, exists (select 1 from pets q where q.owner_id = p.id) from people p",
+        )
+        .unwrap();
+        let guard = session.execute_streaming(&db, &stmt).unwrap();
+
+        let db2 = db.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            db2.execute(2, "truncate pets").unwrap();
+            done_tx.send(()).unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "truncate should block while the streaming guard holds the inner relation lock"
+        );
+
+        drop(guard);
+        done_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+        worker.join().unwrap();
     }
 
 }

@@ -2,7 +2,7 @@ use crate::access::heap::am::VisibleHeapScan;
 use crate::access::heap::am::{heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page};
 use crate::access::heap::tuple::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::compact_string::CompactString;
-use crate::parser::{SqlType, SqlTypeKind};
+use crate::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -191,6 +191,7 @@ pub struct AggAccum {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Column(usize),
+    OuterColumn { depth: usize, index: usize },
     Const(Value),
     Add(Box<Expr>, Box<Expr>),
     Negate(Box<Expr>),
@@ -206,6 +207,18 @@ pub enum Expr {
     IsNotNull(Box<Expr>),
     IsDistinctFrom(Box<Expr>, Box<Expr>),
     IsNotDistinctFrom(Box<Expr>, Box<Expr>),
+    ScalarSubquery(Box<Plan>),
+    ExistsSubquery(Box<Plan>),
+    AnySubquery {
+        left: Box<Expr>,
+        op: SubqueryComparisonOp,
+        subquery: Box<Plan>,
+    },
+    AllSubquery {
+        left: Box<Expr>,
+        op: SubqueryComparisonOp,
+        subquery: Box<Plan>,
+    },
     Random,
     CurrentTimestamp,
 }
@@ -636,7 +649,7 @@ impl PlanNode for SeqScanState {
                     // Inline qual check (like PG's ExecScanExtended).
                     // Tuples that fail the predicate never leave the scan node.
                     if let Some(qual) = &self.qual {
-                        if !qual(&mut self.slot)? {
+                        if !qual(&mut self.slot, ctx)? {
                             continue;
                         }
                     }
@@ -686,7 +699,7 @@ impl PlanNode for FilterState {
                 }
             };
 
-            if (self.compiled_predicate)(slot)? {
+            if (self.compiled_predicate)(slot, ctx)? {
                 if let Some(s) = start {
                     self.stats.loops += 1;
                     self.stats.total_time += s.elapsed();
@@ -746,7 +759,7 @@ impl PlanNode for NestedLoopJoinState {
                 self.slot.kind = SlotKind::Virtual;
                 self.slot.decode_offset = 0;
 
-                match eval_expr(&self.on, &mut self.slot)? {
+                match eval_expr(&self.on, &mut self.slot, ctx)? {
                     Value::Bool(true) => return Ok(Some(&mut self.slot)),
                     Value::Bool(false) | Value::Null => {}
                     other => return Err(ExecError::NonBoolQual(other)),
@@ -780,7 +793,7 @@ impl PlanNode for OrderByState {
             for mut row in rows {
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
-                    keys.push(eval_expr(&item.expr, &mut row)?);
+                    keys.push(eval_expr(&item.expr, &mut row, ctx)?);
                 }
                 keyed_rows.push((keys, row));
             }
@@ -856,7 +869,7 @@ impl PlanNode for ProjectionState {
         // reference the input slot's page which may be overwritten on the next call.
         let mut values = Vec::with_capacity(self.targets.len());
         for target in &self.targets {
-            values.push(eval_expr(&target.expr, input_slot)?.to_owned_value());
+            values.push(eval_expr(&target.expr, input_slot, ctx)?.to_owned_value());
         }
 
         // Store in projection's own slot
@@ -885,7 +898,7 @@ impl PlanNode for AggregateState {
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
                 self.key_buffer.clear();
                 for expr in &self.group_by {
-                    self.key_buffer.push(eval_expr(expr, slot)?);
+                    self.key_buffer.push(eval_expr(expr, slot, ctx)?);
                 }
 
                 let group_idx = groups
@@ -908,7 +921,7 @@ impl PlanNode for AggregateState {
                 static NO_ARG: Value = Value::Null;
                 for (i, accum) in self.accumulators.iter().enumerate() {
                     let value: &Value = if let Some(arg) = &accum.arg {
-                        &eval_expr(arg, slot)?
+                        &eval_expr(arg, slot, ctx)?
                     } else {
                         &NO_ARG
                     };
@@ -937,7 +950,7 @@ impl PlanNode for AggregateState {
 
                 if let Some(having) = &self.having {
                     let mut having_slot = TupleSlot::virtual_row(row_values.clone());
-                    match eval_expr(having, &mut having_slot)? {
+                    match eval_expr(having, &mut having_slot, ctx)? {
                         Value::Bool(true) => {}
                         Value::Bool(false) | Value::Null => continue,
                         other => return Err(ExecError::NonBoolQual(other)),
@@ -974,18 +987,18 @@ impl PlanNode for AggregateState {
 }
 
 impl PlanNode for GenerateSeriesState {
-    fn exec_proc_node<'a>(&'a mut self, _ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    fn exec_proc_node<'a>(&'a mut self, ctx: &mut ExecutorContext) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if !self.initialized {
             let mut dummy = TupleSlot::empty(0);
-            self.current = match eval_expr(&self.start, &mut dummy)? {
+            self.current = match eval_expr(&self.start, &mut dummy, ctx)? {
                 Value::Int32(v) => v,
                 other => return Err(ExecError::TypeMismatch { op: "generate_series start", left: other, right: Value::Null }),
             };
-            self.end = match eval_expr(&self.stop, &mut dummy)? {
+            self.end = match eval_expr(&self.stop, &mut dummy, ctx)? {
                 Value::Int32(v) => v,
                 other => return Err(ExecError::TypeMismatch { op: "generate_series stop", left: other, right: Value::Null }),
             };
-            self.step_val = match eval_expr(&self.step, &mut dummy)? {
+            self.step_val = match eval_expr(&self.step, &mut dummy, ctx)? {
                 Value::Int32(v) => v,
                 other => return Err(ExecError::TypeMismatch { op: "generate_series step", left: other, right: Value::Null }),
             };

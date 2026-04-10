@@ -22,6 +22,7 @@ pub enum ParseError {
     UnsupportedType(String),
     UngroupedColumn(String),
     AggInWhere,
+    SubqueryMustReturnOneColumn,
 }
 
 impl fmt::Display for ParseError {
@@ -48,6 +49,9 @@ impl fmt::Display for ParseError {
             }
             ParseError::AggInWhere => {
                 write!(f, "aggregate functions are not allowed in WHERE")
+            }
+            ParseError::SubqueryMustReturnOneColumn => {
+                write!(f, "subquery must return only one column")
             }
         }
     }
@@ -230,6 +234,13 @@ pub struct Assignment {
     pub expr: SqlExpr,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubqueryComparisonOp {
+    Eq,
+    Lt,
+    Gt,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlExpr {
     Column(String),
@@ -252,6 +263,19 @@ pub enum SqlExpr {
         func: AggFunc,
         arg: Option<Box<SqlExpr>>,
         distinct: bool,
+    },
+    ScalarSubquery(Box<SelectStatement>),
+    Exists(Box<SelectStatement>),
+    InSubquery {
+        expr: Box<SqlExpr>,
+        subquery: Box<SelectStatement>,
+        negated: bool,
+    },
+    QuantifiedSubquery {
+        left: Box<SqlExpr>,
+        op: SubqueryComparisonOp,
+        is_all: bool,
+        subquery: Box<SelectStatement>,
     },
     Random,
     CurrentTimestamp,

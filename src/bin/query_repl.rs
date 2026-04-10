@@ -389,6 +389,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                outer_rows: Vec::new(),
                 timed: false,
             };
             execute_statement(
@@ -405,6 +406,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                outer_rows: Vec::new(),
                 timed: false,
             };
             execute_statement(
@@ -421,6 +423,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                outer_rows: Vec::new(),
                 timed: false,
             };
             execute_statement(
@@ -437,6 +440,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                outer_rows: Vec::new(),
                 timed: false,
             };
             execute_statement(
@@ -453,6 +457,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                outer_rows: Vec::new(),
                 timed: false,
             };
             execute_statement(
@@ -469,6 +474,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                outer_rows: Vec::new(),
                 timed: false,
             };
             execute_statement(
@@ -485,6 +491,7 @@ fn run_statement(
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
+                outer_rows: Vec::new(),
                 timed: false,
             };
             execute_statement(
@@ -503,6 +510,7 @@ fn run_statement(
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 execute_statement(
@@ -532,6 +540,7 @@ fn run_statement(
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 execute_statement(
@@ -561,6 +570,7 @@ fn run_statement(
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
+                    outer_rows: Vec::new(),
                     timed: false,
                 };
                 execute_statement(

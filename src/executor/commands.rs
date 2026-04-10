@@ -151,7 +151,7 @@ pub fn execute_insert(
             let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
             for (column_index, expr) in stmt.target_columns.iter().zip(row.iter()) {
-                values[*column_index] = eval_expr(expr, &mut slot)?;
+                values[*column_index] = eval_expr(expr, &mut slot, ctx)?;
             }
             Ok(values)
         })
@@ -242,8 +242,10 @@ pub fn execute_update_with_waiter(
 
         let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
 
+        let mut page_rows = Vec::new();
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
-            // Reset slot for new tuple (like PG's ExecStoreBufferHeapTuple)
+            // Materialize page rows before expression evaluation so the page
+            // borrow can end; correlated subqueries need mutable access to ctx.
             slot.kind = SlotKind::BufferHeapTuple {
                 tuple_ptr: tuple_bytes.as_ptr(),
                 tuple_len: tuple_bytes.len(),
@@ -252,17 +254,21 @@ pub fn execute_update_with_waiter(
             slot.tts_nvalid = 0;
             slot.tts_values.clear();
             slot.decode_offset = 0;
-
-            if let Some(q) = &qual {
-                if !q(&mut slot)? { continue; }
-            }
             slot.values()?;
             Value::materialize_all(&mut slot.tts_values);
-            let original_values = slot.tts_values.clone();
+            page_rows.push((tid, slot.tts_values.clone()));
+        }
+        drop(pin);
+
+        for (tid, original_values) in page_rows {
+            let mut slot = TupleSlot::virtual_row(original_values.clone());
+            if let Some(q) = &qual {
+                if !q(&mut slot, ctx)? { continue; }
+            }
             let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
             let mut values = original_values;
             for assignment in &stmt.assignments {
-                values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot)?;
+                values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
             }
 
             let replacement = tuple_from_values(&stmt.desc, &values)?;
@@ -290,7 +296,7 @@ pub fn execute_update_with_waiter(
                         let mut new_slot = TupleSlot::from_heap_tuple(
                             Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
                         );
-                        let passes = match &qual { Some(q) => q(&mut new_slot)?, None => true };
+                        let passes = match &qual { Some(q) => q(&mut new_slot, ctx)?, None => true };
                         if !passes {
                             break;
                         }
@@ -299,7 +305,7 @@ pub fn execute_update_with_waiter(
                         let mut new_values = new_values_base;
                         for assignment in &stmt.assignments {
                             new_values[assignment.column_index] =
-                                eval_expr(&assignment.expr, &mut eval_slot)?;
+                                eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
                         }
                         current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
                         current_tid = new_ctid;
@@ -356,6 +362,7 @@ pub fn execute_delete_with_waiter(
 
         let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
 
+        let mut page_rows = Vec::new();
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
             slot.kind = SlotKind::BufferHeapTuple {
                 tuple_ptr: tuple_bytes.as_ptr(),
@@ -365,9 +372,16 @@ pub fn execute_delete_with_waiter(
             slot.tts_nvalid = 0;
             slot.tts_values.clear();
             slot.decode_offset = 0;
+            slot.values()?;
+            Value::materialize_all(&mut slot.tts_values);
+            page_rows.push((tid, slot.tts_values.clone()));
+        }
+        drop(pin);
 
+        for (tid, values) in page_rows {
+            let mut slot = TupleSlot::virtual_row(values);
             if let Some(q) = &qual {
-                if !q(&mut slot)? { continue; }
+                if !q(&mut slot, ctx)? { continue; }
             }
             targets.push(tid);
         }
@@ -397,7 +411,7 @@ pub fn execute_delete_with_waiter(
                     let mut new_slot = TupleSlot::from_heap_tuple(
                         Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
                     );
-                    let passes = match &qual { Some(q) => q(&mut new_slot)?, None => true };
+                    let passes = match &qual { Some(q) => q(&mut new_slot, ctx)?, None => true };
                     if !passes {
                         // Concurrent update changed the row so it no longer
                         // matches our WHERE — skip it.

@@ -734,4 +734,140 @@ mod tests {
             other => panic!("expected insert, got {:?}", other),
         }
     }
+
+    #[test]
+    fn parse_scalar_subquery_expression() {
+        assert!(parse_select("select (select 1)").is_ok());
+    }
+
+    #[test]
+    fn parse_exists_subquery_expression() {
+        assert!(parse_select("select exists (select 1)").is_ok());
+        assert!(parse_select("select not exists (select 1)").is_ok());
+    }
+
+    #[test]
+    fn parse_in_subquery_expression() {
+        assert!(parse_select("select id in (select owner_id from pets) from people").is_ok());
+        assert!(parse_select("select id not in (select owner_id from pets) from people").is_ok());
+    }
+
+    #[test]
+    fn parse_any_all_subquery_expressions() {
+        assert!(parse_select("select id = any (select owner_id from pets) from people").is_ok());
+        assert!(parse_select("select id < all (select owner_id from pets) from people").is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_correlated_scalar_subquery_in_target_list() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_correlated_exists_in_where() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.name from people p where exists (select 1 from pets q where q.owner_id = p.id)",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_nested_outer_correlation() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id))",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_treats_subqueries_as_aggregate_scope_boundaries() {
+        let stmt = parse_select(
+            "select name from people where exists (select count(*) from people p2)",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog()).is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_grouped_outer_column_inside_subquery() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.id, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.id)",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_rejects_ungrouped_outer_column_inside_subquery() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.name, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.name)",
+        )
+        .unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog),
+            Err(ParseError::UngroupedColumn(name)) if name == "p.name" || name == "name"
+        ));
+    }
+
+    #[test]
+    fn build_plan_rejects_multi_column_scalar_subquery() {
+        let stmt = parse_select("select (select id, name from people)").unwrap();
+        assert!(build_plan(&stmt, &catalog()).is_err());
+    }
 }
