@@ -84,6 +84,7 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                 SqlTypeKind::Text
                 | SqlTypeKind::Numeric
                 | SqlTypeKind::Json
+                | SqlTypeKind::Jsonb
                 | SqlTypeKind::Timestamp
                 | SqlTypeKind::Char
                 | SqlTypeKind::Varchar => {
@@ -91,6 +92,8 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                         Value::Numeric(value.as_str().into())
                     } else if matches!(element_type.kind, SqlTypeKind::Json) {
                         Value::Json(value.into())
+                    } else if matches!(element_type.kind, SqlTypeKind::Jsonb) {
+                        Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text(&value)?)
                     } else {
                         Value::Text(value.into())
                     }

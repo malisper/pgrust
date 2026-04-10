@@ -3,9 +3,9 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use pgrust::pgrust::database::{Database, Session};
-use pgrust::executor::{StatementResult, Value};
 use pgrust::ClientId;
+use pgrust::executor::{StatementResult, Value};
+use pgrust::pgrust::database::{Database, Session};
 use rand::Rng;
 use std::env;
 use std::path::PathBuf;
@@ -47,8 +47,12 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let config = Config::from_args(env::args().skip(1).collect())?;
-    let db = Database::open(&config.base_dir, config.pool_size)
-        .map_err(|e| format!("failed to open database at {}: {e:?}", config.base_dir.display()))?;
+    let db = Database::open(&config.base_dir, config.pool_size).map_err(|e| {
+        format!(
+            "failed to open database at {}: {e:?}",
+            config.base_dir.display()
+        )
+    })?;
 
     if config.init {
         println!(
@@ -80,7 +84,9 @@ fn run() -> Result<(), String> {
         let cfg = config.clone();
         let totals = totals.clone();
         let barrier = barrier.clone();
-        handles.push(thread::spawn(move || worker(i as ClientId + 1, db, cfg, deadline, totals, barrier)));
+        handles.push(thread::spawn(move || {
+            worker(i as ClientId + 1, db, cfg, deadline, totals, barrier)
+        }));
     }
 
     barrier.wait();
@@ -188,7 +194,11 @@ fn run_tpcb_like_transaction<R: Rng>(
         db,
         &format!("update pgbench_accounts set abalance = abalance + {delta} where aid = {aid}"),
     )?;
-    execute_expect_select(session, db, &format!("select abalance from pgbench_accounts where aid = {aid}"))?;
+    execute_expect_select(
+        session,
+        db,
+        &format!("select abalance from pgbench_accounts where aid = {aid}"),
+    )?;
     execute_expect_affected(
         session,
         db,
@@ -213,7 +223,9 @@ fn run_tpcb_like_transaction<R: Rng>(
 fn execute_expect_affected(session: &mut Session, db: &Database, sql: &str) -> Result<(), String> {
     match session.execute(db, sql) {
         Ok(StatementResult::AffectedRows(_)) => Ok(()),
-        Ok(StatementResult::Query { .. }) => Err(format!("expected affected-rows result for: {sql}")),
+        Ok(StatementResult::Query { .. }) => {
+            Err(format!("expected affected-rows result for: {sql}"))
+        }
         Err(e) => Err(format!("{sql}: {e:?}")),
     }
 }
@@ -221,8 +233,12 @@ fn execute_expect_affected(session: &mut Session, db: &Database, sql: &str) -> R
 fn execute_expect_select(session: &mut Session, db: &Database, sql: &str) -> Result<i32, String> {
     match session.execute(db, sql) {
         Ok(StatementResult::Query { rows, .. }) => {
-            let row = rows.first().ok_or_else(|| format!("no rows returned for: {sql}"))?;
-            let value = row.first().ok_or_else(|| format!("empty row returned for: {sql}"))?;
+            let row = rows
+                .first()
+                .ok_or_else(|| format!("no rows returned for: {sql}"))?;
+            let value = row
+                .first()
+                .ok_or_else(|| format!("empty row returned for: {sql}"))?;
             match value {
                 Value::Int32(v) => Ok(*v),
                 other => Err(format!("unexpected select result {other:?} for: {sql}")),
@@ -278,18 +294,28 @@ fn initialize_schema(db: &Database, config: &Config) -> Result<(), String> {
     )?;
 
     println!("copying pgbench_branches...");
-    copy_rows_chunked(&mut session, db, "pgbench_branches", NBRANCHES * config.scale, |row| {
-        vec![(row + 1).to_string(), "0".to_string(), "\\N".to_string()]
-    })?;
+    copy_rows_chunked(
+        &mut session,
+        db,
+        "pgbench_branches",
+        NBRANCHES * config.scale,
+        |row| vec![(row + 1).to_string(), "0".to_string(), "\\N".to_string()],
+    )?;
     println!("copying pgbench_tellers...");
-    copy_rows_chunked(&mut session, db, "pgbench_tellers", NTELLERS * config.scale, |row| {
-        vec![
-            (row + 1).to_string(),
-            (row / NTELLERS + 1).to_string(),
-            "0".to_string(),
-            "\\N".to_string(),
-        ]
-    })?;
+    copy_rows_chunked(
+        &mut session,
+        db,
+        "pgbench_tellers",
+        NTELLERS * config.scale,
+        |row| {
+            vec![
+                (row + 1).to_string(),
+                (row / NTELLERS + 1).to_string(),
+                "0".to_string(),
+                "\\N".to_string(),
+            ]
+        },
+    )?;
     println!("copying pgbench_accounts...");
     copy_rows_chunked(
         &mut session,

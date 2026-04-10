@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::include::access::htup::AttributeAlign;
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
+use crate::include::access::htup::AttributeAlign;
 
 const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
@@ -50,7 +50,9 @@ pub struct DurableCatalog {
 impl Catalog {
     pub fn insert(&mut self, name: impl Into<String>, entry: CatalogEntry) {
         let name = name.into().to_ascii_lowercase();
-        self.next_rel_number = self.next_rel_number.max(entry.rel.rel_number.saturating_add(1));
+        self.next_rel_number = self
+            .next_rel_number
+            .max(entry.rel.rel_number.saturating_add(1));
         self.tables.insert(name, entry);
     }
 
@@ -144,7 +146,11 @@ fn persist_catalog_file(path: &Path, catalog: &Catalog) -> Result<(), CatalogErr
                     "col\t{}\t{}\t{}\t{}\n",
                     column.name,
                     encode_sql_type(column.sql_type),
-                    if column.storage.nullable { "null" } else { "not_null" },
+                    if column.storage.nullable {
+                        "null"
+                    } else {
+                        "not_null"
+                    },
                     column.sql_type.typmod,
                 )
                 .as_bytes(),
@@ -259,7 +265,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Float32 => (4, AttributeAlign::Int),
         ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Numeric => (-1, AttributeAlign::Int),
-        ScalarType::Json => (-1, AttributeAlign::Int),
+        ScalarType::Json | ScalarType::Jsonb => (-1, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Bool => (1, AttributeAlign::Char),
         ScalarType::Array(_) => (-1, AttributeAlign::Int),
@@ -289,6 +295,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Float8 => ScalarType::Float64,
         SqlTypeKind::Numeric => ScalarType::Numeric,
         SqlTypeKind::Json => ScalarType::Json,
+        SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
             ScalarType::Text
         }
@@ -305,6 +312,7 @@ fn encode_sql_type(sql_type: SqlType) -> String {
         SqlTypeKind::Float8 => "float8",
         SqlTypeKind::Numeric => "numeric",
         SqlTypeKind::Json => "json",
+        SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
@@ -320,20 +328,77 @@ fn encode_sql_type(sql_type: SqlType) -> String {
 
 fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
     let is_array = name.ends_with("[]");
-    let base = if is_array { &name[..name.len() - 2] } else { name };
+    let base = if is_array {
+        &name[..name.len() - 2]
+    } else {
+        name
+    };
     let mut sql_type = match base {
-        "int2" => SqlType { kind: SqlTypeKind::Int2, typmod, is_array: false },
-        "int4" => SqlType { kind: SqlTypeKind::Int4, typmod, is_array: false },
-        "int8" => SqlType { kind: SqlTypeKind::Int8, typmod, is_array: false },
-        "float4" => SqlType { kind: SqlTypeKind::Float4, typmod, is_array: false },
-        "float8" => SqlType { kind: SqlTypeKind::Float8, typmod, is_array: false },
-        "numeric" => SqlType { kind: SqlTypeKind::Numeric, typmod, is_array: false },
-        "json" => SqlType { kind: SqlTypeKind::Json, typmod, is_array: false },
-        "text" => SqlType { kind: SqlTypeKind::Text, typmod, is_array: false },
-        "bool" => SqlType { kind: SqlTypeKind::Bool, typmod, is_array: false },
-        "timestamp" => SqlType { kind: SqlTypeKind::Timestamp, typmod, is_array: false },
-        "char" => SqlType { kind: SqlTypeKind::Char, typmod, is_array: false },
-        "varchar" => SqlType { kind: SqlTypeKind::Varchar, typmod, is_array: false },
+        "int2" => SqlType {
+            kind: SqlTypeKind::Int2,
+            typmod,
+            is_array: false,
+        },
+        "int4" => SqlType {
+            kind: SqlTypeKind::Int4,
+            typmod,
+            is_array: false,
+        },
+        "int8" => SqlType {
+            kind: SqlTypeKind::Int8,
+            typmod,
+            is_array: false,
+        },
+        "float4" => SqlType {
+            kind: SqlTypeKind::Float4,
+            typmod,
+            is_array: false,
+        },
+        "float8" => SqlType {
+            kind: SqlTypeKind::Float8,
+            typmod,
+            is_array: false,
+        },
+        "numeric" => SqlType {
+            kind: SqlTypeKind::Numeric,
+            typmod,
+            is_array: false,
+        },
+        "json" => SqlType {
+            kind: SqlTypeKind::Json,
+            typmod,
+            is_array: false,
+        },
+        "jsonb" => SqlType {
+            kind: SqlTypeKind::Jsonb,
+            typmod,
+            is_array: false,
+        },
+        "text" => SqlType {
+            kind: SqlTypeKind::Text,
+            typmod,
+            is_array: false,
+        },
+        "bool" => SqlType {
+            kind: SqlTypeKind::Bool,
+            typmod,
+            is_array: false,
+        },
+        "timestamp" => SqlType {
+            kind: SqlTypeKind::Timestamp,
+            typmod,
+            is_array: false,
+        },
+        "char" => SqlType {
+            kind: SqlTypeKind::Char,
+            typmod,
+            is_array: false,
+        },
+        "varchar" => SqlType {
+            kind: SqlTypeKind::Varchar,
+            typmod,
+            is_array: false,
+        },
         other => return Err(CatalogError::UnknownType(other.to_string())),
     };
     sql_type.is_array = is_array;
@@ -414,8 +479,16 @@ mod tests {
                 "shipments",
                 RelationDesc {
                     columns: vec![
-                        column_desc("tags", SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)), true),
-                        column_desc("counts", SqlType::array_of(SqlType::new(SqlTypeKind::Int4)), true),
+                        column_desc(
+                            "tags",
+                            SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)),
+                            true,
+                        ),
+                        column_desc(
+                            "counts",
+                            SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+                            true,
+                        ),
                     ],
                 },
             )
@@ -424,8 +497,14 @@ mod tests {
 
         let reopened = DurableCatalog::load(&base).unwrap();
         let entry = reopened.catalog().get("shipments").unwrap();
-        assert_eq!(entry.desc.columns[0].sql_type, SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)));
-        assert_eq!(entry.desc.columns[1].sql_type, SqlType::array_of(SqlType::new(SqlTypeKind::Int4)));
+        assert_eq!(
+            entry.desc.columns[0].sql_type,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
+        );
+        assert_eq!(
+            entry.desc.columns[1].sql_type,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+        );
     }
 
     #[test]
@@ -476,7 +555,10 @@ mod tests {
 
         let reopened = DurableCatalog::load(&base).unwrap();
         let column = &reopened.catalog().get("people").unwrap().desc.columns[0];
-        assert_eq!(column.sql_type, SqlType::with_char_len(SqlTypeKind::Varchar, 5));
+        assert_eq!(
+            column.sql_type,
+            SqlType::with_char_len(SqlTypeKind::Varchar, 5)
+        );
     }
 
     #[test]
@@ -503,7 +585,10 @@ mod tests {
 
         let reopened = DurableCatalog::load(&base).unwrap();
         let entry = reopened.catalog().get("metrics").unwrap();
-        assert_eq!(entry.desc.columns[0].sql_type, SqlType::new(SqlTypeKind::Numeric));
+        assert_eq!(
+            entry.desc.columns[0].sql_type,
+            SqlType::new(SqlTypeKind::Numeric)
+        );
         assert_eq!(
             entry.desc.columns[1].sql_type,
             SqlType::array_of(SqlType::new(SqlTypeKind::Numeric))
@@ -523,8 +608,14 @@ mod tests {
 
         let reopened = DurableCatalog::load(&base).unwrap();
         let entry = reopened.catalog().get("people").unwrap();
-        assert_eq!(entry.desc.columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
-        assert_eq!(entry.desc.columns[1].sql_type, SqlType::new(SqlTypeKind::Text));
+        assert_eq!(
+            entry.desc.columns[0].sql_type,
+            SqlType::new(SqlTypeKind::Int4)
+        );
+        assert_eq!(
+            entry.desc.columns[1].sql_type,
+            SqlType::new(SqlTypeKind::Text)
+        );
     }
 
     #[test]

@@ -4,15 +4,20 @@ use std::sync::Arc;
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_analyze, execute_delete_with_waiter, execute_drop_table,
-    execute_insert, execute_prepared_insert_row, execute_truncate_table, execute_update_with_waiter,
+    execute_analyze, execute_delete_with_waiter, execute_drop_table, execute_insert,
+    execute_prepared_insert_row, execute_truncate_table, execute_update_with_waiter,
 };
-use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement};
-use crate::backend::parser::{PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update, ParseError};
+use crate::backend::executor::{
+    ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement,
+};
+use crate::backend::parser::{
+    ParseError, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
+    bind_insert_prepared, bind_update,
+};
+use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
-use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::{ClientId, RelFileLocator};
 
 pub struct SelectGuard<'a> {
@@ -197,7 +202,9 @@ impl Session {
                 let visible_catalog = db.visible_catalog(client_id);
                 execute_analyze(analyze_stmt.clone(), &visible_catalog)
             }
-            Statement::Vacuum(_) => Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM"))),
+            Statement::Vacuum(_) => {
+                Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
+            }
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let visible_catalog = db.visible_catalog(client_id);
@@ -218,7 +225,8 @@ impl Session {
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
-                    db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                    db.table_locks
+                        .lock_table(rel, TableLockMode::RowExclusive, client_id);
                     txn.held_table_locks.push(rel);
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
@@ -239,7 +247,8 @@ impl Session {
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
-                    db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                    db.table_locks
+                        .lock_table(rel, TableLockMode::RowExclusive, client_id);
                     txn.held_table_locks.push(rel);
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
@@ -252,7 +261,13 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_update_with_waiter(bound, &mut ctx, xid, cid, Some((&db.txns, &db.txn_waiter)))
+                execute_update_with_waiter(
+                    bound,
+                    &mut ctx,
+                    xid,
+                    cid,
+                    Some((&db.txns, &db.txn_waiter)),
+                )
             }
             Statement::Delete(ref delete_stmt) => {
                 let visible_catalog = db.visible_catalog(client_id);
@@ -260,7 +275,8 @@ impl Session {
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
-                    db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+                    db.table_locks
+                        .lock_table(rel, TableLockMode::RowExclusive, client_id);
                     txn.held_table_locks.push(rel);
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
@@ -293,7 +309,8 @@ impl Session {
                 for rel in rels {
                     let txn = self.active_txn.as_mut().unwrap();
                     if !txn.held_table_locks.contains(&rel) {
-                        db.table_locks.lock_table(rel, TableLockMode::AccessExclusive, client_id);
+                        db.table_locks
+                            .lock_table(rel, TableLockMode::AccessExclusive, client_id);
                         txn.held_table_locks.push(rel);
                     }
                 }
@@ -342,7 +359,8 @@ impl Session {
                 for rel in rels {
                     let txn = self.active_txn.as_mut().unwrap();
                     if !txn.held_table_locks.contains(&rel) {
-                        db.table_locks.lock_table(rel, TableLockMode::AccessExclusive, client_id);
+                        db.table_locks
+                            .lock_table(rel, TableLockMode::AccessExclusive, client_id);
                         txn.held_table_locks.push(rel);
                     }
                 }
@@ -358,24 +376,36 @@ impl Session {
                 };
                 execute_truncate_table(truncate_stmt.clone(), &visible_catalog, &mut ctx)
             }
-            Statement::Begin | Statement::Commit | Statement::Rollback => unreachable!("handled in Session::execute"),
+            Statement::Begin | Statement::Commit | Statement::Rollback => {
+                unreachable!("handled in Session::execute")
+            }
         }
     }
 
-    fn apply_set(&mut self, stmt: &crate::backend::parser::SetStatement) -> Result<StatementResult, ExecError> {
+    fn apply_set(
+        &mut self,
+        stmt: &crate::backend::parser::SetStatement,
+    ) -> Result<StatementResult, ExecError> {
         let name = normalize_guc_name(&stmt.name);
         if !is_postgres_guc(&name) {
-            return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(name)));
+            return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                name,
+            )));
         }
         self.gucs.insert(name, stmt.value.clone());
         Ok(StatementResult::AffectedRows(0))
     }
 
-    fn apply_reset(&mut self, stmt: &crate::backend::parser::ResetStatement) -> Result<StatementResult, ExecError> {
+    fn apply_reset(
+        &mut self,
+        stmt: &crate::backend::parser::ResetStatement,
+    ) -> Result<StatementResult, ExecError> {
         if let Some(name) = &stmt.name {
             let normalized = normalize_guc_name(name);
             if !is_postgres_guc(&normalized) {
-                return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(normalized)));
+                return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                    normalized,
+                )));
             }
             self.gucs.remove(&normalized);
         } else {
@@ -392,7 +422,12 @@ impl Session {
         num_params: usize,
     ) -> Result<PreparedInsert, ExecError> {
         let visible_catalog = db.visible_catalog(self.client_id);
-        Ok(bind_insert_prepared(table_name, columns, num_params, &visible_catalog)?)
+        Ok(bind_insert_prepared(
+            table_name,
+            columns,
+            num_params,
+            &visible_catalog,
+        )?)
     }
 
     pub fn execute_prepared_insert(
@@ -415,7 +450,8 @@ impl Session {
         let rel = prepared.rel;
         let txn = self.active_txn.as_mut().unwrap();
         if !txn.held_table_locks.contains(&rel) {
-            db.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
+            db.table_locks
+                .lock_table(rel, TableLockMode::RowExclusive, client_id);
             txn.held_table_locks.push(rel);
         }
 
@@ -465,7 +501,8 @@ impl Session {
         };
 
         if !txn.held_table_locks.contains(&rel) {
-            db.table_locks.lock_table(rel, TableLockMode::RowExclusive, self.client_id);
+            db.table_locks
+                .lock_table(rel, TableLockMode::RowExclusive, self.client_id);
             txn.held_table_locks.push(rel);
         }
 
@@ -486,18 +523,21 @@ impl Session {
                             return Ok(Value::Null);
                         }
                         match column.ty {
-                            ScalarType::Int16 => raw
-                                .parse::<i16>()
-                                .map(Value::Int16)
-                                .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(raw.clone()))),
-                            ScalarType::Int32 => raw
-                                .parse::<i32>()
-                                .map(Value::Int32)
-                                .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(raw.clone()))),
-                            ScalarType::Int64 => raw
-                                .parse::<i64>()
-                                .map(Value::Int64)
-                                .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(raw.clone()))),
+                            ScalarType::Int16 => {
+                                raw.parse::<i16>().map(Value::Int16).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })
+                            }
+                            ScalarType::Int32 => {
+                                raw.parse::<i32>().map(Value::Int32).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })
+                            }
+                            ScalarType::Int64 => {
+                                raw.parse::<i64>().map(Value::Int64).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })
+                            }
                             ScalarType::Float32 | ScalarType::Float64 => raw
                                 .parse::<f64>()
                                 .map(Value::Float64)
@@ -508,6 +548,9 @@ impl Session {
                                 }),
                             ScalarType::Numeric => Ok(Value::Numeric(raw.as_str().into())),
                             ScalarType::Json => Ok(Value::Json(raw.clone().into())),
+                            ScalarType::Jsonb => Ok(Value::Jsonb(
+                                crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
+                            )),
                             ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),

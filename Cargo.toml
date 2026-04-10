@@ -24,7 +24,7 @@ pest_derive = "2.7"
 rand = "0.8"
 regex = "1"
 rustc-hash = "2.1.2"
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 
 [profile.release]
 debug = true
