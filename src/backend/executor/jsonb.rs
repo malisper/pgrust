@@ -1,0 +1,1001 @@
+use std::cmp::Ordering;
+
+use num_bigint::BigInt;
+use num_traits::{Signed, Zero};
+use serde_json::{Map, Value as SerdeJsonValue};
+
+use crate::backend::executor::ExecError;
+use crate::backend::executor::exec_expr::format_array_text;
+use crate::include::nodes::execnodes::{NumericValue, Value};
+use crate::pgrust::compact_string::CompactString;
+
+const JENTRY_OFFLENMASK: u32 = 0x0FFF_FFFF;
+const JENTRY_TYPEMASK: u32 = 0x7000_0000;
+const JENTRY_HAS_OFF: u32 = 0x8000_0000;
+
+const JENTRY_ISSTRING: u32 = 0x0000_0000;
+const JENTRY_ISNUMERIC: u32 = 0x1000_0000;
+const JENTRY_ISBOOL_FALSE: u32 = 0x2000_0000;
+const JENTRY_ISBOOL_TRUE: u32 = 0x3000_0000;
+const JENTRY_ISNULL: u32 = 0x4000_0000;
+const JENTRY_ISCONTAINER: u32 = 0x5000_0000;
+
+const JB_OFFSET_STRIDE: usize = 32;
+const JB_CMASK: u32 = 0x0FFF_FFFF;
+const JB_FSCALAR: u32 = 0x1000_0000;
+const JB_FOBJECT: u32 = 0x2000_0000;
+const JB_FARRAY: u32 = 0x4000_0000;
+
+const NUMERIC_NEG: u16 = 0x4000;
+const NUMERIC_SHORT: u16 = 0x8000;
+const NUMERIC_SPECIAL: u16 = 0xC000;
+const NUMERIC_NAN: u16 = 0xC000;
+const NUMERIC_DSCALE_MASK: u16 = 0x3FFF;
+const NUMERIC_SHORT_SIGN_MASK: u16 = 0x2000;
+const NUMERIC_SHORT_DSCALE_MASK: u16 = 0x1F80;
+const NUMERIC_SHORT_DSCALE_SHIFT: u16 = 7;
+const NUMERIC_SHORT_WEIGHT_SIGN_MASK: u16 = 0x0040;
+const NUMERIC_SHORT_WEIGHT_MASK: u16 = 0x003F;
+const NUMERIC_SHORT_WEIGHT_MAX: i16 = NUMERIC_SHORT_WEIGHT_MASK as i16;
+const NUMERIC_SHORT_WEIGHT_MIN: i16 = -((NUMERIC_SHORT_WEIGHT_MASK as i16) + 1);
+const NUMERIC_SHORT_DSCALE_MAX: u16 = NUMERIC_SHORT_DSCALE_MASK >> NUMERIC_SHORT_DSCALE_SHIFT;
+const NBASE: u16 = 10000;
+const DEC_DIGITS: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum JsonbValue {
+    Null,
+    String(String),
+    Numeric(NumericValue),
+    Bool(bool),
+    Array(Vec<JsonbValue>),
+    Object(Vec<(String, JsonbValue)>),
+}
+
+impl JsonbValue {
+    pub(crate) fn from_serde(value: SerdeJsonValue) -> Result<Self, ExecError> {
+        Ok(match value {
+            SerdeJsonValue::Null => JsonbValue::Null,
+            SerdeJsonValue::Bool(v) => JsonbValue::Bool(v),
+            SerdeJsonValue::Number(v) => JsonbValue::Numeric(
+                crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
+                    .ok_or_else(|| ExecError::InvalidStorageValue {
+                        column: "jsonb".into(),
+                        details: format!("invalid input syntax for type jsonb: \"{v}\""),
+                    })?,
+            ),
+            SerdeJsonValue::String(v) => JsonbValue::String(v),
+            SerdeJsonValue::Array(items) => JsonbValue::Array(
+                items
+                    .into_iter()
+                    .map(JsonbValue::from_serde)
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            SerdeJsonValue::Object(map) => {
+                let pairs = map
+                    .into_iter()
+                    .map(|(k, v)| Ok((k, JsonbValue::from_serde(v)?)))
+                    .collect::<Result<Vec<_>, ExecError>>()?;
+                JsonbValue::Object(canonicalize_object_pairs(pairs))
+            }
+        })
+    }
+
+    pub(crate) fn to_serde(&self) -> SerdeJsonValue {
+        match self {
+            JsonbValue::Null => SerdeJsonValue::Null,
+            JsonbValue::Bool(v) => SerdeJsonValue::Bool(*v),
+            JsonbValue::Numeric(v) => {
+                serde_json::from_str(&v.render()).unwrap_or(SerdeJsonValue::Null)
+            }
+            JsonbValue::String(v) => SerdeJsonValue::String(v.clone()),
+            JsonbValue::Array(items) => {
+                SerdeJsonValue::Array(items.iter().map(JsonbValue::to_serde).collect())
+            }
+            JsonbValue::Object(items) => {
+                let mut map = Map::new();
+                for (key, value) in items {
+                    map.insert(key.clone(), value.to_serde());
+                }
+                SerdeJsonValue::Object(map)
+            }
+        }
+    }
+
+    pub(crate) fn render(&self) -> String {
+        self.to_serde().to_string()
+    }
+}
+
+pub(crate) fn parse_jsonb_text(text: &str) -> Result<Vec<u8>, ExecError> {
+    let value = serde_json::from_str::<SerdeJsonValue>(text).map_err(|_| {
+        ExecError::InvalidStorageValue {
+            column: "jsonb".into(),
+            details: format!("invalid input syntax for type jsonb: \"{text}\""),
+        }
+    })?;
+    Ok(encode_jsonb(&JsonbValue::from_serde(value)?))
+}
+
+pub(crate) fn render_jsonb_bytes(bytes: &[u8]) -> Result<String, ExecError> {
+    Ok(decode_jsonb(bytes)?.render())
+}
+
+pub(crate) fn decode_jsonb(bytes: &[u8]) -> Result<JsonbValue, ExecError> {
+    let header = read_u32(bytes, 0)?;
+    if header & JB_FARRAY == 0 && header & JB_FOBJECT == 0 {
+        return Err(corrupt_jsonb());
+    }
+    let decoded = decode_container(bytes, 0, 0, header)?;
+    if header & JB_FSCALAR != 0 {
+        match decoded {
+            JsonbValue::Array(mut items) if items.len() == 1 => Ok(items.remove(0)),
+            _ => Err(corrupt_jsonb()),
+        }
+    } else {
+        Ok(decoded)
+    }
+}
+
+pub(crate) fn encode_jsonb(value: &JsonbValue) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut meta = 0u32;
+    encode_jsonb_value(&mut out, &mut meta, value, 0, true);
+    out
+}
+
+pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
+    Ok(match value {
+        Value::Null => JsonbValue::Null,
+        Value::Int16(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
+        Value::Int32(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
+        Value::Int64(v) => JsonbValue::Numeric(NumericValue::from_i64(*v)),
+        Value::Float64(v) => JsonbValue::Numeric(
+            crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
+                .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?,
+        ),
+        Value::Numeric(v) => JsonbValue::Numeric(v.clone()),
+        Value::Bool(v) => JsonbValue::Bool(*v),
+        Value::Text(text) => JsonbValue::String(text.to_string()),
+        Value::TextRef(_, _) => JsonbValue::String(value.as_text().unwrap().to_string()),
+        Value::Json(text) => {
+            JsonbValue::from_serde(serde_json::from_str(text.as_str()).map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: "json".into(),
+                    details: format!("invalid input syntax for type json: \"{}\"", text.as_str()),
+                }
+            })?)?
+        }
+        Value::Jsonb(bytes) => decode_jsonb(bytes)?,
+        Value::Array(items) => JsonbValue::Array(
+            items
+                .iter()
+                .map(jsonb_from_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    })
+}
+
+pub(crate) fn jsonb_to_value(value: &JsonbValue) -> Value {
+    Value::Jsonb(encode_jsonb(value))
+}
+
+pub(crate) fn jsonb_to_text_value(value: &JsonbValue) -> Value {
+    match value {
+        JsonbValue::Null => Value::Null,
+        JsonbValue::String(text) => Value::Text(CompactString::from_owned(text.clone())),
+        other => Value::Text(CompactString::from_owned(other.render())),
+    }
+}
+
+pub(crate) fn compare_jsonb(left: &JsonbValue, right: &JsonbValue) -> Ordering {
+    let left_rank = jsonb_type_rank(left);
+    let right_rank = jsonb_type_rank(right);
+    if left_rank != right_rank {
+        return left_rank.cmp(&right_rank);
+    }
+    match (left, right) {
+        (JsonbValue::Null, JsonbValue::Null) => Ordering::Equal,
+        (JsonbValue::String(l), JsonbValue::String(r)) => l.cmp(r),
+        (JsonbValue::Numeric(l), JsonbValue::Numeric(r)) => l.cmp(r),
+        (JsonbValue::Bool(l), JsonbValue::Bool(r)) => l.cmp(r),
+        (JsonbValue::Array(l), JsonbValue::Array(r)) => {
+            let len_cmp = l.len().cmp(&r.len());
+            if len_cmp != Ordering::Equal {
+                return len_cmp;
+            }
+            for (lv, rv) in l.iter().zip(r.iter()) {
+                let cmp = compare_jsonb(lv, rv);
+                if cmp != Ordering::Equal {
+                    return cmp;
+                }
+            }
+            Ordering::Equal
+        }
+        (JsonbValue::Object(l), JsonbValue::Object(r)) => {
+            let len_cmp = l.len().cmp(&r.len());
+            if len_cmp != Ordering::Equal {
+                return len_cmp;
+            }
+            for ((lk, lv), (rk, rv)) in l.iter().zip(r.iter()) {
+                let key_cmp = lk.cmp(rk);
+                if key_cmp != Ordering::Equal {
+                    return key_cmp;
+                }
+                let val_cmp = compare_jsonb(lv, rv);
+                if val_cmp != Ordering::Equal {
+                    return val_cmp;
+                }
+            }
+            Ordering::Equal
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+pub(crate) fn jsonb_get<'a>(
+    value: &'a JsonbValue,
+    key: &Value,
+) -> Result<Option<&'a JsonbValue>, ExecError> {
+    Ok(match key {
+        Value::Text(_) | Value::TextRef(_, _) => match value {
+            JsonbValue::Object(items) => {
+                let name = key.as_text().unwrap();
+                items.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+            }
+            _ => None,
+        },
+        Value::Int16(index) => jsonb_get_index(value, *index as i32),
+        Value::Int32(index) => jsonb_get_index(value, *index),
+        Value::Int64(index) => i32::try_from(*index)
+            .ok()
+            .and_then(|idx| jsonb_get_index(value, idx)),
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "jsonb ->",
+                left: jsonb_to_value(value),
+                right: other.clone(),
+            });
+        }
+    })
+}
+
+pub(crate) fn jsonb_path<'a>(value: &'a JsonbValue, path: &[String]) -> Option<&'a JsonbValue> {
+    let mut current = value;
+    for step in path {
+        current = match current {
+            JsonbValue::Object(items) => items.iter().find(|(k, _)| k == step).map(|(_, v)| v)?,
+            JsonbValue::Array(_) => {
+                let idx = step.parse::<i32>().ok()?;
+                jsonb_get_index(current, idx)?
+            }
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+pub(crate) fn jsonb_contains(left: &JsonbValue, right: &JsonbValue) -> bool {
+    match (left, right) {
+        (
+            _,
+            JsonbValue::Null | JsonbValue::String(_) | JsonbValue::Numeric(_) | JsonbValue::Bool(_),
+        ) => {
+            if let JsonbValue::Array(items) = left {
+                items.iter().any(|item| jsonb_contains(item, right))
+            } else {
+                compare_jsonb(left, right) == Ordering::Equal
+            }
+        }
+        (JsonbValue::Object(left_items), JsonbValue::Object(right_items)) => {
+            right_items.iter().all(|(rk, rv)| {
+                left_items
+                    .iter()
+                    .find(|(lk, _)| lk == rk)
+                    .map(|(_, lv)| jsonb_contains(lv, rv))
+                    .unwrap_or(false)
+            })
+        }
+        (JsonbValue::Array(left_items), JsonbValue::Array(right_items)) => {
+            let mut used = vec![false; left_items.len()];
+            'outer: for right_item in right_items {
+                for (idx, left_item) in left_items.iter().enumerate() {
+                    if !used[idx] && jsonb_contains(left_item, right_item) {
+                        used[idx] = true;
+                        continue 'outer;
+                    }
+                }
+                return false;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn jsonb_exists(value: &JsonbValue, key: &str) -> bool {
+    match value {
+        JsonbValue::Object(items) => items.iter().any(|(k, _)| k == key),
+        JsonbValue::Array(items) => items
+            .iter()
+            .any(|item| matches!(item, JsonbValue::String(text) if text == key)),
+        _ => false,
+    }
+}
+
+pub(crate) fn jsonb_exists_any(value: &JsonbValue, keys: &[String]) -> bool {
+    keys.iter().any(|key| jsonb_exists(value, key))
+}
+
+pub(crate) fn jsonb_exists_all(value: &JsonbValue, keys: &[String]) -> bool {
+    keys.iter().all(|key| jsonb_exists(value, key))
+}
+
+pub(crate) fn jsonb_object_from_pairs(pairs: &[(String, Value)]) -> Result<JsonbValue, ExecError> {
+    let items = pairs
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), jsonb_from_value(v)?)))
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    Ok(JsonbValue::Object(canonicalize_object_pairs(items)))
+}
+
+pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
+    match value {
+        Value::Null => Err(ExecError::TypeMismatch {
+            op: "jsonb_build_object key",
+            left: Value::Null,
+            right: Value::Text("non-null key".into()),
+        }),
+        Value::Int16(v) => Ok(v.to_string()),
+        Value::Int32(v) => Ok(v.to_string()),
+        Value::Int64(v) => Ok(v.to_string()),
+        Value::Float64(v) => Ok(v.to_string()),
+        Value::Numeric(v) => Ok(v.render()),
+        Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
+        Value::Text(text) => Ok(text.to_string()),
+        Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::Json(text) => Ok(text.to_string()),
+        Value::Jsonb(bytes) => render_jsonb_bytes(bytes),
+        Value::Array(items) => Ok(format_array_text(items)),
+    }
+}
+
+fn encode_jsonb_value(
+    out: &mut Vec<u8>,
+    header: &mut u32,
+    value: &JsonbValue,
+    level: usize,
+    is_root: bool,
+) {
+    match value {
+        JsonbValue::Null | JsonbValue::String(_) | JsonbValue::Numeric(_) | JsonbValue::Bool(_) => {
+            if is_root {
+                encode_jsonb_array(out, header, std::slice::from_ref(value), level, true);
+            } else {
+                encode_jsonb_scalar(out, header, value);
+            }
+        }
+        JsonbValue::Array(items) => encode_jsonb_array(out, header, items, level, false),
+        JsonbValue::Object(items) => encode_jsonb_object(out, header, items, level),
+    }
+}
+
+fn encode_jsonb_array(
+    out: &mut Vec<u8>,
+    header: &mut u32,
+    items: &[JsonbValue],
+    level: usize,
+    raw_scalar: bool,
+) {
+    let base_offset = out.len();
+    pad_to_int(out);
+    let mut container_header = items.len() as u32 | JB_FARRAY;
+    if raw_scalar {
+        debug_assert_eq!(items.len(), 1);
+        debug_assert_eq!(level, 0);
+        container_header |= JB_FSCALAR;
+    }
+    push_u32(out, container_header);
+    let jentry_offset = reserve(out, items.len() * 4);
+    let mut total_data_len = 0usize;
+
+    for (i, item) in items.iter().enumerate() {
+        let mut meta = 0u32;
+        encode_jsonb_value(out, &mut meta, item, level + 1, false);
+        let len = jentry_len(meta) as usize;
+        total_data_len += len;
+        if total_data_len > JENTRY_OFFLENMASK as usize {
+            panic!("jsonb array elements exceed maximum size");
+        }
+        if i % JB_OFFSET_STRIDE == 0 {
+            meta = (meta & JENTRY_TYPEMASK) | total_data_len as u32 | JENTRY_HAS_OFF;
+        }
+        write_u32(out, jentry_offset + i * 4, meta);
+    }
+
+    let total_len = out.len() - base_offset;
+    if total_len > JENTRY_OFFLENMASK as usize {
+        panic!("jsonb array exceeds maximum size");
+    }
+    *header = JENTRY_ISCONTAINER | total_len as u32;
+}
+
+fn encode_jsonb_object(
+    out: &mut Vec<u8>,
+    header: &mut u32,
+    items: &[(String, JsonbValue)],
+    level: usize,
+) {
+    let items = canonicalize_object_pairs(items.to_vec());
+    let base_offset = out.len();
+    pad_to_int(out);
+    push_u32(out, items.len() as u32 | JB_FOBJECT);
+    let jentry_offset = reserve(out, items.len() * 8);
+    let mut total_data_len = 0usize;
+
+    for (i, (key, _)) in items.iter().enumerate() {
+        let mut meta = 0u32;
+        encode_jsonb_scalar(out, &mut meta, &JsonbValue::String(key.clone()));
+        let len = jentry_len(meta) as usize;
+        total_data_len += len;
+        if total_data_len > JENTRY_OFFLENMASK as usize {
+            panic!("jsonb object elements exceed maximum size");
+        }
+        if i % JB_OFFSET_STRIDE == 0 {
+            meta = (meta & JENTRY_TYPEMASK) | total_data_len as u32 | JENTRY_HAS_OFF;
+        }
+        write_u32(out, jentry_offset + i * 4, meta);
+    }
+
+    for (i, (_, value)) in items.iter().enumerate() {
+        let mut meta = 0u32;
+        encode_jsonb_value(out, &mut meta, value, level + 1, false);
+        let len = jentry_len(meta) as usize;
+        total_data_len += len;
+        if total_data_len > JENTRY_OFFLENMASK as usize {
+            panic!("jsonb object elements exceed maximum size");
+        }
+        if (i + items.len()) % JB_OFFSET_STRIDE == 0 {
+            meta = (meta & JENTRY_TYPEMASK) | total_data_len as u32 | JENTRY_HAS_OFF;
+        }
+        write_u32(out, jentry_offset + (i + items.len()) * 4, meta);
+    }
+
+    let total_len = out.len() - base_offset;
+    if total_len > JENTRY_OFFLENMASK as usize {
+        panic!("jsonb object exceeds maximum size");
+    }
+    *header = JENTRY_ISCONTAINER | total_len as u32;
+}
+
+fn encode_jsonb_scalar(out: &mut Vec<u8>, header: &mut u32, value: &JsonbValue) {
+    match value {
+        JsonbValue::Null => *header = JENTRY_ISNULL,
+        JsonbValue::Bool(false) => *header = JENTRY_ISBOOL_FALSE,
+        JsonbValue::Bool(true) => *header = JENTRY_ISBOOL_TRUE,
+        JsonbValue::String(text) => {
+            out.extend_from_slice(text.as_bytes());
+            *header = JENTRY_ISSTRING | text.len() as u32;
+        }
+        JsonbValue::Numeric(numeric) => {
+            let pad = pad_to_int(out);
+            let bytes = encode_pg_numeric(numeric);
+            out.extend_from_slice(&bytes);
+            *header = JENTRY_ISNUMERIC | (pad + bytes.len()) as u32;
+        }
+        JsonbValue::Array(_) | JsonbValue::Object(_) => unreachable!(),
+    }
+}
+
+fn decode_container(
+    bytes: &[u8],
+    start: usize,
+    data_offset: usize,
+    header: u32,
+) -> Result<JsonbValue, ExecError> {
+    let container_start = if start == 0 {
+        0
+    } else {
+        align4(start + data_offset)
+    };
+    if container_start + 4 > bytes.len() {
+        return Err(corrupt_jsonb());
+    }
+    let count = (header & JB_CMASK) as usize;
+    let is_object = header & JB_FOBJECT != 0;
+    let is_array = header & JB_FARRAY != 0;
+    let is_scalar = header & JB_FSCALAR != 0;
+    if !is_object && !is_array {
+        return Err(corrupt_jsonb());
+    }
+
+    let jentry_count = if is_object { count * 2 } else { count };
+    let jentry_start = container_start + 4;
+    let data_base = jentry_start + jentry_count * 4;
+    if data_base > bytes.len() {
+        return Err(corrupt_jsonb());
+    }
+
+    let mut offsets = Vec::with_capacity(jentry_count);
+    let mut current = 0usize;
+    for i in 0..jentry_count {
+        let meta = read_u32(bytes, jentry_start + i * 4)?;
+        let len = jentry_len(meta) as usize;
+        let end = if meta & JENTRY_HAS_OFF != 0 {
+            len
+        } else {
+            current.checked_add(len).ok_or_else(corrupt_jsonb)?
+        };
+        offsets.push((meta, current, end));
+        current = end;
+    }
+
+    if is_object {
+        let mut items = Vec::with_capacity(count);
+        for i in 0..count {
+            let key =
+                decode_jsonb_string(bytes, data_base, offsets[i].1, offsets[i].2, offsets[i].0)?;
+            let value = decode_jsonb_entry(
+                bytes,
+                data_base,
+                offsets[count + i].1,
+                offsets[count + i].2,
+                offsets[count + i].0,
+            )?;
+            items.push((key, value));
+        }
+        Ok(JsonbValue::Object(items))
+    } else {
+        let mut items = Vec::with_capacity(count);
+        for (meta, start_off, end_off) in offsets {
+            items.push(decode_jsonb_entry(
+                bytes, data_base, start_off, end_off, meta,
+            )?);
+        }
+        if is_scalar && items.len() == 1 {
+            Ok(JsonbValue::Array(items))
+        } else {
+            Ok(JsonbValue::Array(items))
+        }
+    }
+}
+
+fn decode_jsonb_entry(
+    bytes: &[u8],
+    data_base: usize,
+    start_off: usize,
+    end_off: usize,
+    meta: u32,
+) -> Result<JsonbValue, ExecError> {
+    let ty = meta & JENTRY_TYPEMASK;
+    let raw_start = data_base.checked_add(start_off).ok_or_else(corrupt_jsonb)?;
+    let raw_end = data_base.checked_add(end_off).ok_or_else(corrupt_jsonb)?;
+    if raw_end > bytes.len() || raw_start > raw_end {
+        return Err(corrupt_jsonb());
+    }
+    match ty {
+        JENTRY_ISNULL => Ok(JsonbValue::Null),
+        JENTRY_ISBOOL_FALSE => Ok(JsonbValue::Bool(false)),
+        JENTRY_ISBOOL_TRUE => Ok(JsonbValue::Bool(true)),
+        JENTRY_ISSTRING => {
+            let text =
+                std::str::from_utf8(&bytes[raw_start..raw_end]).map_err(|_| corrupt_jsonb())?;
+            Ok(JsonbValue::String(text.to_string()))
+        }
+        JENTRY_ISNUMERIC => {
+            let aligned = align4(raw_start);
+            if aligned > raw_end {
+                return Err(corrupt_jsonb());
+            }
+            Ok(JsonbValue::Numeric(decode_pg_numeric(
+                &bytes[aligned..raw_end],
+            )?))
+        }
+        JENTRY_ISCONTAINER => {
+            let aligned = align4(raw_start);
+            if aligned > raw_end {
+                return Err(corrupt_jsonb());
+            }
+            let header = read_u32(bytes, aligned)?;
+            decode_container(bytes, aligned, 0, header)
+        }
+        _ => Err(corrupt_jsonb()),
+    }
+}
+
+fn decode_jsonb_string(
+    bytes: &[u8],
+    data_base: usize,
+    start_off: usize,
+    end_off: usize,
+    meta: u32,
+) -> Result<String, ExecError> {
+    if meta & JENTRY_TYPEMASK != JENTRY_ISSTRING {
+        return Err(corrupt_jsonb());
+    }
+    let start = data_base.checked_add(start_off).ok_or_else(corrupt_jsonb)?;
+    let end = data_base.checked_add(end_off).ok_or_else(corrupt_jsonb)?;
+    if end > bytes.len() || start > end {
+        return Err(corrupt_jsonb());
+    }
+    Ok(std::str::from_utf8(&bytes[start..end])
+        .map_err(|_| corrupt_jsonb())?
+        .to_string())
+}
+
+fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
+    match value {
+        NumericValue::NaN => {
+            let mut out = Vec::with_capacity(6);
+            push_i32(&mut out, 6);
+            push_u16(&mut out, NUMERIC_NAN);
+            out
+        }
+        NumericValue::Finite { coeff, scale } => {
+            let (sign, mut digits, weight) = decimal_to_pg_digits(coeff, *scale);
+            while matches!(digits.first(), Some(0)) {
+                digits.remove(0);
+            }
+            while matches!(digits.last(), Some(0)) {
+                digits.pop();
+            }
+            let weight = if digits.is_empty() {
+                0
+            } else {
+                weight + (decimal_to_pg_digits(coeff, *scale).1.len() as i16 - digits.len() as i16)
+            };
+            let can_be_short = *scale <= NUMERIC_SHORT_DSCALE_MAX as u32
+                && weight >= NUMERIC_SHORT_WEIGHT_MIN
+                && weight <= NUMERIC_SHORT_WEIGHT_MAX;
+
+            let header_len = if can_be_short { 2 } else { 4 };
+            let total_len = 4 + header_len + digits.len() * 2;
+            let mut out = Vec::with_capacity(total_len);
+            push_i32(&mut out, total_len as i32);
+            if can_be_short {
+                let mut short = NUMERIC_SHORT;
+                if sign == NUMERIC_NEG {
+                    short |= NUMERIC_SHORT_SIGN_MASK;
+                }
+                short |=
+                    ((*scale as u16) << NUMERIC_SHORT_DSCALE_SHIFT) & NUMERIC_SHORT_DSCALE_MASK;
+                if weight < 0 {
+                    short |= NUMERIC_SHORT_WEIGHT_SIGN_MASK;
+                }
+                short |= (weight as u16) & NUMERIC_SHORT_WEIGHT_MASK;
+                push_u16(&mut out, short);
+            } else {
+                let sign_dscale = (if sign == NUMERIC_NEG { NUMERIC_NEG } else { 0 })
+                    | ((*scale as u16) & NUMERIC_DSCALE_MASK);
+                push_u16(&mut out, sign_dscale);
+                push_i16(&mut out, weight);
+            }
+            for digit in digits {
+                push_u16(&mut out, digit);
+            }
+            out
+        }
+    }
+}
+
+fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
+    if bytes.len() < 6 {
+        return Err(corrupt_jsonb());
+    }
+    let total_len = read_i32_from(bytes, 0)? as usize;
+    if total_len != bytes.len() {
+        return Err(corrupt_jsonb());
+    }
+    let header = read_u16_from(bytes, 4)?;
+    if header & NUMERIC_SPECIAL == NUMERIC_SPECIAL {
+        return if header == NUMERIC_NAN {
+            Ok(NumericValue::NaN)
+        } else {
+            Err(corrupt_jsonb())
+        };
+    }
+
+    let (sign, dscale, weight, digits_start) = if header & NUMERIC_SHORT == NUMERIC_SHORT {
+        let sign = if header & NUMERIC_SHORT_SIGN_MASK != 0 {
+            NUMERIC_NEG
+        } else {
+            0
+        };
+        let dscale = ((header & NUMERIC_SHORT_DSCALE_MASK) >> NUMERIC_SHORT_DSCALE_SHIFT) as u32;
+        let weight = if header & NUMERIC_SHORT_WEIGHT_SIGN_MASK != 0 {
+            (header | !NUMERIC_SHORT_WEIGHT_MASK) as i16
+        } else {
+            (header & NUMERIC_SHORT_WEIGHT_MASK) as i16
+        };
+        (sign, dscale, weight, 6usize)
+    } else {
+        let sign = header & NUMERIC_NEG;
+        let dscale = (header & NUMERIC_DSCALE_MASK) as u32;
+        let weight = read_i16_from(bytes, 6)?;
+        (sign, dscale, weight, 8usize)
+    };
+
+    if (bytes.len() - digits_start) % 2 != 0 {
+        return Err(corrupt_jsonb());
+    }
+    let ndigits = (bytes.len() - digits_start) / 2;
+    if ndigits == 0 {
+        return Ok(NumericValue::Finite {
+            coeff: BigInt::zero(),
+            scale: dscale,
+        });
+    }
+
+    let mut coeff = BigInt::zero();
+    for i in 0..ndigits {
+        let digit = read_u16_from(bytes, digits_start + i * 2)? as u32;
+        if digit >= NBASE as u32 {
+            return Err(corrupt_jsonb());
+        }
+        coeff = coeff * BigInt::from(NBASE) + BigInt::from(digit);
+    }
+    let group_scale = usize::saturating_sub(ndigits, (weight + 1).max(0) as usize) * DEC_DIGITS;
+    let coeff = if dscale as usize >= group_scale {
+        coeff * pow10((dscale as usize) - group_scale)
+    } else {
+        let divisor = pow10(group_scale - dscale as usize);
+        if (&coeff % &divisor) != BigInt::zero() {
+            return Err(corrupt_jsonb());
+        }
+        coeff / divisor
+    };
+
+    Ok(NumericValue::Finite {
+        coeff: if sign == NUMERIC_NEG { -coeff } else { coeff },
+        scale: dscale,
+    })
+}
+
+fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i16) {
+    let negative = coeff.is_negative();
+    let digits = coeff.abs().to_str_radix(10);
+    let scale = scale as usize;
+    let integer_len = digits.len().saturating_sub(scale);
+    let whole = if integer_len == 0 {
+        ""
+    } else {
+        &digits[..integer_len]
+    };
+    let frac = if scale == 0 {
+        String::new()
+    } else if digits.len() >= scale {
+        digits[digits.len() - scale..].to_string()
+    } else {
+        format!("{}{}", "0".repeat(scale - digits.len()), digits)
+    };
+
+    let mut pg_digits = Vec::new();
+    if !whole.is_empty() {
+        let first = whole.len() % DEC_DIGITS;
+        let first = if first == 0 { DEC_DIGITS } else { first };
+        pg_digits.push(whole[..first].parse::<u16>().unwrap());
+        let mut idx = first;
+        while idx < whole.len() {
+            pg_digits.push(whole[idx..idx + DEC_DIGITS].parse::<u16>().unwrap());
+            idx += DEC_DIGITS;
+        }
+    }
+    let whole_groups = pg_digits.len();
+    if !frac.is_empty() {
+        let mut frac = frac;
+        while frac.len() % DEC_DIGITS != 0 {
+            frac.push('0');
+        }
+        let mut idx = 0;
+        while idx < frac.len() {
+            pg_digits.push(frac[idx..idx + DEC_DIGITS].parse::<u16>().unwrap());
+            idx += DEC_DIGITS;
+        }
+    }
+
+    while matches!(pg_digits.first(), Some(0)) {
+        pg_digits.remove(0);
+    }
+    while matches!(pg_digits.last(), Some(0)) {
+        pg_digits.pop();
+    }
+
+    let weight = if pg_digits.is_empty() {
+        0
+    } else {
+        whole_groups as i16 - 1
+    };
+    (if negative { NUMERIC_NEG } else { 0 }, pg_digits, weight)
+}
+
+fn canonicalize_object_pairs(items: Vec<(String, JsonbValue)>) -> Vec<(String, JsonbValue)> {
+    let mut deduped: Vec<(String, JsonbValue)> = Vec::new();
+    for (key, value) in items {
+        if let Some(existing) = deduped
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            existing.1 = value;
+        } else {
+            deduped.push((key, value));
+        }
+    }
+    deduped.sort_by(|(lk, _), (rk, _)| compare_jsonb_key(lk, rk));
+    deduped
+}
+
+fn compare_jsonb_key(left: &str, right: &str) -> Ordering {
+    left.len()
+        .cmp(&right.len())
+        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+}
+
+fn jsonb_type_rank(value: &JsonbValue) -> u8 {
+    match value {
+        JsonbValue::Null => 0,
+        JsonbValue::String(_) => 1,
+        JsonbValue::Numeric(_) => 2,
+        JsonbValue::Bool(_) => 3,
+        JsonbValue::Array(_) => 16,
+        JsonbValue::Object(_) => 17,
+    }
+}
+
+fn jsonb_get_index(value: &JsonbValue, index: i32) -> Option<&JsonbValue> {
+    let items = match value {
+        JsonbValue::Array(items) => items,
+        _ => return None,
+    };
+    let len = items.len() as i32;
+    let idx = if index < 0 { len + index } else { index };
+    if idx < 0 {
+        None
+    } else {
+        items.get(idx as usize)
+    }
+}
+
+fn pad_to_int(out: &mut Vec<u8>) -> usize {
+    let aligned = align4(out.len());
+    let pad = aligned - out.len();
+    if pad > 0 {
+        out.resize(aligned, 0);
+    }
+    pad
+}
+
+fn align4(offset: usize) -> usize {
+    (offset + 3) & !3
+}
+
+fn reserve(out: &mut Vec<u8>, len: usize) -> usize {
+    let offset = out.len();
+    out.resize(offset + len, 0);
+    offset
+}
+
+fn write_u32(out: &mut [u8], offset: usize, value: u32) {
+    out[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn push_i32(out: &mut Vec<u8>, value: i32) {
+    out.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn push_i16(out: &mut Vec<u8>, value: i16) {
+    out.extend_from_slice(&value.to_ne_bytes());
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, ExecError> {
+    read_u32_from(bytes, offset)
+}
+
+fn read_u32_from(bytes: &[u8], offset: usize) -> Result<u32, ExecError> {
+    if offset + 4 > bytes.len() {
+        return Err(corrupt_jsonb());
+    }
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(&bytes[offset..offset + 4]);
+    Ok(u32::from_ne_bytes(raw))
+}
+
+fn read_i32_from(bytes: &[u8], offset: usize) -> Result<i32, ExecError> {
+    if offset + 4 > bytes.len() {
+        return Err(corrupt_jsonb());
+    }
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(&bytes[offset..offset + 4]);
+    Ok(i32::from_ne_bytes(raw))
+}
+
+fn read_u16_from(bytes: &[u8], offset: usize) -> Result<u16, ExecError> {
+    if offset + 2 > bytes.len() {
+        return Err(corrupt_jsonb());
+    }
+    let mut raw = [0u8; 2];
+    raw.copy_from_slice(&bytes[offset..offset + 2]);
+    Ok(u16::from_ne_bytes(raw))
+}
+
+fn read_i16_from(bytes: &[u8], offset: usize) -> Result<i16, ExecError> {
+    if offset + 2 > bytes.len() {
+        return Err(corrupt_jsonb());
+    }
+    let mut raw = [0u8; 2];
+    raw.copy_from_slice(&bytes[offset..offset + 2]);
+    Ok(i16::from_ne_bytes(raw))
+}
+
+fn jentry_len(meta: u32) -> u32 {
+    meta & JENTRY_OFFLENMASK
+}
+
+fn pow10(exp: usize) -> BigInt {
+    let mut value = BigInt::from(1u8);
+    for _ in 0..exp {
+        value *= 10u8;
+    }
+    value
+}
+
+fn corrupt_jsonb() -> ExecError {
+    ExecError::InvalidStorageValue {
+        column: "jsonb".into(),
+        details: "corrupt jsonb payload".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_root_uses_pg_scalar_array_wrapper() {
+        let bytes = encode_jsonb(&JsonbValue::Numeric(NumericValue::from("42")));
+        let header = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+        assert_eq!(header & (JB_FARRAY | JB_FSCALAR), JB_FARRAY | JB_FSCALAR);
+        assert_eq!(
+            decode_jsonb(&bytes).unwrap(),
+            JsonbValue::Numeric(NumericValue::from("42"))
+        );
+    }
+
+    #[test]
+    fn object_keys_are_sorted_by_pg_length_then_bytes() {
+        let value = JsonbValue::Object(vec![
+            ("bbb".into(), JsonbValue::Null),
+            ("aa".into(), JsonbValue::Null),
+            ("b".into(), JsonbValue::Null),
+            ("ab".into(), JsonbValue::Null),
+        ]);
+        let decoded = decode_jsonb(&encode_jsonb(&value)).unwrap();
+        assert_eq!(
+            decoded,
+            JsonbValue::Object(vec![
+                ("b".into(), JsonbValue::Null),
+                ("aa".into(), JsonbValue::Null),
+                ("ab".into(), JsonbValue::Null),
+                ("bbb".into(), JsonbValue::Null),
+            ])
+        );
+    }
+
+    #[test]
+    fn numeric_payload_round_trips_pg_numeric_bytes() {
+        let value = JsonbValue::Numeric(NumericValue::Finite {
+            coeff: BigInt::from(12345u32),
+            scale: 2,
+        });
+        let encoded = encode_jsonb(&value);
+        let decoded = decode_jsonb(&encoded).unwrap();
+        assert_eq!(decoded, value);
+    }
+}
