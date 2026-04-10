@@ -31,6 +31,9 @@ pub enum ParseError {
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
     ActiveSqlTransaction(&'static str),
+    OnCommitOnlyForTempTables,
+    TempTableInNonTempSchema(String),
+    OnlyTemporaryRelationsInTemporarySchemas(String),
 }
 
 impl fmt::Display for ParseError {
@@ -71,6 +74,16 @@ impl fmt::Display for ParseError {
             ParseError::ActiveSqlTransaction(stmt) => {
                 write!(f, "{stmt} cannot run inside a transaction block")
             }
+            ParseError::OnCommitOnlyForTempTables => {
+                write!(f, "ON COMMIT can only be used on temporary tables")
+            }
+            ParseError::TempTableInNonTempSchema(_name) => {
+                write!(f, "cannot create temporary relation in non-temporary schema")
+            }
+            ParseError::OnlyTemporaryRelationsInTemporarySchemas(name) => {
+                let _ = name;
+                write!(f, "only temporary relations may be created in temporary schemas")
+            }
         }
     }
 }
@@ -84,6 +97,7 @@ pub enum Statement {
     Reset(ResetStatement),
     ShowTables,
     CreateTable(CreateTableStatement),
+    CreateTableAs(CreateTableAsStatement),
     DropTable(DropTableStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
@@ -93,6 +107,19 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TablePersistence {
+    Permanent,
+    Temporary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnCommitAction {
+    PreserveRows,
+    DeleteRows,
+    Drop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,8 +220,21 @@ pub struct InsertStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTableStatement {
+    pub schema_name: Option<String>,
     pub table_name: String,
+    pub persistence: TablePersistence,
+    pub on_commit: OnCommitAction,
     pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableAsStatement {
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    pub persistence: TablePersistence,
+    pub on_commit: OnCommitAction,
+    pub column_names: Vec<String>,
+    pub query: SelectStatement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

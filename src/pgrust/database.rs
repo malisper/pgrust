@@ -1,16 +1,23 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use parking_lot::RwLock;
 
 use crate::backend::access::transam::xact::{CommandId, MvccError, TransactionId, TransactionManager};
-use crate::backend::catalog::catalog::{CatalogError, DurableCatalog};
-use crate::backend::executor::{ExecError, ExecutorContext, StatementResult};
+use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, DurableCatalog};
+use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, execute_readonly_statement};
 use crate::backend::parser::Statement;
-use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator};
+use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, lock_relations, unlock_relations};
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter, WalError};
+use crate::backend::catalog::catalog::column_desc;
+use crate::backend::parser::{
+    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError,
+    TablePersistence, bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
+    normalize_create_table_as_name, normalize_create_table_name,
+};
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
@@ -49,8 +56,23 @@ pub struct Database {
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
+    temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     /// Background WAL writer — flushes BufWriter to kernel periodically.
     _wal_bg_writer: Arc<WalBgWriter>,
+}
+
+const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
+
+#[derive(Debug, Clone)]
+struct TempCatalogEntry {
+    entry: CatalogEntry,
+    on_commit: OnCommitAction,
+}
+
+#[derive(Debug, Default, Clone)]
+struct TempNamespace {
+    tables: BTreeMap<String, TempCatalogEntry>,
+    next_rel_number: u32,
 }
 
 impl Database {
@@ -122,8 +144,334 @@ impl Database {
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
+            temp_relations: Arc::new(RwLock::new(HashMap::new())),
             _wal_bg_writer: Arc::new(wal_bg_writer),
         })
+    }
+
+    fn temp_db_oid(client_id: ClientId) -> u32 {
+        TEMP_DB_OID_BASE.saturating_add(client_id)
+    }
+
+    pub(crate) fn visible_catalog(&self, client_id: ClientId) -> Catalog {
+        let mut catalog = self.catalog.read().catalog().clone();
+        if let Some(namespace) = self.temp_relations.read().get(&client_id) {
+            for (name, temp) in &namespace.tables {
+                catalog.insert(name.clone(), temp.entry.clone());
+                catalog.insert(format!("pg_temp.{name}"), temp.entry.clone());
+            }
+        }
+        catalog
+    }
+
+    pub(crate) fn temp_entry(&self, client_id: ClientId, table_name: &str) -> Option<CatalogEntry> {
+        let normalized = normalize_temp_lookup_name(table_name);
+        self.temp_relations
+            .read()
+            .get(&client_id)
+            .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
+    }
+
+    fn create_temp_relation(
+        &self,
+        client_id: ClientId,
+        table_name: String,
+        desc: crate::backend::executor::RelationDesc,
+        on_commit: OnCommitAction,
+    ) -> Result<CatalogEntry, ExecError> {
+        let normalized = normalize_temp_lookup_name(&table_name);
+        let entry = {
+            let mut namespaces = self.temp_relations.write();
+            let namespace = namespaces.entry(client_id).or_default();
+            if namespace.tables.contains_key(&normalized) {
+                return Err(ExecError::Parse(ParseError::TableAlreadyExists(normalized)));
+            }
+            let rel_number = namespace.next_rel_number.max(1);
+            namespace.next_rel_number = rel_number.saturating_add(1);
+            let entry = CatalogEntry {
+                rel: RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: Self::temp_db_oid(client_id),
+                    rel_number,
+                },
+                desc,
+            };
+            namespace.tables.insert(
+                normalized,
+                TempCatalogEntry {
+                    entry: entry.clone(),
+                    on_commit,
+                },
+            );
+            entry
+        };
+
+        let _ = self.pool.with_storage_mut(|s| {
+            use crate::backend::storage::smgr::StorageManager;
+            let _ = s.smgr.open(entry.rel);
+            let _ = s.smgr.create(entry.rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+        });
+        self.plan_cache.invalidate_all();
+        Ok(entry)
+    }
+
+    pub(crate) fn drop_temp_relation(&self, client_id: ClientId, table_name: &str) -> Result<CatalogEntry, ExecError> {
+        let normalized = normalize_temp_lookup_name(table_name);
+        let entry = {
+            let mut namespaces = self.temp_relations.write();
+            let namespace = namespaces
+                .get_mut(&client_id)
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone())))?;
+            namespace
+                .tables
+                .remove(&normalized)
+                .map(|entry| entry.entry)
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone())))?
+        };
+        let _ = self.pool.invalidate_relation(entry.rel);
+        self.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+        self.plan_cache.invalidate_all();
+        Ok(entry)
+    }
+
+    pub(crate) fn apply_temp_on_commit(&self, client_id: ClientId) -> Result<(), ExecError> {
+        let mut to_delete = Vec::new();
+        let mut to_drop = Vec::new();
+        {
+            let namespaces = self.temp_relations.read();
+            if let Some(namespace) = namespaces.get(&client_id) {
+                for (name, entry) in &namespace.tables {
+                    match entry.on_commit {
+                        OnCommitAction::PreserveRows => {}
+                        OnCommitAction::DeleteRows => to_delete.push(entry.entry.rel),
+                        OnCommitAction::Drop => to_drop.push(name.clone()),
+                    }
+                }
+            }
+        }
+
+        for rel in to_delete {
+            let _ = self.pool.invalidate_relation(rel);
+            self.pool
+                .with_storage_mut(|s| s.smgr.truncate(rel, crate::backend::storage::smgr::ForkNumber::Main, 0))
+                .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+        }
+
+        for name in to_drop {
+            let _ = self.drop_temp_relation(client_id, &name)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_client_temp_relations(&self, client_id: ClientId) {
+        let entries = {
+            let mut namespaces = self.temp_relations.write();
+            namespaces
+                .remove(&client_id)
+                .map(|ns| ns.tables.into_values().map(|entry| entry.entry).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        let had_entries = !entries.is_empty();
+        for entry in entries {
+            let _ = self.pool.invalidate_relation(entry.rel);
+            self.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+        }
+        if had_entries {
+            self.plan_cache.invalidate_all();
+        }
+    }
+
+    pub(crate) fn execute_create_table_stmt(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let (table_name, persistence) = normalize_create_table_name(create_stmt)?;
+        let desc = create_relation_desc(create_stmt);
+        match persistence {
+            TablePersistence::Permanent => {
+                let mut catalog_guard = self.catalog.write();
+                let result = crate::backend::commands::tablecmds::execute_create_table(
+                    CreateTableStatement {
+                        schema_name: None,
+                        table_name: table_name.clone(),
+                        persistence,
+                        on_commit: create_stmt.on_commit,
+                        columns: create_stmt.columns.clone(),
+                    },
+                    catalog_guard.catalog_mut(),
+                );
+                if result.is_ok() {
+                    if let Some(entry) = catalog_guard.catalog().get(&table_name) {
+                        let rel = entry.rel;
+                        let _ = self.pool.with_storage_mut(|s| {
+                            use crate::backend::storage::smgr::StorageManager;
+                            let _ = s.smgr.open(rel);
+                            let _ = s.smgr.create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+                        });
+                    }
+                    let _ = catalog_guard.persist();
+                    self.plan_cache.invalidate_all();
+                }
+                result
+            }
+            TablePersistence::Temporary => {
+                let _ = self.create_temp_relation(client_id, table_name, desc, create_stmt.on_commit)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
+        }
+    }
+
+    pub(crate) fn execute_create_table_as_stmt(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableAsStatement,
+        xid: Option<TransactionId>,
+        cid: u32,
+    ) -> Result<StatementResult, ExecError> {
+        let (table_name, persistence) = normalize_create_table_as_name(create_stmt)?;
+        let visible_catalog = self.visible_catalog(client_id);
+        let plan = build_plan(&create_stmt.query, &visible_catalog)?;
+        let rels = {
+            let mut rels = std::collections::BTreeSet::new();
+            collect_rels_from_plan(&plan, &mut rels);
+            rels.into_iter().collect::<Vec<_>>()
+        };
+        if xid.is_none() {
+            lock_relations(&self.table_locks, client_id, &rels);
+        }
+
+        let snapshot = match xid {
+            Some(xid) => self.txns.read().snapshot_for_command(xid, cid)?,
+            None => self.txns.read().snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)?,
+        };
+        let mut ctx = ExecutorContext {
+            pool: Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            snapshot,
+            client_id,
+            next_command_id: cid,
+            outer_rows: Vec::new(),
+            timed: false,
+        };
+        let query_result = execute_readonly_statement(Statement::Select(create_stmt.query.clone()), &visible_catalog, &mut ctx);
+        if xid.is_none() {
+            unlock_relations(&self.table_locks, client_id, &rels);
+        }
+        let StatementResult::Query { columns, column_names, rows } = query_result? else {
+            unreachable!("ctas query should return rows");
+        };
+
+        if !create_stmt.column_names.is_empty() && create_stmt.column_names.len() != columns.len() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "column alias count matching query column count",
+                actual: format!("{} aliases for {} columns", create_stmt.column_names.len(), columns.len()),
+            }));
+        }
+
+        let desc = crate::backend::executor::RelationDesc {
+            columns: columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    let name = create_stmt
+                        .column_names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| column_names[index].clone());
+                    column_desc(name, column.sql_type, true)
+                })
+                .collect(),
+        };
+
+        let rel = match persistence {
+            TablePersistence::Permanent => {
+                let mut catalog_guard = self.catalog.write();
+                let stmt = CreateTableStatement {
+                    schema_name: None,
+                    table_name: table_name.clone(),
+                    persistence,
+                    on_commit: create_stmt.on_commit,
+                    columns: desc
+                        .columns
+                        .iter()
+                        .map(|column| crate::backend::parser::ColumnDef {
+                            name: column.name.clone(),
+                            ty: column.sql_type,
+                            nullable: true,
+                        })
+                        .collect(),
+                };
+                crate::backend::commands::tablecmds::execute_create_table(stmt, catalog_guard.catalog_mut())?;
+                let entry = catalog_guard
+                    .catalog()
+                    .get(&table_name)
+                    .cloned()
+                    .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
+                let _ = self.pool.with_storage_mut(|s| {
+                    use crate::backend::storage::smgr::StorageManager;
+                    let _ = s.smgr.open(entry.rel);
+                    let _ = s.smgr.create(entry.rel, crate::backend::storage::smgr::ForkNumber::Main, false);
+                });
+                let _ = catalog_guard.persist();
+                self.plan_cache.invalidate_all();
+                entry.rel
+            }
+            TablePersistence::Temporary => self
+                .create_temp_relation(client_id, table_name.clone(), desc.clone(), create_stmt.on_commit)?
+                .rel,
+        };
+
+        if rows.is_empty() {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        if let Some(xid) = xid {
+            let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+            let mut ctx = ExecutorContext {
+                pool: Arc::clone(&self.pool),
+                txns: self.txns.clone(),
+                snapshot,
+                client_id,
+                next_command_id: cid,
+                outer_rows: Vec::new(),
+                timed: false,
+            };
+            let inserted = crate::backend::commands::tablecmds::execute_insert_values(
+                rel,
+                &desc,
+                &rows,
+                &mut ctx,
+                xid,
+                cid,
+            )?;
+            Ok(StatementResult::AffectedRows(inserted))
+        } else {
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
+            let mut ctx = ExecutorContext {
+                pool: Arc::clone(&self.pool),
+                txns: self.txns.clone(),
+                snapshot,
+                client_id,
+                next_command_id: 0,
+                outer_rows: Vec::new(),
+                timed: false,
+            };
+            let result = crate::backend::commands::tablecmds::execute_insert_values(
+                rel,
+                &desc,
+                &rows,
+                &mut ctx,
+                xid,
+                0,
+            )
+            .map(StatementResult::AffectedRows);
+            let result = self.finish_txn(client_id, xid, result);
+            guard.disarm();
+            result
+        }
     }
 
     /// Execute a single SQL statement inside an auto-commit transaction
@@ -136,35 +484,29 @@ impl Database {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::execute_readonly_statement;
         use crate::backend::commands::tablecmds::{
-            execute_analyze, execute_create_table, execute_delete_with_waiter, execute_drop_table,
-            execute_truncate_table, execute_vacuum,
-            execute_insert, execute_update_with_waiter,
-        };
-        use crate::backend::parser::{
-            bind_delete, bind_insert, bind_update,
+            execute_analyze, execute_delete_with_waiter, execute_drop_table,
+            execute_truncate_table, execute_vacuum, execute_insert, execute_update_with_waiter,
         };
 
         let stmt = self.plan_cache.get_statement(sql)?;
+        let visible_catalog = self.visible_catalog(client_id);
 
         match stmt {
             Statement::Analyze(ref analyze_stmt) => {
-                let catalog_guard = self.catalog.read();
-                execute_analyze(analyze_stmt.clone(), catalog_guard.catalog())
+                execute_analyze(analyze_stmt.clone(), &visible_catalog)
             }
             Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let (plan_or_stmt, rels) = {
-                    let catalog_guard = self.catalog.read();
-                    let catalog = catalog_guard.catalog();
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
                         Statement::Select(select) => {
-                            let plan = crate::backend::parser::build_plan(select, catalog)?;
+                            let plan = crate::backend::parser::build_plan(select, &visible_catalog)?;
                             collect_rels_from_plan(&plan, &mut rels);
                         }
                         Statement::Explain(explain) => {
                             if let Statement::Select(select) = explain.statement.as_ref() {
-                                let plan = crate::backend::parser::build_plan(select, catalog)?;
+                                let plan = crate::backend::parser::build_plan(select, &visible_catalog)?;
                                 collect_rels_from_plan(&plan, &mut rels);
                             }
                         }
@@ -177,7 +519,6 @@ impl Database {
                 lock_relations(&self.table_locks, client_id, &rels);
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
-                let catalog_guard = self.catalog.read();
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
@@ -187,19 +528,15 @@ impl Database {
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result = execute_readonly_statement(plan_or_stmt, catalog_guard.catalog(), &mut ctx);
+                let result = execute_readonly_statement(plan_or_stmt, &visible_catalog, &mut ctx);
                 drop(ctx);
-                drop(catalog_guard);
 
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
             }
 
             Statement::Insert(ref insert_stmt) => {
-                let bound = {
-                    let catalog_guard = self.catalog.read();
-                    bind_insert(insert_stmt, catalog_guard.catalog())?
-                };
+                let bound = bind_insert(insert_stmt, &visible_catalog)?;
                 let rel = bound.rel;
                 self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
 
@@ -217,17 +554,14 @@ impl Database {
                 };
                 let result = execute_insert(bound, &mut ctx, xid, 0);
                 drop(ctx);
-                let result = self.finish_txn(xid, result);
+                let result = self.finish_txn(client_id, xid, result);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
             }
 
             Statement::Update(ref update_stmt) => {
-                let bound = {
-                    let catalog_guard = self.catalog.read();
-                    bind_update(update_stmt, catalog_guard.catalog())?
-                };
+                let bound = bind_update(update_stmt, &visible_catalog)?;
                 let rel = bound.rel;
                 self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
 
@@ -251,17 +585,14 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter)),
                 );
                 drop(ctx);
-                let result = self.finish_txn(xid, result);
+                let result = self.finish_txn(client_id, xid, result);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
             }
 
             Statement::Delete(ref delete_stmt) => {
-                let bound = {
-                    let catalog_guard = self.catalog.read();
-                    bind_delete(delete_stmt, catalog_guard.catalog())?
-                };
+                let bound = bind_delete(delete_stmt, &visible_catalog)?;
                 let rel = bound.rel;
                 self.table_locks.lock_table(rel, TableLockMode::RowExclusive, client_id);
 
@@ -284,45 +615,32 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter)),
                 );
                 drop(ctx);
-                let result = self.finish_txn(xid, result);
+                let result = self.finish_txn(client_id, xid, result);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
             }
 
             Statement::CreateTable(ref create_stmt) => {
-                let mut catalog_guard = self.catalog.write();
-                let result = execute_create_table(create_stmt.clone(), catalog_guard.catalog_mut());
-                if result.is_ok() {
-                    // Create the relation's storage files so inserts don't need to.
-                    if let Some(entry) = catalog_guard.catalog().get(&create_stmt.table_name) {
-                        let rel = entry.rel;
-                        let _ = self.pool.with_storage_mut(|s| {
-                            use crate::backend::storage::smgr::StorageManager;
-                            let _ = s.smgr.open(rel);
-                            let _ = s.smgr.create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
-                        });
-                    }
-                    let _ = catalog_guard.persist();
-                    self.plan_cache.invalidate_all();
-                }
-                result
+                self.execute_create_table_stmt(client_id, create_stmt)
+            }
+
+            Statement::CreateTableAs(ref create_stmt) => {
+                self.execute_create_table_as_stmt(client_id, create_stmt, None, 0)
             }
 
             Statement::DropTable(ref drop_stmt) => {
                 let rels = {
-                    let catalog_guard = self.catalog.read();
                     drop_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in &rels {
                     self.table_locks.lock_table(*rel, TableLockMode::AccessExclusive, client_id);
                 }
 
-                let mut catalog_guard = self.catalog.write();
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -333,13 +651,42 @@ impl Database {
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
+                let mut dropped = 0usize;
+                let mut result = Ok(StatementResult::AffectedRows(0));
+                for table_name in &drop_stmt.table_names {
+                    if self.temp_entry(client_id, table_name).is_some() {
+                        match self.drop_temp_relation(client_id, table_name) {
+                            Ok(_) => dropped += 1,
+                            Err(e) if drop_stmt.if_exists => {}
+                            Err(e) => {
+                                result = Err(e);
+                                break;
+                            }
+                        }
+                    } else {
+                        let mut catalog_guard = self.catalog.write();
+                        let stmt = crate::backend::parser::DropTableStatement {
+                            if_exists: drop_stmt.if_exists,
+                            table_names: vec![table_name.clone()],
+                        };
+                        match execute_drop_table(stmt, catalog_guard.catalog_mut(), &mut ctx) {
+                            Ok(StatementResult::AffectedRows(n)) => {
+                                dropped += n;
+                                let _ = catalog_guard.persist();
+                                self.plan_cache.invalidate_all();
+                            }
+                            Ok(other) => result = Ok(other),
+                            Err(e) => {
+                                result = Err(e);
+                                break;
+                            }
+                        }
+                    }
+                }
                 if result.is_ok() {
-                    let _ = catalog_guard.persist();
-                    self.plan_cache.invalidate_all();
+                    result = Ok(StatementResult::AffectedRows(dropped));
                 }
                 drop(ctx);
-                drop(catalog_guard);
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
                 }
@@ -348,18 +695,16 @@ impl Database {
 
             Statement::TruncateTable(ref truncate_stmt) => {
                 let rels = {
-                    let catalog_guard = self.catalog.read();
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in &rels {
                     self.table_locks.lock_table(*rel, TableLockMode::AccessExclusive, client_id);
                 }
 
-                let catalog_guard = self.catalog.read();
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
@@ -370,10 +715,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result =
-                    execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx);
+                let result = execute_truncate_table(truncate_stmt.clone(), &visible_catalog, &mut ctx);
                 drop(ctx);
-                drop(catalog_guard);
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
                 }
@@ -381,8 +724,7 @@ impl Database {
             }
 
             Statement::Vacuum(ref vacuum_stmt) => {
-                let catalog_guard = self.catalog.read();
-                execute_vacuum(vacuum_stmt.clone(), catalog_guard.catalog())
+                execute_vacuum(vacuum_stmt.clone(), &visible_catalog)
             }
 
             Statement::Begin | Statement::Commit | Statement::Rollback => {
@@ -448,6 +790,13 @@ impl Database {
         })
     }
 
+}
+
+fn normalize_temp_lookup_name(table_name: &str) -> String {
+    table_name
+        .strip_prefix("pg_temp.")
+        .unwrap_or(table_name)
+        .to_ascii_lowercase()
 }
 
 fn collect_rels_from_expr(expr: &crate::backend::executor::Expr, rels: &mut std::collections::BTreeSet<RelFileLocator>) {
@@ -573,6 +922,7 @@ fn collect_rels_from_plan(plan: &crate::backend::executor::Plan, rels: &mut std:
 impl Database {
     fn finish_txn(
         &self,
+        client_id: ClientId,
         xid: TransactionId,
         result: Result<StatementResult, ExecError>,
     ) -> Result<StatementResult, ExecError> {
@@ -598,6 +948,7 @@ impl Database {
                 self.txns.write().commit(xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
+                self.apply_temp_on_commit(client_id)?;
                 self.txn_waiter.notify();
                 Ok(r)
             }
@@ -976,6 +1327,116 @@ mod tests {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn temp_tables_are_session_local_and_mask_permanent_tables() {
+        let base = temp_dir("temp_table_masking");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session_a = Session::new(1);
+        let mut session_b = Session::new(2);
+
+        db.execute(1, "create table items (id int4 not null)").unwrap();
+        db.execute(1, "insert into items (id) values (1)").unwrap();
+
+        session_a.execute(&db, "create temp table items (id int4 not null)").unwrap();
+        session_a.execute(&db, "insert into items (id) values (2)").unwrap();
+
+        match session_a.execute(&db, "select id from items").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match session_b.execute(&db, "select id from items").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        session_a.execute(&db, "drop table items").unwrap();
+        match session_a.execute(&db, "select id from items").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn temp_table_on_commit_actions_apply_at_commit() {
+        let base = temp_dir("temp_table_on_commit");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session.execute(&db, "create temp table keep_rows (id int4 not null)").unwrap();
+        session.execute(&db, "insert into keep_rows (id) values (1)").unwrap();
+        match session.execute(&db, "select count(*) from keep_rows").unwrap() {
+            StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        session.execute(&db, "create temp table delete_rows (id int4 not null) on commit delete rows").unwrap();
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, "insert into delete_rows (id) values (10)").unwrap();
+        session.execute(&db, "commit").unwrap();
+        match session.execute(&db, "select count(*) from delete_rows").unwrap() {
+            StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(0)]]),
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        session.execute(&db, "create temp table drop_rows (id int4 not null) on commit drop").unwrap();
+        session.execute(&db, "begin").unwrap();
+        session.execute(&db, "insert into drop_rows (id) values (11)").unwrap();
+        session.execute(&db, "commit").unwrap();
+        let err = session.execute(&db, "select count(*) from drop_rows").unwrap_err();
+        assert!(matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "drop_rows"));
+    }
+
+    #[test]
+    fn temp_create_table_as_select_works() {
+        let base = temp_dir("temp_ctas");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        db.execute(1, "create table source_items (id int4 not null, note text)").unwrap();
+        db.execute(1, "insert into source_items (id, note) values (1, 'a'), (2, 'b')").unwrap();
+
+        session
+            .execute(&db, "create temp table temp_items(tmp_id, tmp_note) as select id, note from source_items order by id")
+            .unwrap();
+
+        match session.execute(&db, "select tmp_id, tmp_note from temp_items order by tmp_id").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Int32(1), Value::Text("a".into())],
+                        vec![Value::Int32(2), Value::Text("b".into())],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn temp_tables_are_removed_on_client_cleanup() {
+        let base = temp_dir("temp_cleanup");
+        let db = Database::open(&base, 16).unwrap();
+
+        db.execute(1, "create temp table cleanup_me (id int4 not null)").unwrap();
+        db.execute(1, "insert into cleanup_me (id) values (1)").unwrap();
+        match db.execute(1, "select count(*) from cleanup_me").unwrap() {
+            StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        db.cleanup_client_temp_relations(1);
+        let err = db.execute(1, "select count(*) from cleanup_me").unwrap_err();
+        assert!(matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "cleanup_me"));
     }
 
     #[test]

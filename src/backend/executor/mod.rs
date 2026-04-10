@@ -528,6 +528,10 @@ pub fn execute_statement(
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::ShowTables => execute_show_tables(catalog),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
+        Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "create table handled by database/session layer",
+            actual: "CREATE TABLE AS".into(),
+        })),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
         Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog),

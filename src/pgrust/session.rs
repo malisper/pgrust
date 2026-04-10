@@ -4,12 +4,11 @@ use std::sync::Arc;
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_analyze, execute_create_table, execute_delete_with_waiter, execute_drop_table,
+    execute_analyze, execute_delete_with_waiter, execute_drop_table,
     execute_insert, execute_prepared_insert_row, execute_truncate_table, execute_update_with_waiter,
 };
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement};
 use crate::backend::parser::{PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update, ParseError};
-use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
@@ -119,6 +118,7 @@ impl Session {
                 db.txns.write().commit(txn.xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
+                db.apply_temp_on_commit(self.client_id)?;
                 db.txn_waiter.notify();
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -194,13 +194,13 @@ impl Session {
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::Analyze(ref analyze_stmt) => {
-                let catalog_guard = db.catalog.read();
-                execute_analyze(analyze_stmt.clone(), catalog_guard.catalog())
+                let visible_catalog = db.visible_catalog(client_id);
+                execute_analyze(analyze_stmt.clone(), &visible_catalog)
             }
             Statement::Vacuum(_) => Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM"))),
             Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let catalog_guard = db.catalog.read();
+                let visible_catalog = db.visible_catalog(client_id);
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
@@ -210,13 +210,11 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_readonly_statement(stmt, catalog_guard.catalog(), &mut ctx)
+                execute_readonly_statement(stmt, &visible_catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
-                let bound = {
-                    let catalog_guard = db.catalog.read();
-                    bind_insert(insert_stmt, catalog_guard.catalog())?
-                };
+                let visible_catalog = db.visible_catalog(client_id);
+                let bound = bind_insert(insert_stmt, &visible_catalog)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -236,10 +234,8 @@ impl Session {
                 execute_insert(bound, &mut ctx, xid, cid)
             }
             Statement::Update(ref update_stmt) => {
-                let bound = {
-                    let catalog_guard = db.catalog.read();
-                    bind_update(update_stmt, catalog_guard.catalog())?
-                };
+                let visible_catalog = db.visible_catalog(client_id);
+                let bound = bind_update(update_stmt, &visible_catalog)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -259,10 +255,8 @@ impl Session {
                 execute_update_with_waiter(bound, &mut ctx, xid, cid, Some((&db.txns, &db.txn_waiter)))
             }
             Statement::Delete(ref delete_stmt) => {
-                let bound = {
-                    let catalog_guard = db.catalog.read();
-                    bind_delete(delete_stmt, catalog_guard.catalog())?
-                };
+                let visible_catalog = db.visible_catalog(client_id);
+                let bound = bind_delete(delete_stmt, &visible_catalog)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -282,29 +276,18 @@ impl Session {
                 execute_delete_with_waiter(bound, &mut ctx, xid, Some((&db.txns, &db.txn_waiter)))
             }
             Statement::CreateTable(ref create_stmt) => {
-                let mut catalog_guard = db.catalog.write();
-                let result = execute_create_table(create_stmt.clone(), catalog_guard.catalog_mut());
-                if result.is_ok() {
-                    if let Some(entry) = catalog_guard.catalog().get(&create_stmt.table_name) {
-                        let rel = entry.rel;
-                        let _ = db.pool.with_storage_mut(|s| {
-                            use crate::backend::storage::smgr::StorageManager;
-                            let _ = s.smgr.open(rel);
-                            let _ = s.smgr.create(rel, ForkNumber::Main, false);
-                        });
-                    }
-                    let _ = catalog_guard.persist();
-                    db.plan_cache.invalidate_all();
-                }
-                result
+                db.execute_create_table_stmt(client_id, create_stmt)
+            }
+            Statement::CreateTableAs(ref create_stmt) => {
+                db.execute_create_table_as_stmt(client_id, create_stmt, Some(xid), cid)
             }
             Statement::DropTable(ref drop_stmt) => {
+                let visible_catalog = db.visible_catalog(client_id);
                 let rels = {
-                    let catalog_guard = db.catalog.read();
                     drop_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
@@ -314,7 +297,6 @@ impl Session {
                         txn.held_table_locks.push(rel);
                     }
                 }
-                let mut catalog_guard = db.catalog.write();
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
@@ -325,20 +307,36 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                let result = execute_drop_table(drop_stmt.clone(), catalog_guard.catalog_mut(), &mut ctx);
-                if result.is_ok() {
-                    let _ = catalog_guard.persist();
-                    db.plan_cache.invalidate_all();
+                let mut dropped = 0usize;
+                for table_name in &drop_stmt.table_names {
+                    if db.temp_entry(client_id, table_name).is_some() {
+                        db.drop_temp_relation(client_id, table_name)?;
+                        dropped += 1;
+                    } else {
+                        let mut catalog_guard = db.catalog.write();
+                        let stmt = crate::backend::parser::DropTableStatement {
+                            if_exists: drop_stmt.if_exists,
+                            table_names: vec![table_name.clone()],
+                        };
+                        match execute_drop_table(stmt, catalog_guard.catalog_mut(), &mut ctx)? {
+                            StatementResult::AffectedRows(n) => {
+                                dropped += n;
+                                let _ = catalog_guard.persist();
+                                db.plan_cache.invalidate_all();
+                            }
+                            other => return Ok(other),
+                        }
+                    }
                 }
-                result
+                Ok(StatementResult::AffectedRows(dropped))
             }
             Statement::TruncateTable(ref truncate_stmt) => {
+                let visible_catalog = db.visible_catalog(client_id);
                 let rels = {
-                    let catalog_guard = db.catalog.read();
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| catalog_guard.catalog().get(name).map(|e| e.rel))
+                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
@@ -348,7 +346,6 @@ impl Session {
                         txn.held_table_locks.push(rel);
                     }
                 }
-                let catalog_guard = db.catalog.read();
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
@@ -359,7 +356,7 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_truncate_table(truncate_stmt.clone(), catalog_guard.catalog(), &mut ctx)
+                execute_truncate_table(truncate_stmt.clone(), &visible_catalog, &mut ctx)
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => unreachable!("handled in Session::execute"),
         }
@@ -394,8 +391,8 @@ impl Session {
         columns: Option<&[String]>,
         num_params: usize,
     ) -> Result<PreparedInsert, ExecError> {
-        let catalog_guard = db.catalog.read();
-        Ok(bind_insert_prepared(table_name, columns, num_params, catalog_guard.catalog())?)
+        let visible_catalog = db.visible_catalog(self.client_id);
+        Ok(bind_insert_prepared(table_name, columns, num_params, &visible_catalog)?)
     }
 
     pub fn execute_prepared_insert(
@@ -459,9 +456,9 @@ impl Session {
         let cid = txn.next_command_id;
         txn.next_command_id = txn.next_command_id.saturating_add(1);
 
+        let visible_catalog = db.visible_catalog(self.client_id);
         let (rel, desc) = {
-            let catalog_guard = db.catalog.read();
-            let entry = catalog_guard.catalog().get(table_name).ok_or_else(|| {
+            let entry = visible_catalog.get(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
             })?;
             (entry.rel, entry.desc.clone())
@@ -576,6 +573,7 @@ impl Session {
                     db.txns.write().commit(txn.xid).map_err(|e| {
                         ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                     })?;
+                    db.apply_temp_on_commit(self.client_id)?;
                     db.txn_waiter.notify();
                     Ok(n)
                 }
