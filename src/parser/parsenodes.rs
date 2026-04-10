@@ -105,6 +105,8 @@ pub enum FromItem {
     FunctionCall {
         name: String,
         args: Vec<SqlExpr>,
+        alias: Option<String>,
+        column_aliases: Vec<String>,
     },
 }
 

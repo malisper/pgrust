@@ -249,12 +249,28 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::srf_from_item => {
             let mut name = None;
             let mut args = Vec::new();
+            let mut alias = None;
+            let mut column_aliases = Vec::new();
             for part in inner.into_inner() {
                 match part.as_rule() {
-                    Rule::identifier => name = Some(build_identifier(part)),
+                    Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::expr_list => {
                         for expr_pair in part.into_inner() {
                             args.push(build_expr(expr_pair)?);
+                        }
+                    }
+                    Rule::srf_alias => {
+                        for alias_part in part.into_inner() {
+                            match alias_part.as_rule() {
+                                Rule::identifier => alias = Some(build_identifier(alias_part)),
+                                Rule::ident_list => {
+                                    column_aliases = alias_part
+                                        .into_inner()
+                                        .map(build_identifier)
+                                        .collect();
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     _ => {}
@@ -263,6 +279,8 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             Ok(FromItem::FunctionCall {
                 name: name.ok_or(ParseError::UnexpectedEof)?,
                 args,
+                alias,
+                column_aliases,
             })
         }
         _ => Err(ParseError::UnexpectedToken {

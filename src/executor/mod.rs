@@ -339,7 +339,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::GenerateSeries { start, stop, step } => {
+        Plan::GenerateSeries { start, stop, step, output_name } => {
             Box::new(GenerateSeriesState {
                 start,
                 stop,
@@ -349,7 +349,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 step_val: 0,
                 initialized: false,
                 slot: TupleSlot::empty(1),
-                column_names: vec!["generate_series".into()],
+                column_names: vec![output_name],
                 stats: NodeExecStats::default(),
             })
         }
@@ -805,6 +805,62 @@ mod tests {
     #[test] fn generate_series_negative_step() { let base = temp_dir("gen_series_neg"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(5, 1, -1)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(5)], vec![Value::Int32(4)], vec![Value::Int32(3)], vec![Value::Int32(2)], vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_empty() { let base = temp_dir("gen_series_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 0)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, Vec::<Vec<Value>>::new()); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_with_where() { let base = temp_dir("gen_series_where"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 10) where generate_series > 8").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(9)], vec![Value::Int32(10)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn generate_series_column_alias() {
+        let base = temp_dir("gen_series_alias");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select val from generate_series(1, 3) as g(val)").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["val"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)], vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn generate_series_column_alias_in_where() {
+        let base = temp_dir("gen_series_alias_where");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select val from generate_series(1, 5) as g(val) where val > 3").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["val"]);
+                assert_eq!(rows, vec![vec![Value::Int32(4)], vec![Value::Int32(5)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn generate_series_table_alias_only() {
+        let base = temp_dir("gen_series_table_alias");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 3) as g").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["generate_series"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)], vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn generate_series_alias_without_as_keyword() {
+        let base = temp_dir("gen_series_no_as");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select i from generate_series(1, 3) g(i)").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["i"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)], vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+    #[test] fn generate_series_table_alias_qualifies_column() {
+        let base = temp_dir("gen_series_qualify");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        // Use the table alias to qualify the column reference: g.val
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select g.val from generate_series(1, 3) as g(val)").unwrap() {
+            StatementResult::Query { column_names, rows } => {
+                assert_eq!(column_names, vec!["val"]);
+                assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)], vec![Value::Int32(3)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
     #[test] fn regex_basic_match() { let base = temp_dir("regex_basic_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_basic_no_match() { let base = temp_dir("regex_basic_no_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ 'baz'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_start_anchor_match() { let base = temp_dir("regex_start_anchor_match"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foobar' ~ '^foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }

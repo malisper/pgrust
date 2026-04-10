@@ -231,6 +231,7 @@ pub enum Plan {
         start: Expr,
         stop: Expr,
         step: Expr,
+        output_name: String,
     },
 }
 
@@ -250,7 +251,7 @@ impl Plan {
                 names.extend(right.column_names());
                 names
             }
-            Plan::GenerateSeries { .. } => vec!["generate_series".into()],
+            Plan::GenerateSeries { output_name, .. } => vec![output_name.clone()],
         }
     }
 }
