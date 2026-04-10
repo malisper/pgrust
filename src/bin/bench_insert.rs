@@ -6,8 +6,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use pgrust::compact_string::CompactString;
-use pgrust::database::{Database, Session};
+use pgrust::pgrust::compact_string::CompactString;
+use pgrust::pgrust::database::{Database, Session};
 use pgrust::executor::Value;
 
 fn main() -> Result<(), String> {

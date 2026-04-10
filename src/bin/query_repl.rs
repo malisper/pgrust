@@ -6,16 +6,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
-use pgrust::access::heap::am::{heap_flush, heap_insert_mvcc};
-use pgrust::access::heap::mvcc::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::access::heap::tuple::{HeapTuple, TupleValue};
-use pgrust::catalog::{Catalog, DurableCatalog, column_desc};
+use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
+use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
+use pgrust::include::access::htup::{HeapTuple, TupleValue};
+use pgrust::backend::catalog::catalog::{Catalog, DurableCatalog, column_desc};
 use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value,
     execute_statement,
 };
 use pgrust::parser::{ParseError, SqlType, SqlTypeKind, Statement, parse_statement};
-use pgrust::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
+use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use pgrust::{BufferPool, SmgrStorageBackend};
 
 struct RawModeGuard {

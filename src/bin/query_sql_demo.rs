@@ -4,16 +4,16 @@
 //!   cargo run --bin query_sql_demo
 //!   cargo run --bin query_sql_demo -- "select name, note from people where id > 1"
 
-use pgrust::access::heap::am::{heap_flush, heap_insert_mvcc};
-use pgrust::access::heap::mvcc::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::access::heap::tuple::{HeapTuple, TupleValue};
-use pgrust::catalog::column_desc;
+use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
+use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
+use pgrust::include::access::htup::{HeapTuple, TupleValue};
+use pgrust::backend::catalog::catalog::column_desc;
 use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value,
     execute_sql,
 };
 use pgrust::parser::{Catalog, CatalogEntry, SqlType, SqlTypeKind};
-use pgrust::storage::smgr::MdStorageManager;
+use pgrust::backend::storage::smgr::MdStorageManager;
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
 use std::path::PathBuf;

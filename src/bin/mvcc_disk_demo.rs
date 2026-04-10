@@ -12,16 +12,16 @@
 //!   cargo run --bin mvcc_disk_demo
 //!   cargo run --bin mvcc_disk_demo -- --show-file-state
 
-use pgrust::access::heap::am::{
+use pgrust::backend::access::heap::heapam::{
     heap_delete, heap_flush, heap_insert_mvcc, heap_scan_begin_visible, heap_scan_next_visible,
     heap_update,
 };
-use pgrust::access::heap::mvcc::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
-use pgrust::access::heap::tuple::{AttributeAlign, AttributeDesc, HeapTuple, TupleValue};
-use pgrust::storage::page::{
+use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
+use pgrust::include::access::htup::{AttributeAlign, AttributeDesc, HeapTuple, TupleValue};
+use pgrust::backend::storage::page::bufpage::{
     ItemIdFlags, page_get_item_id, page_get_max_offset_number, page_header,
 };
-use pgrust::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use pgrust::{BufferPool, SmgrStorageBackend};
 use std::collections::BTreeSet;
 use std::fs;
@@ -200,7 +200,7 @@ fn inspect_relation(base_dir: &Path, desc: &[AttributeDesc], title: &str, show_f
                 continue;
             }
 
-            let tuple = pgrust::access::heap::tuple::heap_page_get_tuple(&page, off).unwrap();
+            let tuple = pgrust::include::access::htup::heap_page_get_tuple(&page, off).unwrap();
             println!(
                 "      tuple xmin={} xmax={} ctid=({},{}) hoff={} natts={}",
                 tuple.header.xmin,

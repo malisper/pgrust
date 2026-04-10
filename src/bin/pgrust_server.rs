@@ -5,8 +5,8 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use std::path::PathBuf;
 
-use pgrust::database::Database;
-use pgrust::server::serve;
+use pgrust::pgrust::database::Database;
+use pgrust::pgrust::server::serve;
 
 fn raise_fd_limit() {
     unsafe {

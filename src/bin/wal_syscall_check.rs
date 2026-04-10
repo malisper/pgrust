@@ -16,7 +16,7 @@
 //!
 //! Run with:  cargo run --bin wal_syscall_check
 
-use pgrust::database::Database;
+use pgrust::pgrust::database::Database;
 use pgrust::ClientId;
 
 const CLIENT: ClientId = 1;
