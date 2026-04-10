@@ -258,6 +258,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Int64 => (8, AttributeAlign::Double),
         ScalarType::Float32 => (4, AttributeAlign::Int),
         ScalarType::Float64 => (8, AttributeAlign::Double),
+        ScalarType::Numeric => (-1, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Bool => (1, AttributeAlign::Char),
         ScalarType::Array(_) => (-1, AttributeAlign::Int),
@@ -285,6 +286,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Int8 => ScalarType::Int64,
         SqlTypeKind::Float4 => ScalarType::Float32,
         SqlTypeKind::Float8 => ScalarType::Float64,
+        SqlTypeKind::Numeric => ScalarType::Numeric,
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
             ScalarType::Text
         }
@@ -299,6 +301,7 @@ fn encode_sql_type(sql_type: SqlType) -> String {
         SqlTypeKind::Int8 => "int8",
         SqlTypeKind::Float4 => "float4",
         SqlTypeKind::Float8 => "float8",
+        SqlTypeKind::Numeric => "numeric",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
@@ -321,6 +324,7 @@ fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
         "int8" => SqlType { kind: SqlTypeKind::Int8, typmod, is_array: false },
         "float4" => SqlType { kind: SqlTypeKind::Float4, typmod, is_array: false },
         "float8" => SqlType { kind: SqlTypeKind::Float8, typmod, is_array: false },
+        "numeric" => SqlType { kind: SqlTypeKind::Numeric, typmod, is_array: false },
         "text" => SqlType { kind: SqlTypeKind::Text, typmod, is_array: false },
         "bool" => SqlType { kind: SqlTypeKind::Bool, typmod, is_array: false },
         "timestamp" => SqlType { kind: SqlTypeKind::Timestamp, typmod, is_array: false },
@@ -469,6 +473,37 @@ mod tests {
         let reopened = DurableCatalog::load(&base).unwrap();
         let column = &reopened.catalog().get("people").unwrap().desc.columns[0];
         assert_eq!(column.sql_type, SqlType::with_char_len(SqlTypeKind::Varchar, 5));
+    }
+
+    #[test]
+    fn durable_catalog_roundtrips_numeric_types() {
+        let base = temp_dir("numeric_roundtrip");
+        let mut store = DurableCatalog::load(&base).unwrap();
+        store
+            .catalog_mut()
+            .create_table(
+                "metrics",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("amount", SqlType::new(SqlTypeKind::Numeric), false),
+                        column_desc(
+                            "samples",
+                            SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)),
+                            true,
+                        ),
+                    ],
+                },
+            )
+            .unwrap();
+        store.persist().unwrap();
+
+        let reopened = DurableCatalog::load(&base).unwrap();
+        let entry = reopened.catalog().get("metrics").unwrap();
+        assert_eq!(entry.desc.columns[0].sql_type, SqlType::new(SqlTypeKind::Numeric));
+        assert_eq!(
+            entry.desc.columns[1].sql_type,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Numeric))
+        );
     }
 
     #[test]

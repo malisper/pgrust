@@ -82,9 +82,16 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                     }
                 },
                 SqlTypeKind::Text
+                | SqlTypeKind::Numeric
                 | SqlTypeKind::Timestamp
                 | SqlTypeKind::Char
-                | SqlTypeKind::Varchar => Value::Text(value.into()),
+                | SqlTypeKind::Varchar => {
+                    if matches!(element_type.kind, SqlTypeKind::Numeric) {
+                        Value::Numeric(value.into())
+                    } else {
+                        Value::Text(value.into())
+                    }
+                }
             }
         };
         items.push(value);

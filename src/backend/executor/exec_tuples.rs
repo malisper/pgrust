@@ -200,6 +200,10 @@ impl CompiledTupleDecoder {
                                     bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                                 ])),
                                 ScalarType::Bool => Value::Bool(bytes[0] != 0),
+                                ScalarType::Numeric => {
+                                    values.push(Value::Null);
+                                    continue;
+                                }
                                 ScalarType::Text => {
                                     values.push(Value::Null);
                                     continue;
@@ -344,6 +348,9 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
             }
             Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
         }
+        ScalarType::Numeric => Ok(Value::Numeric(crate::pgrust::compact_string::CompactString::new(
+            unsafe { std::str::from_utf8_unchecked(bytes) },
+        ))),
         ScalarType::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {
