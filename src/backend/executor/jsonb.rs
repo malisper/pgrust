@@ -103,7 +103,9 @@ impl JsonbValue {
     }
 
     pub(crate) fn render(&self) -> String {
-        self.to_serde().to_string()
+        let mut out = String::new();
+        render_jsonb_value(&mut out, self);
+        out
     }
 }
 
@@ -639,11 +641,7 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
             while matches!(digits.last(), Some(0)) {
                 digits.pop();
             }
-            let weight = if digits.is_empty() {
-                0
-            } else {
-                weight + (decimal_to_pg_digits(coeff, *scale).1.len() as i16 - digits.len() as i16)
-            };
+            let weight = if digits.is_empty() { 0 } else { weight };
             let can_be_short = *scale <= NUMERIC_SHORT_DSCALE_MAX as u32
                 && weight >= NUMERIC_SHORT_WEIGHT_MIN
                 && weight <= NUMERIC_SHORT_WEIGHT_MAX;
@@ -734,11 +732,20 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
         }
         coeff = coeff * BigInt::from(NBASE) + BigInt::from(digit);
     }
-    let group_scale = usize::saturating_sub(ndigits, (weight + 1).max(0) as usize) * DEC_DIGITS;
-    let coeff = if dscale as usize >= group_scale {
-        coeff * pow10((dscale as usize) - group_scale)
+    let integer_group_gap = if (weight + 1) > ndigits as i16 {
+        ((weight + 1) - ndigits as i16) as usize
     } else {
-        let divisor = pow10(group_scale - dscale as usize);
+        0
+    };
+    if integer_group_gap > 0 {
+        coeff *= pow10(integer_group_gap * DEC_DIGITS);
+    }
+    let fractional_digits = usize::saturating_sub(ndigits, (weight + 1).max(0) as usize)
+        * DEC_DIGITS;
+    let coeff = if dscale as usize >= fractional_digits {
+        coeff * pow10((dscale as usize) - fractional_digits)
+    } else {
+        let divisor = pow10(fractional_digits - dscale as usize);
         if (&coeff % &divisor) != BigInt::zero() {
             return Err(corrupt_jsonb());
         }
@@ -748,7 +755,8 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
     Ok(NumericValue::Finite {
         coeff: if sign == NUMERIC_NEG { -coeff } else { coeff },
         scale: dscale,
-    })
+    }
+    .normalize())
 }
 
 fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i16) {
@@ -806,6 +814,56 @@ fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i16) {
         whole_groups as i16 - 1
     };
     (if negative { NUMERIC_NEG } else { 0 }, pg_digits, weight)
+}
+
+fn render_jsonb_value(out: &mut String, value: &JsonbValue) {
+    match value {
+        JsonbValue::Null => out.push_str("null"),
+        JsonbValue::Bool(true) => out.push_str("true"),
+        JsonbValue::Bool(false) => out.push_str("false"),
+        JsonbValue::Numeric(numeric) => out.push_str(&numeric.render()),
+        JsonbValue::String(text) => render_jsonb_string(out, text),
+        JsonbValue::Array(items) => {
+            out.push('[');
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                render_jsonb_value(out, item);
+            }
+            out.push(']');
+        }
+        JsonbValue::Object(items) => {
+            out.push('{');
+            for (idx, (key, value)) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                render_jsonb_string(out, key);
+                out.push_str(": ");
+                render_jsonb_value(out, value);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn render_jsonb_string(out: &mut String, text: &str) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 fn canonicalize_object_pairs(items: Vec<(String, JsonbValue)>) -> Vec<(String, JsonbValue)> {
@@ -997,5 +1055,29 @@ mod tests {
         let encoded = encode_jsonb(&value);
         let decoded = decode_jsonb(&encoded).unwrap();
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn numeric_payload_handles_large_exponents() {
+        let value = JsonbValue::Numeric(NumericValue::from("1e100"));
+        let encoded = encode_jsonb(&value);
+        let decoded = decode_jsonb(&encoded).unwrap();
+        assert_eq!(decoded, value);
+        assert_eq!(decoded.render(), "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn render_uses_postgres_jsonb_spacing() {
+        let value = JsonbValue::Object(vec![
+            ("a".into(), JsonbValue::Numeric(NumericValue::from("1"))),
+            (
+                "b".into(),
+                JsonbValue::Array(vec![
+                    JsonbValue::Numeric(NumericValue::from("2")),
+                    JsonbValue::String("x".into()),
+                ]),
+            ),
+        ]);
+        assert_eq!(value.render(), "{\"a\": 1, \"b\": [2, \"x\"]}");
     }
 }
