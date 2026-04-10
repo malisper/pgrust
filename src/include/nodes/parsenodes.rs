@@ -9,6 +9,7 @@ pub enum ParseError {
         actual: String,
     },
     InvalidInteger(String),
+    InvalidNumeric(String),
     UnknownTable(String),
     UnknownColumn(String),
     EmptySelectList,
@@ -31,6 +32,7 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedEof => write!(f, "unexpected end of input"),
             ParseError::UnexpectedToken { actual, .. } => write!(f, "{actual}"),
             ParseError::InvalidInteger(value) => write!(f, "invalid integer: {value}"),
+            ParseError::InvalidNumeric(value) => write!(f, "invalid numeric: {value}"),
             ParseError::UnknownTable(name) => write!(f, "unknown table: {name}"),
             ParseError::UnknownColumn(name) => write!(f, "unknown column: {name}"),
             ParseError::EmptySelectList => write!(f, "SELECT requires a target list or FROM clause"),
@@ -174,7 +176,11 @@ pub struct ColumnDef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlTypeKind {
+    Int2,
     Int4,
+    Int8,
+    Float4,
+    Float8,
     Text,
     Bool,
     Timestamp,
@@ -253,20 +259,33 @@ pub struct Assignment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubqueryComparisonOp {
     Eq,
+    NotEq,
     Lt,
+    LtEq,
     Gt,
+    GtEq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlExpr {
     Column(String),
     Const(Value),
+    IntegerLiteral(String),
+    NumericLiteral(String),
     Add(Box<SqlExpr>, Box<SqlExpr>),
+    Sub(Box<SqlExpr>, Box<SqlExpr>),
+    Mul(Box<SqlExpr>, Box<SqlExpr>),
+    Div(Box<SqlExpr>, Box<SqlExpr>),
+    Mod(Box<SqlExpr>, Box<SqlExpr>),
+    UnaryPlus(Box<SqlExpr>),
     Negate(Box<SqlExpr>),
     Cast(Box<SqlExpr>, SqlType),
     Eq(Box<SqlExpr>, Box<SqlExpr>),
+    NotEq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),
+    LtEq(Box<SqlExpr>, Box<SqlExpr>),
     Gt(Box<SqlExpr>, Box<SqlExpr>),
+    GtEq(Box<SqlExpr>, Box<SqlExpr>),
     RegexMatch(Box<SqlExpr>, Box<SqlExpr>),
     And(Box<SqlExpr>, Box<SqlExpr>),
     Or(Box<SqlExpr>, Box<SqlExpr>),

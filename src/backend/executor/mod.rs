@@ -70,6 +70,7 @@ pub enum ExecError {
     },
     MissingRequiredColumn(String),
     InvalidRegex(String),
+    DivisionByZero(&'static str),
 }
 
 impl From<HeapError> for ExecError {
@@ -99,11 +100,17 @@ impl From<MvccError> for ExecError {
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
+pub(crate) enum NumericAccum {
+    Int(i64),
+    Float(f64),
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum AccumState {
     Count { count: i64 },
     CountDistinct { seen: HashSet<Value> },
-    Sum { sum: Option<i64> },
-    Avg { sum: Option<i64>, count: i64 },
+    Sum { sum: Option<NumericAccum> },
+    Avg { sum: Option<NumericAccum>, count: i64 },
     Min { min: Option<Value> },
     Max { max: Option<Value> },
 }
@@ -143,16 +150,83 @@ impl AccumState {
             },
             (AggFunc::Sum, _, _) => |state, value| {
                 if let AccumState::Sum { sum } = state {
-                    if let Value::Int32(v) = value {
-                        *sum = Some(sum.unwrap_or(0) + *v as i64);
+                    match value {
+                        Value::Int16(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + *v as i64),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v as f64),
+                                None => NumericAccum::Int(*v as i64),
+                            };
+                            *sum = Some(next);
+                        }
+                        Value::Int32(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + *v as i64),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v as f64),
+                                None => NumericAccum::Int(*v as i64),
+                            };
+                            *sum = Some(next);
+                        }
+                        Value::Int64(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + *v),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v as f64),
+                                None => NumericAccum::Int(*v),
+                            };
+                            *sum = Some(next);
+                        }
+                        Value::Float64(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
+                                None => NumericAccum::Float(*v),
+                            };
+                            *sum = Some(next);
+                        }
+                        _ => {}
                     }
                 }
             },
             (AggFunc::Avg, _, _) => |state, value| {
                 if let AccumState::Avg { sum, count } = state {
-                    if let Value::Int32(v) = value {
-                        *sum = Some(sum.unwrap_or(0) + *v as i64);
-                        *count += 1;
+                    match value {
+                        Value::Int16(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + *v as i64),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v as f64),
+                                None => NumericAccum::Int(*v as i64),
+                            };
+                            *sum = Some(next);
+                            *count += 1;
+                        }
+                        Value::Int32(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + *v as i64),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v as f64),
+                                None => NumericAccum::Int(*v as i64),
+                            };
+                            *sum = Some(next);
+                            *count += 1;
+                        }
+                        Value::Int64(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Int(cur + *v),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v as f64),
+                                None => NumericAccum::Int(*v),
+                            };
+                            *sum = Some(next);
+                            *count += 1;
+                        }
+                        Value::Float64(v) => {
+                            let next = match sum.take() {
+                                Some(NumericAccum::Int(cur)) => NumericAccum::Float(cur as f64 + *v),
+                                Some(NumericAccum::Float(cur)) => NumericAccum::Float(cur + *v),
+                                None => NumericAccum::Float(*v),
+                            };
+                            *sum = Some(next);
+                            *count += 1;
+                        }
+                        _ => {}
                     }
                 }
             },
@@ -193,10 +267,11 @@ impl AccumState {
 
     pub(crate) fn finalize(&self) -> Value {
         match self {
-            AccumState::Count { count } => Value::Int32(*count as i32),
-            AccumState::CountDistinct { seen } => Value::Int32(seen.len() as i32),
+            AccumState::Count { count } => Value::Int64(*count),
+            AccumState::CountDistinct { seen } => Value::Int64(seen.len() as i64),
             AccumState::Sum { sum } => match sum {
-                Some(v) => Value::Int32(*v as i32),
+                Some(NumericAccum::Int(v)) => Value::Int64(*v),
+                Some(NumericAccum::Float(v)) => Value::Float64(*v),
                 None => Value::Null,
             },
             AccumState::Avg { sum, count } => {
@@ -204,7 +279,8 @@ impl AccumState {
                     Value::Null
                 } else {
                     match sum {
-                        Some(v) => Value::Int32((*v / *count) as i32),
+                        Some(NumericAccum::Int(v)) => Value::Int64(*v / *count),
+                        Some(NumericAccum::Float(v)) => Value::Float64(*v / *count as f64),
                         None => Value::Null,
                     }
                 }
@@ -871,20 +947,20 @@ mod tests {
     #[test] fn inner_join_returns_matching_rows() { let base = temp_dir("join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let pool = test_pool_with_pets(&base); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None), tuple(3, "carol", Some("storage"))] { let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap(); heap_flush(&*pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&*pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&*pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people join pets on people.id = pets.owner_id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("carol".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn cross_join_returns_cartesian_product() { let base = temp_dir("cross_join_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let pool = test_pool_with_pets(&base); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap(); heap_flush(&*pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 2), pet_tuple(11, "Mocha", 3)] { let tid = heap_insert_mvcc(&*pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&*pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Text("Kitchen".into())], vec![Value::Text("alice".into()), Value::Text("Mocha".into())], vec![Value::Text("bob".into()), Value::Text("Kitchen".into())], vec![Value::Text("bob".into()), Value::Text("Mocha".into())]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn cross_join_where_clause_can_use_addition() { let base = temp_dir("cross_join_addition_sql"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let pool = test_pool_with_pets(&base); let xid = txns.begin(); for row in [tuple(1, "alice", Some("alpha")), tuple(2, "bob", None)] { let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap(); heap_flush(&*pool, 1, rel(), tid.block_number).unwrap(); } for row in [pet_tuple(10, "Kitchen", 1), pet_tuple(11, "Mocha", 2)] { let tid = heap_insert_mvcc(&*pool, 1, pets_rel(), xid, &row).unwrap(); heap_flush(&*pool, 1, pets_rel(), tid.block_number).unwrap(); } txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select people.name, pets.name from people, pets where pets.owner_id + 1 = people.id", catalog_with_pets()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("bob".into()), Value::Text("Kitchen".into())]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn count_star_without_group_by() { let base = temp_dir("count_star"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["count"]); assert_eq!(rows, vec![vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn count_star_on_empty_table() { let base = temp_dir("count_star_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(0)]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn group_by_with_count() { let base = temp_dir("group_by_count"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by note").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["note", "count"]); assert_eq!(rows, vec![vec![Value::Text("a".into()), Value::Int32(2)], vec![Value::Text("b".into()), Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn sum_avg_min_max_aggregates() { let base = temp_dir("sum_avg_min_max"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', 'b'), (30, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select sum(id), avg(id), min(id), max(id) from people").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["sum", "avg", "min", "max"]); assert_eq!(rows, vec![vec![Value::Int32(60), Value::Int32(20), Value::Int32(10), Value::Int32(30)]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn having_filters_groups() { let base = temp_dir("having_filter"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note having count(*) > 1").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("a".into()), Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn count_expr_skips_nulls() { let base = temp_dir("count_expr_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_star_without_group_by() { let base = temp_dir("count_star"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["count"]); assert_eq!(rows, vec![vec![Value::Int64(3)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_star_on_empty_table() { let base = temp_dir("count_star_empty"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int64(0)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn group_by_with_count() { let base = temp_dir("group_by_count"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by note").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["note", "count"]); assert_eq!(rows, vec![vec![Value::Text("a".into()), Value::Int64(2)], vec![Value::Text("b".into()), Value::Int64(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn sum_avg_min_max_aggregates() { let base = temp_dir("sum_avg_min_max"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', 'b'), (30, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select sum(id), avg(id), min(id), max(id) from people").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["sum", "avg", "min", "max"]); assert_eq!(rows, vec![vec![Value::Int64(60), Value::Int64(20), Value::Int32(10), Value::Int32(30)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn having_filters_groups() { let base = temp_dir("having_filter"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note having count(*) > 1").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("a".into()), Value::Int64(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_expr_skips_nulls() { let base = temp_dir("count_expr_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int64(2)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn sum_of_all_nulls_returns_null() { let base = temp_dir("sum_all_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select min(note), max(note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Null, Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn null_group_by_keys_are_grouped_together() { let base = temp_dir("null_group_keys"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', 'a'), (3, 'carol', null), (4, 'dave', 'a')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by note").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows.len(), 2); assert_eq!(rows[0], vec![Value::Text("a".into()), Value::Int32(2)]); assert_eq!(rows[1], vec![Value::Null, Value::Int32(2)]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn sum_and_avg_skip_nulls() { let base = temp_dir("sum_avg_skip_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*), count(note), sum(id), avg(id), min(id), max(id) from people").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["count", "count", "sum", "avg", "min", "max"]); assert_eq!(rows, vec![vec![Value::Int32(3), Value::Int32(2), Value::Int32(60), Value::Int32(20), Value::Int32(10), Value::Int32(30)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn null_group_by_keys_are_grouped_together() { let base = temp_dir("null_group_keys"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', 'a'), (3, 'carol', null), (4, 'dave', 'a')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by note").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows.len(), 2); assert_eq!(rows[0], vec![Value::Text("a".into()), Value::Int64(2)]); assert_eq!(rows[1], vec![Value::Null, Value::Int64(2)]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn sum_and_avg_skip_nulls() { let base = temp_dir("sum_avg_skip_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(*), count(note), sum(id), avg(id), min(id), max(id) from people").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["count", "count", "sum", "avg", "min", "max"]); assert_eq!(rows, vec![vec![Value::Int64(3), Value::Int64(2), Value::Int64(60), Value::Int64(20), Value::Int32(10), Value::Int32(30)]]); } other => panic!("expected query result, got {:?}", other), } }
 
     // regex (~) operator tests
-    #[test] fn count_distinct_counts_unique_values() { let base = temp_dir("count_distinct"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b'), (4, 'dave', 'b'), (5, 'eve', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(3)]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn count_distinct_skips_nulls() { let base = temp_dir("count_distinct_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'a'), (4, 'dave', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn count_distinct_with_group_by() { let base = temp_dir("count_distinct_group"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'alice', 'x'), (3, 'alice', 'y'), (4, 'bob', 'x'), (5, 'bob', 'x')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, count(distinct note) from people group by name order by name").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Int32(2)], vec![Value::Text("bob".into()), Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_distinct_counts_unique_values() { let base = temp_dir("count_distinct"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'a'), (3, 'carol', 'b'), (4, 'dave', 'b'), (5, 'eve', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int64(3)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_distinct_skips_nulls() { let base = temp_dir("count_distinct_nulls"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'a'), (4, 'dave', null)").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select count(distinct note) from people").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int64(1)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn count_distinct_with_group_by() { let base = temp_dir("count_distinct_group"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'alice', 'x'), (3, 'alice', 'y'), (4, 'bob', 'x'), (5, 'bob', 'x')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, count(distinct note) from people group by name order by name").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into()), Value::Int64(2)], vec![Value::Text("bob".into()), Value::Int64(1)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_basic() { let base = temp_dir("gen_series_basic"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(1, 5)").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["generate_series"]); assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(2)], vec![Value::Int32(3)], vec![Value::Int32(4)], vec![Value::Int32(5)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_with_step() { let base = temp_dir("gen_series_step"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(0, 10, 3)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(0)], vec![Value::Int32(3)], vec![Value::Int32(6)], vec![Value::Int32(9)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn generate_series_negative_step() { let base = temp_dir("gen_series_neg"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from generate_series(5, 1, -1)").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Int32(5)], vec![Value::Int32(4)], vec![Value::Int32(3)], vec![Value::Int32(2)], vec![Value::Int32(1)]]); } other => panic!("expected query result, got {:?}", other), } }
@@ -893,7 +969,175 @@ mod tests {
     #[test] fn select_array_literal_round_trips() { let base = temp_dir("array_literal_round_trip"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a', 'b']::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())])]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn any_array_truth_table_and_overlap_work() { let base = temp_dir("array_any_overlap"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'b' = any(ARRAY['a', 'b']::varchar[]), 'z' = any(ARRAY['a', null]::varchar[]), ARRAY['a']::varchar[] && ARRAY['b', 'a']::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Null, Value::Bool(true)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn unnest_single_and_multi_arg_work() { let base = temp_dir("unnest_multi"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select * from unnest(ARRAY[1, 2], ARRAY['x']::varchar[]) as u(a, b)").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["a", "b"]); assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("x".into())], vec![Value::Int32(2), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn record_shaped_array_query_runs() { let base = temp_dir("record_arrays"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql_with_catalog(&base, &txns, xid, "insert into orders (id, company_id, year, tags, category_tags, size_tags) values (1, 'acme', '2024', ARRAY['c1', 'c2']::varchar[], ARRAY['dry', 'dry']::varchar[], ARRAY['large', 'medium']::varchar[]), (2, 'acme', '2024', ARRAY['c3']::varchar[], ARRAY['dry']::varchar[], ARRAY['large']::varchar[]), (3, 'beta', '2024', ARRAY['c4']::varchar[], ARRAY['dry']::varchar[], ARRAY['medium']::varchar[])", records_catalog()).unwrap(); txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select orders.company_id, count(distinct orders.id) as records_filtered, sum((select count(*) from unnest(orders.tags, orders.category_tags, orders.size_tags) as c(num, type_cat, size_cat) where (c.size_cat)::text = any(ARRAY['large']::varchar[]))) as containers_filtered from orders where orders.year = '2024' and orders.size_tags && ARRAY['large']::varchar[] group by orders.company_id order by orders.company_id", records_catalog()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("acme".into()), Value::Int32(2), Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn record_shaped_array_query_runs() { let base = temp_dir("record_arrays"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql_with_catalog(&base, &txns, xid, "insert into orders (id, company_id, year, tags, category_tags, size_tags) values (1, 'acme', '2024', ARRAY['c1', 'c2']::varchar[], ARRAY['dry', 'dry']::varchar[], ARRAY['large', 'medium']::varchar[]), (2, 'acme', '2024', ARRAY['c3']::varchar[], ARRAY['dry']::varchar[], ARRAY['large']::varchar[]), (3, 'beta', '2024', ARRAY['c4']::varchar[], ARRAY['dry']::varchar[], ARRAY['medium']::varchar[])", records_catalog()).unwrap(); txns.commit(xid).unwrap(); match run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "select orders.company_id, count(distinct orders.id) as records_filtered, sum((select count(*) from unnest(orders.tags, orders.category_tags, orders.size_tags) as c(num, type_cat, size_cat) where (c.size_cat)::text = any(ARRAY['large']::varchar[]))) as containers_filtered from orders where orders.year = '2024' and orders.size_tags && ARRAY['large']::varchar[] group by orders.company_id order by orders.company_id", records_catalog()).unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("acme".into()), Value::Int64(2), Value::Int64(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+
+    #[test]
+    fn casts_support_int2_int8_float4_and_float8() {
+        let base = temp_dir("extended_numeric_casts");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '7'::int2, '9000000000'::int8, '1.5'::real, '2.5'::double precision",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int16(7),
+                        Value::Int64(9_000_000_000),
+                        Value::Float64(1.5),
+                        Value::Float64(2.5),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extended_numeric_columns_round_trip_through_storage() {
+        let base = temp_dir("extended_numeric_storage");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let mut catalog = Catalog::default();
+        catalog.insert(
+            "metrics",
+            CatalogEntry {
+                rel: crate::RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15004,
+                },
+                desc: RelationDesc {
+                    columns: vec![
+                        crate::backend::catalog::catalog::column_desc(
+                            "a",
+                            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int2),
+                            true,
+                        ),
+                        crate::backend::catalog::catalog::column_desc(
+                            "b",
+                            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int8),
+                            true,
+                        ),
+                        crate::backend::catalog::catalog::column_desc(
+                            "c",
+                            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Float4),
+                            true,
+                        ),
+                        crate::backend::catalog::catalog::column_desc(
+                            "d",
+                            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Float8),
+                            true,
+                        ),
+                    ],
+                },
+            },
+        );
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "insert into metrics (a, b, c, d) values ('7'::int2, '9000000000'::int8, '1.5'::real, '2.5'::double precision)",
+            catalog.clone(),
+        )
+        .unwrap();
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select a, b, c, d from metrics",
+            catalog,
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int16(7),
+                        Value::Int64(9_000_000_000),
+                        Value::Float64(1.5),
+                        Value::Float64(2.5),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn arithmetic_operators_work_for_extended_numeric_types() {
+        let base = temp_dir("extended_numeric_operators");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 5 - 2, 3 * 4, 9 / 2, 9 % 4, +1.5, 2.5 * 2",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int32(3),
+                        Value::Int32(12),
+                        Value::Int32(4),
+                        Value::Int32(1),
+                        Value::Float64(1.5),
+                        Value::Float64(5.0),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn comparison_operators_work_for_extended_numeric_types() {
+        let base = temp_dir("extended_numeric_comparisons");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 1 <= 2, 2 >= 2, 3 != 4, 3 <> 3, 1.5 <= 1.5, 2.5 >= 3.5",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scientific_notation_literal_binds_as_float_value() {
+        let base = temp_dir("scientific_notation_literal");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1e2, 2.5e1").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Float64(100.0), Value::Float64(25.0)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
     #[test] fn all_array_semantics_match_empty_false_and_null_cases() { let base = temp_dir("all_array_semantics"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 < all(ARRAY[2, 3]), 1 < all(ARRAY[]::int4[]), 3 < all(ARRAY[2, null]::int4[]), 1 < all(ARRAY[2, null]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn any_array_empty_and_null_array_cases() { let base = temp_dir("any_array_empty_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 1 = any(ARRAY[]::int4[]), 1 = any((null)::int4[]), (null)::int4 = any(ARRAY[1]::int4[])").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Null, Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn array_overlap_false_and_null_cases() { let base = temp_dir("array_overlap_false_null"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a']::varchar[] && ARRAY['b']::varchar[], ARRAY['a', null]::varchar[] && ARRAY['b', null]::varchar[], ARRAY['a']::varchar[] && (null)::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), } }
@@ -1143,7 +1387,7 @@ mod tests {
     #[test] fn ungrouped_column_is_rejected() { let base = temp_dir("ungrouped_column"); let txns = TransactionManager::new_durable(&base).unwrap(); let result = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name, count(*) from people"); assert!(result.is_err()); }
     #[test] fn aggregate_in_where_is_rejected() { let base = temp_dir("agg_in_where"); let txns = TransactionManager::new_durable(&base).unwrap(); let result = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name from people where count(*) > 1"); assert!(result.is_err()); }
     #[test] fn explain_shows_aggregate_node() { let base = temp_dir("explain_agg"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "explain select note, count(*) from people group by note").unwrap() { StatementResult::Query { rows, .. } => { let rendered = rows.into_iter().map(|row| match &row[0] { Value::Text(text) => text.clone(), other => panic!("expected text, got {:?}", other), }).collect::<Vec<_>>(); assert!(rendered.iter().any(|line| line.contains("Aggregate"))); assert!(rendered.iter().any(|line| line.contains("Seq Scan"))); } other => panic!("expected query result, got {:?}", other), } }
-    #[test] fn group_by_with_order_by_and_limit() { let base = temp_dir("group_by_order_limit"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y'), (3, 'carol', 'x'), (4, 'dave', 'y'), (5, 'eve', 'z')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by count(*) desc limit 2").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("x".into()), Value::Int32(2)], vec![Value::Text("y".into()), Value::Int32(2)]]); } other => panic!("expected query result, got {:?}", other), } }
+    #[test] fn group_by_with_order_by_and_limit() { let base = temp_dir("group_by_order_limit"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'x'), (2, 'bob', 'y'), (3, 'carol', 'x'), (4, 'dave', 'y'), (5, 'eve', 'z')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select note, count(*) from people group by note order by count(*) desc limit 2").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("x".into()), Value::Int64(2)], vec![Value::Text("y".into()), Value::Int64(2)]]); } other => panic!("expected query result, got {:?}", other), } }
     #[test] fn random_returns_float_in_range() { let base = temp_dir("random_func"); let txns = TransactionManager::new_durable(&base).unwrap(); for _ in 0..10 { match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select random()").unwrap() { StatementResult::Query { column_names, rows, .. } => { assert_eq!(column_names, vec!["random".to_string()]); assert_eq!(rows.len(), 1); match &rows[0][0] { Value::Float64(v) => assert!(*v >= 0.0 && *v < 1.0, "random() must be in [0,1), got {v}"), other => panic!("expected Float64, got {:?}", other), } } other => panic!("expected query result, got {:?}", other), } } }
 
     #[test]
@@ -1239,9 +1483,9 @@ mod tests {
             )
             .unwrap(),
             vec![
-                vec![Value::Text("alice".into()), Value::Int32(2)],
-                vec![Value::Text("bob".into()), Value::Int32(1)],
-                vec![Value::Text("carol".into()), Value::Int32(0)],
+                vec![Value::Text("alice".into()), Value::Int64(2)],
+                vec![Value::Text("bob".into()), Value::Int64(1)],
+                vec![Value::Text("carol".into()), Value::Int64(0)],
             ],
         );
     }
@@ -1426,8 +1670,8 @@ mod tests {
             )
             .unwrap(),
             vec![
-                vec![Value::Int32(1), Value::Int32(1)],
-                vec![Value::Int32(2), Value::Int32(1)],
+                vec![Value::Int32(1), Value::Int64(1)],
+                vec![Value::Int32(2), Value::Int64(1)],
             ],
         );
     }

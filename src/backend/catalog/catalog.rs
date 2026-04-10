@@ -253,7 +253,11 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
     let name = name.into();
     let ty = scalar_type_for_sql_type(sql_type);
     let (attlen, attalign) = match ty {
+        ScalarType::Int16 => (2, AttributeAlign::Short),
         ScalarType::Int32 => (4, AttributeAlign::Int),
+        ScalarType::Int64 => (8, AttributeAlign::Double),
+        ScalarType::Float32 => (4, AttributeAlign::Int),
+        ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Bool => (1, AttributeAlign::Char),
         ScalarType::Array(_) => (-1, AttributeAlign::Int),
@@ -276,7 +280,11 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         return ScalarType::Array(Box::new(scalar_type_for_sql_type(sql_type.element_type())));
     }
     match sql_type.kind {
+        SqlTypeKind::Int2 => ScalarType::Int16,
         SqlTypeKind::Int4 => ScalarType::Int32,
+        SqlTypeKind::Int8 => ScalarType::Int64,
+        SqlTypeKind::Float4 => ScalarType::Float32,
+        SqlTypeKind::Float8 => ScalarType::Float64,
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
             ScalarType::Text
         }
@@ -286,7 +294,11 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
 
 fn encode_sql_type(sql_type: SqlType) -> String {
     let base = match sql_type.kind {
+        SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int4 => "int4",
+        SqlTypeKind::Int8 => "int8",
+        SqlTypeKind::Float4 => "float4",
+        SqlTypeKind::Float8 => "float8",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
@@ -304,7 +316,11 @@ fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
     let is_array = name.ends_with("[]");
     let base = if is_array { &name[..name.len() - 2] } else { name };
     let mut sql_type = match base {
+        "int2" => SqlType { kind: SqlTypeKind::Int2, typmod, is_array: false },
         "int4" => SqlType { kind: SqlTypeKind::Int4, typmod, is_array: false },
+        "int8" => SqlType { kind: SqlTypeKind::Int8, typmod, is_array: false },
+        "float4" => SqlType { kind: SqlTypeKind::Float4, typmod, is_array: false },
+        "float8" => SqlType { kind: SqlTypeKind::Float8, typmod, is_array: false },
         "text" => SqlType { kind: SqlTypeKind::Text, typmod, is_array: false },
         "bool" => SqlType { kind: SqlTypeKind::Bool, typmod, is_array: false },
         "timestamp" => SqlType { kind: SqlTypeKind::Timestamp, typmod, is_array: false },

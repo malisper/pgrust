@@ -131,7 +131,9 @@ fn default_base_dir() -> PathBuf {
 
 fn render_value(value: &Value) -> String {
     match value {
+        Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap().to_string(),

@@ -451,15 +451,23 @@ fn collect_rels_from_expr(expr: &crate::backend::executor::Expr, rels: &mut std:
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentTimestamp => {}
-        Expr::Negate(inner)
+        Expr::UnaryPlus(inner)
+        | Expr::Negate(inner)
         | Expr::Cast(inner, _)
         | Expr::Not(inner)
         | Expr::IsNull(inner)
         | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
         Expr::Add(left, right)
+        | Expr::Sub(left, right)
+        | Expr::Mul(left, right)
+        | Expr::Div(left, right)
+        | Expr::Mod(left, right)
         | Expr::Eq(left, right)
+        | Expr::NotEq(left, right)
         | Expr::Lt(left, right)
+        | Expr::LtEq(left, right)
         | Expr::Gt(left, right)
+        | Expr::GtEq(left, right)
         | Expr::RegexMatch(left, right)
         | Expr::And(left, right)
         | Expr::Or(left, right)
@@ -846,7 +854,7 @@ mod tests {
             .unwrap()
         {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(0)]]);
+                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -963,6 +971,48 @@ mod tests {
     }
 
     #[test]
+    fn copy_from_rows_parses_extended_numeric_types() {
+        let base = temp_dir("copy_from_rows_extended_numeric");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        db.execute(
+            1,
+            "create table metrics (a int2, b int8, c float4, d float8)",
+        )
+        .unwrap();
+
+        let inserted = session
+            .copy_from_rows(
+                &db,
+                "metrics",
+                &[vec![
+                    "7".into(),
+                    "9000000000".into(),
+                    "1.5".into(),
+                    "2.5".into(),
+                ]],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+
+        match db.execute(1, "select a, b, c, d from metrics").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int16(7),
+                        Value::Int64(9_000_000_000),
+                        Value::Float64(1.5),
+                        Value::Float64(2.5),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn concurrent_selects_on_shared_data() {
         let base = temp_dir("concurrent_selects");
         let db = Database::open(&base, 32).unwrap();
@@ -991,7 +1041,7 @@ mod tests {
                             .unwrap()
                         {
                             StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows, vec![vec![Value::Int32(10)]]);
+                                assert_eq!(rows, vec![vec![Value::Int64(10)]]);
                             }
                             other => panic!("expected query result, got {:?}", other),
                         }
@@ -1040,7 +1090,7 @@ mod tests {
             .unwrap()
         {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(total as i32)]]);
+                assert_eq!(rows, vec![vec![Value::Int64(total as i64)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1106,7 +1156,7 @@ mod tests {
         {
             StatementResult::Query { rows, .. } => {
                 let expected = 1 + num_writers * ops_per_thread;
-                assert_eq!(rows, vec![vec![Value::Int32(expected as i32)]]);
+                assert_eq!(rows, vec![vec![Value::Int64(expected as i64)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1297,7 +1347,7 @@ mod tests {
 
         match db.execute(1, "select count(*) from ftest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(80)]]);
+                assert_eq!(rows, vec![vec![Value::Int64(80)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1339,7 +1389,7 @@ mod tests {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![Value::Int32(expected as i32)]],
+                    vec![vec![Value::Int64(expected as i64)]],
                     "expected {expected} rows, no lost inserts"
                 );
             }
@@ -1376,7 +1426,7 @@ mod tests {
                             .unwrap()
                         {
                             StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows, vec![vec![Value::Int32(5)]]);
+                                assert_eq!(rows, vec![vec![Value::Int64(5)]]);
                             }
                             other => panic!("expected query result, got {:?}", other),
                         }
@@ -1701,7 +1751,7 @@ mod tests {
 
         match session.execute(&db, "select count(*) from txtest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+                assert_eq!(rows, vec![vec![Value::Int64(2)]]);
             }
             other => panic!("expected query, got {:?}", other),
         }
@@ -1723,7 +1773,7 @@ mod tests {
 
         match session.execute(&db, "select count(*) from rbtest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]],
+                assert_eq!(rows, vec![vec![Value::Int64(1)]],
                     "only the autocommitted row should survive rollback");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1754,7 +1804,7 @@ mod tests {
 
         match session.execute(&db, "select count(*) from ftest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(0)]],
+                assert_eq!(rows, vec![vec![Value::Int64(0)]],
                     "all inserts should be rolled back");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1773,7 +1823,7 @@ mod tests {
 
         match session.execute(&db, "select count(*) from atest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+                assert_eq!(rows, vec![vec![Value::Int64(2)]]);
             }
             other => panic!("expected query, got {:?}", other),
         }
@@ -1794,7 +1844,7 @@ mod tests {
 
         match session_b.execute(&db, "select count(*) from isotest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]],
+                assert_eq!(rows, vec![vec![Value::Int64(1)]],
                     "session B should not see session A's uncommitted insert");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1804,7 +1854,7 @@ mod tests {
 
         match session_b.execute(&db, "select count(*) from isotest").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]],
+                assert_eq!(rows, vec![vec![Value::Int64(2)]],
                     "session B should see session A's committed insert");
             }
             other => panic!("expected query, got {:?}", other),
@@ -1894,7 +1944,7 @@ mod tests {
         // After commit the row must still be there.
         match session.execute(&db, "select count(*) from rowtable").unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+                assert_eq!(rows, vec![vec![Value::Int64(1)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }
@@ -1937,7 +1987,7 @@ mod tests {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![Value::Int32(expected)]],
+                    vec![vec![Value::Int64(expected as i64)]],
                     "all bulk-inserted rows must survive — expected {expected}"
                 );
             }
@@ -1998,7 +2048,7 @@ mod tests {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![Value::Int32(0)]],
+                    vec![vec![Value::Int64(0)]],
                     "must not see uncommitted row (dirty read)"
                 );
             }
@@ -2016,7 +2066,7 @@ mod tests {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![Value::Int32(1)]],
+                    vec![vec![Value::Int64(1)]],
                     "committed row must be visible after commit"
                 );
             }
@@ -2066,7 +2116,7 @@ mod tests {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![Value::Int32(expected)]],
+                    vec![vec![Value::Int64(expected as i64)]],
                     "only committed rows should survive — expected {expected}"
                 );
             }
@@ -2329,9 +2379,9 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                vec![Value::Int32(1), Value::Int32(2)],
-                vec![Value::Int32(2), Value::Int32(1)],
-                vec![Value::Int32(3), Value::Int32(0)],
+                vec![Value::Int32(1), Value::Int64(2)],
+                vec![Value::Int32(2), Value::Int64(1)],
+                vec![Value::Int32(3), Value::Int64(0)],
             ]
         );
     }

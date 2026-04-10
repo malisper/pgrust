@@ -451,10 +451,26 @@ impl Session {
                             return Ok(Value::Null);
                         }
                         match column.ty {
+                            ScalarType::Int16 => raw
+                                .parse::<i16>()
+                                .map(Value::Int16)
+                                .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(raw.clone()))),
                             ScalarType::Int32 => raw
                                 .parse::<i32>()
                                 .map(Value::Int32)
                                 .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(raw.clone()))),
+                            ScalarType::Int64 => raw
+                                .parse::<i64>()
+                                .map(Value::Int64)
+                                .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(raw.clone()))),
+                            ScalarType::Float32 | ScalarType::Float64 => raw
+                                .parse::<f64>()
+                                .map(Value::Float64)
+                                .map_err(|_| ExecError::TypeMismatch {
+                                    op: "copy assignment",
+                                    left: Value::Null,
+                                    right: Value::Text(raw.clone().into()),
+                                }),
                             ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),

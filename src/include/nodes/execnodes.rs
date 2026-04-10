@@ -12,7 +12,11 @@ use crate::backend::executor::{AccumState, AggGroup, ExecError, ExecutorContext}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarType {
+    Int16,
     Int32,
+    Int64,
+    Float32,
+    Float64,
     Text,
     Bool,
     Array(Box<ScalarType>),
@@ -54,7 +58,9 @@ impl RelationDesc {
 
 #[derive(Debug, Clone)]
 pub enum Value {
+    Int16(i16),
     Int32(i32),
+    Int64(i64),
     Float64(f64),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned
@@ -82,6 +88,7 @@ impl Value {
     /// other variants are cloned cheaply.
     pub fn to_owned_value(&self) -> Value {
         match self {
+            Value::Int16(v) => Value::Int16(*v),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -113,7 +120,9 @@ impl Value {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Value::Int16(a), Value::Int16(b)) => a == b,
             (Value::Int32(a), Value::Int32(b)) => a == b,
+            (Value::Int64(a), Value::Int64(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
@@ -131,23 +140,25 @@ impl Eq for Value {}
 impl std::hash::Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
-            Value::Int32(v) => { 0u8.hash(state); v.hash(state); }
-            Value::Float64(v) => { 1u8.hash(state); v.to_bits().hash(state); }
+            Value::Int16(v) => { 0u8.hash(state); v.hash(state); }
+            Value::Int32(v) => { 1u8.hash(state); v.hash(state); }
+            Value::Int64(v) => { 2u8.hash(state); v.hash(state); }
+            Value::Float64(v) => { 3u8.hash(state); v.to_bits().hash(state); }
             // Text and TextRef hash the same way so equal values get the same hash
-            Value::Text(s) => { 2u8.hash(state); s.as_str().hash(state); }
+            Value::Text(s) => { 4u8.hash(state); s.as_str().hash(state); }
             Value::TextRef(ptr, len) => {
-                2u8.hash(state);
+                4u8.hash(state);
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
                 };
                 s.hash(state);
             }
-            Value::Bool(v) => { 3u8.hash(state); v.hash(state); }
+            Value::Bool(v) => { 5u8.hash(state); v.hash(state); }
             Value::Array(values) => {
-                4u8.hash(state);
+                6u8.hash(state);
                 values.hash(state);
             }
-            Value::Null => { 5u8.hash(state); }
+            Value::Null => { 7u8.hash(state); }
         }
     }
 }
@@ -206,11 +217,19 @@ pub enum Expr {
     OuterColumn { depth: usize, index: usize },
     Const(Value),
     Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),
+    Mod(Box<Expr>, Box<Expr>),
+    UnaryPlus(Box<Expr>),
     Negate(Box<Expr>),
     Cast(Box<Expr>, SqlType),
     Eq(Box<Expr>, Box<Expr>),
+    NotEq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
+    LtEq(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
+    GtEq(Box<Expr>, Box<Expr>),
     RegexMatch(Box<Expr>, Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),

@@ -22,22 +22,38 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -
             .ok_or(ExecError::UnboundOuterColumn { depth: *depth, index: *index }),
         Expr::Const(value) => Ok(value.clone()),
         Expr::Add(left, right) => add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Sub(left, right) => sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Mul(left, right) => mul_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Div(left, right) => div_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Mod(left, right) => mod_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::UnaryPlus(inner) => eval_expr(inner, slot, ctx),
         Expr::Negate(inner) => negate_value(eval_expr(inner, slot, ctx)?),
         Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot, ctx)?, *ty),
         Expr::Eq(left, right) => {
             compare_values("=", eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
+        Expr::NotEq(left, right) => {
+            not_equal_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
         Expr::Lt(left, right) => order_values(
             "<",
             eval_expr(left, slot, ctx)?,
             eval_expr(right, slot, ctx)?,
-            |a, b| a < b,
+        ),
+        Expr::LtEq(left, right) => order_values(
+            "<=",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
         ),
         Expr::Gt(left, right) => order_values(
             ">",
             eval_expr(left, slot, ctx)?,
             eval_expr(right, slot, ctx)?,
-            |a, b| a > b,
+        ),
+        Expr::GtEq(left, right) => order_values(
+            ">=",
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
         ),
         Expr::RegexMatch(left, right) => {
             let text = eval_expr(left, slot, ctx)?;
@@ -266,8 +282,11 @@ fn compare_subquery_values(
 ) -> Result<Value, ExecError> {
     match op {
         SubqueryComparisonOp::Eq => compare_values("=", left.clone(), right.clone()),
-        SubqueryComparisonOp::Lt => order_values("<", left.clone(), right.clone(), |a, b| a < b),
-        SubqueryComparisonOp::Gt => order_values(">", left.clone(), right.clone(), |a, b| a > b),
+        SubqueryComparisonOp::NotEq => not_equal_values(left.clone(), right.clone()),
+        SubqueryComparisonOp::Lt => order_values("<", left.clone(), right.clone()),
+        SubqueryComparisonOp::LtEq => order_values("<=", left.clone(), right.clone()),
+        SubqueryComparisonOp::Gt => order_values(">", left.clone(), right.clone()),
+        SubqueryComparisonOp::GtEq => order_values(">=", left.clone(), right.clone()),
     }
 }
 
@@ -293,8 +312,31 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
 
     match value {
         Value::Null => Ok(Value::Null),
+        Value::Int16(v) => match ty {
+            SqlType { kind: SqlTypeKind::Int2, .. } => Ok(Value::Int16(v)),
+            SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v as i32)),
+            SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
+            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+                cast_text_value(&v.to_string(), ty, true)
+            }
+            SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
+                op: "::bool",
+                left: Value::Int16(v),
+                right: Value::Bool(false),
+            }),
+        },
         Value::Int32(v) => match ty {
+            SqlType { kind: SqlTypeKind::Int2, .. } => i16::try_from(v)
+                .map(Value::Int16)
+                .map_err(|_| ExecError::TypeMismatch {
+                    op: "::int2",
+                    left: Value::Int32(v),
+                    right: Value::Int16(0),
+                }),
             SqlType { kind: SqlTypeKind::Int4, .. } => Ok(Value::Int32(v)),
+            SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v as i64)),
+            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
@@ -309,7 +351,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(if v { "true" } else { "false" }, ty, true)
             }
-            SqlType { kind: SqlTypeKind::Int4, .. } => Err(ExecError::TypeMismatch {
+            SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Err(ExecError::TypeMismatch {
                 op: "::int4",
                 left: Value::Bool(v),
                 right: Value::Int32(0),
@@ -322,15 +364,44 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             };
             cast_text_value(text, ty, true)
         }
-        Value::Float64(v) => match ty {
+        Value::Int64(v) => match ty {
+            SqlType { kind: SqlTypeKind::Int2, .. } => i16::try_from(v)
+                .map(Value::Int16)
+                .map_err(|_| ExecError::TypeMismatch {
+                    op: "::int2",
+                    left: Value::Int64(v),
+                    right: Value::Int16(0),
+                }),
+            SqlType { kind: SqlTypeKind::Int4, .. } => i32::try_from(v)
+                .map(Value::Int32)
+                .map_err(|_| ExecError::TypeMismatch {
+                    op: "::int4",
+                    left: Value::Int64(v),
+                    right: Value::Int32(0),
+                }),
+            SqlType { kind: SqlTypeKind::Int8, .. } => Ok(Value::Int64(v)),
+            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v as f64)),
             SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
                 cast_text_value(&v.to_string(), ty, true)
             }
-            SqlType { kind: SqlTypeKind::Int4 | SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
+            SqlType { kind: SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
+                op: "::bool",
+                left: Value::Int64(v),
+                right: Value::Bool(false),
+            }),
+        },
+        Value::Float64(v) => match ty {
+            SqlType { kind: SqlTypeKind::Float4 | SqlTypeKind::Float8, .. } => Ok(Value::Float64(v)),
+            SqlType { kind: SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar, .. } => {
+                cast_text_value(&v.to_string(), ty, true)
+            }
+            SqlType { kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Bool, .. } => Err(ExecError::TypeMismatch {
                 op: "::",
                 left: Value::Float64(v),
                 right: match ty {
+                    SqlType { kind: SqlTypeKind::Int2, .. } => Value::Int16(0),
                     SqlType { kind: SqlTypeKind::Int4, .. } => Value::Int32(0),
+                    SqlType { kind: SqlTypeKind::Int8, .. } => Value::Int64(0),
                     SqlType { kind: SqlTypeKind::Bool, .. } => Value::Bool(false),
                     _ => Value::Text(CompactString::new("")),
                 },
@@ -346,12 +417,33 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
         SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
             coerce_character_string(text, ty, explicit)?,
         ))),
+        SqlTypeKind::Int2 => text.parse::<i16>()
+            .map(Value::Int16)
+            .map_err(|_| ExecError::TypeMismatch {
+                op: "::int2",
+                left: Value::Text(CompactString::new(text)),
+                right: Value::Int16(0),
+            }),
         SqlTypeKind::Int4 => text.parse::<i32>()
             .map(Value::Int32)
             .map_err(|_| ExecError::TypeMismatch {
                 op: "::int4",
                 left: Value::Text(CompactString::new(text)),
                 right: Value::Int32(0),
+            }),
+        SqlTypeKind::Int8 => text.parse::<i64>()
+            .map(Value::Int64)
+            .map_err(|_| ExecError::TypeMismatch {
+                op: "::int8",
+                left: Value::Text(CompactString::new(text)),
+                right: Value::Int64(0),
+            }),
+        SqlTypeKind::Float4 | SqlTypeKind::Float8 => text.parse::<f64>()
+            .map(Value::Float64)
+            .map_err(|_| ExecError::TypeMismatch {
+                op: "::float8",
+                left: Value::Text(CompactString::new(text)),
+                right: Value::Float64(0.0),
             }),
         SqlTypeKind::Bool => match text.to_ascii_lowercase().as_str() {
             "true" | "t" => Ok(Value::Bool(true)),
@@ -684,7 +776,11 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<crate::
                 Ok(TupleValue::Null)
             }
         }
+        (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((*v as f32).to_le_bytes().to_vec())),
+        (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Text, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
             Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
@@ -731,7 +827,9 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
 
     match value {
         Value::Null => Ok(Value::Null),
+        Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
         Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
@@ -746,6 +844,23 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
     };
 
     match column.ty {
+        ScalarType::Int16 => {
+            if column.storage.attlen != 2 || bytes.len() != 2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Int16(i16::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "int2 must be exactly 2 bytes".into(),
+                    })?,
+            )))
+        }
         ScalarType::Int32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
                 return Err(ExecError::UnsupportedStorageType {
@@ -760,6 +875,57 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     .map_err(|_| ExecError::InvalidStorageValue {
                         column: column.name.clone(),
                         details: "int4 must be exactly 4 bytes".into(),
+                    })?,
+            )))
+        }
+        ScalarType::Int64 => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Int64(i64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "int8 must be exactly 8 bytes".into(),
+                    })?,
+            )))
+        }
+        ScalarType::Float32 => {
+            if column.storage.attlen != 4 || bytes.len() != 4 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Float64(f32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "float4 must be exactly 4 bytes".into(),
+                    })?,
+            ) as f64))
+        }
+        ScalarType::Float64 => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Float64(f64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "float8 must be exactly 8 bytes".into(),
                     })?,
             )))
         }
@@ -839,8 +1005,18 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
         return Ok(Value::Null);
     }
     match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(l == r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool((*l as i32) == *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
-        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(l.to_bits() == r.to_bits())),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
+            Ok(Value::Bool(numeric_as_f64(l).unwrap() == numeric_as_f64(r).unwrap()))
+        }
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(l.as_text() == r.as_text())),
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
         (Value::Array(l), Value::Array(r)) => Ok(Value::Bool(l == r)),
@@ -848,12 +1024,30 @@ fn compare_values(op: &'static str, left: Value, right: Value) -> Result<Value, 
     }
 }
 
+fn not_equal_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match compare_values("=", left.clone(), right.clone())? {
+        Value::Bool(value) => Ok(Value::Bool(!value)),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
 fn values_are_distinct(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Null, Value::Null) => false,
         (Value::Null, _) | (_, Value::Null) => true,
+        (Value::Int16(l), Value::Int16(r)) => l != r,
+        (Value::Int16(l), Value::Int32(r)) => (*l as i32) != *r,
+        (Value::Int16(l), Value::Int64(r)) => (*l as i64) != *r,
         (Value::Int32(l), Value::Int32(r)) => l != r,
-        (Value::Float64(l), Value::Float64(r)) => l.to_bits() != r.to_bits(),
+        (Value::Int32(l), Value::Int16(r)) => *l != (*r as i32),
+        (Value::Int32(l), Value::Int64(r)) => (*l as i64) != *r,
+        (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
+        (Value::Int64(l), Value::Int32(r)) => *l != (*r as i64),
+        (Value::Int64(l), Value::Int64(r)) => l != r,
+        (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => numeric_as_f64(l).unwrap() != numeric_as_f64(r).unwrap(),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
         (Value::Array(l), Value::Array(r)) => l != r,
@@ -866,7 +1060,18 @@ fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
         return Ok(Value::Null);
     }
     match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l + r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) + *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) + *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l + (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l + r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) + *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l + (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l + (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l + r)),
+        (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
+            Ok(Value::Float64(numeric_as_f64(l).unwrap() + numeric_as_f64(r).unwrap()))
+        }
         _ => Err(ExecError::TypeMismatch {
             op: "+",
             left,
@@ -875,10 +1080,113 @@ fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
     }
 }
 
+fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l - r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) - *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) - *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l - (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l - r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) - *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l - (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l - (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l - r)),
+        (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
+            Ok(Value::Float64(numeric_as_f64(l).unwrap() - numeric_as_f64(r).unwrap()))
+        }
+        _ => Err(ExecError::TypeMismatch { op: "-", left, right }),
+    }
+}
+
+fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l * r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) * *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) * *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l * (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l * r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) * *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l * (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l * (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l * r)),
+        (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
+            Ok(Value::Float64(numeric_as_f64(l).unwrap() * numeric_as_f64(r).unwrap()))
+        }
+        _ => Err(ExecError::TypeMismatch { op: "*", left, right }),
+    }
+}
+
+fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let zero = match &right {
+        Value::Int16(v) => *v == 0,
+        Value::Int32(v) => *v == 0,
+        Value::Int64(v) => *v == 0,
+        Value::Float64(v) => *v == 0.0,
+        _ => false,
+    };
+    if zero {
+        return Err(ExecError::DivisionByZero("/"));
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l / r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) / *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) / *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l / (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l / r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) / *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l / (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l / (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l / r)),
+        (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => {
+            Ok(Value::Float64(numeric_as_f64(l).unwrap() / numeric_as_f64(r).unwrap()))
+        }
+        _ => Err(ExecError::TypeMismatch { op: "/", left, right }),
+    }
+}
+
+fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let zero = match &right {
+        Value::Int16(v) => *v == 0,
+        Value::Int32(v) => *v == 0,
+        Value::Int64(v) => *v == 0,
+        _ => false,
+    };
+    if zero {
+        return Err(ExecError::DivisionByZero("%"));
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l % r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) % *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) % *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l % (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l % r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) % *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l % (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l % (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l % r)),
+        _ => Err(ExecError::TypeMismatch { op: "%", left, right }),
+    }
+}
+
 fn negate_value(value: Value) -> Result<Value, ExecError> {
     match value {
         Value::Null => Ok(Value::Null),
+        Value::Int16(v) => Ok(Value::Int16(-v)),
         Value::Int32(v) => Ok(Value::Int32(-v)),
+        Value::Int64(v) => Ok(Value::Int64(-v)),
+        Value::Float64(v) => Ok(Value::Float64(-v)),
         other => Err(ExecError::TypeMismatch {
             op: "unary -",
             left: other,
@@ -887,23 +1195,39 @@ fn negate_value(value: Value) -> Result<Value, ExecError> {
     }
 }
 
-fn order_values<F>(op: &'static str, left: Value, right: Value, cmp: F) -> Result<Value, ExecError>
-where
-    F: FnOnce(i32, i32) -> bool + Copy,
-{
+fn order_values(op: &'static str, left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
     match (&left, &right) {
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(cmp(*l, *r))),
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l as i32, *r, op))),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i32, op))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => l < r,
+            "<=" => l <= r,
             ">" => l > r,
+            ">=" => l >= r,
+            _ => unreachable!(),
+        })),
+        (l, r) if numeric_as_f64(l).is_some() && numeric_as_f64(r).is_some() => Ok(Value::Bool(match op {
+            "<" => numeric_as_f64(l).unwrap() < numeric_as_f64(r).unwrap(),
+            "<=" => numeric_as_f64(l).unwrap() <= numeric_as_f64(r).unwrap(),
+            ">" => numeric_as_f64(l).unwrap() > numeric_as_f64(r).unwrap(),
+            ">=" => numeric_as_f64(l).unwrap() >= numeric_as_f64(r).unwrap(),
             _ => unreachable!(),
         })),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(match op {
             "<" => l.as_text().unwrap() < r.as_text().unwrap(),
+            "<=" => l.as_text().unwrap() <= r.as_text().unwrap(),
             ">" => l.as_text().unwrap() > r.as_text().unwrap(),
+            ">=" => l.as_text().unwrap() >= r.as_text().unwrap(),
             _ => unreachable!(),
         })),
         (Value::Array(l), Value::Array(r)) => {
@@ -911,11 +1235,23 @@ where
             let right = format_array_text(r);
             Ok(Value::Bool(match op {
                 "<" => left < right,
+                "<=" => left <= right,
                 ">" => left > right,
+                ">=" => left >= right,
                 _ => unreachable!(),
             }))
         }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
+    }
+}
+
+fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
+    match op {
+        "<" => left < right,
+        "<=" => left <= right,
+        ">" => left > right,
+        ">=" => left >= right,
+        _ => unreachable!(),
     }
 }
 
@@ -939,7 +1275,9 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
     let coerced = coerce_assignment_value(value, element_type)?;
     match coerced {
         Value::Null => Ok(Vec::new()),
+        Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
@@ -990,6 +1328,15 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
 
 fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
     match element_type.kind {
+        SqlTypeKind::Int2 => {
+            if bytes.len() != 2 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int2 array element must be 2 bytes".into(),
+                });
+            }
+            Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().unwrap())))
+        }
         SqlTypeKind::Int4 => {
             if bytes.len() != 4 {
                 return Err(ExecError::InvalidStorageValue {
@@ -998,6 +1345,28 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
                 });
             }
             Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        SqlTypeKind::Int8 => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int8 array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+            if bytes.len() != if matches!(element_type.kind, SqlTypeKind::Float4) { 4 } else { 8 } {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "float array element has wrong width".into(),
+                });
+            }
+            if matches!(element_type.kind, SqlTypeKind::Float4) {
+                Ok(Value::Float64(f32::from_le_bytes(bytes.try_into().unwrap()) as f64))
+            } else {
+                Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
+            }
         }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
@@ -1022,7 +1391,9 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
         }
         match item {
             Value::Null => out.push_str("NULL"),
+            Value::Int16(v) => out.push_str(&v.to_string()),
             Value::Int32(v) => out.push_str(&v.to_string()),
+            Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
             Value::Text(_) | Value::TextRef(_, _) => {
@@ -1043,4 +1414,14 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
     }
     out.push('}');
     out
+}
+
+fn numeric_as_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int16(v) => Some(*v as f64),
+        Value::Int32(v) => Some(*v as f64),
+        Value::Int64(v) => Some(*v as f64),
+        Value::Float64(v) => Some(*v),
+        _ => None,
+    }
 }

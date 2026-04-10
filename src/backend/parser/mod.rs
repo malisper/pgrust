@@ -221,6 +221,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_extended_numeric_type_cast_expressions() {
+        let stmt = parse_select(
+            "select '7'::int2, '9'::bigint, '1.5'::real, '2.5'::double precision",
+        )
+        .unwrap();
+        assert_eq!(stmt.targets.len(), 4);
+        let expected = [
+            SqlTypeKind::Int2,
+            SqlTypeKind::Int8,
+            SqlTypeKind::Float4,
+            SqlTypeKind::Float8,
+        ];
+        for (target, kind) in stmt.targets.iter().zip(expected) {
+            match &target.expr {
+                SqlExpr::Cast(_, ty) => assert_eq!(ty.kind, kind),
+                other => panic!("expected cast expression, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn parse_cross_join_with_aliases() {
         let stmt = parse_select("select p.name, q.name from people p, pets q").unwrap();
         assert_eq!(
@@ -288,6 +309,19 @@ mod tests {
             }
             other => panic!("expected update, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_unary_plus_numeric_literal_and_new_operators() {
+        let stmt = parse_select("select +1.5, 5 - 2, 3 * 4, 8 / 2, 9 % 4, 1 <= 2, 3 >= 2, 4 != 5").unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::UnaryPlus(_)));
+        assert!(matches!(stmt.targets[1].expr, SqlExpr::Sub(_, _)));
+        assert!(matches!(stmt.targets[2].expr, SqlExpr::Mul(_, _)));
+        assert!(matches!(stmt.targets[3].expr, SqlExpr::Div(_, _)));
+        assert!(matches!(stmt.targets[4].expr, SqlExpr::Mod(_, _)));
+        assert!(matches!(stmt.targets[5].expr, SqlExpr::LtEq(_, _)));
+        assert!(matches!(stmt.targets[6].expr, SqlExpr::GtEq(_, _)));
+        assert!(matches!(stmt.targets[7].expr, SqlExpr::NotEq(_, _)));
     }
 
     #[test]

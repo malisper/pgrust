@@ -184,8 +184,20 @@ impl CompiledTupleDecoder {
                             let bytes = &data[off..end];
                             off = end;
                             values.push(match ty {
+                                ScalarType::Int16 => Value::Int16(i16::from_le_bytes([
+                                    bytes[0], bytes[1],
+                                ])),
                                 ScalarType::Int32 => Value::Int32(i32::from_le_bytes([
                                     bytes[0], bytes[1], bytes[2], bytes[3],
+                                ])),
+                                ScalarType::Int64 => Value::Int64(i64::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                                ])),
+                                ScalarType::Float32 => Value::Float64(f32::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3],
+                                ]) as f64),
+                                ScalarType::Float64 => Value::Float64(f64::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                                 ])),
                                 ScalarType::Bool => Value::Bool(bytes[0] != 0),
                                 ScalarType::Text => {
@@ -287,6 +299,15 @@ fn decode_array_value(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, 
 
 fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, ExecError> {
     match element_type {
+        ScalarType::Int16 => {
+            if bytes.len() != 2 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int2 array element must be 2 bytes".into(),
+                });
+            }
+            Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().unwrap())))
+        }
         ScalarType::Int32 => {
             if bytes.len() != 4 {
                 return Err(ExecError::InvalidStorageValue {
@@ -295,6 +316,33 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
                 });
             }
             Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        ScalarType::Int64 => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int8 array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        ScalarType::Float32 => {
+            if bytes.len() != 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "float4 array element must be 4 bytes".into(),
+                });
+            }
+            Ok(Value::Float64(f32::from_le_bytes(bytes.try_into().unwrap()) as f64))
+        }
+        ScalarType::Float64 => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "float8 array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
         }
         ScalarType::Bool => {
             if bytes.len() != 1 {

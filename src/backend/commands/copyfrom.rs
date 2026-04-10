@@ -50,10 +50,26 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
             Value::Null
         } else {
             match element_type.kind {
+                SqlTypeKind::Int2 => value
+                    .parse::<i16>()
+                    .map(Value::Int16)
+                    .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(value.clone())))?,
                 SqlTypeKind::Int4 => value
                     .parse::<i32>()
                     .map(Value::Int32)
                     .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(value.clone())))?,
+                SqlTypeKind::Int8 => value
+                    .parse::<i64>()
+                    .map(Value::Int64)
+                    .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(value.clone())))?,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8 => value
+                    .parse::<f64>()
+                    .map(Value::Float64)
+                    .map_err(|_| ExecError::TypeMismatch {
+                        op: "copy assignment",
+                        left: Value::Null,
+                        right: Value::Text(value.clone().into()),
+                    })?,
                 SqlTypeKind::Bool => match value.as_str() {
                     "t" | "true" | "1" => Value::Bool(true),
                     "f" | "false" | "0" => Value::Bool(false),
