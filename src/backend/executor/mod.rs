@@ -4520,6 +4520,52 @@ mod tests {
     }
 
     #[test]
+    fn concat_text_array_and_jsonb_work() {
+        let base = temp_dir("concat_ops");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 'four: ' || 2 + 2, ARRAY[1,2] || 3, 0 || ARRAY[1,2], ARRAY[1,2] || ARRAY[3,4], '{\"a\":1}'::jsonb || '{\"b\":2,\"a\":9}'::jsonb",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![
+                    Value::Text("four: 4".into()),
+                    Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)]),
+                    Value::Array(vec![Value::Int32(0), Value::Int32(1), Value::Int32(2)]),
+                    Value::Array(vec![
+                        Value::Int32(1),
+                        Value::Int32(2),
+                        Value::Int32(3),
+                        Value::Int32(4)
+                    ]),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"a\": 9, \"b\": 2}"
+                        )
+                        .unwrap()
+                    ),
+                ]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn concat_rejects_non_text_nonarray_non_jsonb_operands() {
+        let base = temp_dir("concat_rejects");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 3 || 4.0").unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::UndefinedOperator { op: "||", .. })
+        ));
+    }
+
+    #[test]
     fn jsonb_table_functions_and_agg_work() {
         let base = temp_dir("jsonb_table_functions");
         let mut txns = TransactionManager::new_durable(&base).unwrap();

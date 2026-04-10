@@ -403,6 +403,7 @@ pub enum SqlExpr {
     Mul(Box<SqlExpr>, Box<SqlExpr>),
     Div(Box<SqlExpr>, Box<SqlExpr>),
     Mod(Box<SqlExpr>, Box<SqlExpr>),
+    Concat(Box<SqlExpr>, Box<SqlExpr>),
     UnaryPlus(Box<SqlExpr>),
     Negate(Box<SqlExpr>),
     Cast(Box<SqlExpr>, SqlType),

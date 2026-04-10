@@ -885,6 +885,7 @@ fn collect_rels_from_expr(
         | Expr::Mul(left, right)
         | Expr::Div(left, right)
         | Expr::Mod(left, right)
+        | Expr::Concat(left, right)
         | Expr::Eq(left, right)
         | Expr::NotEq(left, right)
         | Expr::Lt(left, right)
