@@ -11,7 +11,7 @@ pub(crate) struct BoundScope {
     pub(crate) columns: Vec<ScopeColumn>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScopeColumn {
     pub(crate) output_name: String,
     pub(crate) relation_name: Option<String>,
@@ -22,6 +22,18 @@ fn empty_scope() -> BoundScope {
         desc: RelationDesc { columns: Vec::new() },
         columns: Vec::new(),
     }
+}
+
+#[derive(Debug, Clone)]
+struct GroupedOuterScope {
+    scope: BoundScope,
+    group_by_exprs: Vec<SqlExpr>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResolvedColumn {
+    Local(usize),
+    Outer { depth: usize, index: usize },
 }
 
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
@@ -61,6 +73,15 @@ pub fn bind_create_table(
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
+    build_plan_with_outer(stmt, catalog, &[], None)
+}
+
+fn build_plan_with_outer(
+    stmt: &SelectStatement,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+) -> Result<Plan, ParseError> {
     if stmt.targets.is_empty() && stmt.from.is_none() {
         return Err(ParseError::EmptySelectList);
     }
@@ -80,7 +101,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
     let mut plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
             input: Box::new(base),
-            predicate: bind_expr(predicate, &scope)?,
+            predicate: bind_expr_with_outer(predicate, &scope, catalog, outer_scopes, grouped_outer.as_ref())?,
         }
     } else {
         base
@@ -102,7 +123,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         let group_keys: Vec<Expr> = stmt
             .group_by
             .iter()
-            .map(|e| bind_expr(e, &scope))
+            .map(|e| bind_expr_with_outer(e, &scope, catalog, outer_scopes, grouped_outer.as_ref()))
             .collect::<Result<_, _>>()?;
 
         let accumulators: Vec<AggAccum> = aggs
@@ -110,7 +131,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
             .map(|(func, arg, distinct)| {
                 Ok(AggAccum {
                     func: *func,
-                    arg: arg.as_ref().map(|e| bind_expr(e, &scope)).transpose()?,
+                    arg: arg.as_ref().map(|e| bind_expr_with_outer(e, &scope, catalog, outer_scopes, grouped_outer.as_ref())).transpose()?,
                     distinct: *distinct,
                 })
             })
@@ -121,7 +142,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         for gk in &stmt.group_by {
             output_columns.push(QueryColumn {
                 name: sql_expr_name(gk),
-                sql_type: infer_sql_expr_type(gk, &scope),
+                sql_type: infer_sql_expr_type(gk, &scope, catalog, outer_scopes, grouped_outer.as_ref()),
             });
         }
         for (func, _, _) in &aggs {
@@ -134,7 +155,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
         let having = stmt
             .having
             .as_ref()
-            .map(|e| bind_agg_output_expr(e, &stmt.group_by, &scope, &aggs, n_keys))
+            .map(|e| bind_agg_output_expr(e, &stmt.group_by, &scope, catalog, outer_scopes, grouped_outer.as_ref(), &aggs, n_keys))
             .transpose()?;
 
         plan = Plan::Aggregate {
@@ -157,6 +178,9 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
                                 &item.expr,
                                 &stmt.group_by,
                                 &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
                                 &aggs,
                                 n_keys,
                             )?,
@@ -198,10 +222,13 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
                             &item.expr,
                             &stmt.group_by,
                             &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
                             &aggs,
                             n_keys,
                         )?,
-                        sql_type: infer_sql_expr_type(&item.expr, &scope),
+                        sql_type: infer_sql_expr_type(&item.expr, &scope, catalog, outer_scopes, grouped_outer.as_ref()),
                     })
                 })
                 .collect::<Result<_, _>>()?
@@ -220,7 +247,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
                     .iter()
                     .map(|item| {
                         Ok(crate::executor::OrderByEntry {
-                            expr: bind_expr(&item.expr, &scope)?,
+                            expr: bind_expr_with_outer(&item.expr, &scope, catalog, outer_scopes, grouped_outer.as_ref())?,
                             descending: item.descending,
                             nulls_first: item.nulls_first,
                         })
@@ -237,7 +264,7 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
             };
         }
 
-        let targets = bind_select_targets(&stmt.targets, &scope)?;
+        let targets = bind_select_targets(&stmt.targets, &scope, catalog, outer_scopes, grouped_outer.as_ref())?;
 
         // Optimization: skip Projection if it's an identity mapping (select *)
         let is_identity = targets.len() == scope.columns.len()
@@ -260,6 +287,9 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
 fn bind_select_targets(
     targets: &[SelectItem],
     scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<Vec<TargetEntry>, ParseError> {
     if targets.len() == 1 && matches!(targets[0].expr, SqlExpr::Column(ref name) if name == "*") {
         return Ok(scope
@@ -279,66 +309,130 @@ fn bind_select_targets(
         .map(|item| {
             Ok(TargetEntry {
                 name: item.output_name.clone(),
-                expr: bind_expr(&item.expr, scope)?,
-                sql_type: infer_sql_expr_type(&item.expr, scope),
+                expr: bind_expr_with_outer(&item.expr, scope, catalog, outer_scopes, grouped_outer)?,
+                sql_type: infer_sql_expr_type(&item.expr, scope, catalog, outer_scopes, grouped_outer),
             })
         })
         .collect()
 }
 
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
+    bind_expr_with_outer(expr, scope, &Catalog::default(), &[], None)
+}
+
+pub(crate) fn bind_expr_with_outer(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
     Ok(match expr {
-        SqlExpr::Column(name) => Expr::Column(resolve_column(scope, name)?),
+        SqlExpr::Column(name) => match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
+            ResolvedColumn::Local(index) => Expr::Column(index),
+            ResolvedColumn::Outer { depth, index } => Expr::OuterColumn { depth, index },
+        },
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::Add(left, right) => Expr::Add(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
-        SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr(inner, scope)?)),
+        SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?)),
         SqlExpr::Cast(inner, ty) => Expr::Cast(
-            Box::new(bind_expr(inner, scope)?),
+            Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?),
             *ty,
         ),
         SqlExpr::Eq(left, right) => Expr::Eq(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::Lt(left, right) => Expr::Lt(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::Gt(left, right) => Expr::Gt(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::RegexMatch(left, right) => Expr::RegexMatch(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::And(left, right) => Expr::And(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::Or(left, right) => Expr::Or(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
-        SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr(inner, scope)?)),
-        SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr(inner, scope)?)),
-        SqlExpr::IsNotNull(inner) => Expr::IsNotNull(Box::new(bind_expr(inner, scope)?)),
+        SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?)),
+        SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?)),
+        SqlExpr::IsNotNull(inner) => Expr::IsNotNull(Box::new(bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?)),
         SqlExpr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(bind_expr(left, scope)?),
-            Box::new(bind_expr(right, scope)?),
+            Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+            Box::new(bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?),
         ),
         SqlExpr::AggCall { .. } => {
             return Err(ParseError::UnexpectedToken {
                 expected: "non-aggregate expression",
                 actual: "aggregate function".into(),
             })
+        }
+        SqlExpr::ScalarSubquery(select) => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            let plan = build_plan_with_outer(select, catalog, &child_outer, None)?;
+            ensure_single_column_subquery(&plan)?;
+            Expr::ScalarSubquery(Box::new(plan))
+        }
+        SqlExpr::Exists(select) => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            Expr::ExistsSubquery(Box::new(build_plan_with_outer(select, catalog, &child_outer, None)?))
+        }
+        SqlExpr::InSubquery { expr, subquery, negated } => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None)?;
+            ensure_single_column_subquery(&subquery_plan)?;
+            let any_expr = Expr::AnySubquery {
+                left: Box::new(bind_expr_with_outer(expr, scope, catalog, outer_scopes, grouped_outer)?),
+                op: SubqueryComparisonOp::Eq,
+                subquery: Box::new(subquery_plan),
+            };
+            if *negated {
+                Expr::Not(Box::new(any_expr))
+            } else {
+                any_expr
+            }
+        }
+        SqlExpr::QuantifiedSubquery { left, op, is_all, subquery } => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None)?;
+            ensure_single_column_subquery(&subquery_plan)?;
+            if *is_all {
+                Expr::AllSubquery {
+                    left: Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+                    op: *op,
+                    subquery: Box::new(subquery_plan),
+                }
+            } else {
+                Expr::AnySubquery {
+                    left: Box::new(bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?),
+                    op: *op,
+                    subquery: Box::new(subquery_plan),
+                }
+            }
         }
         SqlExpr::Random => Expr::Random,
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
@@ -455,7 +549,7 @@ pub fn bind_insert(
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|expr| bind_expr(expr, &scope))
+                    .map(|expr| bind_expr_with_outer(expr, &scope, catalog, &[], None))
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -480,14 +574,14 @@ pub fn bind_update(
             .map(|assignment| {
                 Ok(BoundAssignment {
                     column_index: resolve_column(&scope, &assignment.column)?,
-                    expr: bind_expr(&assignment.expr, &scope)?,
+                    expr: bind_expr_with_outer(&assignment.expr, &scope, catalog, &[], None)?,
                 })
             })
             .collect::<Result<Vec<_>, ParseError>>()?,
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr(expr, &scope))
+            .map(|expr| bind_expr_with_outer(expr, &scope, catalog, &[], None))
             .transpose()?,
     })
 }
@@ -507,7 +601,7 @@ pub fn bind_delete(
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr(expr, &scope))
+            .map(|expr| bind_expr_with_outer(expr, &scope, catalog, &[], None))
             .transpose()?,
     })
 }
@@ -560,6 +654,45 @@ fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
     Ok(first.0)
 }
 
+fn resolve_column_with_outer(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    name: &str,
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<ResolvedColumn, ParseError> {
+    if let Ok(index) = resolve_column(scope, name) {
+        return Ok(ResolvedColumn::Local(index));
+    }
+
+    for (depth, outer_scope) in outer_scopes.iter().enumerate() {
+        if let Ok(index) = resolve_column(outer_scope, name) {
+            if depth == 0 {
+                if let Some(grouped) = grouped_outer {
+                    if scopes_match(&grouped.scope, outer_scope)
+                        && !outer_column_is_grouped(index, &grouped.scope, &grouped.group_by_exprs)
+                    {
+                        return Err(ParseError::UngroupedColumn(name.to_string()));
+                    }
+                }
+            }
+            return Ok(ResolvedColumn::Outer { depth, index });
+        }
+    }
+
+    Err(ParseError::UnknownColumn(name.to_string()))
+}
+
+fn scopes_match(left: &BoundScope, right: &BoundScope) -> bool {
+    left.columns == right.columns && left.desc == right.desc
+}
+
+fn outer_column_is_grouped(index: usize, scope: &BoundScope, group_by_exprs: &[SqlExpr]) -> bool {
+    group_by_exprs.iter().any(|expr| match expr {
+        SqlExpr::Column(name) => resolve_column(scope, name).ok().is_some_and(|group_idx| group_idx == index),
+        _ => false,
+    })
+}
+
 fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScope), ParseError> {
     match stmt {
         FromItem::Table { name } => {
@@ -584,10 +717,10 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
                     });
                 }
                 let empty_scope = empty_scope();
-                let start = bind_expr(&args[0], &empty_scope)?;
-                let stop = bind_expr(&args[1], &empty_scope)?;
+                let start = bind_expr_with_outer(&args[0], &empty_scope, catalog, &[], None)?;
+                let stop = bind_expr_with_outer(&args[1], &empty_scope, catalog, &[], None)?;
                 let step = if args.len() == 3 {
-                    bind_expr(&args[2], &empty_scope)?
+                    bind_expr_with_outer(&args[2], &empty_scope, catalog, &[], None)?
                 } else {
                     Expr::Const(Value::Int32(1))
                 };
@@ -615,7 +748,7 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
             other => Err(ParseError::UnknownTable(other.to_string())),
         },
         FromItem::DerivedTable(select) => {
-            let plan = build_plan(select, catalog)?;
+            let plan = build_plan_with_outer(select, catalog, &[], None)?;
             let desc = synthetic_desc_from_plan(&plan);
             Ok((plan, scope_for_relation(None, &desc)))
         }
@@ -629,7 +762,7 @@ fn bind_from_item(stmt: &FromItem, catalog: &Catalog) -> Result<(Plan, BoundScop
             let (right_plan, right_scope) = bind_from_item(right, catalog)?;
             let scope = combine_scopes(&left_scope, &right_scope);
             let on = match (kind, on) {
-                (JoinKind::Inner, Some(on)) => bind_expr(on, &scope)?,
+                (JoinKind::Inner, Some(on)) => bind_expr_with_outer(on, &scope, catalog, &[], None)?,
                 (JoinKind::Cross, None) => Expr::Const(Value::Bool(true)),
                 _ => {
                     return Err(ParseError::UnexpectedToken {
@@ -735,7 +868,14 @@ fn apply_relation_alias(
 fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::AggCall { .. } => true,
-        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => false,
+        SqlExpr::Column(_)
+        | SqlExpr::Const(_)
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::InSubquery { .. }
+        | SqlExpr::QuantifiedSubquery { .. }
+        | SqlExpr::Random
+        | SqlExpr::CurrentTimestamp => false,
         SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::RegexMatch(l, r)
@@ -755,7 +895,14 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Option<SqlExpr>, bool)>
             let entry = (*func, arg.as_deref().cloned(), *distinct);
             if !aggs.contains(&entry) { aggs.push(entry); }
         }
-        SqlExpr::Column(_) | SqlExpr::Const(_) | SqlExpr::Random | SqlExpr::CurrentTimestamp => {}
+        SqlExpr::Column(_)
+        | SqlExpr::Const(_)
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::InSubquery { .. }
+        | SqlExpr::QuantifiedSubquery { .. }
+        | SqlExpr::Random
+        | SqlExpr::CurrentTimestamp => {}
         SqlExpr::Cast(inner, _) => collect_aggs(inner, aggs),
         SqlExpr::Add(l, r) | SqlExpr::Eq(l, r) | SqlExpr::Lt(l, r) | SqlExpr::Gt(l, r)
         | SqlExpr::RegexMatch(l, r)
@@ -769,16 +916,25 @@ fn sql_expr_name(expr: &SqlExpr) -> String {
     match expr {
         SqlExpr::Column(name) => name.clone(),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
+        SqlExpr::ScalarSubquery(_) | SqlExpr::Exists(_) | SqlExpr::InSubquery { .. } | SqlExpr::QuantifiedSubquery { .. } => "?column?".to_string(),
         _ => "?column?".to_string(),
     }
 }
 
-fn infer_sql_expr_type(expr: &SqlExpr, scope: &BoundScope) -> SqlType {
+fn infer_sql_expr_type(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> SqlType {
     match expr {
-        SqlExpr::Column(name) => resolve_column(scope, name)
-            .ok()
-            .and_then(|idx| scope.desc.columns.get(idx).map(|c| c.sql_type))
-            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        SqlExpr::Column(name) => match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
+            Ok(ResolvedColumn::Local(idx)) => scope.desc.columns.get(idx).map(|c| c.sql_type),
+            Ok(ResolvedColumn::Outer { depth, index }) => outer_scopes.get(depth).and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
+            Err(_) => None,
+        }
+        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)) | SqlExpr::Const(Value::Null) => {
@@ -786,7 +942,7 @@ fn infer_sql_expr_type(expr: &SqlExpr, scope: &BoundScope) -> SqlType {
         }
         SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Add(_, _) => SqlType::new(SqlTypeKind::Int4),
-        SqlExpr::Negate(inner) => infer_sql_expr_type(inner, scope),
+        SqlExpr::Negate(inner) => infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer),
         SqlExpr::Cast(_, ty) => *ty,
         SqlExpr::Eq(_, _)
         | SqlExpr::Lt(_, _)
@@ -800,8 +956,26 @@ fn infer_sql_expr_type(expr: &SqlExpr, scope: &BoundScope) -> SqlType {
         | SqlExpr::IsDistinctFrom(_, _)
         | SqlExpr::IsNotDistinctFrom(_, _) => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::AggCall { func, .. } => aggregate_sql_type(*func),
+        SqlExpr::ScalarSubquery(select) => build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.cloned())
+            .ok()
+            .and_then(|plan| {
+                let cols = plan.columns();
+                if cols.len() == 1 { Some(cols[0].sql_type) } else { None }
+            })
+            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        SqlExpr::Exists(_) | SqlExpr::InSubquery { .. } | SqlExpr::QuantifiedSubquery { .. } => {
+            SqlType::new(SqlTypeKind::Bool)
+        }
         SqlExpr::Random => SqlType::new(SqlTypeKind::Text),
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
+    }
+}
+
+fn ensure_single_column_subquery(plan: &Plan) -> Result<(), ParseError> {
+    if plan.columns().len() == 1 {
+        Ok(())
+    } else {
+        Err(ParseError::SubqueryMustReturnOneColumn)
     }
 }
 
@@ -816,6 +990,9 @@ fn bind_agg_output_expr(
     expr: &SqlExpr,
     group_by_exprs: &[SqlExpr],
     input_scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
     agg_list: &[(AggFunc, Option<SqlExpr>, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
@@ -832,7 +1009,12 @@ fn bind_agg_output_expr(
             Err(ParseError::UnexpectedToken { expected: "known aggregate", actual: format!("{}(...)", func.name()) })
         }
         SqlExpr::Column(name) => {
-            let col_index = resolve_column(input_scope, name)?;
+            let col_index = match resolve_column_with_outer(input_scope, outer_scopes, name, grouped_outer)? {
+                ResolvedColumn::Local(index) => index,
+                ResolvedColumn::Outer { depth, index } => {
+                    return Ok(Expr::OuterColumn { depth, index });
+                }
+            };
             for (i, gk) in group_by_exprs.iter().enumerate() {
                 if let SqlExpr::Column(gk_name) = gk {
                     if let Ok(gk_index) = resolve_column(input_scope, gk_name) {
@@ -843,23 +1025,106 @@ fn bind_agg_output_expr(
             Err(ParseError::UngroupedColumn(name.clone()))
         }
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
-        SqlExpr::Add(l, r) => Ok(Expr::Add(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::Negate(inner) => Ok(Expr::Negate(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
+        SqlExpr::Add(l, r) => Ok(Expr::Add(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Negate(inner) => Ok(Expr::Negate(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
         SqlExpr::Cast(inner, ty) => Ok(Expr::Cast(
-            Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?),
+            Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
             *ty,
         )),
-        SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::Gt(l, r) => Ok(Expr::Gt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::RegexMatch(l, r) => Ok(Expr::RegexMatch(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::And(l, r) => Ok(Expr::And(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::Or(l, r) => Ok(Expr::Or(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::Not(inner) => Ok(Expr::Not(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::IsNull(inner) => Ok(Expr::IsNull(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::IsNotNull(inner) => Ok(Expr::IsNotNull(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::IsDistinctFrom(l, r) => Ok(Expr::IsDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
-        SqlExpr::IsNotDistinctFrom(l, r) => Ok(Expr::IsNotDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, agg_list, n_keys)?))),
+        SqlExpr::Eq(l, r) => Ok(Expr::Eq(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Lt(l, r) => Ok(Expr::Lt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Gt(l, r) => Ok(Expr::Gt(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::RegexMatch(l, r) => Ok(Expr::RegexMatch(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::And(l, r) => Ok(Expr::And(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Or(l, r) => Ok(Expr::Or(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::Not(inner) => Ok(Expr::Not(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::IsNull(inner) => Ok(Expr::IsNull(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::IsNotNull(inner) => Ok(Expr::IsNotNull(Box::new(bind_agg_output_expr(inner, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::IsDistinctFrom(l, r) => Ok(Expr::IsDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::IsNotDistinctFrom(l, r) => Ok(Expr::IsNotDistinctFrom(Box::new(bind_agg_output_expr(l, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?), Box::new(bind_agg_output_expr(r, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?))),
+        SqlExpr::ScalarSubquery(select) => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(input_scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            let plan = build_plan_with_outer(
+                select,
+                catalog,
+                &child_outer,
+                Some(GroupedOuterScope {
+                    scope: input_scope.clone(),
+                    group_by_exprs: group_by_exprs.to_vec(),
+                }),
+            )?;
+            ensure_single_column_subquery(&plan)?;
+            Ok(Expr::ScalarSubquery(Box::new(plan)))
+        }
+        SqlExpr::Exists(select) => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(input_scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            Ok(Expr::ExistsSubquery(Box::new(build_plan_with_outer(
+                select,
+                catalog,
+                &child_outer,
+                Some(GroupedOuterScope {
+                    scope: input_scope.clone(),
+                    group_by_exprs: group_by_exprs.to_vec(),
+                }),
+            )?)))
+        }
+        SqlExpr::InSubquery { expr, subquery, negated } => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(input_scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            let subquery_plan = build_plan_with_outer(
+                subquery,
+                catalog,
+                &child_outer,
+                Some(GroupedOuterScope {
+                    scope: input_scope.clone(),
+                    group_by_exprs: group_by_exprs.to_vec(),
+                }),
+            )?;
+            ensure_single_column_subquery(&subquery_plan)?;
+            let any = Expr::AnySubquery {
+                left: Box::new(bind_agg_output_expr(expr, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+                op: SubqueryComparisonOp::Eq,
+                subquery: Box::new(subquery_plan),
+            };
+            if *negated {
+                Ok(Expr::Not(Box::new(any)))
+            } else {
+                Ok(any)
+            }
+        }
+        SqlExpr::QuantifiedSubquery { left, op, is_all, subquery } => {
+            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+            child_outer.push(input_scope.clone());
+            child_outer.extend_from_slice(outer_scopes);
+            let subquery_plan = build_plan_with_outer(
+                subquery,
+                catalog,
+                &child_outer,
+                Some(GroupedOuterScope {
+                    scope: input_scope.clone(),
+                    group_by_exprs: group_by_exprs.to_vec(),
+                }),
+            )?;
+            ensure_single_column_subquery(&subquery_plan)?;
+            if *is_all {
+                Ok(Expr::AllSubquery {
+                    left: Box::new(bind_agg_output_expr(left, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+                    op: *op,
+                    subquery: Box::new(subquery_plan),
+                })
+            } else {
+                Ok(Expr::AnySubquery {
+                    left: Box::new(bind_agg_output_expr(left, group_by_exprs, input_scope, catalog, outer_scopes, grouped_outer, agg_list, n_keys)?),
+                    op: *op,
+                    subquery: Box::new(subquery_plan),
+                })
+            }
+        }
         SqlExpr::Random => Ok(Expr::Random),
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
     }

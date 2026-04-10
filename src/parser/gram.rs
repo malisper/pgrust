@@ -602,6 +602,60 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
             match next.as_rule() {
                 Rule::null_predicate_suffix => build_null_predicate(left, next),
+                Rule::in_subquery_suffix => {
+                    let mut negated = false;
+                    let mut subquery = None;
+                    for part in next.into_inner() {
+                        match part.as_rule() {
+                            Rule::kw_not => negated = true,
+                            Rule::select_stmt => {
+                                subquery = Some(build_select(part)?);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(SqlExpr::InSubquery {
+                        expr: Box::new(left),
+                        subquery: Box::new(subquery.ok_or(ParseError::UnexpectedEof)?),
+                        negated,
+                    })
+                }
+                Rule::quantified_subquery_suffix => {
+                    let mut parts = next.into_inner();
+                    let op = match parts.next().ok_or(ParseError::UnexpectedEof)?.as_str() {
+                        "=" => SubqueryComparisonOp::Eq,
+                        "<" => SubqueryComparisonOp::Lt,
+                        ">" => SubqueryComparisonOp::Gt,
+                        other => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "subquery comparison operator",
+                                actual: other.into(),
+                            })
+                        }
+                    };
+                    let quantifier = parts.next().ok_or(ParseError::UnexpectedEof)?;
+                    let is_all = match quantifier.as_str().to_ascii_lowercase().as_str() {
+                        "any" => false,
+                        "all" => true,
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "ANY or ALL",
+                                actual: quantifier.as_str().into(),
+                            })
+                        }
+                    };
+                    let subquery = build_select(
+                        parts
+                            .find(|part| part.as_rule() == Rule::select_stmt)
+                            .ok_or(ParseError::UnexpectedEof)?,
+                    )?;
+                    Ok(SqlExpr::QuantifiedSubquery {
+                        left: Box::new(left),
+                        op,
+                        is_all,
+                        subquery: Box::new(subquery),
+                    })
+                }
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
@@ -619,6 +673,22 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             }
         }
         Rule::primary_expr => build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?),
+        Rule::scalar_subquery_expr => {
+            let subquery = build_select(
+                pair.into_inner()
+                    .find(|part| part.as_rule() == Rule::select_stmt)
+                    .ok_or(ParseError::UnexpectedEof)?,
+            )?;
+            Ok(SqlExpr::ScalarSubquery(Box::new(subquery)))
+        }
+        Rule::exists_expr => {
+            let subquery = build_select(
+                pair.into_inner()
+                    .find(|part| part.as_rule() == Rule::select_stmt)
+                    .ok_or(ParseError::UnexpectedEof)?,
+            )?;
+            Ok(SqlExpr::Exists(Box::new(subquery)))
+        }
         Rule::agg_call => build_agg_call(pair),
         Rule::func_call => Ok(SqlExpr::Random),
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),

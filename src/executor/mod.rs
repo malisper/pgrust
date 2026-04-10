@@ -28,6 +28,7 @@ pub struct ExecutorContext {
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,
+    pub outer_rows: Vec<Vec<Value>>,
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,
 }
@@ -55,6 +56,11 @@ pub enum ExecError {
     },
     StringDataRightTruncation {
         ty: String,
+    },
+    CardinalityViolation(String),
+    UnboundOuterColumn {
+        depth: usize,
+        index: usize,
     },
     MissingRequiredColumn(String),
     InvalidRegex(String),
@@ -511,7 +517,7 @@ mod tests {
             columns: vec![
                 crate::catalog::column_desc("id", crate::parser::SqlType::new(crate::parser::SqlTypeKind::Int4), false),
                 crate::catalog::column_desc("name", crate::parser::SqlType::new(crate::parser::SqlTypeKind::Text), false),
-                crate::catalog::column_desc("owner_id", crate::parser::SqlType::new(crate::parser::SqlTypeKind::Int4), false),
+                crate::catalog::column_desc("owner_id", crate::parser::SqlType::new(crate::parser::SqlTypeKind::Int4), true),
             ],
         }
     }
@@ -606,6 +612,20 @@ mod tests {
         pool
     }
 
+    fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
+        let txns = TransactionManager::new_durable(base).unwrap();
+        let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+        ExecutorContext {
+            pool: test_pool(base),
+            txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
+            snapshot,
+            client_id: 1,
+            next_command_id: 0,
+            outer_rows: Vec::new(),
+            timed: false,
+        }
+    }
+
     fn run_plan(
         base: &PathBuf,
         txns: &TransactionManager,
@@ -620,6 +640,7 @@ mod tests {
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
             client_id: 42,
             next_command_id: 0,
+            outer_rows: Vec::new(),
             timed: false,
         };
 
@@ -661,23 +682,54 @@ mod tests {
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
             next_command_id: 0,
+            outer_rows: Vec::new(),
             timed: false,
         };
         execute_sql(sql, &mut catalog, &mut ctx, xid)
     }
 
+    fn assert_query_rows(result: StatementResult, expected: Vec<Vec<Value>>) {
+        match result {
+            StatementResult::Query { rows, .. } => assert_eq!(rows, expected),
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    fn seed_people_and_pets(base: &PathBuf, txns: &mut TransactionManager) {
+        let xid = txns.begin();
+        run_sql_with_catalog(
+            base,
+            txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'carol', null)",
+            catalog_with_pets(),
+        )
+        .unwrap();
+        run_sql_with_catalog(
+            base,
+            txns,
+            xid,
+            "insert into pets (id, name, owner_id) values (10, 'mocha', 1), (11, 'pixel', 1), (12, 'otis', 2), (13, 'stray', null)",
+            catalog_with_pets(),
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+    }
+
     #[test]
     fn expr_eval_obeys_null_semantics() {
+        let base = temp_dir("expr_eval_obeys_null_semantics");
+        let mut ctx = empty_executor_context(&base);
         let mut slot = TupleSlot::virtual_row(
             vec![Value::Int32(7), Value::Text("alice".into()), Value::Null],
         );
-        assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Int32(7)))), &mut slot).unwrap(), Value::Bool(true));
-        assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(2)), Box::new(Expr::Const(Value::Text("x".into())))), &mut slot).unwrap(), Value::Null);
-        assert_eq!(eval_expr(&Expr::And(Box::new(Expr::Const(Value::Bool(true))), Box::new(Expr::Const(Value::Null))), &mut slot).unwrap(), Value::Null);
-        assert_eq!(eval_expr(&Expr::IsNull(Box::new(Expr::Column(2))), &mut slot).unwrap(), Value::Bool(true));
-        assert_eq!(eval_expr(&Expr::IsNotNull(Box::new(Expr::Column(2))), &mut slot).unwrap(), Value::Bool(false));
-        assert_eq!(eval_expr(&Expr::IsDistinctFrom(Box::new(Expr::Column(2)), Box::new(Expr::Const(Value::Null))), &mut slot).unwrap(), Value::Bool(false));
-        assert_eq!(eval_expr(&Expr::IsDistinctFrom(Box::new(Expr::Column(1)), Box::new(Expr::Const(Value::Null))), &mut slot).unwrap(), Value::Bool(true));
+        assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Int32(7)))), &mut slot, &mut ctx).unwrap(), Value::Bool(true));
+        assert_eq!(eval_expr(&Expr::Eq(Box::new(Expr::Column(2)), Box::new(Expr::Const(Value::Text("x".into())))), &mut slot, &mut ctx).unwrap(), Value::Null);
+        assert_eq!(eval_expr(&Expr::And(Box::new(Expr::Const(Value::Bool(true))), Box::new(Expr::Const(Value::Null))), &mut slot, &mut ctx).unwrap(), Value::Null);
+        assert_eq!(eval_expr(&Expr::IsNull(Box::new(Expr::Column(2))), &mut slot, &mut ctx).unwrap(), Value::Bool(true));
+        assert_eq!(eval_expr(&Expr::IsNotNull(Box::new(Expr::Column(2))), &mut slot, &mut ctx).unwrap(), Value::Bool(false));
+        assert_eq!(eval_expr(&Expr::IsDistinctFrom(Box::new(Expr::Column(2)), Box::new(Expr::Const(Value::Null))), &mut slot, &mut ctx).unwrap(), Value::Bool(false));
+        assert_eq!(eval_expr(&Expr::IsDistinctFrom(Box::new(Expr::Column(1)), Box::new(Expr::Const(Value::Null))), &mut slot, &mut ctx).unwrap(), Value::Bool(true));
     }
 
     #[test]
@@ -1020,8 +1072,8 @@ mod tests {
     #[test] fn regex_alternation_first_branch() { let base = temp_dir("regex_alt_first"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'foo' ~ '(foo|bar)'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_alternation_second_branch() { let base = temp_dir("regex_alt_second"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'bar' ~ '(foo|bar)'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true)]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_is_case_sensitive() { let base = temp_dir("regex_case_sensitive"); let txns = TransactionManager::new_durable(&base).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'FOO' ~ 'foo'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false)]]); } other => panic!("{:?}", other), } }
-    #[test] fn regex_null_text_returns_null() { let mut slot = TupleSlot::virtual_row(vec![Value::Null]); assert_eq!(eval_expr(&Expr::RegexMatch(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Text("foo".into())))), &mut slot).unwrap(), Value::Null); }
-    #[test] fn regex_null_pattern_returns_null() { let mut slot = TupleSlot::virtual_row(vec![Value::Text("foobar".into())]); assert_eq!(eval_expr(&Expr::RegexMatch(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Null))), &mut slot).unwrap(), Value::Null); }
+    #[test] fn regex_null_text_returns_null() { let base = temp_dir("regex_null_text_returns_null"); let mut ctx = empty_executor_context(&base); let mut slot = TupleSlot::virtual_row(vec![Value::Null]); assert_eq!(eval_expr(&Expr::RegexMatch(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Text("foo".into())))), &mut slot, &mut ctx).unwrap(), Value::Null); }
+    #[test] fn regex_null_pattern_returns_null() { let base = temp_dir("regex_null_pattern_returns_null"); let mut ctx = empty_executor_context(&base); let mut slot = TupleSlot::virtual_row(vec![Value::Text("foobar".into())]); assert_eq!(eval_expr(&Expr::RegexMatch(Box::new(Expr::Column(0)), Box::new(Expr::Const(Value::Null))), &mut slot, &mut ctx).unwrap(), Value::Null); }
     #[test] fn regex_filters_rows_in_where_clause() { let base = temp_dir("regex_filter_where"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'charlie', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name from people where name ~ '^a'").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into())]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_filter_matches_multiple_rows() { let base = temp_dir("regex_filter_multi"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'arnold', 'b'), (3, 'bob', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name from people where name ~ '^a' order by name").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("alice".into())], vec![Value::Text("arnold".into())]]); } other => panic!("{:?}", other), } }
     #[test] fn regex_combined_with_and() { let base = temp_dir("regex_and"); let mut txns = TransactionManager::new_durable(&base).unwrap(); let xid = txns.begin(); run_sql(&base, &txns, xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'albert', 'b'), (3, 'bob', 'c')").unwrap(); txns.commit(xid).unwrap(); match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select name from people where name ~ '^al' and id > 1").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Text("albert".into())]]); } other => panic!("{:?}", other), } }
@@ -1108,5 +1160,253 @@ mod tests {
             err,
             ExecError::StringDataRightTruncation { ref ty } if ty == "character varying(2)"
         ));
+    }
+
+    #[test]
+    fn scalar_subquery_target_list_returns_per_row_counts() {
+        let base = temp_dir("scalar_subquery_target_list");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Text("alice".into()), Value::Int32(2)],
+                vec![Value::Text("bob".into()), Value::Int32(1)],
+                vec![Value::Text("carol".into()), Value::Int32(0)],
+            ],
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_zero_rows_yields_null() {
+        let base = temp_dir("scalar_subquery_zero_rows");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.name, (select q.name from pets q where q.owner_id = p.id and q.id = 999) from people p order by p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Text("alice".into()), Value::Null],
+                vec![Value::Text("bob".into()), Value::Null],
+                vec![Value::Text("carol".into()), Value::Null],
+            ],
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_multiple_rows_errors() {
+        let base = temp_dir("scalar_subquery_multiple_rows");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        let err = run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select (select q.name from pets q where q.owner_id = p.id) from people p where p.id = 1",
+            catalog_with_pets(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("more than one row returned by a subquery used as an expression"));
+    }
+
+    #[test]
+    fn exists_and_not_exists_are_correlated_per_row() {
+        let base = temp_dir("exists_correlated_per_row");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+        );
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.id from people p where not exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(3)]],
+        );
+    }
+
+    #[test]
+    fn in_subquery_truth_table_cases() {
+        let base = temp_dir("in_subquery_truth_table");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 1 in (select 1), 1 in (select 2), 1 in (select 1 where false)",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(true), Value::Bool(false), Value::Bool(false)]],
+        );
+    }
+
+    #[test]
+    fn not_in_subquery_truth_table_cases() {
+        let base = temp_dir("not_in_subquery_truth_table");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 1 not in (select 1), 1 not in (select 2), 1 not in (select 1 where false)",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]],
+        );
+    }
+
+    #[test]
+    fn in_and_not_in_propagate_nulls_like_postgres() {
+        let base = temp_dir("in_not_in_nulls");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 1 in (select null), 1 not in (select null), null in (select 1), null not in (select 1)",
+            )
+            .unwrap(),
+            vec![vec![Value::Null, Value::Null, Value::Null, Value::Null]],
+        );
+    }
+
+    #[test]
+    fn any_and_all_subquery_match_postgres_empty_set_semantics() {
+        let base = temp_dir("any_all_empty_set");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 1 = any (select 1 where false), 1 < all (select 1 where false)",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(false), Value::Bool(true)]],
+        );
+    }
+
+    #[test]
+    fn any_and_all_subquery_propagate_nulls() {
+        let base = temp_dir("any_all_nulls");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 1 = any (select null), 1 < all (select null)",
+            )
+            .unwrap(),
+            vec![vec![Value::Null, Value::Null]],
+        );
+    }
+
+    #[test]
+    fn correlated_any_subquery_filters_rows() {
+        let base = temp_dir("correlated_any_subquery");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.id from people p where p.id = any (select q.owner_id from pets q where q.owner_id is not null) order by p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+        );
+    }
+
+    #[test]
+    fn grouped_query_having_can_use_correlated_exists() {
+        let base = temp_dir("grouped_having_correlated_exists");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.id, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Int32(1), Value::Int32(1)],
+                vec![Value::Int32(2), Value::Int32(1)],
+            ],
+        );
+    }
+
+    #[test]
+    fn nested_outer_correlation_uses_the_correct_row() {
+        let base = temp_dir("nested_outer_correlation");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id and r.name = p.name)) order by p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_can_be_used_in_order_by() {
+        let base = temp_dir("scalar_subquery_order_by");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.name from people p order by (select count(*) from pets q where q.owner_id = p.id) desc, p.id",
+                catalog_with_pets(),
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Text("alice".into())],
+                vec![Value::Text("bob".into())],
+                vec![Value::Text("carol".into())],
+            ],
+        );
     }
 }

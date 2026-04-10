@@ -129,6 +129,7 @@ fn main() -> Result<(), ExecError> {
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
         next_command_id: 0,
+        outer_rows: Vec::new(),
         timed: false,
     };
 

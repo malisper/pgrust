@@ -2,40 +2,46 @@ use std::cmp::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::compact_string::CompactString;
-use crate::parser::{SqlType, SqlTypeKind};
+use crate::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use super::nodes::*;
-use super::ExecError;
+use super::{ExecError, ExecutorContext, executor_start, exec_next};
 
 extern crate rand;
 
-pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
+pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
     match expr {
         Expr::Column(index) => {
             let val = slot.get_attr(*index)?;
             Ok(val.clone())
         }
+        Expr::OuterColumn { depth, index } => ctx
+            .outer_rows
+            .get(*depth)
+            .and_then(|row| row.get(*index))
+            .cloned()
+            .ok_or(ExecError::UnboundOuterColumn { depth: *depth, index: *index }),
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Add(left, right) => add_values(eval_expr(left, slot)?, eval_expr(right, slot)?),
-        Expr::Negate(inner) => negate_value(eval_expr(inner, slot)?),
-        Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot)?, *ty),
+        Expr::Add(left, right) => add_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Negate(inner) => negate_value(eval_expr(inner, slot, ctx)?),
+        Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot, ctx)?, *ty),
         Expr::Eq(left, right) => {
-            compare_values("=", eval_expr(left, slot)?, eval_expr(right, slot)?)
+            compare_values("=", eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
         Expr::Lt(left, right) => order_values(
             "<",
-            eval_expr(left, slot)?,
-            eval_expr(right, slot)?,
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
             |a, b| a < b,
         ),
         Expr::Gt(left, right) => order_values(
             ">",
-            eval_expr(left, slot)?,
-            eval_expr(right, slot)?,
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
             |a, b| a > b,
         ),
         Expr::RegexMatch(left, right) => {
-            let text = eval_expr(left, slot)?;
-            let pattern = eval_expr(right, slot)?;
+            let text = eval_expr(left, slot, ctx)?;
+            let pattern = eval_expr(right, slot, ctx)?;
             if matches!(text, Value::Null) || matches!(pattern, Value::Null) {
                 return Ok(Value::Null);
             }
@@ -49,25 +55,131 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
                 .map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
             Ok(Value::Bool(re.is_match(text_str)))
         }
-        Expr::And(left, right) => eval_and(eval_expr(left, slot)?, eval_expr(right, slot)?),
-        Expr::Or(left, right) => eval_or(eval_expr(left, slot)?, eval_expr(right, slot)?),
-        Expr::Not(inner) => match eval_expr(inner, slot)? {
+        Expr::And(left, right) => eval_and(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Or(left, right) => eval_or(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?),
+        Expr::Not(inner) => match eval_expr(inner, slot, ctx)? {
             Value::Bool(value) => Ok(Value::Bool(!value)),
             Value::Null => Ok(Value::Null),
             other => Err(ExecError::NonBoolQual(other)),
         },
-        Expr::IsNull(inner) => Ok(Value::Bool(matches!(eval_expr(inner, slot)?, Value::Null))),
-        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(eval_expr(inner, slot)?, Value::Null))),
+        Expr::IsNull(inner) => Ok(Value::Bool(matches!(eval_expr(inner, slot, ctx)?, Value::Null))),
+        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(eval_expr(inner, slot, ctx)?, Value::Null))),
         Expr::IsDistinctFrom(left, right) => Ok(Value::Bool(values_are_distinct(
-            &eval_expr(left, slot)?,
-            &eval_expr(right, slot)?,
+            &eval_expr(left, slot, ctx)?,
+            &eval_expr(right, slot, ctx)?,
         ))),
         Expr::IsNotDistinctFrom(left, right) => Ok(Value::Bool(!values_are_distinct(
-            &eval_expr(left, slot)?,
-            &eval_expr(right, slot)?,
+            &eval_expr(left, slot, ctx)?,
+            &eval_expr(right, slot, ctx)?,
         ))),
+        Expr::ScalarSubquery(plan) => eval_scalar_subquery(plan, slot, ctx),
+        Expr::ExistsSubquery(plan) => eval_exists_subquery(plan, slot, ctx),
+        Expr::AnySubquery { left, op, subquery } => {
+            let left_value = eval_expr(left, slot, ctx)?;
+            eval_quantified_subquery(&left_value, *op, false, subquery, slot, ctx)
+        }
+        Expr::AllSubquery { left, op, subquery } => {
+            let left_value = eval_expr(left, slot, ctx)?;
+            eval_quantified_subquery(&left_value, *op, true, subquery, slot, ctx)
+        }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
         Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(render_current_timestamp()))),
+    }
+}
+
+fn eval_scalar_subquery(plan: &Plan, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+    let outer_row = slot.values()?.iter().map(|v| v.to_owned_value()).collect::<Vec<_>>();
+    ctx.outer_rows.insert(0, outer_row);
+    let result = (|| {
+        let mut state = executor_start(plan.clone());
+        let mut first_value = None;
+        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
+            let values = inner_slot.values()?.iter().map(|v| v.to_owned_value()).collect::<Vec<_>>();
+            if values.len() != 1 {
+                return Err(ExecError::CardinalityViolation(
+                    "subquery must return only one column".into(),
+                ));
+            }
+            if first_value.is_some() {
+                return Err(ExecError::CardinalityViolation(
+                    "more than one row returned by a subquery used as an expression".into(),
+                ));
+            }
+            first_value = Some(values[0].clone());
+        }
+        Ok(first_value.unwrap_or(Value::Null))
+    })();
+    ctx.outer_rows.remove(0);
+    result
+}
+
+fn eval_exists_subquery(plan: &Plan, slot: &mut TupleSlot, ctx: &mut ExecutorContext) -> Result<Value, ExecError> {
+    let outer_row = slot.values()?.iter().map(|v| v.to_owned_value()).collect::<Vec<_>>();
+    ctx.outer_rows.insert(0, outer_row);
+    let result = (|| {
+        let mut state = executor_start(plan.clone());
+        Ok(Value::Bool(exec_next(&mut state, ctx)?.is_some()))
+    })();
+    ctx.outer_rows.remove(0);
+    result
+}
+
+fn eval_quantified_subquery(
+    left_value: &Value,
+    op: SubqueryComparisonOp,
+    is_all: bool,
+    plan: &Plan,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let outer_row = slot.values()?.iter().map(|v| v.to_owned_value()).collect::<Vec<_>>();
+    ctx.outer_rows.insert(0, outer_row);
+    let result = (|| {
+        let mut state = executor_start(plan.clone());
+        let mut saw_row = false;
+        let mut saw_null = false;
+        while let Some(inner_slot) = exec_next(&mut state, ctx)? {
+            saw_row = true;
+            let values = inner_slot.values()?.iter().map(|v| v.to_owned_value()).collect::<Vec<_>>();
+            if values.len() != 1 {
+                return Err(ExecError::CardinalityViolation(
+                    "subquery must return only one column".into(),
+                ));
+            }
+            match compare_subquery_values(left_value, &values[0], op)? {
+                Value::Bool(result) => {
+                    if !is_all && result {
+                        return Ok(Value::Bool(true));
+                    }
+                    if is_all && !result {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Value::Null => saw_null = true,
+                other => return Err(ExecError::NonBoolQual(other)),
+            }
+        }
+        if !saw_row {
+            Ok(Value::Bool(is_all))
+        } else if saw_null {
+            Ok(Value::Null)
+        } else {
+            Ok(Value::Bool(is_all))
+        }
+    })();
+    ctx.outer_rows.remove(0);
+    result
+}
+
+fn compare_subquery_values(
+    left: &Value,
+    right: &Value,
+    op: SubqueryComparisonOp,
+) -> Result<Value, ExecError> {
+    match op {
+        SubqueryComparisonOp::Eq => compare_values("=", left.clone(), right.clone()),
+        SubqueryComparisonOp::Lt => order_values("<", left.clone(), right.clone(), |a, b| a < b),
+        SubqueryComparisonOp::Gt => order_values(">", left.clone(), right.clone(), |a, b| a > b),
     }
 }
 
@@ -225,7 +337,7 @@ pub(crate) fn compare_order_values(
 /// ExecInitQual which resolves expression evaluation steps once. Eliminates
 /// per-tuple recursive eval_expr dispatch. Allocated once at plan time;
 /// per-tuple cost is just an indirect function call.
-pub(crate) type CompiledPredicate = Box<dyn Fn(&mut TupleSlot) -> Result<bool, ExecError>>;
+pub(crate) type CompiledPredicate = Box<dyn Fn(&mut TupleSlot, &mut ExecutorContext) -> Result<bool, ExecError>>;
 
 /// Compile a predicate with access to the tuple decoder for direct byte access.
 /// Like PG's heap_getattr fast path for fixed-offset attributes.
@@ -250,7 +362,7 @@ fn try_compile_fixed_offset(
     match expr {
         Expr::Gt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
             let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
-            return Some(Box::new(move |slot| {
+            return Some(Box::new(move |slot, _ctx| {
                 if let Some(v) = slot.get_fixed_int32(off) { return Ok(v > val); }
                 match slot.get_attr(col)? {
                     Value::Int32(v) => Ok(*v > val),
@@ -261,7 +373,7 @@ fn try_compile_fixed_offset(
         } else { },
         Expr::Lt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
             let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
-            return Some(Box::new(move |slot| {
+            return Some(Box::new(move |slot, _ctx| {
                 if let Some(v) = slot.get_fixed_int32(off) { return Ok(v < val); }
                 match slot.get_attr(col)? {
                     Value::Int32(v) => Ok(*v < val),
@@ -272,7 +384,7 @@ fn try_compile_fixed_offset(
         } else { },
         Expr::Eq(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
             let (col, off, val) = (*col, decoder.fixed_int32_offset(*col)?, *val);
-            return Some(Box::new(move |slot| {
+            return Some(Box::new(move |slot, _ctx| {
                 if let Some(v) = slot.get_fixed_int32(off) { return Ok(v == val); }
                 match slot.get_attr(col)? {
                     Value::Int32(v) => Ok(*v == val),
@@ -283,18 +395,18 @@ fn try_compile_fixed_offset(
         } else { },
         Expr::And(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_and_with_decoder(expr, decoder);
-            return Some(Box::new(move |slot| {
+            return Some(Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if !part(slot)? { return Ok(false); }
+                    if !part(slot, ctx)? { return Ok(false); }
                 }
                 Ok(true)
             }));
         },
         Expr::Or(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_or_with_decoder(expr, decoder);
-            return Some(Box::new(move |slot| {
+            return Some(Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if part(slot)? { return Ok(true); }
+                    if part(slot, ctx)? { return Ok(true); }
                 }
                 Ok(false)
             }));
@@ -339,7 +451,7 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
     match expr {
         Expr::Gt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
             let (col, val) = (*col, *val);
-            return Box::new(move |slot| match slot.get_attr(col)? {
+            return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
                 Value::Int32(v) => Ok(*v > val),
                 Value::Null => Ok(false),
                 other => Err(ExecError::TypeMismatch { op: ">", left: other.clone(), right: Value::Int32(val) }),
@@ -347,7 +459,7 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
         } else { },
         Expr::Lt(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
             let (col, val) = (*col, *val);
-            return Box::new(move |slot| match slot.get_attr(col)? {
+            return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
                 Value::Int32(v) => Ok(*v < val),
                 Value::Null => Ok(false),
                 other => Err(ExecError::TypeMismatch { op: "<", left: other.clone(), right: Value::Int32(val) }),
@@ -355,7 +467,7 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
         } else { },
         Expr::Eq(left, right) => if let (Expr::Column(col), Expr::Const(Value::Int32(val))) = (left.as_ref(), right.as_ref()) {
             let (col, val) = (*col, *val);
-            return Box::new(move |slot| match slot.get_attr(col)? {
+            return Box::new(move |slot, _ctx| match slot.get_attr(col)? {
                 Value::Int32(v) => Ok(*v == val),
                 Value::Null => Ok(false),
                 other => Err(ExecError::TypeMismatch { op: "=", left: other.clone(), right: Value::Int32(val) }),
@@ -363,18 +475,18 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
         } else { },
         Expr::And(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_and(expr);
-            return Box::new(move |slot| {
+            return Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if !part(slot)? { return Ok(false); }
+                    if !part(slot, ctx)? { return Ok(false); }
                 }
                 Ok(true)
             });
         },
         Expr::Or(_, _) => {
             let parts: Vec<CompiledPredicate> = flatten_or(expr);
-            return Box::new(move |slot| {
+            return Box::new(move |slot, ctx| {
                 for part in &parts {
-                    if part(slot)? { return Ok(true); }
+                    if part(slot, ctx)? { return Ok(true); }
                 }
                 Ok(false)
             });
@@ -384,7 +496,7 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
                 let col = *col;
                 if let Ok(re) = regex::Regex::new(pat.as_str()) {
                     let re = std::sync::Arc::new(re);
-                    return Box::new(move |slot| {
+                    return Box::new(move |slot, _ctx| {
                         let val = slot.get_attr(col)?;
                         if let Some(s) = val.as_text() {
                             Ok(re.is_match(s))
@@ -405,7 +517,7 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
     }
     // Fallback: generic eval_expr
     let expr = expr.clone();
-    Box::new(move |slot| match eval_expr(&expr, slot)? {
+    Box::new(move |slot, ctx| match eval_expr(&expr, slot, ctx)? {
         Value::Bool(true) => Ok(true),
         Value::Bool(false) | Value::Null => Ok(false),
         other => Err(ExecError::NonBoolQual(other)),
