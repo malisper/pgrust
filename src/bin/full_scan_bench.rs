@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use pgrust::database::{Database, Session};
+use pgrust::pgrust::database::{Database, Session};
 use pgrust::executor::{StatementResult, Value};
 
 fn main() -> Result<(), String> {

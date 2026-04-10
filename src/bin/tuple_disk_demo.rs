@@ -8,11 +8,11 @@
 //!
 //! Run with: cargo run --bin tuple_disk_demo
 
-use pgrust::access::heap::tuple::{
+use pgrust::include::access::htup::{
     HeapTuple, heap_page_add_tuple, heap_page_get_tuple, heap_page_init,
 };
-use pgrust::storage::page::page_get_max_offset_number;
-use pgrust::storage::smgr::{BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+use pgrust::backend::storage::page::bufpage::page_get_max_offset_number;
+use pgrust::backend::storage::smgr::{BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use std::fs;
 use std::path::PathBuf;
 

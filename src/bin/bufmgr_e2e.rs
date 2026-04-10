@@ -7,7 +7,7 @@
 //!
 //! Run with:  cargo run --bin bufmgr_e2e
 
-use pgrust::storage::smgr::{MdStorageManager, StorageManager};
+use pgrust::backend::storage::smgr::{MdStorageManager, StorageManager};
 use pgrust::{
     BufferPool, BufferTag, FlushResult, ForkNumber, PAGE_SIZE, RelFileLocator, RequestPageResult,
     SmgrStorageBackend,

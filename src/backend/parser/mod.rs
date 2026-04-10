@@ -1,0 +1,943 @@
+pub mod parsenodes {
+    pub use crate::include::nodes::parsenodes::*;
+}
+pub mod gram;
+pub mod analyze;
+
+pub use crate::include::nodes::parsenodes::*;
+pub use gram::parse_statement;
+pub use analyze::*;
+
+pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
+    let stmt = parse_statement(sql)?;
+    match stmt {
+        Statement::Select(stmt) => Ok(stmt),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "SELECT",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::catalog::column_desc;
+    use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc};
+
+    fn desc() -> RelationDesc {
+        RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("name", SqlType::new(SqlTypeKind::Text), false),
+                column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+            ],
+        }
+    }
+
+    fn catalog() -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.insert(
+            "people",
+            CatalogEntry {
+                rel: crate::RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15000,
+                },
+                desc: desc(),
+            },
+        );
+        catalog
+    }
+
+    #[test]
+    fn pest_matches_basic_select_keyword() {
+        let result = gram::pest_parse_keyword(gram::Rule::kw_select_atom, "select").unwrap();
+        assert_eq!(result, "select");
+    }
+
+    #[test]
+    fn pest_matches_minimal_select_statement() {
+        let stmt = parse_statement("select id from people").unwrap();
+        match stmt {
+            Statement::Select(stmt) => {
+                assert_eq!(
+                    stmt.from,
+                    Some(FromItem::Table { name: "people".into() })
+                );
+                assert_eq!(stmt.targets.len(), 1);
+            }
+            other => panic!("expected select statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_select_with_where() {
+        let stmt =
+            parse_select("select name, note from people where id > 1 and note is null").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Table { name: "people".into() })
+        );
+        assert_eq!(stmt.targets.len(), 2);
+        assert!(matches!(stmt.where_clause, Some(SqlExpr::And(_, _))));
+    }
+
+    #[test]
+    fn parse_null_predicates() {
+        let stmt = parse_select(
+            "select name from people where note is not null or note is distinct from null",
+        )
+        .unwrap();
+        assert!(matches!(stmt.where_clause, Some(SqlExpr::Or(_, _))));
+
+        let stmt =
+            parse_select("select name from people where note is not distinct from null").unwrap();
+        assert!(matches!(
+            stmt.where_clause,
+            Some(SqlExpr::IsNotDistinctFrom(_, _))
+        ));
+    }
+
+    #[test]
+    fn parse_join_select() {
+        let stmt = parse_select(
+            "select people.name, pets.name from people join pets on people.id = pets.owner_id",
+        )
+        .unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Join {
+                left: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                right: Box::new(FromItem::Table {
+                    name: "pets".into(),
+                }),
+                kind: JoinKind::Inner,
+                on: Some(SqlExpr::Eq(
+                    Box::new(SqlExpr::Column("people.id".into())),
+                    Box::new(SqlExpr::Column("pets.owner_id".into()))
+                )),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_cross_join_select() {
+        let stmt = parse_select("select people.name, pets.name from people, pets").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Join {
+                left: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                right: Box::new(FromItem::Table {
+                    name: "pets".into(),
+                }),
+                kind: JoinKind::Cross,
+                on: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_table_alias() {
+        let stmt = parse_select("select s.name from people s").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "name");
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                alias: "s".into(),
+                column_aliases: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_table_alias_with_as() {
+        let stmt = parse_select("select s.name from people as s").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "name");
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                alias: "s".into(),
+                column_aliases: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_select_star_with_table_alias() {
+        let stmt = parse_select("select * from people p").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into(),
+                }),
+                alias: "p".into(),
+                column_aliases: vec![],
+            })
+        );
+        assert_eq!(stmt.targets[0].output_name, "*");
+    }
+
+    #[test]
+    fn parse_select_alias_overrides_qualified_column_name() {
+        let stmt = parse_select("select p.name as w from people p").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "w");
+    }
+
+    #[test]
+    fn parse_type_cast_expression() {
+        let stmt = parse_select("select (p.name)::text from people p").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "name");
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
+                assert!(matches!(**inner, SqlExpr::Column(ref name) if name == "p.name"));
+            }
+            other => panic!("expected cast expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_varchar_type_cast_expression() {
+        let stmt = parse_select("select 'abc'::varchar(2)").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(_, ty) => {
+                assert_eq!(*ty, SqlType::with_char_len(SqlTypeKind::Varchar, 2));
+            }
+            other => panic!("expected cast expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_cross_join_with_aliases() {
+        let stmt = parse_select("select p.name, q.name from people p, pets q").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Join {
+                left: Box::new(FromItem::Alias {
+                    source: Box::new(FromItem::Table {
+                        name: "people".into(),
+                    }),
+                    alias: "p".into(),
+                    column_aliases: vec![],
+                }),
+                right: Box::new(FromItem::Alias {
+                    source: Box::new(FromItem::Table {
+                        name: "pets".into(),
+                    }),
+                    alias: "q".into(),
+                    column_aliases: vec![],
+                }),
+                kind: JoinKind::Cross,
+                on: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_select_without_from() {
+        let stmt = parse_select("select 1").unwrap();
+        assert_eq!(stmt.from, None);
+        assert_eq!(stmt.targets.len(), 1);
+    }
+
+    #[test]
+    fn parse_select_without_targets_but_with_from() {
+        let stmt = parse_select("select from people").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Table { name: "people".into() })
+        );
+        assert!(stmt.targets.is_empty());
+    }
+
+    #[test]
+    fn parse_addition_in_where_clause() {
+        let stmt =
+            parse_select("select * from people, pets where pets.owner_id + 1 = people.id").unwrap();
+        assert!(matches!(
+            stmt.where_clause,
+            Some(SqlExpr::Eq(left, _))
+                if matches!(*left, SqlExpr::Add(_, _))
+        ));
+    }
+
+    #[test]
+    fn parse_unary_minus_in_expression() {
+        let stmt =
+            parse_statement("update pgbench_accounts set abalance = abalance + -1822 where aid = 82711")
+                .unwrap();
+        match stmt {
+            Statement::Update(UpdateStatement { assignments, .. }) => {
+                assert!(matches!(
+                    &assignments[0].expr,
+                    SqlExpr::Add(_, right) if matches!(**right, SqlExpr::Negate(_))
+                ));
+            }
+            other => panic!("expected update, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_select_with_order_limit_offset() {
+        let stmt =
+            parse_select("select name from people order by id desc limit 2 offset 1").unwrap();
+        assert_eq!(stmt.order_by.len(), 1);
+        assert!(stmt.order_by[0].descending);
+        assert_eq!(stmt.order_by[0].nulls_first, None);
+        assert_eq!(stmt.limit, Some(2));
+        assert_eq!(stmt.offset, Some(1));
+    }
+
+    #[test]
+    fn parse_select_with_explicit_nulls_ordering() {
+        let stmt = parse_select("select name from people order by note desc nulls last").unwrap();
+        assert_eq!(stmt.order_by.len(), 1);
+        assert!(stmt.order_by[0].descending);
+        assert_eq!(stmt.order_by[0].nulls_first, Some(false));
+    }
+
+    #[test]
+    fn build_plan_resolves_columns() {
+        let stmt = parse_select("select name, note from people where id > 1").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 2);
+                match *input {
+                    Plan::Filter { input, predicate } => {
+                        assert!(matches!(predicate, Expr::Gt(_, _)));
+                        assert!(matches!(*input, Plan::SeqScan { .. }));
+                    }
+                    other => panic!("expected filter, got {:?}", other),
+                }
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_resolves_aliased_columns() {
+        let stmt = parse_select("select s.name from people s where s.id > 1").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].name, "name");
+                match *input {
+                    Plan::Filter { predicate, .. } => {
+                        assert!(matches!(predicate, Expr::Gt(_, _)));
+                    }
+                    other => panic!("expected filter, got {:?}", other),
+                }
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_join_plan_resolves_qualified_columns() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select("select people.name, pets.id from people join pets on people.id = pets.owner_id").unwrap();
+        let plan = build_plan(&stmt, &catalog).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 2);
+                match *input { Plan::NestedLoopJoin { on, .. } => assert!(matches!(on, Expr::Eq(_, _))), other => panic!("expected join, got {:?}", other), }
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unknown_column_is_rejected() {
+        let stmt = parse_select("select missing from people").unwrap();
+        assert!(matches!(build_plan(&stmt, &catalog()), Err(ParseError::UnknownColumn(name)) if name == "missing"));
+    }
+
+    #[test]
+    fn select_star_expands_to_all_columns() {
+        let stmt = parse_select("select * from people").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        // select * is an identity projection — optimized away to bare SeqScan
+        assert!(matches!(plan, Plan::SeqScan { .. }),
+            "expected SeqScan (identity projection elided), got {:?}", plan);
+    }
+
+    #[test]
+    fn build_plan_wraps_order_by_and_limit() {
+        let stmt = parse_select("select name from people where id > 0 order by id desc limit 2 offset 1").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 1);
+                match *input {
+                    Plan::Limit { input, limit, offset } => {
+                        assert_eq!(limit, Some(2)); assert_eq!(offset, 1);
+                        match *input { Plan::OrderBy { input, items } => { assert_eq!(items.len(), 1); assert!(items[0].descending); assert!(matches!(*input, Plan::Filter { .. })); } other => panic!("expected order by, got {:?}", other), }
+                    }
+                    other => panic!("expected limit, got {:?}", other),
+                }
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_insert_update_delete() {
+        assert!(matches!(parse_statement("explain select name from people").unwrap(), Statement::Explain(ExplainStatement { analyze: false, buffers: false, .. })));
+        assert!(matches!(parse_statement("explain analyze select name from people").unwrap(), Statement::Explain(ExplainStatement { analyze: true, buffers: false, .. })));
+        assert!(matches!(parse_statement("explain (analyze, buffers) select name from people").unwrap(), Statement::Explain(ExplainStatement { analyze: true, buffers: true, .. })));
+        assert!(matches!(parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(), Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people"));
+        assert!(matches!(parse_statement("insert into people (id, name) values (1, 'alice'), (2, 'bob')").unwrap(), Statement::Insert(InsertStatement { table_name, values, .. }) if table_name == "people" && values.len() == 2));
+        assert!(matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "widgets" && columns.len() == 2));
+        assert!(matches!(parse_statement("create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "pgbench_history" && columns.len() == 6));
+        assert!(matches!(parse_statement("create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns }) if table_name == "pgbench_tellers" && columns.len() == 4));
+        assert!(matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names }) if table_names == vec!["widgets"]));
+        assert!(matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"]));
+        assert!(matches!(parse_statement("truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"]));
+        assert!(matches!(parse_statement("truncate pgbench_history").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_history"]));
+        assert!(matches!(parse_statement("vacuum pgbench_branches").unwrap(), Statement::Vacuum(VacuumStatement { table_names }) if table_names == vec!["pgbench_branches"]));
+        assert!(matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, .. }) if table_name == "people"));
+        assert!(matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, .. }) if table_name == "people"));
+        assert!(matches!(parse_statement("show tables").unwrap(), Statement::ShowTables));
+    }
+
+    #[test]
+    fn parse_create_table_with_varchar_types() {
+        match parse_statement(
+            "create table widgets (a varchar, b varchar(5), c character varying, d character varying(7))",
+        )
+        .unwrap()
+        {
+            Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+                assert_eq!(columns.len(), 4);
+                assert_eq!(columns[0].ty, SqlType::new(SqlTypeKind::Varchar));
+                assert_eq!(columns[1].ty, SqlType::with_char_len(SqlTypeKind::Varchar, 5));
+                assert_eq!(columns[2].ty, SqlType::new(SqlTypeKind::Varchar));
+                assert_eq!(columns[3].ty, SqlType::with_char_len(SqlTypeKind::Varchar, 7));
+            }
+            other => panic!("expected create table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_create_table_with_array_types() {
+        match parse_statement(
+            "create table widgets (a varchar[], b varchar(5)[], c int4[], d text[])",
+        )
+        .unwrap()
+        {
+            Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+                assert_eq!(columns[0].ty, SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)));
+                assert_eq!(columns[1].ty, SqlType::array_of(SqlType::with_char_len(SqlTypeKind::Varchar, 5)));
+                assert_eq!(columns[2].ty, SqlType::array_of(SqlType::new(SqlTypeKind::Int4)));
+                assert_eq!(columns[3].ty, SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
+            }
+            other => panic!("expected create table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_array_and_unnest_expressions() {
+        let stmt = parse_select("select * from unnest(ARRAY['a', 'b']::varchar[], ARRAY[1, 2])").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "unnest" && args.len() == 2));
+
+        let stmt = parse_select("select 1 = any (ARRAY[1, 2])").unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::QuantifiedArray { is_all: false, .. }));
+
+        let stmt = parse_select("select 1 < all (ARRAY[2, 3])").unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::QuantifiedArray { is_all: true, .. }));
+
+        let stmt = parse_select("select ARRAY['a'] && ARRAY['b']").unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayOverlap(_, _)));
+    }
+
+    #[test]
+    fn build_plan_rejects_untyped_empty_array() {
+        let stmt = parse_select("select ARRAY[]").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnexpectedToken { .. })
+        ));
+    }
+
+    #[test]
+    fn build_plan_accepts_typed_empty_array() {
+        let stmt = parse_select("select ARRAY[]::varchar[]").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { targets, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].sql_type, SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)));
+            }
+            other => panic!("expected projection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_aggregate_select() {
+        let stmt = parse_select("select count(*) from people").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: None, distinct: false }));
+        assert_eq!(stmt.targets[0].output_name, "count");
+    }
+
+    #[test]
+    fn parse_group_by_and_having() {
+        let stmt = parse_select("select name, count(*) from people group by name having count(*) > 1").unwrap();
+        assert_eq!(stmt.group_by.len(), 1);
+        assert!(matches!(stmt.group_by[0], SqlExpr::Column(ref name) if name == "name"));
+        assert!(stmt.having.is_some());
+    }
+
+    #[test]
+    fn build_plan_with_aggregate() {
+        let stmt = parse_select("select name, count(*) from people group by name").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { input, targets } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].name, "name");
+                assert_eq!(targets[1].name, "count");
+                assert!(matches!(*input, Plan::Aggregate { .. }));
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ungrouped_column_rejected_at_plan_time() {
+        let stmt = parse_select("select name, count(*) from people").unwrap();
+        assert!(matches!(build_plan(&stmt, &catalog()), Err(ParseError::UngroupedColumn(name)) if name == "name"));
+    }
+
+    #[test]
+    fn aggregate_in_where_rejected() {
+        let stmt = parse_select("select name from people where count(*) > 1").unwrap();
+        assert!(matches!(build_plan(&stmt, &catalog()), Err(ParseError::AggInWhere)));
+    }
+
+    #[test]
+    fn parse_column_alias() {
+        let stmt = parse_select("select count(*) as total from people").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert_eq!(stmt.targets[0].output_name, "total");
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: None, distinct: false }));
+    }
+
+    #[test]
+    fn parse_mixed_aliases() {
+        let stmt = parse_select("select name, count(*) as total from people group by name").unwrap();
+        assert_eq!(stmt.targets.len(), 2);
+        assert_eq!(stmt.targets[0].output_name, "name");
+        assert_eq!(stmt.targets[1].output_name, "total");
+    }
+
+    #[test]
+    fn parse_count_distinct() {
+        let stmt = parse_select("select count(distinct name) from people").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::AggCall { func: AggFunc::Count, arg: Some(_), distinct: true }));
+    }
+
+    #[test]
+    fn parse_generate_series() {
+        let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 2));
+    }
+
+    #[test]
+    fn parse_generate_series_with_step() {
+        let stmt = parse_select("select * from generate_series(1, 10, 2)").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 3));
+    }
+
+    #[test]
+    fn build_plan_for_unnest_uses_array_element_types() {
+        let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[], ARRAY[1, 2])").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Unnest { output_columns, .. } => {
+                assert_eq!(output_columns.len(), 2);
+                assert_eq!(output_columns[0].sql_type, SqlType::new(SqlTypeKind::Varchar));
+                assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
+            }
+            other => panic!("expected unnest plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_srf_with_column_alias() {
+        let stmt = parse_select("select * from generate_series(1, 3) as g(val)").unwrap();
+        match &stmt.from {
+            Some(FromItem::Alias { source, alias, column_aliases }) => {
+                let FromItem::FunctionCall { name, args } = source.as_ref() else {
+                    panic!("expected FunctionCall source, got {:?}", source);
+                };
+                assert_eq!(name, "generate_series");
+                assert_eq!(args.len(), 2);
+                assert_eq!(alias, "g");
+                assert_eq!(column_aliases, &["val"]);
+            }
+            other => panic!("expected Alias, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_srf_with_table_alias_only() {
+        let stmt = parse_select("select * from generate_series(1, 3) as g").unwrap();
+        match &stmt.from {
+            Some(FromItem::Alias { alias, column_aliases, .. }) => {
+                assert_eq!(alias, "g");
+                assert!(column_aliases.is_empty());
+            }
+            other => panic!("expected Alias, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_derived_table_with_alias() {
+        let stmt = parse_select("select * from (select id from people) p").unwrap();
+        match stmt.from {
+            Some(FromItem::Alias { source, alias, column_aliases }) => {
+                assert_eq!(alias, "p");
+                assert!(column_aliases.is_empty());
+                assert!(matches!(*source, FromItem::DerivedTable(_)));
+            }
+            other => panic!("expected aliased derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_derived_table_with_column_aliases() {
+        let stmt = parse_select("select * from (select id, name from people) p(x, y)").unwrap();
+        match stmt.from {
+            Some(FromItem::Alias { source, alias, column_aliases }) => {
+                assert_eq!(alias, "p");
+                assert_eq!(column_aliases, vec!["x", "y"]);
+                assert!(matches!(*source, FromItem::DerivedTable(_)));
+            }
+            other => panic!("expected aliased derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_aliasless_derived_table() {
+        let stmt = parse_select("select * from (select id from people)").unwrap();
+        assert!(matches!(stmt.from, Some(FromItem::DerivedTable(_))));
+    }
+
+    #[test]
+    fn parse_join_with_derived_table() {
+        let stmt = parse_select(
+            "select * from people p join (select owner_id from pets) q on p.id = q.owner_id",
+        )
+        .unwrap();
+        match stmt.from {
+            Some(FromItem::Join { left, right, kind, on }) => {
+                assert_eq!(kind, JoinKind::Inner);
+                assert!(on.is_some());
+                assert!(matches!(*left, FromItem::Alias { .. }));
+                assert!(matches!(*right, FromItem::Alias { .. }));
+            }
+            other => panic!("expected join with derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_cross_join_with_derived_table() {
+        let stmt = parse_select("select * from people p, (select owner_id from pets) q").unwrap();
+        match stmt.from {
+            Some(FromItem::Join { left, right, kind, on }) => {
+                assert_eq!(kind, JoinKind::Cross);
+                assert!(on.is_none());
+                assert!(matches!(*left, FromItem::Alias { .. }));
+                assert!(matches!(*right, FromItem::Alias { .. }));
+            }
+            other => panic!("expected cross join with derived table, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_join_precedence_binds_tighter_than_comma() {
+        let stmt = parse_select("select * from a, b join c on b.id = c.id").unwrap();
+        match stmt.from {
+            Some(FromItem::Join { left, right, kind: JoinKind::Cross, on: None }) => {
+                assert!(matches!(*left, FromItem::Table { name } if name == "a"));
+                match *right {
+                    FromItem::Join { left, right, kind: JoinKind::Inner, on: Some(_) } => {
+                        assert!(matches!(*left, FromItem::Table { name } if name == "b"));
+                        assert!(matches!(*right, FromItem::Table { name } if name == "c"));
+                    }
+                    other => panic!("expected inner join on right side, got {:?}", other),
+                }
+            }
+            other => panic!("expected cross join tree, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_parenthesized_join_alias() {
+        let stmt =
+            parse_select("select * from (people p join pets q on p.id = q.owner_id) j").unwrap();
+        match stmt.from {
+            Some(FromItem::Alias { source, alias, .. }) => {
+                assert_eq!(alias, "j");
+                assert!(matches!(*source, FromItem::Join { .. }));
+            }
+            other => panic!("expected aliased parenthesized join, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_resolves_columns_from_derived_table_alias() {
+        let stmt = parse_select("select p.id from (select id from people) p").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { targets, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].name, "id");
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_aliasless_derived_table_exposes_unqualified_columns() {
+        let stmt = parse_select("select id from (select id from people)").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        assert!(matches!(plan, Plan::Projection { .. } | Plan::SeqScan { .. }));
+    }
+
+    #[test]
+    fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
+        let stmt = parse_select("select p.x, p.name from (select id, name from people) p(x)").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { targets, .. } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(targets[0].name, "x");
+                assert_eq!(targets[1].name, "name");
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_plan_rejects_too_many_derived_table_column_aliases() {
+        let stmt = parse_select("select * from (select id from people) p(x, y)").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnexpectedToken { .. })
+        ));
+    }
+
+    #[test]
+    fn build_plan_join_alias_hides_inner_relation_names() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt =
+            parse_select("select p.id from (people p join pets q on p.id = q.owner_id) j").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog),
+            Err(ParseError::UnknownColumn(name)) if name == "p.id"
+        ));
+    }
+
+    #[test]
+    fn build_plan_non_lateral_derived_table_rejects_outer_refs() {
+        let stmt =
+            parse_select("select * from people p, (select p.id from people) q").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnknownColumn(name)) if name == "p.id"
+        ));
+    }
+
+    #[test]
+    fn parse_random_function() {
+        let stmt = parse_select("select random()").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::Random));
+        assert_eq!(stmt.targets[0].output_name, "random");
+    }
+
+    #[test]
+    fn parse_current_timestamp() {
+        let stmt =
+            parse_statement("insert into pgbench_history (mtime) values (current_timestamp)")
+                .unwrap();
+        match stmt {
+            Statement::Insert(InsertStatement { values, .. }) => {
+                assert!(matches!(values[0][0], SqlExpr::CurrentTimestamp));
+            }
+            other => panic!("expected insert, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_scalar_subquery_expression() {
+        assert!(parse_select("select (select 1)").is_ok());
+    }
+
+    #[test]
+    fn parse_exists_subquery_expression() {
+        assert!(parse_select("select exists (select 1)").is_ok());
+        assert!(parse_select("select not exists (select 1)").is_ok());
+    }
+
+    #[test]
+    fn parse_in_subquery_expression() {
+        assert!(parse_select("select id in (select owner_id from pets) from people").is_ok());
+        assert!(parse_select("select id not in (select owner_id from pets) from people").is_ok());
+    }
+
+    #[test]
+    fn parse_any_all_subquery_expressions() {
+        assert!(parse_select("select id = any (select owner_id from pets) from people").is_ok());
+        assert!(parse_select("select id < all (select owner_id from pets) from people").is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_correlated_scalar_subquery_in_target_list() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_correlated_exists_in_where() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.name from people p where exists (select 1 from pets q where q.owner_id = p.id)",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_nested_outer_correlation() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id))",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_treats_subqueries_as_aggregate_scope_boundaries() {
+        let stmt = parse_select(
+            "select name from people where exists (select count(*) from people p2)",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog()).is_ok());
+    }
+
+    #[test]
+    fn build_plan_allows_grouped_outer_column_inside_subquery() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.id, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.id)",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog).is_ok());
+    }
+
+    #[test]
+    fn build_plan_rejects_ungrouped_outer_column_inside_subquery() {
+        let mut catalog = catalog();
+        catalog.insert("pets", CatalogEntry {
+            rel: crate::RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 15001 },
+            desc: RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        });
+        let stmt = parse_select(
+            "select p.name, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.name)",
+        )
+        .unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog),
+            Err(ParseError::UngroupedColumn(name)) if name == "p.name" || name == "name"
+        ));
+    }
+
+    #[test]
+    fn build_plan_rejects_multi_column_scalar_subquery() {
+        let stmt = parse_select("select (select id, name from people)").unwrap();
+        assert!(build_plan(&stmt, &catalog()).is_err());
+    }
+}
