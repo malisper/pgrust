@@ -16,6 +16,7 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
         Expr::Const(value) => Ok(value.clone()),
         Expr::Add(left, right) => add_values(eval_expr(left, slot)?, eval_expr(right, slot)?),
         Expr::Negate(inner) => negate_value(eval_expr(inner, slot)?),
+        Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot)?, *ty),
         Expr::Eq(left, right) => {
             compare_values("=", eval_expr(left, slot)?, eval_expr(right, slot)?)
         }
@@ -66,6 +67,71 @@ pub fn eval_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> 
         ))),
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
         Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(render_current_timestamp()))),
+    }
+}
+
+fn cast_value(value: Value, ty: ScalarType) -> Result<Value, ExecError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int32(v) => match ty {
+            ScalarType::Int32 => Ok(Value::Int32(v)),
+            ScalarType::Text => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
+            ScalarType::Bool => Err(ExecError::TypeMismatch {
+                op: "::bool",
+                left: Value::Int32(v),
+                right: Value::Bool(false),
+            }),
+        },
+        Value::Bool(v) => match ty {
+            ScalarType::Bool => Ok(Value::Bool(v)),
+            ScalarType::Text => Ok(Value::Text(CompactString::new(if v { "true" } else { "false" }))),
+            ScalarType::Int32 => Err(ExecError::TypeMismatch {
+                op: "::int4",
+                left: Value::Bool(v),
+                right: Value::Int32(0),
+            }),
+        },
+        Value::Text(text) => cast_text_value(text.as_str(), ty),
+        Value::TextRef(ptr, len) => {
+            let text = unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
+            };
+            cast_text_value(text, ty)
+        }
+        Value::Float64(v) => match ty {
+            ScalarType::Text => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
+            ScalarType::Int32 | ScalarType::Bool => Err(ExecError::TypeMismatch {
+                op: "::",
+                left: Value::Float64(v),
+                right: match ty {
+                    ScalarType::Int32 => Value::Int32(0),
+                    ScalarType::Bool => Value::Bool(false),
+                    ScalarType::Text => Value::Text(CompactString::new("")),
+                },
+            }),
+        },
+    }
+}
+
+fn cast_text_value(text: &str, ty: ScalarType) -> Result<Value, ExecError> {
+    match ty {
+        ScalarType::Text => Ok(Value::Text(CompactString::new(text))),
+        ScalarType::Int32 => text.parse::<i32>()
+            .map(Value::Int32)
+            .map_err(|_| ExecError::TypeMismatch {
+                op: "::int4",
+                left: Value::Text(CompactString::new(text)),
+                right: Value::Int32(0),
+            }),
+        ScalarType::Bool => match text.to_ascii_lowercase().as_str() {
+            "true" | "t" => Ok(Value::Bool(true)),
+            "false" | "f" => Ok(Value::Bool(false)),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::bool",
+                left: Value::Text(CompactString::new(text)),
+                right: Value::Bool(false),
+            }),
+        },
     }
 }
 

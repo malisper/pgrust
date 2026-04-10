@@ -199,6 +199,7 @@ pub enum SqlExpr {
     Const(Value),
     Add(Box<SqlExpr>, Box<SqlExpr>),
     Negate(Box<SqlExpr>),
+    Cast(Box<SqlExpr>, SqlType),
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),
     Gt(Box<SqlExpr>, Box<SqlExpr>),
