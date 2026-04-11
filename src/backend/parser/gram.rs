@@ -958,6 +958,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         | Rule::add_expr
         | Rule::bit_expr
         | Rule::shift_expr
+        | Rule::pow_expr
         | Rule::mul_expr => {
             let mut inner = pair.into_inner();
             let first = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
@@ -986,7 +987,22 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::negated_expr => {
             let raw = pair.as_str().trim_start();
             let expr = build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)?;
-            if raw.starts_with('~') {
+            if raw.starts_with("||/") {
+                Ok(SqlExpr::FuncCall {
+                    name: "cbrt".into(),
+                    args: vec![expr],
+                })
+            } else if raw.starts_with("|/") {
+                Ok(SqlExpr::FuncCall {
+                    name: "sqrt".into(),
+                    args: vec![expr],
+                })
+            } else if raw.starts_with('@') {
+                Ok(SqlExpr::FuncCall {
+                    name: "abs".into(),
+                    args: vec![expr],
+                })
+            } else if raw.starts_with('~') {
                 Ok(SqlExpr::BitNot(Box::new(expr)))
             } else {
                 Ok(SqlExpr::Negate(Box::new(expr)))
@@ -1012,6 +1028,29 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
             match next.as_rule() {
                 Rule::null_predicate_suffix => build_null_predicate(left, next),
+                Rule::in_expr_list_suffix => {
+                    let mut negated = false;
+                    let mut values = Vec::new();
+                    for part in next.into_inner() {
+                        match part.as_rule() {
+                            Rule::kw_not => negated = true,
+                            Rule::expr_list => {
+                                values = part
+                                    .into_inner()
+                                    .filter(|part| part.as_rule() == Rule::expr)
+                                    .map(build_expr)
+                                    .collect::<Result<Vec<_>, _>>()?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(SqlExpr::QuantifiedArray {
+                        left: Box::new(left),
+                        op: SubqueryComparisonOp::Eq,
+                        is_all: negated,
+                        array: Box::new(SqlExpr::ArrayLiteral(values)),
+                    })
+                }
                 Rule::in_subquery_suffix => {
                     let mut negated = false;
                     let mut subquery = None;
@@ -1316,6 +1355,10 @@ fn fold_infix(
                 "|" => SqlExpr::BitOr(Box::new(expr), Box::new(rhs)),
                 "#" => SqlExpr::BitXor(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
+            },
+            Rule::pow_op => SqlExpr::FuncCall {
+                name: "power".into(),
+                args: vec![expr, rhs],
             },
             Rule::shift_op => match op.as_str() {
                 "<<" => SqlExpr::Shl(Box::new(expr), Box::new(rhs)),

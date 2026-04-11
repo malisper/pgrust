@@ -368,6 +368,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_prefix_float_operator_sugar() {
+        let stmt = parse_select("select @x, |/x, ||/x from metrics").unwrap();
+        assert!(matches!(
+            &stmt.targets[0].expr,
+            SqlExpr::FuncCall { name, args } if name == "abs" && args.len() == 1
+        ));
+        assert!(matches!(
+            &stmt.targets[1].expr,
+            SqlExpr::FuncCall { name, args } if name == "sqrt" && args.len() == 1
+        ));
+        assert!(matches!(
+            &stmt.targets[2].expr,
+            SqlExpr::FuncCall { name, args } if name == "cbrt" && args.len() == 1
+        ));
+    }
+
+    #[test]
+    fn parse_power_operator_and_in_list() {
+        let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
+        assert!(matches!(
+            &stmt.targets[0].expr,
+            SqlExpr::FuncCall { name, args } if name == "power" && args.len() == 2
+        ));
+        assert!(matches!(
+            &stmt.targets[1].expr,
+            SqlExpr::QuantifiedArray { is_all: false, .. }
+        ));
+    }
+
+    #[test]
     fn parse_escape_and_dollar_quoted_strings() {
         let stmt = parse_select(r#"select E'abc\tdef', $$a'b$$, $tag$x
 y$tag$"#).unwrap();
