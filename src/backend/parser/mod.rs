@@ -229,6 +229,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_select_with_quoted_output_alias() {
+        let stmt = parse_select("select q1 * 2 as \"twice int4\" from people").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "twice int4");
+    }
+
+    #[test]
     fn parse_select_star_with_table_alias() {
         let stmt = parse_select("select * from people p").unwrap();
         assert_eq!(

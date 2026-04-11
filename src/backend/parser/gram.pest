@@ -136,7 +136,9 @@ typed_string_literal = { type_name ~ quoted_string_literal }
 
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
 keyword_end = _{ !ident_cont }
-identifier = @{ (ASCII_ALPHA | "_") ~ ident_cont* }
+identifier = { quoted_identifier | unquoted_identifier }
+unquoted_identifier = @{ (ASCII_ALPHA | "_") ~ ident_cont* }
+quoted_identifier = @{ "\"" ~ ("\"\"" | !("\"") ~ ANY)* ~ "\"" }
 simple_identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 numeric_literal = @{
     (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ exponent?)

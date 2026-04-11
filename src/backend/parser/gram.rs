@@ -788,12 +788,11 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         let mut item_inner = item_pair.into_inner();
         let expr = build_expr(item_inner.next().ok_or(ParseError::UnexpectedEof)?)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
-            alias_pair
+            let alias = alias_pair
                 .into_inner()
                 .last()
-                .ok_or(ParseError::UnexpectedEof)?
-                .as_str()
-                .to_string()
+                .ok_or(ParseError::UnexpectedEof)?;
+            build_identifier(alias)
         } else {
             select_item_name(&expr, index)
         };
@@ -937,7 +936,12 @@ fn build_type_len(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
 }
 
 fn build_identifier(pair: Pair<'_, Rule>) -> String {
-    pair.as_str().to_string()
+    let raw = pair.as_str();
+    if raw.starts_with('"') && raw.ends_with('"') {
+        raw[1..raw.len() - 1].replace("\"\"", "\"")
+    } else {
+        raw.to_string()
+    }
 }
 
 pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
@@ -1165,7 +1169,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 ty,
             ))
         }
-        Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
+        Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
         Rule::quoted_string_literal
