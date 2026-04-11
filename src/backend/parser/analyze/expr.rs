@@ -897,8 +897,13 @@ fn bind_scalar_function_call(
         | BuiltinScalarFunction::Asind
         | BuiltinScalarFunction::Acosd
         | BuiltinScalarFunction::Atand => {
-            let arg_type =
+            let raw_arg_type =
                 infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_arg_type,
+                SqlType::new(SqlTypeKind::Float8),
+            );
             if !is_numeric_family(arg_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "numeric argument",
@@ -915,10 +920,20 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => {
-            let left_type =
+            let raw_left_type =
                 infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
-            let right_type =
+            let raw_right_type =
                 infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            let left_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_left_type,
+                SqlType::new(SqlTypeKind::Float8),
+            );
+            let right_type = coerce_unknown_string_literal_type(
+                &args[1],
+                raw_right_type,
+                SqlType::new(SqlTypeKind::Float8),
+            );
             if !is_numeric_family(left_type) || !is_numeric_family(right_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "numeric arguments",
@@ -943,6 +958,25 @@ fn bind_scalar_function_call(
                         SqlType::new(SqlTypeKind::Float8),
                     ),
                 ],
+            })
+        }
+        BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send => {
+            let arg_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let target_type = if matches!(func, BuiltinScalarFunction::Float4Send) {
+                SqlType::new(SqlTypeKind::Float4)
+            } else {
+                SqlType::new(SqlTypeKind::Float8)
+            };
+            if !is_numeric_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target_type)],
             })
         }
         BuiltinScalarFunction::PgInputIsValid

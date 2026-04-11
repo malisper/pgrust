@@ -151,6 +151,8 @@ pub enum BuiltinScalarFunction {
     Acosd,
     Atand,
     Atan2d,
+    Float4Send,
+    Float8Send,
     PgInputIsValid,
     PgInputErrorMessage,
     PgInputErrorDetail,
