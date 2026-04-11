@@ -1411,9 +1411,9 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_integer_family(left_type) || !is_integer_family(right_type) {
+            if !is_numeric_family(left_type) || !is_numeric_family(right_type) {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "integer arguments",
+                    expected: "numeric or integer arguments",
                     actual: format!(
                         "{func:?}({}, {})",
                         sql_type_name(left_type),

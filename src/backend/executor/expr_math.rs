@@ -403,6 +403,110 @@ pub(super) fn cotd(value: f64) -> f64 {
     }
 }
 
+fn numeric_gcd(
+    left: &crate::include::nodes::datum::NumericValue,
+    right: &crate::include::nodes::datum::NumericValue,
+) -> crate::include::nodes::datum::NumericValue {
+    use crate::include::nodes::datum::NumericValue;
+    use num_bigint::BigInt;
+    match (left, right) {
+        (NumericValue::NaN, _) | (_, NumericValue::NaN) => NumericValue::NaN,
+        (
+            NumericValue::Finite {
+                coeff: lcoeff,
+                scale: lscale,
+            },
+            NumericValue::Finite {
+                coeff: rcoeff,
+                scale: rscale,
+            },
+        ) => {
+            // Align scales, compute GCD of integer coefficients, then rescale
+            let max_scale = (*lscale).max(*rscale);
+            let la = lcoeff * pow10_bigint(max_scale - lscale);
+            let ra = rcoeff * pow10_bigint(max_scale - rscale);
+            let g = bigint_gcd(&la, &ra);
+            NumericValue::Finite {
+                coeff: g,
+                scale: max_scale,
+            }
+            .normalize()
+        }
+        _ => NumericValue::NaN,
+    }
+}
+
+fn numeric_lcm(
+    left: &crate::include::nodes::datum::NumericValue,
+    right: &crate::include::nodes::datum::NumericValue,
+) -> crate::include::nodes::datum::NumericValue {
+    use crate::include::nodes::datum::NumericValue;
+    use num_bigint::BigInt;
+    use num_traits::Zero;
+    match (left, right) {
+        (NumericValue::NaN, _) | (_, NumericValue::NaN) => NumericValue::NaN,
+        (
+            NumericValue::Finite {
+                coeff: lcoeff,
+                scale: lscale,
+            },
+            NumericValue::Finite {
+                coeff: rcoeff,
+                scale: rscale,
+            },
+        ) => {
+            let max_scale = (*lscale).max(*rscale);
+            let la = lcoeff * pow10_bigint(max_scale - lscale);
+            let ra = rcoeff * pow10_bigint(max_scale - rscale);
+            if la.is_zero() || ra.is_zero() {
+                return NumericValue::Finite {
+                    coeff: BigInt::from(0),
+                    scale: max_scale,
+                }
+                .normalize();
+            }
+            let g = bigint_gcd(&la, &ra);
+            let lcm = (&la / &g) * &ra;
+            let lcm = if lcm < BigInt::from(0) { -lcm } else { lcm };
+            NumericValue::Finite {
+                coeff: lcm,
+                scale: max_scale,
+            }
+            .normalize()
+        }
+        _ => NumericValue::NaN,
+    }
+}
+
+fn bigint_gcd(a: &num_bigint::BigInt, b: &num_bigint::BigInt) -> num_bigint::BigInt {
+    use num_bigint::BigInt;
+    use num_traits::Zero;
+    let mut a = if a < &BigInt::from(0) {
+        -a.clone()
+    } else {
+        a.clone()
+    };
+    let mut b = if b < &BigInt::from(0) {
+        -b.clone()
+    } else {
+        b.clone()
+    };
+    while !b.is_zero() {
+        let r = &a % &b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn pow10_bigint(exp: u32) -> num_bigint::BigInt {
+    let mut v = num_bigint::BigInt::from(1);
+    for _ in 0..exp {
+        v *= 10;
+    }
+    v
+}
+
 fn gcd_i128(mut left: i128, mut right: i128) -> u128 {
     left = left.abs();
     right = right.abs();
@@ -436,6 +540,9 @@ pub(super) fn eval_gcd_function(values: &[Value]) -> Result<Value, ExecError> {
             i64::try_from(gcd)
                 .map(Value::Int64)
                 .map_err(|_| ExecError::Int8OutOfRange)
+        }
+        [Value::Numeric(left), Value::Numeric(right)] => {
+            Ok(Value::Numeric(numeric_gcd(left, right)))
         }
         [left, right] => Err(ExecError::TypeMismatch {
             op: "gcd",
@@ -490,6 +597,9 @@ pub(super) fn eval_lcm_function(values: &[Value]) -> Result<Value, ExecError> {
             i64::try_from(lcm)
                 .map(Value::Int64)
                 .map_err(|_| ExecError::Int8OutOfRange)
+        }
+        [Value::Numeric(left), Value::Numeric(right)] => {
+            Ok(Value::Numeric(numeric_lcm(left, right)))
         }
         [left, right] => Err(ExecError::TypeMismatch {
             op: "lcm",
