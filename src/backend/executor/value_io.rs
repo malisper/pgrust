@@ -1,5 +1,5 @@
 use super::exec_expr::parse_numeric_text;
-use super::expr_bit::render_bit_text;
+use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{cast_numeric_value, cast_text_value, cast_value, render_internal_char_text};
 use super::node_types::*;
 use super::ExecError;
@@ -87,7 +87,12 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
-        Value::Bit(bits) => cast_value(Value::Bit(bits.clone()), target),
+        Value::Bit(bits) => match target.kind {
+            SqlTypeKind::Bit | SqlTypeKind::VarBit => {
+                Ok(Value::Bit(coerce_bit_string(bits.clone(), target, false)?))
+            }
+            _ => cast_value(Value::Bit(bits.clone()), target),
+        },
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
         Value::Float64(v) => match target.kind {
             SqlTypeKind::Float4

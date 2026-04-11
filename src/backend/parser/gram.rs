@@ -7,6 +7,7 @@ use super::comments::{
 };
 use super::parsenodes::*;
 use crate::backend::executor::{AggFunc, Value};
+use crate::include::nodes::datum::BitString;
 
 #[derive(Parser)]
 #[grammar = "backend/parser/gram.pest"]
@@ -1448,6 +1449,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 ty,
             ))
         }
+        Rule::bit_string_literal | Rule::binary_bit_literal | Rule::hex_bit_literal => {
+            Ok(SqlExpr::Const(Value::Bit(parse_bit_string_literal(pair.as_str())?)))
+        }
         Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
@@ -1638,6 +1642,60 @@ fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
         expected: "string literal",
         actual: raw.into(),
     })
+}
+
+fn parse_bit_string_literal(raw: &str) -> Result<BitString, ParseError> {
+    let (prefix, literal) = raw.split_at(1);
+    let decoded = decode_string_literal(literal)?;
+    let bytes = decoded.as_bytes();
+    match prefix.as_bytes()[0] {
+        b'b' | b'B' => {
+            let mut out = vec![0u8; BitString::byte_len(bytes.len() as i32)];
+            for (idx, byte) in bytes.iter().enumerate() {
+                match byte {
+                    b'0' => {}
+                    b'1' => out[idx / 8] |= 1 << (7 - (idx % 8)),
+                    other => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "valid binary digit",
+                            actual: format!("\"{}\" is not a valid binary digit", char::from(*other)),
+                        });
+                    }
+                }
+            }
+            Ok(BitString::new(bytes.len() as i32, out))
+        }
+        b'x' | b'X' => {
+            let mut out = Vec::with_capacity(bytes.len().div_ceil(2));
+            let mut pending = None::<u8>;
+            for byte in bytes {
+                let nibble = match byte {
+                    b'0'..=b'9' => *byte - b'0',
+                    b'a'..=b'f' => *byte - b'a' + 10,
+                    b'A'..=b'F' => *byte - b'A' + 10,
+                    other => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "valid hexadecimal digit",
+                            actual: format!("\"{}\" is not a valid hexadecimal digit", char::from(*other)),
+                        });
+                    }
+                };
+                if let Some(high) = pending.take() {
+                    out.push((high << 4) | nibble);
+                } else {
+                    pending = Some(nibble);
+                }
+            }
+            if let Some(high) = pending {
+                out.push(high << 4);
+            }
+            Ok(BitString::new((bytes.len() * 4) as i32, out))
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "bit string literal",
+            actual: raw.into(),
+        }),
+    }
 }
 
 fn decode_escape_string(raw: &str) -> Result<String, ParseError> {
