@@ -1135,6 +1135,21 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 .transpose()?
                 .unwrap_or_default(),
         )),
+        Rule::cast_expr => {
+            let mut expr = None;
+            let mut ty = None;
+            for part in pair.into_inner() {
+                match part.as_rule() {
+                    Rule::expr => expr = Some(build_expr(part)?),
+                    Rule::type_name => ty = Some(build_type(part)),
+                    _ => {}
+                }
+            }
+            Ok(SqlExpr::Cast(
+                Box::new(expr.ok_or(ParseError::UnexpectedEof)?),
+                ty.ok_or(ParseError::UnexpectedEof)?,
+            ))
+        }
         Rule::agg_call => build_agg_call(pair),
         Rule::func_call => {
             let mut inner = pair.into_inner();
