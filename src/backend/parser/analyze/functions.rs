@@ -38,12 +38,17 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "md5" => Some(BuiltinScalarFunction::Md5),
         "to_char" => Some(BuiltinScalarFunction::ToChar),
         "abs" => Some(BuiltinScalarFunction::Abs),
+        "log" => Some(BuiltinScalarFunction::Log),
+        "log10" => Some(BuiltinScalarFunction::Log10),
         "gcd" => Some(BuiltinScalarFunction::Gcd),
         "lcm" => Some(BuiltinScalarFunction::Lcm),
         "div" => Some(BuiltinScalarFunction::Div),
         "scale" => Some(BuiltinScalarFunction::Scale),
         "min_scale" => Some(BuiltinScalarFunction::MinScale),
         "trim_scale" => Some(BuiltinScalarFunction::TrimScale),
+        "numeric_inc" => Some(BuiltinScalarFunction::NumericInc),
+        "factorial" => Some(BuiltinScalarFunction::Factorial),
+        "pg_lsn" => Some(BuiltinScalarFunction::PgLsn),
         "trunc" => Some(BuiltinScalarFunction::Trunc),
         "round" => Some(BuiltinScalarFunction::Round),
         "width_bucket" => Some(BuiltinScalarFunction::WidthBucket),
@@ -128,11 +133,15 @@ pub(super) fn validate_scalar_function_arity(
         BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
         BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
         BuiltinScalarFunction::Abs
+        | BuiltinScalarFunction::Log10
         | BuiltinScalarFunction::Length
         | BuiltinScalarFunction::Lower
         | BuiltinScalarFunction::Scale
         | BuiltinScalarFunction::MinScale
         | BuiltinScalarFunction::TrimScale
+        | BuiltinScalarFunction::NumericInc
+        | BuiltinScalarFunction::Factorial
+        | BuiltinScalarFunction::PgLsn
         | BuiltinScalarFunction::Ceil
         | BuiltinScalarFunction::Ceiling
         | BuiltinScalarFunction::Floor
@@ -166,6 +175,7 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::BpcharToText
         | BuiltinScalarFunction::BitCount => args.len() == 1,
         BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => matches!(args.len(), 1 | 2),
+        BuiltinScalarFunction::Log => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::Power
         | BuiltinScalarFunction::Atan2d
         | BuiltinScalarFunction::BoolEq
