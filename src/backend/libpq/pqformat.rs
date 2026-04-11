@@ -19,9 +19,14 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::InvalidNumericInput(value) => {
             format!("invalid input syntax for type numeric: \"{value}\"")
         }
-        ExecError::InvalidFloatInput(value) => {
-            format!("invalid input syntax for type double precision: \"{value}\"")
+        ExecError::InvalidFloatInput { ty, value } => {
+            format!("invalid input syntax for type {ty}: \"{value}\"")
         }
+        ExecError::FloatOutOfRange { ty, value } => {
+            format!("\"{value}\" is out of range for type {ty}")
+        }
+        ExecError::FloatOverflow => "value out of range: overflow".to_string(),
+        ExecError::FloatUnderflow => "value out of range: underflow".to_string(),
         ExecError::InvalidStorageValue { details, .. } => details.clone(),
         ExecError::Int2OutOfRange => "smallint out of range".to_string(),
         ExecError::Int4OutOfRange => "integer out of range".to_string(),

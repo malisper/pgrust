@@ -101,7 +101,16 @@ pub enum ExecError {
         value: String,
     },
     InvalidNumericInput(String),
-    InvalidFloatInput(String),
+    InvalidFloatInput {
+        ty: &'static str,
+        value: String,
+    },
+    FloatOutOfRange {
+        ty: &'static str,
+        value: String,
+    },
+    FloatOverflow,
+    FloatUnderflow,
     Int2OutOfRange,
     Int4OutOfRange,
     Int8OutOfRange,
@@ -2162,6 +2171,82 @@ mod tests {
     }
 
     #[test]
+    fn float_text_input_accepts_whitespace_and_special_literals() {
+        let base = temp_dir("float_text_input_whitespace");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '   NAN  '::float4, '          -INFINiTY   '::float8, '    0.0   '::float8",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                match &rows[0][0] {
+                    Value::Float64(v) => assert!(v.is_nan()),
+                    other => panic!("expected float NaN, got {other:?}"),
+                }
+                match &rows[0][1] {
+                    Value::Float64(v) => assert!(v.is_infinite() && *v < 0.0),
+                    other => panic!("expected negative infinity, got {other:?}"),
+                }
+                assert_eq!(rows[0][2], Value::Float64(0.0));
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn float_text_out_of_range_errors_are_type_aware() {
+        let base = temp_dir("float_text_out_of_range");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '10e70'::float4").unwrap_err(),
+            ExecError::FloatOutOfRange {
+                ty: "real",
+                value,
+            } if value == "10e70"
+        ));
+        assert!(matches!(
+            run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '10e400'::float8").unwrap_err(),
+            ExecError::FloatOutOfRange {
+                ty: "double precision",
+                value,
+            } if value == "10e400"
+        ));
+    }
+
+    #[test]
+    fn float4_narrowing_reports_overflow_and_underflow() {
+        let base = temp_dir("float4_narrowing_out_of_range");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select cast('10e70'::float8 as float4)",
+            )
+            .unwrap_err(),
+            ExecError::FloatOverflow
+        ));
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select cast('10e-70'::float8 as float4)",
+            )
+            .unwrap_err(),
+            ExecError::FloatUnderflow
+        ));
+    }
+
+    #[test]
     fn narrowing_integer_casts_raise_out_of_range_errors() {
         let base = temp_dir("narrowing_integer_casts");
         let txns = TransactionManager::new_durable(&base).unwrap();
@@ -2604,6 +2689,28 @@ mod tests {
     }
 
     #[test]
+    fn pg_input_is_valid_reports_float_results() {
+        let base = temp_dir("pg_input_is_valid_float");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select pg_input_is_valid('34.5', 'float4'), pg_input_is_valid('xyz', 'float4'), pg_input_is_valid('1e4000', 'float8'), pg_input_is_valid('   NAN  ', 'float8')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+            ]],
+        );
+    }
+
+    #[test]
     fn pg_input_error_info_returns_one_row_with_structured_fields() {
         let base = temp_dir("pg_input_error_info_int2");
         let txns = TransactionManager::new_durable(&base).unwrap();
@@ -2633,6 +2740,28 @@ mod tests {
             )
             .unwrap(),
             vec![vec![Value::Null, Value::Null, Value::Null, Value::Null]],
+        );
+    }
+
+    #[test]
+    fn pg_input_error_info_reports_float_out_of_range() {
+        let base = temp_dir("pg_input_error_info_float");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info('1e400', 'float4')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("\"1e400\" is out of range for type real".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("22003".into()),
+            ]],
         );
     }
 
