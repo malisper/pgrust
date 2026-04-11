@@ -827,6 +827,29 @@ fn bind_scalar_function_call(
                 ],
             })
         }
+        BuiltinScalarFunction::ToChar => {
+            let value_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let format_type =
+                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            if !is_numeric_family(value_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(value_type)),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        format_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                ],
+            })
+        }
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => {
             let left_type =
                 infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);

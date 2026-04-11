@@ -164,7 +164,8 @@ pub(super) fn infer_sql_expr_type(
                 },
             ),
             Some(BuiltinScalarFunction::PgInputIsValid) => SqlType::new(SqlTypeKind::Bool),
-            Some(BuiltinScalarFunction::PgInputErrorMessage)
+            Some(BuiltinScalarFunction::ToChar)
+            | Some(BuiltinScalarFunction::PgInputErrorMessage)
             | Some(BuiltinScalarFunction::PgInputErrorDetail)
             | Some(BuiltinScalarFunction::PgInputErrorHint)
             | Some(BuiltinScalarFunction::PgInputErrorSqlState) => SqlType::new(SqlTypeKind::Text),

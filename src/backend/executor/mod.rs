@@ -1,6 +1,7 @@
 mod agg;
 mod expr_casts;
 mod expr_compile;
+mod expr_format;
 mod expr_ops;
 mod driver;
 mod expr_json;
