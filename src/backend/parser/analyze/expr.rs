@@ -20,7 +20,7 @@ pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, Pars
 pub(crate) fn bind_expr_with_outer(
     expr: &SqlExpr,
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<Expr, ParseError> {
@@ -30,7 +30,7 @@ pub(crate) fn bind_expr_with_outer(
 pub(crate) fn bind_expr_with_outer_and_ctes(
     expr: &SqlExpr,
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
@@ -841,7 +841,7 @@ fn bind_scalar_function_call(
     func: BuiltinScalarFunction,
     args: &[SqlExpr],
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],

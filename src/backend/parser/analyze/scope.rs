@@ -1,5 +1,4 @@
 use super::*;
-use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::storage::smgr::RelFileLocator;
 
 #[derive(Debug, Clone)]
@@ -28,9 +27,9 @@ pub(crate) struct BoundCte {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct BoundRelation {
-    pub(super) rel: RelFileLocator,
-    pub(super) desc: RelationDesc,
+pub struct BoundRelation {
+    pub rel: RelFileLocator,
+    pub desc: RelationDesc,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,7 +50,7 @@ pub(super) fn empty_scope() -> BoundScope {
 pub(super) fn bind_values_rows(
     rows: &[Vec<SqlExpr>],
     column_names: Option<&[String]>,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
@@ -260,7 +259,7 @@ fn outer_column_is_grouped(index: usize, scope: &BoundScope, group_by_exprs: &[S
 
 pub(super) fn bind_from_item(
     stmt: &FromItem,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<(Plan, BoundScope), ParseError> {
@@ -269,7 +268,7 @@ pub(super) fn bind_from_item(
 
 pub(super) fn bind_from_item_with_ctes(
     stmt: &FromItem,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
@@ -635,14 +634,9 @@ pub(super) fn bind_from_item_with_ctes(
     }
 }
 
-pub(super) fn lookup_relation(catalog: &Catalog, name: &str) -> Result<BoundRelation, ParseError> {
-    let relcache = RelCache::from_catalog(catalog);
-    relcache
-        .get_by_name(name)
-        .map(|entry| BoundRelation {
-            rel: entry.rel,
-            desc: entry.desc.clone(),
-        })
+pub(super) fn lookup_relation(catalog: &dyn CatalogLookup, name: &str) -> Result<BoundRelation, ParseError> {
+    catalog
+        .lookup_relation(name)
         .ok_or_else(|| ParseError::UnknownTable(name.to_string()))
 }
 

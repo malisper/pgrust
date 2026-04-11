@@ -3,7 +3,7 @@ use super::*;
 pub(crate) fn bind_select_targets(
     targets: &[SelectItem],
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],

@@ -16,6 +16,7 @@ use crate::backend::executor::{
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
+use crate::backend::utils::cache::relcache::RelCache;
 use agg::*;
 use agg_output::*;
 use coerce::*;
@@ -23,6 +24,20 @@ use expr::*;
 use functions::*;
 use infer::*;
 use scope::*;
+
+pub trait CatalogLookup {
+    fn lookup_relation(&self, name: &str) -> Option<BoundRelation>;
+}
+
+impl CatalogLookup for Catalog {
+    fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
+        let relcache = RelCache::from_catalog(self);
+        relcache.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            desc: entry.desc.clone(),
+        })
+    }
+}
 
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
     RelationDesc {
@@ -144,7 +159,7 @@ fn apply_cte_column_names(
 
 fn bind_ctes(
     ctes: &[CommonTableExpr],
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
@@ -208,17 +223,17 @@ pub fn bind_create_table(
         })
 }
 
-pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
+pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
     build_plan_with_outer(stmt, catalog, &[], None, &[])
 }
 
-pub fn build_values_plan(stmt: &ValuesStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
+pub fn build_values_plan(stmt: &ValuesStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
     build_values_plan_with_outer(stmt, catalog, &[], None, &[])
 }
 
 fn build_values_plan_with_outer(
     stmt: &ValuesStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
@@ -277,7 +292,7 @@ fn build_values_plan_with_outer(
 
 fn build_plan_with_outer(
     stmt: &SelectStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
@@ -642,7 +657,7 @@ pub fn bind_insert_prepared(
     table_name: &str,
     columns: Option<&[String]>,
     num_params: usize,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<PreparedInsert, ParseError> {
     let entry = lookup_relation(catalog, table_name)?;
 
@@ -694,7 +709,7 @@ pub struct BoundAssignment {
 
 pub fn bind_insert(
     stmt: &InsertStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<BoundInsertStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
@@ -738,7 +753,7 @@ pub fn bind_insert(
 
 pub fn bind_update(
     stmt: &UpdateStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
@@ -774,7 +789,7 @@ pub fn bind_update(
 
 pub fn bind_delete(
     stmt: &DeleteStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<BoundDeleteStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
