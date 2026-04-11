@@ -1,6 +1,7 @@
 mod agg;
 mod coerce;
 mod expr;
+mod functions;
 mod infer;
 mod scope;
 
@@ -16,6 +17,7 @@ pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use agg::*;
 use coerce::*;
 use expr::*;
+use functions::*;
 use infer::*;
 use scope::*;
 
@@ -551,4 +553,3 @@ pub fn bind_delete(
             .transpose()?,
     })
 }
-
