@@ -26,6 +26,8 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "jsonb_path_query_first" => Some(BuiltinScalarFunction::JsonbPathQueryFirst),
         "left" => Some(BuiltinScalarFunction::Left),
         "repeat" => Some(BuiltinScalarFunction::Repeat),
+        "position" => Some(BuiltinScalarFunction::Position),
+        "convert_from" => Some(BuiltinScalarFunction::ConvertFrom),
         "to_char" => Some(BuiltinScalarFunction::ToChar),
         "abs" => Some(BuiltinScalarFunction::Abs),
         "gcd" => Some(BuiltinScalarFunction::Gcd),
@@ -146,6 +148,16 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::BoolEq
         | BuiltinScalarFunction::BoolNe => args.len() == 2,
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
+        BuiltinScalarFunction::Position
+        | BuiltinScalarFunction::ConvertFrom
+        | BuiltinScalarFunction::Left
+        | BuiltinScalarFunction::Repeat
+        | BuiltinScalarFunction::ToChar
+        | BuiltinScalarFunction::PgInputIsValid
+        | BuiltinScalarFunction::PgInputErrorMessage
+        | BuiltinScalarFunction::PgInputErrorDetail
+        | BuiltinScalarFunction::PgInputErrorHint
+        | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
         BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
@@ -162,14 +174,6 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::JsonbPathMatch
         | BuiltinScalarFunction::JsonbPathQueryArray
         | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
-        BuiltinScalarFunction::Left
-        | BuiltinScalarFunction::Repeat
-        | BuiltinScalarFunction::ToChar
-        | BuiltinScalarFunction::PgInputIsValid
-        | BuiltinScalarFunction::PgInputErrorMessage
-        | BuiltinScalarFunction::PgInputErrorDetail
-        | BuiltinScalarFunction::PgInputErrorHint
-        | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
     };
 
     if valid {

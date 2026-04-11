@@ -132,6 +132,86 @@ pub(crate) fn strip_sql_comments_preserving_layout(sql: &str) -> String {
     String::from_utf8(out).expect("comment stripping preserves UTF-8")
 }
 
+pub(crate) fn normalize_position_syntax_preserving_layout(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = sql.as_bytes().to_vec();
+    let mut i = 0usize;
+    let mut dollar_tag: Option<Vec<u8>> = None;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        SingleQuote,
+        QuotedIdentifier,
+        DollarString,
+    }
+
+    let mut state = State::Normal;
+
+    while i < bytes.len() {
+        match state {
+            State::Normal => {
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    state = State::SingleQuote;
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    state = State::QuotedIdentifier;
+                } else if let Some((tag, len)) = parse_dollar_tag(bytes, i) {
+                    i += len;
+                    dollar_tag = Some(tag);
+                    state = State::DollarString;
+                } else if starts_position_call(bytes, i) {
+                    out[i..i + "position".len()].copy_from_slice(b"position");
+                    i = normalize_position_call(bytes, &mut out, i + "position".len());
+                } else {
+                    i += 1;
+                }
+            }
+            State::SingleQuote => {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                        state = State::Normal;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            State::QuotedIdentifier => {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                        state = State::Normal;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            State::DollarString => {
+                if let Some(tag) = dollar_tag.as_ref() {
+                    if matches_dollar_end(bytes, i, tag) {
+                        i += tag.len() + 2;
+                        dollar_tag = None;
+                        state = State::Normal;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                    state = State::Normal;
+                }
+            }
+        }
+    }
+
+    String::from_utf8(out).expect("position normalization preserves UTF-8")
+}
+
 pub(crate) fn sql_is_effectively_empty_after_comments(sql: &str) -> bool {
     strip_sql_comments_preserving_layout(sql)
         .trim()
@@ -178,9 +258,136 @@ fn matches_dollar_end(bytes: &[u8], start: usize, tag: &[u8]) -> bool {
     end < bytes.len() && &bytes[start + 1..end] == tag && bytes[end] == b'$'
 }
 
+fn starts_position_call(bytes: &[u8], i: usize) -> bool {
+    let keyword = b"position";
+    if i + keyword.len() > bytes.len() || !bytes[i..i + keyword.len()].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    if i > 0 && is_identifier_continue(bytes[i - 1]) {
+        return false;
+    }
+    let mut j = i + keyword.len();
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    j < bytes.len() && bytes[j] == b'('
+}
+
+fn normalize_position_call(bytes: &[u8], out: &mut [u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'(' {
+        return i;
+    }
+    let mut depth = 1usize;
+    let mut j = i + 1;
+    let mut dollar_tag: Option<Vec<u8>> = None;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        SingleQuote,
+        QuotedIdentifier,
+        DollarString,
+    }
+
+    let mut state = State::Normal;
+
+    while j < bytes.len() {
+        match state {
+            State::Normal => {
+                if bytes[j] == b'\'' {
+                    j += 1;
+                    state = State::SingleQuote;
+                } else if bytes[j] == b'"' {
+                    j += 1;
+                    state = State::QuotedIdentifier;
+                } else if let Some((tag, len)) = parse_dollar_tag(bytes, j) {
+                    j += len;
+                    dollar_tag = Some(tag);
+                    state = State::DollarString;
+                } else if bytes[j] == b'(' {
+                    depth += 1;
+                    j += 1;
+                } else if bytes[j] == b')' {
+                    depth -= 1;
+                    j += 1;
+                    if depth == 0 {
+                        return j;
+                    }
+                } else if depth == 1 && matches_kw_in(bytes, j) {
+                    out[j] = b',';
+                    if j + 1 < out.len() {
+                        out[j + 1] = b' ';
+                    }
+                    return j + 2;
+                } else {
+                    j += 1;
+                }
+            }
+            State::SingleQuote => {
+                if bytes[j] == b'\'' {
+                    if j + 1 < bytes.len() && bytes[j + 1] == b'\'' {
+                        j += 2;
+                    } else {
+                        j += 1;
+                        state = State::Normal;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            State::QuotedIdentifier => {
+                if bytes[j] == b'"' {
+                    if j + 1 < bytes.len() && bytes[j + 1] == b'"' {
+                        j += 2;
+                    } else {
+                        j += 1;
+                        state = State::Normal;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            State::DollarString => {
+                if let Some(tag) = dollar_tag.as_ref() {
+                    if matches_dollar_end(bytes, j, tag) {
+                        j += tag.len() + 2;
+                        dollar_tag = None;
+                        state = State::Normal;
+                    } else {
+                        j += 1;
+                    }
+                } else {
+                    j += 1;
+                    state = State::Normal;
+                }
+            }
+        }
+    }
+
+    j
+}
+
+fn matches_kw_in(bytes: &[u8], start: usize) -> bool {
+    start + 1 < bytes.len()
+        && bytes[start].eq_ignore_ascii_case(&b'i')
+        && bytes[start + 1].eq_ignore_ascii_case(&b'n')
+        && (start == 0 || !is_identifier_continue(bytes[start - 1]))
+        && (start + 2 >= bytes.len() || !is_identifier_continue(bytes[start + 2]))
+}
+
+fn is_identifier_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.')
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{sql_is_effectively_empty_after_comments, strip_sql_comments_preserving_layout};
+    use super::{
+        normalize_position_syntax_preserving_layout, sql_is_effectively_empty_after_comments,
+        strip_sql_comments_preserving_layout,
+    };
 
     #[test]
     fn strips_embedded_and_nested_comments() {
@@ -206,5 +413,14 @@ mod tests {
         assert!(sql_is_effectively_empty_after_comments(
             "/* and this is the end of the file */"
         ));
+    }
+
+    #[test]
+    fn normalizes_position_in_syntax() {
+        let sql = "select position('bc' in 'abcd')";
+        assert_eq!(
+            normalize_position_syntax_preserving_layout(sql),
+            "select position('bc' ,  'abcd')"
+        );
     }
 }

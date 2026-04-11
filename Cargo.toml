@@ -26,6 +26,7 @@ regex = "1"
 rustc-hash = "2.1.2"
 ryu = "1"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+encoding_rs = "0.8"
 
 [profile.release]
 debug = true
