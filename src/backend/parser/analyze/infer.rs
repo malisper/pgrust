@@ -1,5 +1,6 @@
 use super::*;
-use super::expr::{bind_concat_operands, resolve_scalar_function, validate_scalar_function_arity};
+use super::expr::bind_concat_operands;
+use super::functions::{resolve_scalar_function, validate_scalar_function_arity};
 
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
