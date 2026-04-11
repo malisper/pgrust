@@ -8,7 +8,9 @@ use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::store::sync_catalog_heaps;
 use crate::backend::catalog::{Catalog, CatalogEntry, CatalogError, CatalogStore};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
@@ -25,7 +27,9 @@ use crate::backend::storage::lmgr::{
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::RelCache;
-use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID};
+use crate::include::catalog::{
+    BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID,
+};
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
@@ -169,8 +173,19 @@ impl Database {
         TEMP_DB_OID_BASE.saturating_add(client_id)
     }
 
+    fn temp_catalog_entry(client_id: ClientId, kind: BootstrapCatalogKind) -> CatalogEntry {
+        let mut entry = bootstrap_catalog_entry(kind);
+        entry.rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid: Self::temp_db_oid(client_id),
+            rel_number: kind.relation_oid(),
+        };
+        entry
+    }
+
     pub(crate) fn visible_catalog(&self, client_id: ClientId) -> Catalog {
         let mut catalog = self.catalog.read().catalog().clone();
+        let base_dir = self.catalog.read().base_dir().to_path_buf();
         let permanent_entries = catalog
             .entries()
             .map(|(name, entry)| (name.to_string(), entry.clone()))
@@ -194,6 +209,17 @@ impl Database {
                 catalog.insert(name.clone(), temp.entry.clone());
                 catalog.insert(format!("pg_temp.{name}"), temp.entry.clone());
             }
+            for kind in [
+                BootstrapCatalogKind::PgNamespace,
+                BootstrapCatalogKind::PgClass,
+                BootstrapCatalogKind::PgAttribute,
+                BootstrapCatalogKind::PgType,
+            ] {
+                let entry = Self::temp_catalog_entry(client_id, kind);
+                catalog.insert(kind.relation_name(), entry.clone());
+                catalog.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
+            }
+            let _ = sync_catalog_heaps(&base_dir, &catalog);
         }
         catalog
     }
