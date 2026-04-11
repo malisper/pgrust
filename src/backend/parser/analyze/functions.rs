@@ -235,6 +235,8 @@ pub(super) fn validate_aggregate_arity(
         AggFunc::Count => args.len() <= 1,
         AggFunc::Sum
         | AggFunc::Avg
+        | AggFunc::Variance
+        | AggFunc::Stddev
         | AggFunc::Min
         | AggFunc::Max
         | AggFunc::JsonAgg

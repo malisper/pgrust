@@ -8,6 +8,7 @@ use super::render_bit_text;
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use num_traits::Zero;
 
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 
@@ -34,6 +35,13 @@ pub(crate) enum AccumState {
         sum: Option<NumericAccum>,
         count: i64,
         result_type: SqlType,
+    },
+    NumericStats {
+        count: i64,
+        sum: NumericValue,
+        sum_sq: NumericValue,
+        result_type: SqlType,
+        stddev: bool,
     },
     JsonAgg {
         values: Vec<Value>,
@@ -66,6 +74,20 @@ impl AccumState {
                 sum: None,
                 count: 0,
                 result_type: sql_type,
+            },
+            (AggFunc::Variance, _) => AccumState::NumericStats {
+                count: 0,
+                sum: NumericValue::zero(),
+                sum_sq: NumericValue::zero(),
+                result_type: sql_type,
+                stddev: false,
+            },
+            (AggFunc::Stddev, _) => AccumState::NumericStats {
+                count: 0,
+                sum: NumericValue::zero(),
+                sum_sq: NumericValue::zero(),
+                result_type: sql_type,
+                stddev: true,
             },
             (AggFunc::JsonAgg, _) => AccumState::JsonAgg {
                 values: Vec::new(),
@@ -131,6 +153,16 @@ impl AccumState {
                     let value = values.first().unwrap_or(&Value::Null);
                     if !matches!(value, Value::Null) {
                         *sum = accumulate_value(sum.take(), *result_type, value);
+                        *count += 1;
+                    }
+                }
+            },
+            (AggFunc::Variance | AggFunc::Stddev, _, _) => |state, values| {
+                if let AccumState::NumericStats { count, sum, sum_sq, .. } = state {
+                    let value = values.first().unwrap_or(&Value::Null);
+                    if let Some(numeric) = aggregate_numeric_value(value) {
+                        *sum = sum.add(&numeric);
+                        *sum_sq = sum_sq.add(&numeric.mul(&numeric));
                         *count += 1;
                     }
                 }
@@ -228,6 +260,39 @@ impl AccumState {
                             Value::Numeric(format_numeric_result(avg, *result_type))
                         }
                         None => Value::Null,
+                    }
+                }
+            }
+            AccumState::NumericStats {
+                count,
+                sum,
+                sum_sq,
+                result_type,
+                stddev,
+            } => {
+                if *count < 2 {
+                    Value::Null
+                } else {
+                    let n = NumericValue::from_i64(*count);
+                    let n_minus_one = NumericValue::from_i64(*count - 1);
+                    let mean_square = sum
+                        .mul(sum)
+                        .div(&n, 32)
+                        .unwrap_or_else(NumericValue::zero);
+                    let variance = sum_sq
+                        .sub(&mean_square)
+                        .div(&n_minus_one, 32)
+                        .unwrap_or_else(NumericValue::zero);
+                    let result = if *stddev {
+                        numeric_sqrt(&variance, 20)
+                    } else {
+                        variance.round_to_scale(20).unwrap_or(variance)
+                    };
+                    match result_type.kind {
+                        SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+                            Value::Float64(result.render().parse().unwrap_or(0.0))
+                        }
+                        _ => Value::Numeric(format_numeric_result(result, *result_type)),
                     }
                 }
             }
@@ -393,6 +458,49 @@ fn accumulate_value(sum: Option<NumericAccum>, result_type: SqlType, value: &Val
             })
         }
         _ => sum,
+    }
+}
+
+fn aggregate_numeric_value(value: &Value) -> Option<NumericValue> {
+    match value {
+        Value::Null => None,
+        Value::Int16(v) => Some(NumericValue::from_i64(i64::from(*v))),
+        Value::Int32(v) => Some(NumericValue::from_i64(i64::from(*v))),
+        Value::Int64(v) => Some(NumericValue::from_i64(*v)),
+        Value::Float64(v) => parse_numeric_text(&v.to_string()),
+        Value::Numeric(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+fn numeric_sqrt(value: &NumericValue, scale: u32) -> NumericValue {
+    match value {
+        NumericValue::Finite { coeff, .. } if coeff.is_zero() => NumericValue::zero(),
+        NumericValue::Finite { .. } => {
+            let seed = value
+                .render()
+                .parse::<f64>()
+                .ok()
+                .map(|v| v.sqrt())
+                .and_then(|v| parse_numeric_text(&format!("{v:.24}")))
+                .unwrap_or_else(|| NumericValue::from_i64(1));
+            let two = NumericValue::from_i64(2);
+            let mut current = seed;
+            for _ in 0..24 {
+                let next = current
+                    .add(&value.div(&current, scale + 12).unwrap_or_else(NumericValue::zero))
+                    .div(&two, scale + 12)
+                    .unwrap_or_else(|| current.clone());
+                if next.cmp(&current) == Ordering::Equal {
+                    current = next;
+                    break;
+                }
+                current = next;
+            }
+            current.round_to_scale(scale).unwrap_or(current)
+        }
+        NumericValue::PosInf => NumericValue::PosInf,
+        NumericValue::NegInf | NumericValue::NaN => NumericValue::NaN,
     }
 }
 
