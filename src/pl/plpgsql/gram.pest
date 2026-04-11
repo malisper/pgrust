@@ -1,0 +1,119 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+pl_block = { SOI ~ block ~ EOI }
+block = { declare_section? ~ kw_begin ~ stmt* ~ kw_end }
+declare_section = { kw_declare ~ (!kw_begin ~ var_decl)+ }
+var_decl = { !kw_begin ~ ident ~ type_name_text ~ default_clause? ~ semi }
+default_clause = { assign_op ~ expr_until_semi }
+
+stmt = { nested_block_stmt | null_stmt | if_stmt | for_int_stmt | raise_stmt | assign_stmt }
+nested_block_stmt = { block ~ semi }
+null_stmt = { kw_null ~ semi }
+assign_stmt = { ident ~ assign_op ~ expr_until_semi ~ semi }
+if_stmt = { kw_if ~ expr_until_then ~ kw_then ~ stmt* ~ elsif_clause* ~ else_clause? ~ kw_end ~ kw_if ~ semi }
+elsif_clause = { kw_elsif ~ expr_until_then ~ kw_then ~ stmt* }
+else_clause = { kw_else ~ stmt* }
+for_int_stmt = { kw_for ~ ident ~ kw_in ~ expr_until_range ~ range_op ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
+raise_stmt = { kw_raise ~ raise_level? ~ sql_string ~ (comma ~ expr_until_comma_or_semi)* ~ semi }
+raise_level = { kw_notice | kw_warning | kw_exception }
+
+ident = { quoted_ident | bare_ident }
+bare_ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+quoted_ident = @{ "\"" ~ ("\"\"" | !("\"") ~ ANY)* ~ "\"" }
+
+sql_string = @{ escape_string | string_literal }
+string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
+escape_string = @{ (^"e" | ^"E") ~ string_literal }
+semi = _{ ";" }
+comma = _{ "," }
+assign_op = _{ ":=" }
+range_op = _{ ".." }
+
+type_name_text = @{ type_name_chunk+ }
+expr_until_semi = @{ expr_chunk+ }
+expr_until_then = @{ expr_then_chunk+ }
+expr_until_range = @{ expr_range_chunk+ }
+expr_until_loop = @{ expr_loop_chunk+ }
+expr_until_comma_or_semi = @{ expr_param_chunk+ }
+
+type_name_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ type_name_text? ~ ")"
+    | "[" ~ type_name_text? ~ "]"
+    | !assign_op ~ !semi ~ ANY
+}
+
+expr_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ expr_until_semi? ~ ")"
+    | "[" ~ expr_until_semi? ~ "]"
+    | !semi ~ ANY
+}
+
+expr_then_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ expr_until_then? ~ ")"
+    | "[" ~ expr_until_then? ~ "]"
+    | !kw_then ~ ANY
+}
+
+expr_range_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ expr_until_range? ~ ")"
+    | "[" ~ expr_until_range? ~ "]"
+    | !range_op ~ ANY
+}
+
+expr_loop_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ expr_until_loop? ~ ")"
+    | "[" ~ expr_until_loop? ~ "]"
+    | !kw_loop ~ ANY
+}
+
+expr_param_chunk = _{
+    sql_string
+    | quoted_ident
+    | "(" ~ expr_until_comma_or_semi? ~ ")"
+    | "[" ~ expr_until_comma_or_semi? ~ "]"
+    | !comma ~ !semi ~ ANY
+}
+
+kw_begin = _{ kw_begin_atom }
+kw_declare = _{ kw_declare_atom }
+kw_end = _{ kw_end_atom }
+kw_null = _{ kw_null_atom }
+kw_if = _{ kw_if_atom }
+kw_then = _{ kw_then_atom }
+kw_elsif = _{ kw_elsif_atom }
+kw_else = _{ kw_else_atom }
+kw_for = _{ kw_for_atom }
+kw_in = _{ kw_in_atom }
+kw_loop = _{ kw_loop_atom }
+kw_raise = _{ kw_raise_atom }
+kw_notice = _{ kw_notice_atom }
+kw_warning = _{ kw_warning_atom }
+kw_exception = _{ kw_exception_atom }
+
+ident_cont = _{ ASCII_ALPHANUMERIC | "_" }
+keyword_end = _{ !ident_cont }
+kw_begin_atom = @{ ^"begin" ~ keyword_end }
+kw_declare_atom = @{ ^"declare" ~ keyword_end }
+kw_end_atom = @{ ^"end" ~ keyword_end }
+kw_null_atom = @{ ^"null" ~ keyword_end }
+kw_if_atom = @{ ^"if" ~ keyword_end }
+kw_then_atom = @{ ^"then" ~ keyword_end }
+kw_elsif_atom = @{ ^"elsif" ~ keyword_end }
+kw_else_atom = @{ ^"else" ~ keyword_end }
+kw_for_atom = @{ ^"for" ~ keyword_end }
+kw_in_atom = @{ ^"in" ~ keyword_end }
+kw_loop_atom = @{ ^"loop" ~ keyword_end }
+kw_raise_atom = @{ ^"raise" ~ keyword_end }
+kw_notice_atom = @{ ^"notice" ~ keyword_end }
+kw_warning_atom = @{ ^"warning" ~ keyword_end }
+kw_exception_atom = @{ ^"exception" ~ keyword_end }
