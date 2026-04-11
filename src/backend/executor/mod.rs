@@ -2451,6 +2451,68 @@ mod tests {
     }
 
     #[test]
+    fn quantified_in_coerces_float_results_against_integer_lists() {
+        let base = temp_dir("quantified_in_float_integer");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select sind(30.0::float8) in (-1, -0.5, 0, 0.5, 1), acosd(0.5::float8) in (0, 60, 90, 120, 180), atand(1.0::float8) in (-90, -45, 0, 45, 90)",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(true)]],
+        );
+    }
+
+    #[test]
+    fn erf_and_gamma_float_builtins_cover_expected_edges() {
+        let base = temp_dir("erf_gamma_builtins");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select erf(0.45::float8), erfc(0.45::float8), gamma(5.0::float8), lgamma(5.0::float8), atanh('nan'::float8)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                match &rows[0][0] {
+                    Value::Float64(v) => assert!((*v - 0.47548171978692366).abs() < 1e-12),
+                    other => panic!("expected float result, got {other:?}"),
+                }
+                match &rows[0][1] {
+                    Value::Float64(v) => assert!((*v - 0.5245182802130763).abs() < 1e-12),
+                    other => panic!("expected float result, got {other:?}"),
+                }
+                assert_eq!(rows[0][2], Value::Float64(24.0));
+                match &rows[0][3] {
+                    Value::Float64(v) => assert!((*v - 3.1780538303479458).abs() < 1e-12),
+                    other => panic!("expected float result, got {other:?}"),
+                }
+                match &rows[0][4] {
+                    Value::Float64(v) => assert!(v.is_nan()),
+                    other => panic!("expected NaN, got {other:?}"),
+                }
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select gamma(0.0::float8)",
+            )
+            .unwrap_err(),
+            ExecError::FloatOverflow
+        ));
+    }
+
+    #[test]
     fn narrowing_integer_casts_raise_out_of_range_errors() {
         let base = temp_dir("narrowing_integer_casts");
         let txns = TransactionManager::new_durable(&base).unwrap();

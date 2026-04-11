@@ -57,6 +57,10 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "atan2d" => Some(BuiltinScalarFunction::Atan2d),
         "float4send" => Some(BuiltinScalarFunction::Float4Send),
         "float8send" => Some(BuiltinScalarFunction::Float8Send),
+        "erf" => Some(BuiltinScalarFunction::Erf),
+        "erfc" => Some(BuiltinScalarFunction::Erfc),
+        "gamma" => Some(BuiltinScalarFunction::Gamma),
+        "lgamma" => Some(BuiltinScalarFunction::Lgamma),
         "pg_input_is_valid" => Some(BuiltinScalarFunction::PgInputIsValid),
         _ => None,
     }
@@ -126,7 +130,11 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Acosd
         | BuiltinScalarFunction::Atand
         | BuiltinScalarFunction::Float4Send
-        | BuiltinScalarFunction::Float8Send => args.len() == 1,
+        | BuiltinScalarFunction::Float8Send
+        | BuiltinScalarFunction::Erf
+        | BuiltinScalarFunction::Erfc
+        | BuiltinScalarFunction::Gamma
+        | BuiltinScalarFunction::Lgamma => args.len() == 1,
         BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => args.len() == 2,
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),

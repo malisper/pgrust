@@ -896,7 +896,11 @@ fn bind_scalar_function_call(
         | BuiltinScalarFunction::Cotd
         | BuiltinScalarFunction::Asind
         | BuiltinScalarFunction::Acosd
-        | BuiltinScalarFunction::Atand => {
+        | BuiltinScalarFunction::Atand
+        | BuiltinScalarFunction::Erf
+        | BuiltinScalarFunction::Erfc
+        | BuiltinScalarFunction::Gamma
+        | BuiltinScalarFunction::Lgamma => {
             let raw_arg_type =
                 infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
             let arg_type = coerce_unknown_string_literal_type(

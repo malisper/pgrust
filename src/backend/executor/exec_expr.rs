@@ -310,6 +310,12 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Float8Send => {
             eval_float_send_function("float8send", &values, false)
         }
+        BuiltinScalarFunction::Erf => eval_unary_float_function("erf", &values, eval_erf),
+        BuiltinScalarFunction::Erfc => eval_unary_float_function("erfc", &values, eval_erfc),
+        BuiltinScalarFunction::Gamma => eval_unary_float_function("gamma", &values, eval_gamma),
+        BuiltinScalarFunction::Lgamma => {
+            eval_unary_float_function("lgamma", &values, eval_lgamma)
+        }
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
@@ -519,6 +525,54 @@ fn eval_float_send_function(
     }
 }
 
+fn eval_erf(value: f64) -> Result<f64, ExecError> {
+    Ok(unsafe { erf(value) })
+}
+
+fn eval_erfc(value: f64) -> Result<f64, ExecError> {
+    Ok(unsafe { erfc(value) })
+}
+
+fn eval_gamma(value: f64) -> Result<f64, ExecError> {
+    if value.is_nan() {
+        return Ok(f64::NAN);
+    }
+    if value == f64::NEG_INFINITY || value == 0.0 || (value.is_finite() && value < 0.0 && value.fract() == 0.0) {
+        return Err(ExecError::FloatOverflow);
+    }
+    let result = unsafe { tgamma(value) };
+    if result.is_nan() {
+        return Err(float_domain_error("input is out of range"));
+    }
+    if result.is_infinite() {
+        if value.is_sign_negative() {
+            return Err(ExecError::FloatUnderflow);
+        }
+        return Err(ExecError::FloatOverflow);
+    }
+    if result == 0.0 && value.is_finite() && value < 0.0 {
+        return Err(ExecError::FloatUnderflow);
+    }
+    Ok(result)
+}
+
+fn eval_lgamma(value: f64) -> Result<f64, ExecError> {
+    if value.is_nan() {
+        return Ok(f64::NAN);
+    }
+    if value == f64::NEG_INFINITY || value == 0.0 || (value.is_finite() && value < 0.0 && value.fract() == 0.0) {
+        return Err(ExecError::FloatOverflow);
+    }
+    let result = unsafe { lgamma(value) };
+    if result.is_infinite() {
+        return Err(ExecError::FloatOverflow);
+    }
+    if result.is_nan() {
+        return Err(float_domain_error("input is out of range"));
+    }
+    Ok(result)
+}
+
 fn float_domain_error(message: impl Into<String>) -> ExecError {
     ExecError::InvalidStorageValue {
         column: String::new(),
@@ -635,6 +689,9 @@ fn eval_acosh(value: f64) -> Result<f64, ExecError> {
 }
 
 fn eval_atanh(value: f64) -> Result<f64, ExecError> {
+    if value.is_nan() {
+        return Ok(f64::NAN);
+    }
     if !(-1.0..=1.0).contains(&value) || value == -1.0 || value == 1.0 {
         return Err(float_domain_error("input is out of range"));
     }
@@ -1065,14 +1122,43 @@ fn compare_subquery_values(
     right: &Value,
     op: SubqueryComparisonOp,
 ) -> Result<Value, ExecError> {
+    let (left, right) = coerce_quantified_compare_values(left, right)?;
     match op {
-        SubqueryComparisonOp::Eq => compare_values("=", left.clone(), right.clone()),
-        SubqueryComparisonOp::NotEq => not_equal_values(left.clone(), right.clone()),
-        SubqueryComparisonOp::Lt => order_values("<", left.clone(), right.clone()),
-        SubqueryComparisonOp::LtEq => order_values("<=", left.clone(), right.clone()),
-        SubqueryComparisonOp::Gt => order_values(">", left.clone(), right.clone()),
-        SubqueryComparisonOp::GtEq => order_values(">=", left.clone(), right.clone()),
+        SubqueryComparisonOp::Eq => compare_values("=", left, right),
+        SubqueryComparisonOp::NotEq => not_equal_values(left, right),
+        SubqueryComparisonOp::Lt => order_values("<", left, right),
+        SubqueryComparisonOp::LtEq => order_values("<=", left, right),
+        SubqueryComparisonOp::Gt => order_values(">", left, right),
+        SubqueryComparisonOp::GtEq => order_values(">=", left, right),
     }
+}
+
+fn coerce_quantified_compare_values(
+    left: &Value,
+    right: &Value,
+) -> Result<(Value, Value), ExecError> {
+    use Value::*;
+    let needs_float = matches!(
+        (left, right),
+        (Float64(_), Int16(_) | Int32(_) | Int64(_))
+            | (Int16(_) | Int32(_) | Int64(_), Float64(_))
+            | (Float64(_), Numeric(_))
+            | (Numeric(_), Float64(_))
+    );
+    if needs_float {
+        return Ok((
+            cast_value(left.clone(), SqlType::new(SqlTypeKind::Float8))?,
+            cast_value(right.clone(), SqlType::new(SqlTypeKind::Float8))?,
+        ));
+    }
+    Ok((left.clone(), right.clone()))
+}
+
+unsafe extern "C" {
+    fn erf(x: f64) -> f64;
+    fn erfc(x: f64) -> f64;
+    fn tgamma(x: f64) -> f64;
+    fn lgamma(x: f64) -> f64;
 }
 
 fn render_current_timestamp() -> String {

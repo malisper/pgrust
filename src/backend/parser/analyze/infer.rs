@@ -177,7 +177,11 @@ pub(super) fn infer_sql_expr_type(
                 | BuiltinScalarFunction::Asind
                 | BuiltinScalarFunction::Acosd
                 | BuiltinScalarFunction::Atand
-                | BuiltinScalarFunction::Atan2d,
+                | BuiltinScalarFunction::Atan2d
+                | BuiltinScalarFunction::Erf
+                | BuiltinScalarFunction::Erfc
+                | BuiltinScalarFunction::Gamma
+                | BuiltinScalarFunction::Lgamma,
             ) => SqlType::new(SqlTypeKind::Float8),
             Some(BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send) => {
                 SqlType::new(SqlTypeKind::Text)
@@ -213,17 +217,28 @@ pub(super) fn infer_array_literal_type(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<SqlType, ParseError> {
+    let mut common: Option<SqlType> = None;
     for element in elements {
         if matches!(element, SqlExpr::Const(Value::Null)) {
             continue;
         }
-        return Ok(SqlType::array_of(
-            infer_sql_expr_type(element, scope, catalog, outer_scopes, grouped_outer)
-                .element_type(),
-        ));
+        let ty = infer_sql_expr_type(element, scope, catalog, outer_scopes, grouped_outer)
+            .element_type();
+        common = Some(match common {
+            None => ty,
+            Some(current) => resolve_common_scalar_type(current, ty).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected: "array literal elements with a common type",
+                    actual: format!("{} and {}", sql_type_name(current), sql_type_name(ty)),
+                }
+            })?,
+        });
     }
-    Err(ParseError::UnexpectedToken {
+    let Some(common) = common else {
+        return Err(ParseError::UnexpectedToken {
         expected: "ARRAY[...] with a typed element or explicit cast",
         actual: "ARRAY[]".into(),
-    })
+    });
+    };
+    Ok(SqlType::array_of(common))
 }
