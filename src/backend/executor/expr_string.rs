@@ -1,5 +1,5 @@
 use super::ExecError;
-use super::expr_format::{to_char_int, to_char_numeric};
+use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
 use super::node_types::Value;
 use super::expr_ops::parse_numeric_text;
 use crate::pgrust::compact_string::CompactString;
@@ -40,6 +40,29 @@ pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError
         }
     };
     Ok(Value::Text(rendered.into()))
+}
+
+pub(super) fn eval_to_number_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(format_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(format_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "to_number",
+        left: text_value.clone(),
+        right: format_value.clone(),
+    })?;
+    let format = format_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "to_number",
+        left: text_value.clone(),
+        right: format_value.clone(),
+    })?;
+    Ok(Value::Numeric(to_number_numeric(text, format)?))
 }
 
 pub(super) fn eval_left_function(values: &[Value]) -> Result<Value, ExecError> {

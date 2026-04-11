@@ -21,7 +21,7 @@ use super::expr_bit::{
 use super::expr_string::{
     eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
     eval_length_function, eval_lower_function, eval_md5_function, eval_position_function,
-    eval_repeat_function, eval_to_char_function,
+    eval_repeat_function, eval_to_char_function, eval_to_number_function,
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::node_types::*;
@@ -452,6 +452,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
+        BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
@@ -677,6 +678,7 @@ fn eval_builtin_function(
         },
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
+        BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
     }
 }

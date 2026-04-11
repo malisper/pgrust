@@ -37,6 +37,7 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "convert_from" => Some(BuiltinScalarFunction::ConvertFrom),
         "md5" => Some(BuiltinScalarFunction::Md5),
         "to_char" => Some(BuiltinScalarFunction::ToChar),
+        "to_number" => Some(BuiltinScalarFunction::ToNumber),
         "abs" => Some(BuiltinScalarFunction::Abs),
         "log" => Some(BuiltinScalarFunction::Log),
         "log10" => Some(BuiltinScalarFunction::Log10),
@@ -190,6 +191,7 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Left
         | BuiltinScalarFunction::Repeat
         | BuiltinScalarFunction::ToChar
+        | BuiltinScalarFunction::ToNumber
         | BuiltinScalarFunction::PgInputIsValid
         | BuiltinScalarFunction::PgInputErrorMessage
         | BuiltinScalarFunction::PgInputErrorDetail
