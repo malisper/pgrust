@@ -10,6 +10,7 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement,
 };
+use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::parser::{
     ParseError, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
     bind_insert_prepared, bind_update,
@@ -551,7 +552,16 @@ impl Session {
                             ScalarType::Jsonb => Ok(Value::Jsonb(
                                 crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
                             )),
-                            ScalarType::JsonPath => Ok(Value::JsonPath(raw.clone().into())),
+                            ScalarType::JsonPath => Ok(Value::JsonPath(
+                                canonicalize_jsonpath(raw)
+                                    .map_err(|_| ExecError::InvalidStorageValue {
+                                        column: "<copy>".into(),
+                                        details: format!(
+                                            "invalid input syntax for type jsonpath: \"{raw}\""
+                                        ),
+                                    })?
+                                    .into(),
+                            )),
                             ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),

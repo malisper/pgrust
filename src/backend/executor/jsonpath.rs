@@ -73,6 +73,11 @@ pub(crate) fn validate_jsonpath(text: &str) -> Result<(), ExecError> {
     parse_jsonpath(text).map(|_| ())
 }
 
+pub(crate) fn canonicalize_jsonpath(text: &str) -> Result<String, ExecError> {
+    let parsed = parse_jsonpath(text)?;
+    Ok(render_jsonpath(&parsed))
+}
+
 pub(crate) fn parse_jsonpath(text: &str) -> Result<JsonPath, ExecError> {
     Parser::new(text).parse()
 }
@@ -298,6 +303,135 @@ fn exec_jsonpath_error(message: &str) -> ExecError {
         column: "jsonpath".into(),
         details: message.to_string(),
     }
+}
+
+fn render_jsonpath(path: &JsonPath) -> String {
+    let mut out = String::new();
+    if matches!(path.mode, PathMode::Strict) {
+        out.push_str("strict ");
+    }
+    render_expr(&path.expr, &mut out);
+    out
+}
+
+fn render_expr(expr: &Expr, out: &mut String) {
+    match expr {
+        Expr::Literal(value) => render_literal(value, out),
+        Expr::Path { base, steps } => {
+            render_base(base, out);
+            for step in steps {
+                render_step(step, out);
+            }
+        }
+        Expr::Compare { op, left, right } => {
+            render_operand(left, out);
+            out.push_str(match op {
+                CompareOp::Eq => " == ",
+                CompareOp::NotEq => " != ",
+                CompareOp::Lt => " < ",
+                CompareOp::LtEq => " <= ",
+                CompareOp::Gt => " > ",
+                CompareOp::GtEq => " >= ",
+            });
+            render_operand(right, out);
+        }
+        Expr::And(left, right) => {
+            render_operand(left, out);
+            out.push_str(" && ");
+            render_operand(right, out);
+        }
+        Expr::Or(left, right) => {
+            render_operand(left, out);
+            out.push_str(" || ");
+            render_operand(right, out);
+        }
+        Expr::Not(inner) => {
+            out.push('!');
+            render_operand(inner, out);
+        }
+    }
+}
+
+fn render_operand(expr: &Expr, out: &mut String) {
+    match expr {
+        Expr::Compare { .. } | Expr::And(..) | Expr::Or(..) => {
+            out.push('(');
+            render_expr(expr, out);
+            out.push(')');
+        }
+        _ => render_expr(expr, out),
+    }
+}
+
+fn render_base(base: &Base, out: &mut String) {
+    match base {
+        Base::Root => out.push('$'),
+        Base::Current => out.push('@'),
+        Base::Var(name) => {
+            out.push('$');
+            out.push_str(name);
+        }
+    }
+}
+
+fn render_step(step: &Step, out: &mut String) {
+    match step {
+        Step::Member(name) => {
+            out.push('.');
+            render_quoted_string(name, out);
+        }
+        Step::MemberWildcard => out.push_str(".*"),
+        Step::Index(index) => {
+            out.push('[');
+            out.push_str(&index.to_string());
+            out.push(']');
+        }
+        Step::IndexWildcard => out.push_str("[*]"),
+        Step::Range(start, end) => {
+            out.push('[');
+            out.push_str(&start.to_string());
+            out.push_str(" to ");
+            out.push_str(&end.to_string());
+            out.push(']');
+        }
+        Step::Filter(expr) => {
+            out.push_str(" ? (");
+            render_expr(expr, out);
+            out.push(')');
+        }
+    }
+}
+
+fn render_literal(value: &JsonbValue, out: &mut String) {
+    match value {
+        JsonbValue::Null => out.push_str("null"),
+        JsonbValue::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+        JsonbValue::Numeric(n) => out.push_str(&n.render()),
+        JsonbValue::String(s) => render_quoted_string(s, out),
+        JsonbValue::Array(_) | JsonbValue::Object(_) => out.push_str("null"),
+    }
+}
+
+fn render_quoted_string(text: &str, out: &mut String) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => {
+                let code = ch as u32;
+                out.push_str("\\u");
+                out.push_str(&format!("{code:04x}"));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
 }
 
 struct Parser<'a> {
