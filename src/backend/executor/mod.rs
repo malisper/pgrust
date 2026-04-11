@@ -2247,6 +2247,62 @@ mod tests {
     }
 
     #[test]
+    fn float_arithmetic_handles_infinity_and_nan() {
+        let base = temp_dir("float_arithmetic_specials");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 'Infinity'::float8 + 100.0, 'Infinity'::float8 / 'Infinity'::float8, '42'::float8 / 'Infinity'::float8, 'nan'::float8 / 'nan'::float8, 'nan'::float8 / '0'::float8",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                match &rows[0][0] {
+                    Value::Float64(v) => assert!(v.is_infinite() && *v > 0.0),
+                    other => panic!("expected infinity, got {other:?}"),
+                }
+                match &rows[0][1] {
+                    Value::Float64(v) => assert!(v.is_nan()),
+                    other => panic!("expected NaN, got {other:?}"),
+                }
+                assert_eq!(rows[0][2], Value::Float64(0.0));
+                match &rows[0][3] {
+                    Value::Float64(v) => assert!(v.is_nan()),
+                    other => panic!("expected NaN, got {other:?}"),
+                }
+                match &rows[0][4] {
+                    Value::Float64(v) => assert!(v.is_nan()),
+                    other => panic!("expected NaN, got {other:?}"),
+                }
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn quoted_float_literals_coerce_in_numeric_comparisons() {
+        let base = temp_dir("quoted_float_literal_coercion");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 1004.3::float8 = '1004.3', '1004.3' > 0.0::float8, 0.0::float8 < '1004.3', 1004.3::float8 + '1.2'",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Float64(1005.5),
+            ]],
+        );
+    }
+
+    #[test]
     fn narrowing_integer_casts_raise_out_of_range_errors() {
         let base = temp_dir("narrowing_integer_casts");
         let txns = TransactionManager::new_durable(&base).unwrap();

@@ -207,6 +207,7 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_add_i64(*l, *r)?)),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l + r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
         }
@@ -232,6 +233,7 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r)?)),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
         }
@@ -257,6 +259,7 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r)?)),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l * r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.mul(rv)), "*")
         }
@@ -356,6 +359,11 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    if let (Value::Float64(l), Value::Float64(r)) = (&left, &right) {
+        if *r == 0.0 && l.is_nan() {
+            return Ok(Value::Float64(f64::NAN));
+        }
+    }
     let zero = match &right {
         Value::Int16(v) => *v == 0,
         Value::Int32(v) => *v == 0,
@@ -377,6 +385,7 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l, *r)?)),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l / r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| lv.div(rv, 16), "/")
         }
