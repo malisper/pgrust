@@ -7,6 +7,11 @@ pub const PG_PROC_RELATION_OID: u32 = 1255;
 pub const PG_CLASS_RELATION_OID: u32 = 1259;
 pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
 
+pub const PG_NAMESPACE_ROWTYPE_OID: u32 = 0;
+pub const PG_TYPE_ROWTYPE_OID: u32 = 71;
+pub const PG_ATTRIBUTE_ROWTYPE_OID: u32 = 75;
+pub const PG_CLASS_ROWTYPE_OID: u32 = 83;
+
 pub const BOOL_TYPE_OID: u32 = 16;
 pub const BYTEA_TYPE_OID: u32 = 17;
 pub const INTERNAL_CHAR_TYPE_OID: u32 = 18;
@@ -29,6 +34,67 @@ pub const JSONPATH_TYPE_OID: u32 = 4072;
 pub struct BootstrapCatalogRelation {
     pub oid: u32,
     pub name: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapCatalogKind {
+    PgNamespace,
+    PgClass,
+    PgAttribute,
+    PgType,
+}
+
+impl BootstrapCatalogKind {
+    pub const fn relation_oid(self) -> u32 {
+        match self {
+            Self::PgNamespace => PG_NAMESPACE_RELATION_OID,
+            Self::PgClass => PG_CLASS_RELATION_OID,
+            Self::PgAttribute => PG_ATTRIBUTE_RELATION_OID,
+            Self::PgType => PG_TYPE_RELATION_OID,
+        }
+    }
+
+    pub const fn relation_name(self) -> &'static str {
+        match self {
+            Self::PgNamespace => "pg_namespace",
+            Self::PgClass => "pg_class",
+            Self::PgAttribute => "pg_attribute",
+            Self::PgType => "pg_type",
+        }
+    }
+
+    pub const fn row_type_oid(self) -> u32 {
+        match self {
+            Self::PgNamespace => PG_NAMESPACE_ROWTYPE_OID,
+            Self::PgClass => PG_CLASS_ROWTYPE_OID,
+            Self::PgAttribute => PG_ATTRIBUTE_ROWTYPE_OID,
+            Self::PgType => PG_TYPE_ROWTYPE_OID,
+        }
+    }
+}
+
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 4] = [
+    BootstrapCatalogKind::PgNamespace,
+    BootstrapCatalogKind::PgType,
+    BootstrapCatalogKind::PgAttribute,
+    BootstrapCatalogKind::PgClass,
+];
+
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 4] {
+    CORE_BOOTSTRAP_KINDS
+}
+
+pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
+    match kind {
+        BootstrapCatalogKind::PgNamespace => pg_namespace_desc(),
+        BootstrapCatalogKind::PgClass => pg_class_desc(),
+        BootstrapCatalogKind::PgAttribute => pg_attribute_desc(),
+        BootstrapCatalogKind::PgType => pg_type_desc(),
+    }
+}
+
+pub const fn bootstrap_namespace_oid() -> u32 {
+    PG_CATALOG_NAMESPACE_OID
 }
 
 pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 4] = [
@@ -67,4 +133,19 @@ mod tests {
         let names: Vec<_> = CORE_BOOTSTRAP_RELATIONS.iter().map(|rel| rel.name).collect();
         assert_eq!(names, vec!["pg_namespace", "pg_type", "pg_attribute", "pg_class"]);
     }
+
+    #[test]
+    fn core_bootstrap_kinds_match_relation_list() {
+        let pairs: Vec<_> = CORE_BOOTSTRAP_KINDS
+            .iter()
+            .map(|kind| (kind.relation_oid(), kind.relation_name()))
+            .collect();
+        let shared: Vec<_> = CORE_BOOTSTRAP_RELATIONS
+            .iter()
+            .map(|rel| (rel.oid, rel.name))
+            .collect();
+        assert_eq!(pairs, shared);
+    }
 }
+use crate::backend::executor::RelationDesc;
+use super::{pg_attribute_desc, pg_class_desc, pg_namespace_desc, pg_type_desc};

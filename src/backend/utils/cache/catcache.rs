@@ -6,9 +6,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BOOL_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID,
     INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_TYPE_OID,
-    JSONPATH_TYPE_OID, JSON_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_TYPE_OID, VARCHAR_TYPE_OID,
+    JSONPATH_TYPE_OID, JSON_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PgAttributeRow, PgClassRow,
+    PgNamespaceRow, PgTypeRow, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, VARCHAR_TYPE_OID,
+    bootstrap_composite_type_rows, bootstrap_pg_namespace_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -26,16 +26,7 @@ impl CatCache {
     pub fn from_catalog(catalog: &Catalog) -> Self {
         let mut cache = Self::default();
 
-        for row in [
-            PgNamespaceRow {
-                oid: PG_CATALOG_NAMESPACE_OID,
-                nspname: "pg_catalog".into(),
-            },
-            PgNamespaceRow {
-                oid: PUBLIC_NAMESPACE_OID,
-                nspname: "public".into(),
-            },
-        ] {
+        for row in bootstrap_pg_namespace_rows() {
             cache
                 .namespaces_by_name
                 .insert(row.nspname.to_ascii_lowercase(), row.clone());
@@ -43,6 +34,13 @@ impl CatCache {
         }
 
         for row in builtin_type_rows() {
+            cache
+                .types_by_name
+                .insert(row.typname.to_ascii_lowercase(), row.clone());
+            cache.types_by_oid.insert(row.oid, row);
+        }
+
+        for row in bootstrap_composite_type_rows() {
             cache
                 .types_by_name
                 .insert(row.typname.to_ascii_lowercase(), row.clone());
@@ -160,39 +158,6 @@ impl CatCache {
         self.types_by_oid.values().cloned().collect()
     }
 }
-
-fn builtin_type_rows() -> Vec<PgTypeRow> {
-    vec![
-        builtin_type_row("bool", BOOL_TYPE_OID, SqlType::new(SqlTypeKind::Bool)),
-        builtin_type_row("bytea", BYTEA_TYPE_OID, SqlType::new(SqlTypeKind::Bytea)),
-        builtin_type_row("\"char\"", INTERNAL_CHAR_TYPE_OID, SqlType::new(SqlTypeKind::InternalChar)),
-        builtin_type_row("int8", INT8_TYPE_OID, SqlType::new(SqlTypeKind::Int8)),
-        builtin_type_row("int2", INT2_TYPE_OID, SqlType::new(SqlTypeKind::Int2)),
-        builtin_type_row("int4", INT4_TYPE_OID, SqlType::new(SqlTypeKind::Int4)),
-        builtin_type_row("text", TEXT_TYPE_OID, SqlType::new(SqlTypeKind::Text)),
-        builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
-        builtin_type_row("float4", FLOAT4_TYPE_OID, SqlType::new(SqlTypeKind::Float4)),
-        builtin_type_row("float8", FLOAT8_TYPE_OID, SqlType::new(SqlTypeKind::Float8)),
-        builtin_type_row("varchar", VARCHAR_TYPE_OID, SqlType::new(SqlTypeKind::Varchar)),
-        builtin_type_row("char", BPCHAR_TYPE_OID, SqlType::new(SqlTypeKind::Char)),
-        builtin_type_row("timestamp", TIMESTAMP_TYPE_OID, SqlType::new(SqlTypeKind::Timestamp)),
-        builtin_type_row("numeric", NUMERIC_TYPE_OID, SqlType::new(SqlTypeKind::Numeric)),
-        builtin_type_row("json", JSON_TYPE_OID, SqlType::new(SqlTypeKind::Json)),
-        builtin_type_row("jsonb", JSONB_TYPE_OID, SqlType::new(SqlTypeKind::Jsonb)),
-        builtin_type_row("jsonpath", JSONPATH_TYPE_OID, SqlType::new(SqlTypeKind::JsonPath)),
-    ]
-}
-
-fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
-    PgTypeRow {
-        oid,
-        typname: name.to_string(),
-        typnamespace: PG_CATALOG_NAMESPACE_OID,
-        typrelid: 0,
-        sql_type,
-    }
-}
-
 pub fn normalize_catalog_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
 }
