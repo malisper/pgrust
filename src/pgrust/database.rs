@@ -999,6 +999,13 @@ fn collect_rels_from_plan(
             collect_rels_from_expr(stop, rels);
             collect_rels_from_expr(step, rels);
         }
+        Plan::Values { rows, .. } => {
+            for row in rows {
+                for expr in row {
+                    collect_rels_from_expr(expr, rels);
+                }
+            }
+        }
         Plan::Unnest { args, .. } => {
             for arg in args {
                 collect_rels_from_expr(arg, rels);

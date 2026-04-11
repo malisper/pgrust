@@ -292,6 +292,15 @@ pub struct GenerateSeriesState {
 }
 
 #[derive(Debug)]
+pub struct ValuesState {
+    pub(crate) rows: Vec<Vec<Expr>>,
+    pub(crate) output_columns: Vec<String>,
+    pub(crate) result_rows: Option<Vec<TupleSlot>>,
+    pub(crate) next_index: usize,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
 pub struct UnnestState {
     pub(crate) args: Vec<Expr>,
     pub(crate) output_columns: Vec<String>,

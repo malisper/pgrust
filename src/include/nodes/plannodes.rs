@@ -265,6 +265,10 @@ pub enum Plan {
         step: Expr,
         output: QueryColumn,
     },
+    Values {
+        rows: Vec<Vec<Expr>>,
+        output_columns: Vec<QueryColumn>,
+    },
     Unnest {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
@@ -305,6 +309,7 @@ impl Plan {
                 cols
             }
             Plan::GenerateSeries { output, .. } => vec![output.clone()],
+            Plan::Values { output_columns, .. } => output_columns.clone(),
             Plan::Unnest { output_columns, .. } => output_columns.clone(),
             Plan::JsonTableFunction { output_columns, .. } => output_columns.clone(),
         }

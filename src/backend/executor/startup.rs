@@ -3,7 +3,7 @@ use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, GenerateSeriesState, JsonTableFunctionState, LimitState,
     NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState, ResultState, SeqScanState,
-    UnnestState,
+    UnnestState, ValuesState,
 };
 
 use std::rc::Rc;
@@ -156,6 +156,13 @@ pub fn executor_start(plan: Plan) -> PlanState {
             initialized: false,
             slot: TupleSlot::empty(1),
             column_names: vec![output.name],
+            stats: NodeExecStats::default(),
+        }),
+        Plan::Values { rows, output_columns } => Box::new(ValuesState {
+            rows,
+            output_columns: output_columns.into_iter().map(|c| c.name).collect(),
+            result_rows: None,
+            next_index: 0,
             stats: NodeExecStats::default(),
         }),
         Plan::Unnest {

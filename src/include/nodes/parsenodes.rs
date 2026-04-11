@@ -190,6 +190,9 @@ pub enum FromItem {
     Table {
         name: String,
     },
+    Values {
+        rows: Vec<Vec<SqlExpr>>,
+    },
     FunctionCall {
         name: String,
         args: Vec<SqlExpr>,
