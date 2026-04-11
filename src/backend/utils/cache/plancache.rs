@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use parking_lot::RwLock;
 
-use crate::backend::catalog::catalog::Catalog;
 use crate::backend::executor::ExecError;
-use crate::backend::parser::{Statement, build_plan, parse_statement};
+use crate::backend::parser::{CatalogLookup, Statement, build_plan, parse_statement};
 use crate::include::nodes::execnodes::Plan;
 
 /// Query plan cache — caches parsed statements and built plans to avoid
@@ -43,7 +42,7 @@ impl PlanCache {
         Ok(stmt)
     }
 
-    pub fn get_plan(&self, sql: &str, catalog: &Catalog) -> Result<Plan, ExecError> {
+    pub fn get_plan(&self, sql: &str, catalog: &dyn CatalogLookup) -> Result<Plan, ExecError> {
         {
             let cache = self.cache.read();
             if let Some(entry) = cache.get(sql) {

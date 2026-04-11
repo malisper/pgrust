@@ -6,7 +6,6 @@ use std::sync::OnceLock;
 use std::thread;
 
 use crate::backend::access::heap::heapam::HeapError;
-use crate::backend::catalog::Catalog;
 use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
@@ -21,8 +20,8 @@ use crate::backend::libpq::pqformat::{
     send_typed_data_row,
 };
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
+use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
-use crate::backend::utils::cache::relcache::RelCache;
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
@@ -832,7 +831,7 @@ fn describe_sql(
     }
 }
 
-fn substitute_params(sql: &str, params: &[Option<String>], catalog: &Catalog) -> String {
+fn substitute_params(sql: &str, params: &[Option<String>], catalog: &dyn CatalogLookup) -> String {
     let mut out = sql.to_string();
     for (i, param) in params.iter().enumerate() {
         let placeholder = format!("${}", i + 1);
@@ -852,13 +851,12 @@ fn substitute_params(sql: &str, params: &[Option<String>], catalog: &Catalog) ->
     out
 }
 
-fn resolve_regclass_param(value: &str, catalog: &Catalog) -> String {
+fn resolve_regclass_param(value: &str, catalog: &dyn CatalogLookup) -> String {
     if value.parse::<u32>().is_ok() {
         return value.to_string();
     }
-    let relcache = RelCache::from_catalog(catalog);
-    relcache
-        .get_by_name(value)
+    catalog
+        .lookup_relation(value)
         .map(|entry| entry.relation_oid.to_string())
         .unwrap_or_else(|| "0".to_string())
 }

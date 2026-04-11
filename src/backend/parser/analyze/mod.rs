@@ -34,6 +34,7 @@ impl CatalogLookup for Catalog {
         let relcache = RelCache::from_catalog(self);
         relcache.get_by_name(name).map(|entry| BoundRelation {
             rel: entry.rel,
+            relation_oid: entry.relation_oid,
             desc: entry.desc.clone(),
         })
     }
