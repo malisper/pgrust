@@ -2267,6 +2267,99 @@ mod tests {
     }
 
     #[test]
+    fn integer_modulo_min_over_negative_one_returns_zero() {
+        let base = temp_dir("integer_modulo_min_over_negative_one");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select (-32768::int2) % (-1::int2), (-2147483648::int4) % (-1::int4), (-9223372036854775808::int8) % (-1::int8)",
+            )
+            .unwrap(),
+            vec![vec![Value::Int16(0), Value::Int32(0), Value::Int64(0)]],
+        );
+    }
+
+    #[test]
+    fn integer_arithmetic_overflow_raises_error() {
+        let base = temp_dir("integer_arithmetic_overflow");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select (32767::int2) + (2::int2)",
+            )
+            .unwrap_err(),
+            ExecError::Int2OutOfRange
+        ));
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select (-32768::int2) * (-1::int2)",
+            )
+            .unwrap_err(),
+            ExecError::Int2OutOfRange
+        ));
+    }
+
+    #[test]
+    fn float_and_numeric_casts_to_int2_follow_postgres_rounding() {
+        let base = temp_dir("float_numeric_cast_int2_rounding");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select (-2.5::float8)::int2, (-1.5::float8)::int2, (-0.5::float8)::int2, (0.5::float8)::int2, (1.5::float8)::int2, (2.5::float8)::int2, (-2.5::numeric)::int2, (-0.5::numeric)::int2, (0.5::numeric)::int2, (2.5::numeric)::int2",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Int16(-2),
+                Value::Int16(-2),
+                Value::Int16(0),
+                Value::Int16(0),
+                Value::Int16(2),
+                Value::Int16(2),
+                Value::Int16(-3),
+                Value::Int16(-1),
+                Value::Int16(1),
+                Value::Int16(3),
+            ]],
+        );
+    }
+
+    #[test]
+    fn abs_builtin_supports_smallint_filters() {
+        let base = temp_dir("abs_builtin_smallint");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select abs((-1234)::int2), abs((-2.5)::float8), abs((-2.5)::numeric)",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Int16(1234),
+                Value::Float64(2.5),
+                Value::Numeric(crate::backend::executor::expr_ops::parse_numeric_text("2.5").unwrap()),
+            ]],
+        );
+    }
+
+    #[test]
     fn int2_text_input_accepts_prefixed_and_underscored_literals() {
         let base = temp_dir("int2_text_input_literals");
         let txns = TransactionManager::new_durable(&base).unwrap();

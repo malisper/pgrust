@@ -117,7 +117,7 @@ pub(super) fn infer_sql_expr_type(
             SqlType::new(SqlTypeKind::Bool)
         }
         SqlExpr::Random => SqlType::new(SqlTypeKind::Float8),
-        SqlExpr::FuncCall { name, .. } => match resolve_scalar_function(name) {
+        SqlExpr::FuncCall { name, args } => match resolve_scalar_function(name) {
             Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
             Some(BuiltinScalarFunction::ToJson)
             | Some(BuiltinScalarFunction::ArrayToJson)
@@ -142,6 +142,10 @@ pub(super) fn infer_sql_expr_type(
             Some(BuiltinScalarFunction::JsonbPathExists)
             | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
             Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
+            Some(BuiltinScalarFunction::Abs) => args.first().map_or(
+                SqlType::new(SqlTypeKind::Text),
+                |arg| infer_sql_expr_type(arg, scope, catalog, outer_scopes, grouped_outer),
+            ),
             Some(BuiltinScalarFunction::PgInputIsValid) => SqlType::new(SqlTypeKind::Bool),
             Some(BuiltinScalarFunction::PgInputErrorMessage)
             | Some(BuiltinScalarFunction::PgInputErrorDetail)

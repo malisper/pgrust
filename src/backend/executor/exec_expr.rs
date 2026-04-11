@@ -262,6 +262,7 @@ fn eval_builtin_function(
                 _ => Value::Null,
             })
         }
+        BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
@@ -343,6 +344,22 @@ fn eval_repeat_function(values: &[Value]) -> Result<Value, ExecError> {
         out.push_str(text);
     }
     Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+fn eval_abs_function(values: &[Value]) -> Result<Value, ExecError> {
+    match &values[0] {
+        Value::Null => Ok(Value::Null),
+        Value::Int16(v) => Ok(Value::Int16(v.checked_abs().ok_or(ExecError::Int2OutOfRange)?)),
+        Value::Int32(v) => Ok(Value::Int32(v.checked_abs().ok_or(ExecError::Int4OutOfRange)?)),
+        Value::Int64(v) => Ok(Value::Int64(v.checked_abs().ok_or(ExecError::Int8OutOfRange)?)),
+        Value::Float64(v) => Ok(Value::Float64(v.abs())),
+        Value::Numeric(v) => Ok(Value::Numeric(v.abs())),
+        other => Err(ExecError::TypeMismatch {
+            op: "abs",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
 }
 
 

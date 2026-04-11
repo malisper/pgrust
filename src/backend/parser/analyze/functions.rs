@@ -26,6 +26,7 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "jsonb_path_query_first" => Some(BuiltinScalarFunction::JsonbPathQueryFirst),
         "left" => Some(BuiltinScalarFunction::Left),
         "repeat" => Some(BuiltinScalarFunction::Repeat),
+        "abs" => Some(BuiltinScalarFunction::Abs),
         "pg_input_is_valid" => Some(BuiltinScalarFunction::PgInputIsValid),
         _ => None,
     }
@@ -55,6 +56,7 @@ pub(super) fn validate_scalar_function_arity(
         BuiltinScalarFunction::Random => args.is_empty(),
         BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
         BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
+        BuiltinScalarFunction::Abs => args.len() == 1,
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
         BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),

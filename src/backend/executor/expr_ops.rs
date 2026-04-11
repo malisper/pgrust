@@ -198,15 +198,15 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
         return Ok(Value::Null);
     }
     match (&left, &right) {
-        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l + r)),
-        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) + *r)),
-        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) + *r)),
-        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l + (*r as i32))),
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l + r)),
-        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) + *r)),
-        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l + (*r as i64))),
-        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l + (*r as i64))),
-        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l + r)),
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_add_i16(*l, *r)?)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_add_i32(*l as i32, *r)?)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64(checked_add_i64(*l as i64, *r)?)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(checked_add_i32(*l, *r as i32)?)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(checked_add_i32(*l, *r)?)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64(checked_add_i64(*l as i64, *r)?)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_add_i64(*l, *r)?)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
         }
@@ -223,15 +223,15 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         return Ok(Value::Null);
     }
     match (&left, &right) {
-        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l - r)),
-        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) - *r)),
-        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) - *r)),
-        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l - (*r as i32))),
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l - r)),
-        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) - *r)),
-        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l - (*r as i64))),
-        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l - (*r as i64))),
-        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l - r)),
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_sub_i16(*l, *r)?)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_sub_i32(*l as i32, *r)?)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64(checked_sub_i64(*l as i64, *r)?)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(checked_sub_i32(*l, *r as i32)?)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(checked_sub_i32(*l, *r)?)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64(checked_sub_i64(*l as i64, *r)?)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r)?)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
         }
@@ -248,15 +248,15 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         return Ok(Value::Null);
     }
     match (&left, &right) {
-        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l * r)),
-        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) * *r)),
-        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) * *r)),
-        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l * (*r as i32))),
-        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l * r)),
-        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) * *r)),
-        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l * (*r as i64))),
-        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l * (*r as i64))),
-        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l * r)),
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_mul_i16(*l, *r)?)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_mul_i32(*l as i32, *r)?)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l as i64, *r)?)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(checked_mul_i32(*l, *r as i32)?)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(checked_mul_i32(*l, *r)?)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l as i64, *r)?)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r)?)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.mul(rv)), "*")
         }
@@ -419,9 +419,9 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
 pub(crate) fn negate_value(value: Value) -> Result<Value, ExecError> {
     match value {
         Value::Null => Ok(Value::Null),
-        Value::Int16(v) => Ok(Value::Int16(-v)),
-        Value::Int32(v) => Ok(Value::Int32(-v)),
-        Value::Int64(v) => Ok(Value::Int64(-v)),
+        Value::Int16(v) => Ok(Value::Int16(checked_neg_i16(v)?)),
+        Value::Int32(v) => Ok(Value::Int32(checked_neg_i32(v)?)),
+        Value::Int64(v) => Ok(Value::Int64(checked_neg_i64(v)?)),
         Value::Float64(v) => Ok(Value::Float64(-v)),
         Value::Numeric(v) => Ok(Value::Numeric(v.negate())),
         other => Err(ExecError::TypeMismatch {
@@ -716,15 +716,72 @@ fn checked_div_i64(left: i64, right: i64) -> Result<i64, ExecError> {
     left.checked_div(right).ok_or(ExecError::Int8OutOfRange)
 }
 
+fn checked_add_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    left.checked_add(right).ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_add_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    left.checked_add(right).ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_add_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    left.checked_add(right).ok_or(ExecError::Int8OutOfRange)
+}
+
+fn checked_sub_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    left.checked_sub(right).ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_sub_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    left.checked_sub(right).ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_sub_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    left.checked_sub(right).ok_or(ExecError::Int8OutOfRange)
+}
+
+fn checked_mul_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    left.checked_mul(right).ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_mul_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    left.checked_mul(right).ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_mul_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    left.checked_mul(right).ok_or(ExecError::Int8OutOfRange)
+}
+
+fn checked_neg_i16(value: i16) -> Result<i16, ExecError> {
+    value.checked_neg().ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_neg_i32(value: i32) -> Result<i32, ExecError> {
+    value.checked_neg().ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_neg_i64(value: i64) -> Result<i64, ExecError> {
+    value.checked_neg().ok_or(ExecError::Int8OutOfRange)
+}
+
 fn checked_rem_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    if right == -1 {
+        return Ok(0);
+    }
     left.checked_rem(right).ok_or(ExecError::Int2OutOfRange)
 }
 
 fn checked_rem_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    if right == -1 {
+        return Ok(0);
+    }
     left.checked_rem(right).ok_or(ExecError::Int4OutOfRange)
 }
 
 fn checked_rem_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    if right == -1 {
+        return Ok(0);
+    }
     left.checked_rem(right).ok_or(ExecError::Int8OutOfRange)
 }
 
