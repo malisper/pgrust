@@ -25,6 +25,7 @@ use crate::backend::storage::lmgr::{
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::RelCache;
+use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID};
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
@@ -170,6 +171,24 @@ impl Database {
 
     pub(crate) fn visible_catalog(&self, client_id: ClientId) -> Catalog {
         let mut catalog = self.catalog.read().catalog().clone();
+        let permanent_entries = catalog
+            .entries()
+            .map(|(name, entry)| (name.to_string(), entry.clone()))
+            .collect::<Vec<_>>();
+        for (name, entry) in permanent_entries {
+            if name.contains('.') {
+                continue;
+            }
+            match entry.namespace_oid {
+                PUBLIC_NAMESPACE_OID => {
+                    catalog.insert(format!("public.{name}"), entry);
+                }
+                PG_CATALOG_NAMESPACE_OID => {
+                    catalog.insert(format!("pg_catalog.{name}"), entry);
+                }
+                _ => {}
+            }
+        }
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {
                 catalog.insert(name.clone(), temp.entry.clone());

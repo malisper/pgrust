@@ -357,6 +357,11 @@
         session_a
             .execute(&db, "create temp table items (id int4 not null)")
             .unwrap();
+        let visible_catalog = db.visible_catalog(1);
+        let relcache = RelCache::from_catalog(&visible_catalog);
+        let unqualified = relcache.get_by_name("items").unwrap();
+        let qualified = relcache.get_by_name("public.items").unwrap();
+        assert_ne!(unqualified.rel, qualified.rel);
         session_a
             .execute(&db, "insert into items (id) values (2)")
             .unwrap();
@@ -379,6 +384,54 @@
         match session_a.execute(&db, "select id from items").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match session_a.execute(&db, "select id from public.items").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn temp_catalog_rows_appear_with_pg_temp_namespace() {
+        let base = temp_dir("temp_catalog_rows");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session_a = Session::new(1);
+        let mut session_b = Session::new(2);
+
+        session_a
+            .execute(&db, "create temp table temp_items (id int4 not null)")
+            .unwrap();
+
+        match session_a
+            .execute(
+                &db,
+                "select n.nspname, c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'temp_items'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Text("pg_temp".into()), Value::Text("temp_items".into())]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match session_b
+            .execute(
+                &db,
+                "select count(*) from pg_class where relname = 'temp_items'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }

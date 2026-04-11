@@ -50,10 +50,26 @@ impl CatCache {
         }
 
         for (name, entry) in catalog.entries() {
-            let normalized = normalize_catalog_name(name);
+            if let Some((namespace, _)) = name.split_once('.')
+                && !cache
+                    .namespaces_by_oid
+                    .contains_key(&entry.namespace_oid)
+            {
+                let namespace_row = PgNamespaceRow {
+                    oid: entry.namespace_oid,
+                    nspname: namespace.to_string(),
+                };
+                cache.namespaces_by_name.insert(
+                    namespace_row.nspname.to_ascii_lowercase(),
+                    namespace_row.clone(),
+                );
+                cache.namespaces_by_oid.insert(namespace_row.oid, namespace_row);
+            }
+
+            let relname = catalog_object_name(name);
             let class_row = PgClassRow {
                 oid: entry.relation_oid,
-                relname: normalized.to_string(),
+                relname: relname.to_string(),
                 relnamespace: entry.namespace_oid,
                 reltype: entry.row_type_oid,
                 relfilenode: entry.rel.rel_number,
@@ -61,19 +77,19 @@ impl CatCache {
             };
             cache
                 .classes_by_name
-                .insert(normalized.to_ascii_lowercase(), class_row.clone());
+                .insert(normalize_catalog_name(name).to_ascii_lowercase(), class_row.clone());
             cache.classes_by_oid.insert(class_row.oid, class_row);
 
             let composite_type = PgTypeRow {
                 oid: entry.row_type_oid,
-                typname: normalized.to_string(),
+                typname: relname.to_string(),
                 typnamespace: entry.namespace_oid,
                 typrelid: entry.relation_oid,
                 sql_type: SqlType::new(SqlTypeKind::Text),
             };
             cache
                 .types_by_name
-                .insert(normalized.to_ascii_lowercase(), composite_type.clone());
+                .insert(relname.to_ascii_lowercase(), composite_type.clone());
             cache.types_by_oid.insert(composite_type.oid, composite_type);
 
             let mut attrs = entry
@@ -178,9 +194,11 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
 }
 
 pub fn normalize_catalog_name(name: &str) -> &str {
-    name.strip_prefix("pg_catalog.")
-        .or_else(|| name.strip_prefix("public."))
-        .unwrap_or(name)
+    name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+fn catalog_object_name(name: &str) -> &str {
+    name.rsplit_once('.').map(|(_, object)| object).unwrap_or(name)
 }
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {

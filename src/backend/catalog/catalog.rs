@@ -2,13 +2,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::backend::catalog::bootstrap::{
-    bootstrap_catalog_entry, bootstrap_catalog_kinds, bootstrap_namespace_oid,
-};
+use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::access::htup::AttributeAlign;
+use crate::include::catalog::PUBLIC_NAMESPACE_OID;
 
 const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
@@ -121,7 +120,7 @@ impl Catalog {
                 rel_number: self.next_rel_number,
             },
             relation_oid: self.next_oid,
-            namespace_oid: bootstrap_namespace_oid(),
+            namespace_oid: PUBLIC_NAMESPACE_OID,
             row_type_oid: self.next_oid.saturating_add(1),
             relkind: 'r',
             desc,
@@ -578,7 +577,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
-        assert_eq!(entry.namespace_oid, bootstrap_namespace_oid());
+        assert_eq!(entry.namespace_oid, PUBLIC_NAMESPACE_OID);
         assert!(entry.relation_oid >= DEFAULT_FIRST_USER_OID);
         store.persist().unwrap();
 
