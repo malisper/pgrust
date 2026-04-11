@@ -126,6 +126,27 @@
     }
 
     #[test]
+    fn parse_boolean_is_predicates_lower_to_existing_ast() {
+        let stmt = parse_select(
+            "select b is true, b is not false, b is unknown, b is not unknown from people",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            stmt.targets[0].expr,
+            SqlExpr::IsNotDistinctFrom(_, ref right)
+                if matches!(right.as_ref(), SqlExpr::Const(Value::Bool(true)))
+        ));
+        assert!(matches!(
+            stmt.targets[1].expr,
+            SqlExpr::IsDistinctFrom(_, ref right)
+                if matches!(right.as_ref(), SqlExpr::Const(Value::Bool(false)))
+        ));
+        assert!(matches!(stmt.targets[2].expr, SqlExpr::IsNull(_)));
+        assert!(matches!(stmt.targets[3].expr, SqlExpr::IsNotNull(_)));
+    }
+
+    #[test]
     fn parse_select_with_where() {
         let stmt =
             parse_select("select name, note from people where id > 1 and note is null").unwrap();
