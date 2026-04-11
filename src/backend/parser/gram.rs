@@ -1435,6 +1435,66 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 args: vec![needle, haystack],
             })
         }
+        Rule::substring_expr => {
+            let mut inner = pair.into_inner().filter(|part| {
+                !matches!(
+                    part.as_rule(),
+                    Rule::kw_from | Rule::kw_from_atom | Rule::kw_for | Rule::kw_for_atom
+                )
+            });
+            let value = parse_expr(
+                inner
+                    .next()
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str()
+                    .trim(),
+            )?;
+            let start = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let mut args = vec![value, start];
+            if let Some(len) = inner.next() {
+                args.push(build_expr(len)?);
+            }
+            Ok(SqlExpr::FuncCall {
+                name: "substring".into(),
+                args,
+            })
+        }
+        Rule::overlay_expr => {
+            let mut inner = pair.into_inner().filter(|part| {
+                !matches!(
+                    part.as_rule(),
+                    Rule::kw_placing
+                        | Rule::kw_placing_atom
+                        | Rule::kw_from
+                        | Rule::kw_from_atom
+                        | Rule::kw_for
+                        | Rule::kw_for_atom
+                )
+            });
+            let value = parse_expr(
+                inner
+                    .next()
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str()
+                    .trim(),
+            )?;
+            let placing = parse_expr(
+                inner
+                    .next()
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str()
+                    .trim(),
+            )?;
+            let start = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let mut args = vec![value, placing, start];
+            if let Some(len) = inner.next() {
+                args.push(build_expr(len)?);
+            }
+            Ok(SqlExpr::FuncCall {
+                name: "overlay".into(),
+                args,
+            })
+        }
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);

@@ -31,8 +31,14 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::InvalidIntegerInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. }
         | ExecError::InvalidFloatInput { .. } => "22P02",
+        ExecError::BitStringLengthMismatch { .. }
+        | ExecError::BitStringTooLong { .. }
+        | ExecError::BitStringSizeMismatch { .. } => "22026",
+        ExecError::BitIndexOutOfRange { .. } => "2202E",
+        ExecError::NegativeSubstringLength => "22011",
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
         ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
             "42704"

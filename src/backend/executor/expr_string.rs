@@ -68,6 +68,21 @@ pub(super) fn eval_left_function(values: &[Value]) -> Result<Value, ExecError> {
     )))
 }
 
+pub(super) fn eval_length_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "length",
+        left: value.clone(),
+        right: Value::Null,
+    })?;
+    Ok(Value::Int32(text.chars().count() as i32))
+}
+
 pub(super) fn eval_repeat_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);

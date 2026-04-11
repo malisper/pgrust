@@ -4,6 +4,11 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
 
+use super::expr_bit::{
+    bitwise_binary as bitwise_binary_bits, bitwise_not as bitwise_not_bits,
+    compare_bit_strings, concat_bit_strings, shift_left as shift_left_bits,
+    shift_right as shift_right_bits,
+};
 use super::expr_casts::cast_value;
 use super::expr_bool::order_bool_values;
 use super::node_types::*;
@@ -64,6 +69,7 @@ pub(crate) fn compare_order_values(
             }
         }
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Bit(a), Value::Bit(b)) => compare_bit_strings(a, b),
         (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
         (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
@@ -133,6 +139,7 @@ pub(crate) fn compare_values(
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
+        (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             Ok(Value::Bool(
@@ -178,6 +185,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int64(l), Value::Int32(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int64(r)) => l != r,
         (Value::Bytea(l), Value::Bytea(r)) => l != r,
+        (Value::Bit(l), Value::Bit(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             parsed_numeric_value(l)
@@ -292,6 +300,7 @@ pub(crate) fn shift_left_values(left: Value, right: Value) -> Result<Value, Exec
         return Ok(Value::Null);
     }
     match (&left, &right) {
+        (Value::Bit(l), Value::Int32(r)) => Ok(Value::Bit(shift_left_bits(l, *r))),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int16(l.wrapping_shl(*r as u32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l.wrapping_shl(*r as u32))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(l.wrapping_shl(*r as u32))),
@@ -308,6 +317,7 @@ pub(crate) fn shift_right_values(left: Value, right: Value) -> Result<Value, Exe
         return Ok(Value::Null);
     }
     match (&left, &right) {
+        (Value::Bit(l), Value::Int32(r)) => Ok(Value::Bit(shift_right_bits(l, *r))),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int16(l.wrapping_shr(*r as u32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l.wrapping_shr(*r as u32))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(l.wrapping_shr(*r as u32))),
@@ -321,6 +331,7 @@ pub(crate) fn shift_right_values(left: Value, right: Value) -> Result<Value, Exe
 
 pub(crate) fn bitwise_and_values(left: Value, right: Value) -> Result<Value, ExecError> {
     match (left, right) {
+        (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(bitwise_binary_bits("&", &l, &r)?)),
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l & r)),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l & r)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l & r)),
@@ -334,6 +345,7 @@ pub(crate) fn bitwise_and_values(left: Value, right: Value) -> Result<Value, Exe
 
 pub(crate) fn bitwise_or_values(left: Value, right: Value) -> Result<Value, ExecError> {
     match (left, right) {
+        (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(bitwise_binary_bits("|", &l, &r)?)),
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l | r)),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l | r)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l | r)),
@@ -347,6 +359,7 @@ pub(crate) fn bitwise_or_values(left: Value, right: Value) -> Result<Value, Exec
 
 pub(crate) fn bitwise_xor_values(left: Value, right: Value) -> Result<Value, ExecError> {
     match (left, right) {
+        (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(bitwise_binary_bits("#", &l, &r)?)),
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l ^ r)),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l ^ r)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l ^ r)),
@@ -360,6 +373,7 @@ pub(crate) fn bitwise_xor_values(left: Value, right: Value) -> Result<Value, Exe
 
 pub(crate) fn bitwise_not_value(value: Value) -> Result<Value, ExecError> {
     match value {
+        Value::Bit(bits) => Ok(Value::Bit(bitwise_not_bits(&bits))),
         Value::Int16(v) => Ok(Value::Int16(!v)),
         Value::Int32(v) => Ok(Value::Int32(!v)),
         Value::Int64(v) => Ok(Value::Int64(!v)),
@@ -453,6 +467,7 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
         return Ok(Value::Null);
     }
     match (&left, &right) {
+        (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(concat_bit_strings(l, r))),
         (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Jsonb(encode_jsonb(&jsonb_concat(
             &decode_jsonb(l)?,
             &decode_jsonb(r)?,
@@ -527,6 +542,16 @@ pub(crate) fn order_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Bit(l), Value::Bit(r)) => {
+            let ordering = compare_bit_strings(l, r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,

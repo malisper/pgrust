@@ -55,6 +55,16 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::BitStringTooLong { limit, .. } => {
             format!("bit string too long for type bit varying({limit})")
         }
+        ExecError::BitStringSizeMismatch { op } => match *op {
+            "&" => "cannot AND bit strings of different sizes".to_string(),
+            "|" => "cannot OR bit strings of different sizes".to_string(),
+            "#" => "cannot XOR bit strings of different sizes".to_string(),
+            _ => format!("cannot apply {op} to bit strings of different sizes"),
+        },
+        ExecError::BitIndexOutOfRange { index, max_index } => {
+            format!("bit index {index} out of valid range (0..{max_index})")
+        }
+        ExecError::NegativeSubstringLength => "negative substring length not allowed".to_string(),
         ExecError::InvalidBooleanInput { value } => {
             format!("invalid input syntax for type boolean: \"{value}\"")
         }

@@ -26,8 +26,14 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "jsonb_path_query_first" => Some(BuiltinScalarFunction::JsonbPathQueryFirst),
         "left" => Some(BuiltinScalarFunction::Left),
         "repeat" => Some(BuiltinScalarFunction::Repeat),
+        "length" => Some(BuiltinScalarFunction::Length),
         "lower" => Some(BuiltinScalarFunction::Lower),
         "position" => Some(BuiltinScalarFunction::Position),
+        "substring" => Some(BuiltinScalarFunction::Substring),
+        "overlay" => Some(BuiltinScalarFunction::Overlay),
+        "get_bit" => Some(BuiltinScalarFunction::GetBit),
+        "set_bit" => Some(BuiltinScalarFunction::SetBit),
+        "bit_count" => Some(BuiltinScalarFunction::BitCount),
         "convert_from" => Some(BuiltinScalarFunction::ConvertFrom),
         "md5" => Some(BuiltinScalarFunction::Md5),
         "to_char" => Some(BuiltinScalarFunction::ToChar),
@@ -117,6 +123,7 @@ pub(super) fn validate_scalar_function_arity(
         BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
         BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
         BuiltinScalarFunction::Abs
+        | BuiltinScalarFunction::Length
         | BuiltinScalarFunction::Lower
         | BuiltinScalarFunction::Trunc
         | BuiltinScalarFunction::Round
@@ -150,11 +157,14 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Md5
         | BuiltinScalarFunction::BitcastIntegerToFloat4
         | BuiltinScalarFunction::BitcastBigintToFloat8
-        | BuiltinScalarFunction::BpcharToText => args.len() == 1,
+        | BuiltinScalarFunction::BpcharToText
+        | BuiltinScalarFunction::BitCount => args.len() == 1,
         BuiltinScalarFunction::Power
         | BuiltinScalarFunction::Atan2d
         | BuiltinScalarFunction::BoolEq
         | BuiltinScalarFunction::BoolNe => args.len() == 2,
+        BuiltinScalarFunction::GetBit => args.len() == 2,
+        BuiltinScalarFunction::SetBit => args.len() == 3,
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
         BuiltinScalarFunction::Position
         | BuiltinScalarFunction::ConvertFrom
@@ -166,6 +176,8 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::PgInputErrorDetail
         | BuiltinScalarFunction::PgInputErrorHint
         | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
+        BuiltinScalarFunction::Substring => matches!(args.len(), 2 | 3),
+        BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
         BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),

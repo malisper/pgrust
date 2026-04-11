@@ -515,6 +515,28 @@
     }
 
     #[test]
+    fn parse_bit_substring_and_overlay_syntax() {
+        let stmt = parse_select(
+            "select substring(B'010101' from 2 for 3), overlay(B'010101' placing B'11' from 2)",
+        )
+        .unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::FuncCall { name, args } => {
+                assert_eq!(name, "substring");
+                assert_eq!(args.len(), 3);
+            }
+            other => panic!("expected substring call, got {other:?}"),
+        }
+        match &stmt.targets[1].expr {
+            SqlExpr::FuncCall { name, args } => {
+                assert_eq!(name, "overlay");
+                assert_eq!(args.len(), 3);
+            }
+            other => panic!("expected overlay call, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_internal_char_casts() {
         let stmt = parse_select("select 'a'::\"char\", cast('b' as \"char\")").unwrap();
         match &stmt.targets[0].expr {
