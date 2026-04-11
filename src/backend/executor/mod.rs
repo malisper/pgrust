@@ -35,6 +35,7 @@ pub use driver::{
     exec_next, execute_plan, execute_readonly_statement, execute_sql, execute_statement,
 };
 pub use exec_expr::eval_expr;
+pub use expr_casts::render_internal_char_text;
 pub use startup::executor_start;
 
 use crate::backend::access::heap::heapam::HeapError;

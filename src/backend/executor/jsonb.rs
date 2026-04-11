@@ -161,6 +161,9 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::JsonPath(text) => JsonbValue::String(text.to_string()),
         Value::Text(text) => JsonbValue::String(text.to_string()),
         Value::TextRef(_, _) => JsonbValue::String(value.as_text().unwrap().to_string()),
+        Value::InternalChar(v) => {
+            JsonbValue::String(crate::backend::executor::render_internal_char_text(*v))
+        }
         Value::Json(text) => {
             JsonbValue::from_serde(serde_json::from_str(text.as_str()).map_err(|_| {
                 ExecError::InvalidStorageValue {
@@ -383,6 +386,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
         Value::Text(text) => Ok(text.to_string()),
         Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::JsonPath(text) => Ok(text.to_string()),
         Value::Json(text) => Ok(text.to_string()),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes),

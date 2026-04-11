@@ -393,6 +393,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
     match value {
         Value::Null => Ok("".into()),
         Value::Text(_) | Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
         Value::Int64(v) => Ok(v.to_string()),
@@ -750,6 +751,9 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
             .unwrap_or(SerdeJsonValue::Null),
         Value::Text(_) | Value::TextRef(_, _) => {
             SerdeJsonValue::String(value.as_text().unwrap().to_string())
+        }
+        Value::InternalChar(v) => {
+            SerdeJsonValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
         Value::Array(items) => SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect()),
     }

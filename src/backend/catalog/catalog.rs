@@ -298,7 +298,11 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::JsonPath => ScalarType::JsonPath,
-        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+        SqlTypeKind::Text
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::InternalChar
+        | SqlTypeKind::Char
+        | SqlTypeKind::Varchar => {
             ScalarType::Text
         }
         SqlTypeKind::Bool => ScalarType::Bool,
@@ -320,6 +324,7 @@ fn encode_sql_type(sql_type: SqlType) -> String {
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::InternalChar => "\"char\"",
         SqlTypeKind::Char => "char",
         SqlTypeKind::Varchar => "varchar",
     };
@@ -390,6 +395,11 @@ fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
         },
         "text" => SqlType {
             kind: SqlTypeKind::Text,
+            typmod,
+            is_array: false,
+        },
+        "\"char\"" => SqlType {
+            kind: SqlTypeKind::InternalChar,
             typmod,
             is_array: false,
         },

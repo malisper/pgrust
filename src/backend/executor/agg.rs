@@ -298,6 +298,7 @@ fn json_object_agg_key(key: &Value) -> String {
     match key {
         Value::Null => "null".to_string(),
         Value::Text(_) | Value::TextRef(_, _) => key.as_text().unwrap().to_string(),
+        Value::InternalChar(v) => crate::backend::executor::render_internal_char_text(*v),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
         Value::Numeric(v) => v.render(),
@@ -338,6 +339,10 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => {
             serde_json::to_string(value.as_text().unwrap()).unwrap()
         }
+        Value::InternalChar(v) => serde_json::to_string(
+            &crate::backend::executor::render_internal_char_text(*v),
+        )
+        .unwrap(),
         Value::Array(items) => render_json_array(items),
     }
 }

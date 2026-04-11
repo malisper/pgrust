@@ -310,6 +310,7 @@ pub enum SqlTypeKind {
     Text,
     Bool,
     Timestamp,
+    InternalChar,
     Char,
     Varchar,
 }

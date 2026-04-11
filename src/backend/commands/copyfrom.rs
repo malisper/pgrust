@@ -113,6 +113,21 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                         Value::Text(value.into())
                     }
                 }
+                SqlTypeKind::InternalChar => {
+                    let bytes = value.as_bytes();
+                    if bytes.is_empty() {
+                        Value::InternalChar(0)
+                    } else if bytes.len() == 4
+                        && bytes[0] == b'\\'
+                        && bytes[1..].iter().all(|b| (b'0'..=b'7').contains(b))
+                    {
+                        Value::InternalChar(
+                            (bytes[1] - b'0') * 64 + (bytes[2] - b'0') * 8 + (bytes[3] - b'0'),
+                        )
+                    } else {
+                        Value::InternalChar(bytes[0])
+                    }
+                }
             }
         };
         items.push(value);
