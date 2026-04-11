@@ -25,6 +25,14 @@ pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
 pub(crate) const DEFAULT_FIRST_USER_OID: u32 = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PhysicalCatalogRows {
+    pub namespaces: Vec<PgNamespaceRow>,
+    pub classes: Vec<PgClassRow>,
+    pub attributes: Vec<PgAttributeRow>,
+    pub types: Vec<PgTypeRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogStore {
     base_dir: PathBuf,
     control_path: PathBuf,
@@ -258,54 +266,11 @@ fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), Cat
 }
 
 fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
-    let mut smgr = MdStorageManager::new(base_dir);
-    let mut rels = BTreeMap::new();
-    for kind in bootstrap_catalog_kinds() {
-        let rel = RelFileLocator {
-            spc_oid: 0,
-            db_oid: 1,
-            rel_number: kind.relation_oid(),
-        };
-        if !smgr.exists(rel, ForkNumber::Main) {
-            return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
-        }
-        smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
-        rels.insert(kind, rel);
-    }
-    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
-
-    let namespace_rows = scan_catalog_relation(
-        &pool,
-        rels[&BootstrapCatalogKind::PgNamespace],
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
-    )?
-    .into_iter()
-    .map(namespace_row_from_values)
-    .collect::<Result<Vec<_>, _>>()?;
-    let type_rows = scan_catalog_relation(
-        &pool,
-        rels[&BootstrapCatalogKind::PgType],
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
-    )?
-    .into_iter()
-    .map(pg_type_row_from_values)
-    .collect::<Result<Vec<_>, _>>()?;
-    let class_rows = scan_catalog_relation(
-        &pool,
-        rels[&BootstrapCatalogKind::PgClass],
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
-    )?
-    .into_iter()
-    .map(pg_class_row_from_values)
-    .collect::<Result<Vec<_>, _>>()?;
-    let attribute_rows = scan_catalog_relation(
-        &pool,
-        rels[&BootstrapCatalogKind::PgAttribute],
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
-    )?
-    .into_iter()
-    .map(pg_attribute_row_from_values)
-    .collect::<Result<Vec<_>, _>>()?;
+    let rows = load_physical_catalog_rows(base_dir)?;
+    let namespace_rows = rows.namespaces;
+    let type_rows = rows.types;
+    let class_rows = rows.classes;
+    let attribute_rows = rows.attributes;
 
     let namespace_names = namespace_rows
         .iter()
@@ -373,6 +338,64 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
             .max(row.relfilenode.saturating_add(1));
     }
     Ok(catalog)
+}
+
+pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCatalogRows, CatalogError> {
+    let mut smgr = MdStorageManager::new(base_dir);
+    let mut rels = BTreeMap::new();
+    for kind in bootstrap_catalog_kinds() {
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: kind.relation_oid(),
+        };
+        if !smgr.exists(rel, ForkNumber::Main) {
+            return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
+        }
+        smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
+        rels.insert(kind, rel);
+    }
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
+
+    let namespace_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgNamespace],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
+    )?
+    .into_iter()
+    .map(namespace_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let type_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgType],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
+    )?
+    .into_iter()
+    .map(pg_type_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let class_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgClass],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
+    )?
+    .into_iter()
+    .map(pg_class_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let attribute_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgAttribute],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
+    )?
+    .into_iter()
+    .map(pg_attribute_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PhysicalCatalogRows {
+        namespaces: namespace_rows,
+        classes: class_rows,
+        attributes: attribute_rows,
+        types: type_rows,
+    })
 }
 
 fn scan_catalog_relation(

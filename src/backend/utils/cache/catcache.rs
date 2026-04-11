@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::store::load_physical_catalog_rows;
 use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
+use crate::backend::catalog::CatalogError;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
@@ -117,9 +120,59 @@ impl CatCache {
         cache
     }
 
+    pub fn from_physical(base_dir: &Path) -> Result<Self, CatalogError> {
+        let rows = load_physical_catalog_rows(base_dir)?;
+        Ok(Self::from_rows(
+            rows.namespaces,
+            rows.classes,
+            rows.attributes,
+            rows.types,
+        ))
+    }
+
+    pub fn from_rows(
+        namespace_rows: Vec<PgNamespaceRow>,
+        class_rows: Vec<PgClassRow>,
+        attribute_rows: Vec<PgAttributeRow>,
+        type_rows: Vec<PgTypeRow>,
+    ) -> Self {
+        let mut cache = Self::default();
+        for row in namespace_rows {
+            cache
+                .namespaces_by_name
+                .insert(row.nspname.to_ascii_lowercase(), row.clone());
+            cache.namespaces_by_oid.insert(row.oid, row);
+        }
+        for row in type_rows {
+            cache
+                .types_by_name
+                .insert(row.typname.to_ascii_lowercase(), row.clone());
+            cache.types_by_oid.insert(row.oid, row);
+        }
+        for row in class_rows {
+            cache
+                .classes_by_name
+                .insert(row.relname.to_ascii_lowercase(), row.clone());
+            cache.classes_by_oid.insert(row.oid, row);
+        }
+        let mut attrs_by_relid = BTreeMap::<u32, Vec<PgAttributeRow>>::new();
+        for row in attribute_rows {
+            attrs_by_relid.entry(row.attrelid).or_default().push(row);
+        }
+        for rows in attrs_by_relid.values_mut() {
+            sort_pg_attribute_rows(rows);
+        }
+        cache.attributes_by_relid = attrs_by_relid;
+        cache
+    }
+
     pub fn namespace_by_name(&self, name: &str) -> Option<&PgNamespaceRow> {
         self.namespaces_by_name
             .get(&normalize_catalog_name(name).to_ascii_lowercase())
+    }
+
+    pub fn namespace_by_oid(&self, oid: u32) -> Option<&PgNamespaceRow> {
+        self.namespaces_by_oid.get(&oid)
     }
 
     pub fn class_by_name(&self, name: &str) -> Option<&PgClassRow> {
@@ -213,8 +266,22 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::catalog::CatalogStore;
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("pgrust_{prefix}_{nanos}"));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn catcache_derives_pg_class_and_pg_attribute_rows() {
@@ -248,5 +315,27 @@ mod tests {
         let cache = CatCache::from_catalog(&Catalog::default());
         assert_eq!(cache.type_by_name("int4").map(|row| row.oid), Some(INT4_TYPE_OID));
         assert_eq!(cache.type_by_name("pg_class").map(|row| row.typrelid), Some(1259));
+    }
+
+    #[test]
+    fn catcache_loads_rows_from_physical_catalogs() {
+        let base = temp_dir("catcache_from_physical");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("name", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+
+        let cache = CatCache::from_physical(&base).unwrap();
+        assert_eq!(cache.class_by_name("people").map(|row| row.oid), Some(entry.relation_oid));
+        assert_eq!(cache.attributes_by_relid(entry.relation_oid).map(|rows| rows.len()), Some(2));
+        assert_eq!(cache.type_by_oid(entry.row_type_oid).map(|row| row.typrelid), Some(entry.relation_oid));
     }
 }
