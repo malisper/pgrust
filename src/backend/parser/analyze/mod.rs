@@ -1,5 +1,6 @@
 mod agg;
 mod agg_output;
+mod agg_output_special;
 mod coerce;
 mod expr;
 mod functions;

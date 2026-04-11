@@ -1,6 +1,5 @@
 use super::*;
-use super::functions::{resolve_scalar_function, validate_scalar_function_arity};
-use super::infer::{infer_array_literal_type, infer_sql_expr_type};
+use super::agg_output_special::*;
 
 pub(super) fn bind_agg_output_expr(
     expr: &SqlExpr,
@@ -167,17 +166,8 @@ pub(super) fn bind_agg_output_expr(
             )?),
         )),
         SqlExpr::Concat(l, r) => {
-            let left_expr = bind_agg_output_expr(
+            bind_grouped_concat_expr(
                 l,
-                group_by_exprs,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                agg_list,
-                n_keys,
-            )?;
-            let right_expr = bind_agg_output_expr(
                 r,
                 group_by_exprs,
                 input_scope,
@@ -186,11 +176,7 @@ pub(super) fn bind_agg_output_expr(
                 grouped_outer,
                 agg_list,
                 n_keys,
-            )?;
-            let left_type = infer_sql_expr_type(l, input_scope, catalog, outer_scopes, grouped_outer);
-            let right_type =
-                infer_sql_expr_type(r, input_scope, catalog, outer_scopes, grouped_outer);
-            bind_concat_operands(l, left_type, left_expr, r, right_type, right_expr)
+            )
         }
         SqlExpr::UnaryPlus(inner) => Ok(Expr::UnaryPlus(Box::new(bind_agg_output_expr(
             inner,
@@ -518,30 +504,16 @@ pub(super) fn bind_agg_output_expr(
                 n_keys,
             )?),
         )),
-        SqlExpr::ArrayLiteral(elements) => Ok(Expr::ArrayLiteral {
-            elements: elements
-                .iter()
-                .map(|element| {
-                    bind_agg_output_expr(
-                        element,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )
-                })
-                .collect::<Result<_, _>>()?,
-            array_type: infer_array_literal_type(
-                elements,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-            )?,
-        }),
+        SqlExpr::ArrayLiteral(elements) => bind_grouped_array_literal(
+            elements,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::ArrayOverlap(l, r) => Ok(Expr::ArrayOverlap(
             Box::new(bind_agg_output_expr(
                 l,
@@ -807,243 +779,75 @@ pub(super) fn bind_agg_output_expr(
             )?),
         )),
         SqlExpr::ScalarSubquery(select) => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(input_scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            let plan = build_plan_with_outer(
-                select,
-                catalog,
-                &child_outer,
-                Some(GroupedOuterScope {
-                    scope: input_scope.clone(),
-                    group_by_exprs: group_by_exprs.to_vec(),
-                }),
-            )?;
-            ensure_single_column_subquery(&plan)?;
-            Ok(Expr::ScalarSubquery(Box::new(plan)))
+            bind_grouped_scalar_subquery(select, group_by_exprs, input_scope, catalog, outer_scopes)
         }
         SqlExpr::Exists(select) => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(input_scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            Ok(Expr::ExistsSubquery(Box::new(build_plan_with_outer(
-                select,
-                catalog,
-                &child_outer,
-                Some(GroupedOuterScope {
-                    scope: input_scope.clone(),
-                    group_by_exprs: group_by_exprs.to_vec(),
-                }),
-            )?)))
+            bind_grouped_exists_subquery(select, group_by_exprs, input_scope, catalog, outer_scopes)
         }
         SqlExpr::InSubquery {
             expr,
             subquery,
             negated,
-        } => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(input_scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan = build_plan_with_outer(
-                subquery,
-                catalog,
-                &child_outer,
-                Some(GroupedOuterScope {
-                    scope: input_scope.clone(),
-                    group_by_exprs: group_by_exprs.to_vec(),
-                }),
-            )?;
-            ensure_single_column_subquery(&subquery_plan)?;
-            let any = Expr::AnySubquery {
-                left: Box::new(bind_agg_output_expr(
-                    expr,
-                    group_by_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?),
-                op: SubqueryComparisonOp::Eq,
-                subquery: Box::new(subquery_plan),
-            };
-            if *negated {
-                Ok(Expr::Not(Box::new(any)))
-            } else {
-                Ok(any)
-            }
-        }
+        } => bind_grouped_in_subquery(
+            expr,
+            subquery,
+            *negated,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::QuantifiedSubquery {
             left,
             op,
             is_all,
             subquery,
-        } => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(input_scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan = build_plan_with_outer(
-                subquery,
-                catalog,
-                &child_outer,
-                Some(GroupedOuterScope {
-                    scope: input_scope.clone(),
-                    group_by_exprs: group_by_exprs.to_vec(),
-                }),
-            )?;
-            ensure_single_column_subquery(&subquery_plan)?;
-            if *is_all {
-                Ok(Expr::AllSubquery {
-                    left: Box::new(bind_agg_output_expr(
-                        left,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )?),
-                    op: *op,
-                    subquery: Box::new(subquery_plan),
-                })
-            } else {
-                Ok(Expr::AnySubquery {
-                    left: Box::new(bind_agg_output_expr(
-                        left,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )?),
-                    op: *op,
-                    subquery: Box::new(subquery_plan),
-                })
-            }
-        }
+        } => bind_grouped_quantified_subquery(
+            left,
+            *op,
+            *is_all,
+            subquery,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::QuantifiedArray {
             left,
             op,
             is_all,
             array,
-        } => {
-            if *is_all {
-                Ok(Expr::AllArray {
-                    left: Box::new(bind_agg_output_expr(
-                        left,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )?),
-                    op: *op,
-                    right: Box::new(bind_agg_output_expr(
-                        array,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )?),
-                })
-            } else {
-                Ok(Expr::AnyArray {
-                    left: Box::new(bind_agg_output_expr(
-                        left,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )?),
-                    op: *op,
-                    right: Box::new(bind_agg_output_expr(
-                        array,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )?),
-                })
-            }
-        }
+        } => bind_grouped_quantified_array(
+            left,
+            *op,
+            *is_all,
+            array,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::Random => Ok(Expr::Random),
-        SqlExpr::FuncCall { name, args } => {
-            let func =
-                resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "supported builtin function",
-                    actual: name.clone(),
-                })?;
-            validate_scalar_function_arity(func, args)?;
-            let bound_args = args
-                .iter()
-                .map(|arg| {
-                    bind_agg_output_expr(
-                        arg,
-                        group_by_exprs,
-                        input_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        agg_list,
-                        n_keys,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            match func {
-                BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
-                    let left_type =
-                        infer_sql_expr_type(&args[0], input_scope, catalog, outer_scopes, grouped_outer);
-                    let right_type =
-                        infer_sql_expr_type(&args[1], input_scope, catalog, outer_scopes, grouped_outer);
-                    if !should_use_text_concat(&args[0], left_type, &args[0], left_type) {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "text argument",
-                            actual: format!("{func:?}({})", sql_type_name(left_type)),
-                        });
-                    }
-                    if !is_numeric_family(right_type) {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "integer argument",
-                            actual: format!("{func:?}({})", sql_type_name(right_type)),
-                        });
-                    }
-                    Ok(Expr::FuncCall {
-                        func,
-                        args: vec![
-                            coerce_bound_expr(
-                                bound_args[0].clone(),
-                                left_type,
-                                SqlType::new(SqlTypeKind::Text),
-                            ),
-                            coerce_bound_expr(
-                                bound_args[1].clone(),
-                                right_type,
-                                SqlType::new(SqlTypeKind::Int4),
-                            ),
-                        ],
-                    })
-                }
-                _ => Ok(Expr::FuncCall {
-                    func,
-                    args: bound_args,
-                }),
-            }
-        }
+        SqlExpr::FuncCall { name, args } => bind_grouped_func_call(
+            name,
+            args,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
     }
 }
