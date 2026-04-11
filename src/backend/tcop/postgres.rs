@@ -49,6 +49,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::FloatUnderflow => "22003",
         ExecError::RequestedLengthTooLarge => "54000",
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { .. })) => "54000",
+        ExecError::RaiseException(_) => "P0001",
         ExecError::DivisionByZero(_) => "22012",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::CardinalityViolation(_) => "21000",

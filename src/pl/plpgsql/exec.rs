@@ -114,10 +114,7 @@ fn exec_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecError>
         } => {
             let rendered = render_raise_message(message, params, values)?;
             match level {
-                RaiseLevel::Exception => Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "successful DO block",
-                    actual: rendered,
-                })),
+                RaiseLevel::Exception => Err(ExecError::RaiseException(rendered)),
                 RaiseLevel::Notice | RaiseLevel::Warning => {
                     NOTICE_QUEUE.with(|queue| {
                         queue.borrow_mut().push(PlpgsqlNotice {

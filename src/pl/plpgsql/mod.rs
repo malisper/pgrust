@@ -98,7 +98,7 @@ mod tests {
         let err = execute_do(&stmt).unwrap_err();
         assert!(matches!(
             err,
-            ExecError::Parse(ParseError::UnexpectedToken { actual, .. }) if actual == "boom 42"
+            ExecError::RaiseException(message) if message == "boom 42"
         ));
     }
 }

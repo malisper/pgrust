@@ -97,6 +97,7 @@ pub enum ExecError {
     },
     MissingRequiredColumn(String),
     InvalidRegex(String),
+    RaiseException(String),
     DivisionByZero(&'static str),
     GenerateSeriesZeroStep,
     InvalidIntegerInput {
