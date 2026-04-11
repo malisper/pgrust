@@ -26,7 +26,7 @@ use crate::backend::storage::lmgr::{
 };
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::cache::plancache::PlanCache;
-use crate::backend::utils::cache::relcache::RelCache;
+use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID,
 };
@@ -77,7 +77,7 @@ const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
 
 #[derive(Debug, Clone)]
 struct TempCatalogEntry {
-    entry: CatalogEntry,
+    entry: RelCacheEntry,
     on_commit: OnCommitAction,
 }
 
@@ -169,8 +169,38 @@ impl Database {
         TEMP_DB_OID_BASE.saturating_add(client_id)
     }
 
-    fn temp_catalog_entry(client_id: ClientId, kind: BootstrapCatalogKind) -> CatalogEntry {
-        let mut entry = bootstrap_catalog_entry(kind);
+    fn temp_catalog_entry(client_id: ClientId, kind: BootstrapCatalogKind) -> RelCacheEntry {
+        let entry = bootstrap_catalog_entry(kind);
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid: Self::temp_db_oid(client_id),
+            rel_number: kind.relation_oid(),
+        };
+        RelCacheEntry {
+            rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: entry.namespace_oid,
+            row_type_oid: entry.row_type_oid,
+            relkind: entry.relkind,
+            desc: entry.desc,
+        }
+    }
+
+    fn catalog_entry_from_relcache_entry(entry: &RelCacheEntry) -> CatalogEntry {
+        CatalogEntry {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: entry.namespace_oid,
+            row_type_oid: entry.row_type_oid,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
+        }
+    }
+
+    fn temp_catalog_row(client_id: ClientId, kind: BootstrapCatalogKind) -> CatalogEntry {
+        let mut entry = Self::catalog_entry_from_relcache_entry(&Self::temp_catalog_entry(
+            client_id, kind,
+        ));
         entry.rel = RelFileLocator {
             spc_oid: 0,
             db_oid: Self::temp_db_oid(client_id),
@@ -206,8 +236,9 @@ impl Database {
         }
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {
-                catalog.insert(name.clone(), temp.entry.clone());
-                catalog.insert(format!("pg_temp.{name}"), temp.entry.clone());
+                let entry = Self::catalog_entry_from_relcache_entry(&temp.entry);
+                catalog.insert(name.clone(), entry.clone());
+                catalog.insert(format!("pg_temp.{name}"), entry);
             }
             for kind in [
                 BootstrapCatalogKind::PgNamespace,
@@ -215,7 +246,7 @@ impl Database {
                 BootstrapCatalogKind::PgAttribute,
                 BootstrapCatalogKind::PgType,
             ] {
-                let entry = Self::temp_catalog_entry(client_id, kind);
+                let entry = Self::temp_catalog_row(client_id, kind);
                 catalog.insert(kind.relation_name(), entry.clone());
                 catalog.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
             }
@@ -224,7 +255,11 @@ impl Database {
         catalog
     }
 
-    pub(crate) fn temp_entry(&self, client_id: ClientId, table_name: &str) -> Option<CatalogEntry> {
+    pub(crate) fn temp_entry(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+    ) -> Option<RelCacheEntry> {
         let normalized = normalize_temp_lookup_name(table_name);
         self.temp_relations
             .read()
@@ -238,7 +273,7 @@ impl Database {
         table_name: String,
         desc: crate::backend::executor::RelationDesc,
         on_commit: OnCommitAction,
-    ) -> Result<CatalogEntry, ExecError> {
+    ) -> Result<RelCacheEntry, ExecError> {
         let normalized = normalize_temp_lookup_name(&table_name);
         let entry = {
             let mut namespaces = self.temp_relations.write();
@@ -248,7 +283,7 @@ impl Database {
             }
             let rel_number = namespace.next_rel_number.max(1);
             namespace.next_rel_number = rel_number.saturating_add(1);
-            let entry = CatalogEntry {
+            let entry = RelCacheEntry {
                 rel: RelFileLocator {
                     spc_oid: 0,
                     db_oid: Self::temp_db_oid(client_id),
@@ -289,7 +324,7 @@ impl Database {
         &self,
         client_id: ClientId,
         table_name: &str,
-    ) -> Result<CatalogEntry, ExecError> {
+    ) -> Result<RelCacheEntry, ExecError> {
         let normalized = normalize_temp_lookup_name(table_name);
         let entry = {
             let mut namespaces = self.temp_relations.write();
