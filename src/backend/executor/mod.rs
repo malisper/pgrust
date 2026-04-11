@@ -1388,7 +1388,7 @@ mod tests {
             StatementResult::Query {
                 column_names, rows, ..
             } => {
-                assert_eq!(column_names, vec!["expr1".to_string()]);
+                assert_eq!(column_names, vec!["?column?".to_string()]);
                 assert_eq!(rows, vec![vec![Value::Int32(1)]]);
             }
             other => panic!("expected query result, got {:?}", other),
