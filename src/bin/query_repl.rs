@@ -9,14 +9,18 @@ use std::sync::Arc;
 use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use pgrust::backend::catalog::{CatalogStore, column_desc};
+use pgrust::backend::commands::tablecmds::{
+    execute_delete_with_waiter, execute_insert, execute_truncate_table, execute_update_with_waiter,
+};
 use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use pgrust::backend::utils::cache::relcache::RelCache;
 use pgrust::executor::{
-    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_statement,
+    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
 use pgrust::parser::{
-    ParseError, SqlType, SqlTypeKind, Statement, create_relation_desc,
+    ParseError, SqlType, SqlTypeKind, Statement, bind_delete, bind_insert, bind_update,
+    create_relation_desc,
     normalize_create_table_name, parse_statement,
 };
 use pgrust::{BufferPool, SmgrStorageBackend};
@@ -412,9 +416,9 @@ fn run_statement(
     catalog_store: &mut CatalogStore,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
-    let mut catalog_snapshot = catalog_store.catalog_snapshot().map_err(|err| {
+    let relcache = catalog_store.relcache().map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "physical catalog snapshot",
+            expected: "physical relcache",
             actual: format!("{err:?}"),
         })
     })?;
@@ -431,12 +435,7 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_statement(
-                Statement::Explain(stmt),
-                &mut catalog_snapshot,
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            execute_readonly_statement(Statement::Explain(stmt), &relcache, &mut ctx)
         }
         Statement::Select(stmt) => {
             let mut ctx = ExecutorContext {
@@ -448,12 +447,7 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_statement(
-                Statement::Select(stmt),
-                &mut catalog_snapshot,
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            execute_readonly_statement(Statement::Select(stmt), &relcache, &mut ctx)
         }
         Statement::Values(stmt) => {
             let mut ctx = ExecutorContext {
@@ -465,12 +459,7 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_statement(
-                Statement::Values(stmt),
-                &mut catalog_snapshot,
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            execute_readonly_statement(Statement::Values(stmt), &relcache, &mut ctx)
         }
         Statement::ShowTables => {
             let mut ctx = ExecutorContext {
@@ -482,12 +471,7 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_statement(
-                Statement::ShowTables,
-                &mut catalog_snapshot,
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            execute_readonly_statement(Statement::ShowTables, &relcache, &mut ctx)
         }
         Statement::Analyze(stmt) => {
             let mut ctx = ExecutorContext {
@@ -499,12 +483,7 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_statement(
-                Statement::Analyze(stmt),
-                &mut catalog_snapshot,
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;
@@ -559,12 +538,7 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_statement(
-                Statement::TruncateTable(stmt),
-                &mut catalog_snapshot,
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            execute_truncate_table(stmt, &relcache, &mut ctx)
         }
         Statement::Vacuum(stmt) => {
             let mut ctx = ExecutorContext {
@@ -576,16 +550,12 @@ fn run_statement(
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_statement(
-                Statement::Vacuum(stmt),
-                &mut catalog_snapshot,
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            execute_readonly_statement(Statement::Vacuum(stmt), &relcache, &mut ctx)
         }
         Statement::Insert(stmt) => {
             let xid = txns.write().begin();
             let result = {
+                let bound = bind_insert(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
@@ -595,12 +565,7 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                execute_statement(
-                    Statement::Insert(stmt),
-                    &mut catalog_snapshot,
-                    &mut ctx,
-                    xid,
-                )
+                execute_insert(bound, &mut ctx, xid, 0)
             };
             match result {
                 Ok(result) => {
@@ -616,6 +581,7 @@ fn run_statement(
         Statement::Update(stmt) => {
             let xid = txns.write().begin();
             let result = {
+                let bound = bind_update(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
@@ -625,12 +591,7 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                execute_statement(
-                    Statement::Update(stmt),
-                    &mut catalog_snapshot,
-                    &mut ctx,
-                    xid,
-                )
+                execute_update_with_waiter(bound, &mut ctx, xid, 0, None)
             };
             match result {
                 Ok(result) => {
@@ -646,6 +607,7 @@ fn run_statement(
         Statement::Delete(stmt) => {
             let xid = txns.write().begin();
             let result = {
+                let bound = bind_delete(&stmt, &relcache)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
@@ -655,12 +617,7 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                execute_statement(
-                    Statement::Delete(stmt),
-                    &mut catalog_snapshot,
-                    &mut ctx,
-                    xid,
-                )
+                execute_delete_with_waiter(bound, &mut ctx, xid, None)
             };
             match result {
                 Ok(result) => {
