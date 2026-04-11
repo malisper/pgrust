@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::node_types::*;
-use super::expr_casts::cast_value;
+use super::expr_casts::{cast_value, soft_input_error_info};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
@@ -225,6 +225,43 @@ fn eval_builtin_function(
     match func {
         BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
+        BuiltinScalarFunction::PgInputIsValid => {
+            let input = values[0].as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_input_is_valid",
+                left: values[0].clone(),
+                right: Value::Text("".into()),
+            })?;
+            let ty = values[1].as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_input_is_valid",
+                left: values[1].clone(),
+                right: Value::Text("".into()),
+            })?;
+            Ok(Value::Bool(soft_input_error_info(input, ty)?.is_none()))
+        }
+        BuiltinScalarFunction::PgInputErrorMessage
+        | BuiltinScalarFunction::PgInputErrorDetail
+        | BuiltinScalarFunction::PgInputErrorHint
+        | BuiltinScalarFunction::PgInputErrorSqlState => {
+            let input = values[0].as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_input_error_info",
+                left: values[0].clone(),
+                right: Value::Text("".into()),
+            })?;
+            let ty = values[1].as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "pg_input_error_info",
+                left: values[1].clone(),
+                right: Value::Text("".into()),
+            })?;
+            let info = soft_input_error_info(input, ty)?;
+            Ok(match (func, info) {
+                (_, None) => Value::Null,
+                (BuiltinScalarFunction::PgInputErrorMessage, Some(info)) => Value::Text(info.message.into()),
+                (BuiltinScalarFunction::PgInputErrorDetail, Some(info)) => info.detail.map(Into::into).map(Value::Text).unwrap_or(Value::Null),
+                (BuiltinScalarFunction::PgInputErrorHint, Some(info)) => info.hint.map(Into::into).map(Value::Text).unwrap_or(Value::Null),
+                (BuiltinScalarFunction::PgInputErrorSqlState, Some(info)) => Value::Text(info.sqlstate.into()),
+                _ => Value::Null,
+            })
+        }
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),

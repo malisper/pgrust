@@ -2317,6 +2317,61 @@ mod tests {
     }
 
     #[test]
+    fn pg_input_is_valid_reports_int2_and_int2vector_results() {
+        let base = temp_dir("pg_input_is_valid_int2");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select pg_input_is_valid('34', 'int2'), pg_input_is_valid('asdf', 'int2'), pg_input_is_valid(' 1 3  5 ', 'int2vector'), pg_input_is_valid('50000', 'int2vector')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(false),
+            ]],
+        );
+    }
+
+    #[test]
+    fn pg_input_error_info_returns_one_row_with_structured_fields() {
+        let base = temp_dir("pg_input_error_info_int2");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info('50000', 'int2')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("value \"50000\" is out of range for type smallint".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("22003".into()),
+            ]],
+        );
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info('34', 'int2')",
+            )
+            .unwrap(),
+            vec![vec![Value::Null, Value::Null, Value::Null, Value::Null]],
+        );
+    }
+
+    #[test]
     fn comparison_operators_work_for_extended_numeric_types() {
         let base = temp_dir("extended_numeric_comparisons");
         let txns = TransactionManager::new_durable(&base).unwrap();
