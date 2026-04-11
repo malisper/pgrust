@@ -40,8 +40,13 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "abs" => Some(BuiltinScalarFunction::Abs),
         "gcd" => Some(BuiltinScalarFunction::Gcd),
         "lcm" => Some(BuiltinScalarFunction::Lcm),
+        "div" => Some(BuiltinScalarFunction::Div),
+        "scale" => Some(BuiltinScalarFunction::Scale),
+        "min_scale" => Some(BuiltinScalarFunction::MinScale),
+        "trim_scale" => Some(BuiltinScalarFunction::TrimScale),
         "trunc" => Some(BuiltinScalarFunction::Trunc),
         "round" => Some(BuiltinScalarFunction::Round),
+        "width_bucket" => Some(BuiltinScalarFunction::WidthBucket),
         "ceil" => Some(BuiltinScalarFunction::Ceil),
         "ceiling" => Some(BuiltinScalarFunction::Ceiling),
         "floor" => Some(BuiltinScalarFunction::Floor),
@@ -125,8 +130,9 @@ pub(super) fn validate_scalar_function_arity(
         BuiltinScalarFunction::Abs
         | BuiltinScalarFunction::Length
         | BuiltinScalarFunction::Lower
-        | BuiltinScalarFunction::Trunc
-        | BuiltinScalarFunction::Round
+        | BuiltinScalarFunction::Scale
+        | BuiltinScalarFunction::MinScale
+        | BuiltinScalarFunction::TrimScale
         | BuiltinScalarFunction::Ceil
         | BuiltinScalarFunction::Ceiling
         | BuiltinScalarFunction::Floor
@@ -159,10 +165,13 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::BitcastBigintToFloat8
         | BuiltinScalarFunction::BpcharToText
         | BuiltinScalarFunction::BitCount => args.len() == 1,
+        BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::Power
         | BuiltinScalarFunction::Atan2d
         | BuiltinScalarFunction::BoolEq
-        | BuiltinScalarFunction::BoolNe => args.len() == 2,
+        | BuiltinScalarFunction::BoolNe
+        | BuiltinScalarFunction::Div => args.len() == 2,
+        BuiltinScalarFunction::WidthBucket => args.len() == 4,
         BuiltinScalarFunction::GetBit => args.len() == 2,
         BuiltinScalarFunction::SetBit => args.len() == 3,
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,

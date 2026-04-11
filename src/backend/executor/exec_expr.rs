@@ -7,6 +7,10 @@ use super::expr_math::{
     eval_lcm_function, eval_lgamma, eval_ln, eval_power, eval_sqrt, eval_unary_float_function,
     snap_degree, cosd, cotd, sind, tand,
 };
+use super::expr_numeric::{
+    eval_div_function, eval_min_scale_function, eval_round_function, eval_scale_function,
+    eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
+};
 use super::expr_bit::{
     bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
     overlay as eval_bit_overlay, position as eval_bit_position, substring as eval_bit_substring,
@@ -570,8 +574,13 @@ fn eval_builtin_function(
             })
         }
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
-        BuiltinScalarFunction::Trunc => eval_unary_float_function("trunc", &values, |v| Ok(v.trunc())),
-        BuiltinScalarFunction::Round => eval_unary_float_function("round", &values, |v| Ok(v.round())),
+        BuiltinScalarFunction::Div => eval_div_function(&values),
+        BuiltinScalarFunction::Scale => eval_scale_function(&values),
+        BuiltinScalarFunction::MinScale => eval_min_scale_function(&values),
+        BuiltinScalarFunction::TrimScale => eval_trim_scale_function(&values),
+        BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
+        BuiltinScalarFunction::Round => eval_round_function(&values),
+        BuiltinScalarFunction::WidthBucket => eval_width_bucket_function(&values),
         BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => {
             eval_unary_float_function("ceil", &values, |v| Ok(v.ceil()))
         }
