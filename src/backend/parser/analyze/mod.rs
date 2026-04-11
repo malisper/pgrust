@@ -254,40 +254,6 @@ fn build_plan_with_outer(
             output_columns: output_columns.clone(),
         };
 
-        if !stmt.order_by.is_empty() {
-            plan = Plan::OrderBy {
-                input: Box::new(plan),
-                items: stmt
-                    .order_by
-                    .iter()
-                    .map(|item| {
-                        Ok(crate::backend::executor::OrderByEntry {
-                            expr: bind_agg_output_expr(
-                                &item.expr,
-                                &stmt.group_by,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &aggs,
-                                n_keys,
-                            )?,
-                            descending: item.descending,
-                            nulls_first: item.nulls_first,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-            };
-        }
-
-        if stmt.limit.is_some() || stmt.offset.is_some() {
-            plan = Plan::Limit {
-                input: Box::new(plan),
-                limit: stmt.limit,
-                offset: stmt.offset.unwrap_or(0),
-            };
-        }
-
         let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
             && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
         {
@@ -328,31 +294,25 @@ fn build_plan_with_outer(
                 .collect::<Result<_, _>>()?
         };
 
-        Ok(Plan::Projection {
-            input: Box::new(plan),
-            targets,
-        })
-    } else {
         if !stmt.order_by.is_empty() {
             plan = Plan::OrderBy {
                 input: Box::new(plan),
-                items: stmt
-                    .order_by
-                    .iter()
-                    .map(|item| {
-                        Ok(crate::backend::executor::OrderByEntry {
-                            expr: bind_expr_with_outer(
-                                &item.expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                            )?,
-                            descending: item.descending,
-                            nulls_first: item.nulls_first,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, ParseError>>()?,
+                items: bind_order_by_items(
+                    &stmt.order_by,
+                    &targets,
+                    |expr| {
+                        bind_agg_output_expr(
+                            expr,
+                            &stmt.group_by,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &aggs,
+                            n_keys,
+                        )
+                    },
+                )?,
             };
         }
 
@@ -364,6 +324,11 @@ fn build_plan_with_outer(
             };
         }
 
+        Ok(Plan::Projection {
+            input: Box::new(plan),
+            targets,
+        })
+    } else {
         let targets = bind_select_targets(
             &stmt.targets,
             &scope,
@@ -372,10 +337,27 @@ fn build_plan_with_outer(
             grouped_outer.as_ref(),
         )?;
 
+        if !stmt.order_by.is_empty() {
+            plan = Plan::OrderBy {
+                input: Box::new(plan),
+                items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                    bind_expr_with_outer(expr, &scope, catalog, outer_scopes, grouped_outer.as_ref())
+                })?,
+            };
+        }
+
+        if stmt.limit.is_some() || stmt.offset.is_some() {
+            plan = Plan::Limit {
+                input: Box::new(plan),
+                limit: stmt.limit,
+                offset: stmt.offset.unwrap_or(0),
+            };
+        }
+
         // Optimization: skip Projection if it's an identity mapping (select *)
         let is_identity = targets.len() == scope.columns.len()
             && targets.iter().enumerate().all(|(i, t)| {
-                matches!(&t.expr, Expr::Column(c) if *c == i)
+                matches!(t.expr, Expr::Column(c) if c == i)
                     && t.name == scope.columns[i].output_name
             });
 
@@ -388,6 +370,39 @@ fn build_plan_with_outer(
             })
         }
     }
+}
+
+fn bind_order_by_items(
+    items: &[OrderByItem],
+    targets: &[TargetEntry],
+    bind_expr: impl Fn(&SqlExpr) -> Result<Expr, ParseError>,
+) -> Result<Vec<crate::backend::executor::OrderByEntry>, ParseError> {
+    items.iter()
+        .map(|item| {
+            let expr = match &item.expr {
+                SqlExpr::IntegerLiteral(value) => {
+                    if let Ok(ordinal) = value.parse::<usize>() {
+                        if ordinal > 0 && ordinal <= targets.len() {
+                            targets[ordinal - 1].expr.clone()
+                        } else {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "ORDER BY position in select list",
+                                actual: value.clone(),
+                            });
+                        }
+                    } else {
+                        bind_expr(&item.expr)?
+                    }
+                }
+                _ => bind_expr(&item.expr)?,
+            };
+            Ok(crate::backend::executor::OrderByEntry {
+                expr,
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
