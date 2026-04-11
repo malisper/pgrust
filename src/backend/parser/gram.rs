@@ -65,6 +65,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     match inner.as_rule() {
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
+        Rule::values_stmt => Ok(Statement::Values(build_values_statement(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
@@ -280,6 +281,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
 }
 
 pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let mut with = Vec::new();
     let mut targets = None;
     let mut from = None;
     let mut where_clause = None;
@@ -290,6 +292,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     let mut offset = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::cte_clause => with = build_cte_clause(part)?,
             Rule::select_list => targets = Some(build_select_list(part)?),
             Rule::from_item => from = Some(build_from_item(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
@@ -302,6 +305,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         }
     }
     Ok(SelectStatement {
+        with,
         from,
         targets: targets.unwrap_or_default(),
         where_clause,
@@ -310,6 +314,76 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         order_by,
         limit,
         offset,
+    })
+}
+
+fn build_values_statement(pair: Pair<'_, Rule>) -> Result<ValuesStatement, ParseError> {
+    let mut with = Vec::new();
+    let mut rows = Vec::new();
+    let mut order_by = Vec::new();
+    let mut limit = None;
+    let mut offset = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::cte_clause => with = build_cte_clause(part)?,
+            Rule::values_row => rows.push(build_values_row(part)?),
+            Rule::order_by_clause => order_by = build_order_by_clause(part)?,
+            Rule::limit_clause => limit = Some(build_limit_clause(part)?),
+            Rule::offset_clause => offset = Some(build_offset_clause(part)?),
+            _ => {}
+        }
+    }
+    Ok(ValuesStatement {
+        with,
+        rows,
+        order_by,
+        limit,
+        offset,
+    })
+}
+
+fn build_cte_clause(pair: Pair<'_, Rule>) -> Result<Vec<CommonTableExpr>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::common_table_expr)
+        .map(build_common_table_expr)
+        .collect()
+}
+
+fn build_common_table_expr(pair: Pair<'_, Rule>) -> Result<CommonTableExpr, ParseError> {
+    let mut name = None;
+    let mut column_names = Vec::new();
+    let mut body = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::cte_column_list => {
+                if let Some(list) = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::ident_list)
+                {
+                    column_names = list.into_inner().map(build_identifier).collect();
+                }
+            }
+            Rule::cte_body => {
+                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                body = Some(match inner.as_rule() {
+                    Rule::select_stmt => CteBody::Select(Box::new(build_select(inner)?)),
+                    Rule::values_stmt => CteBody::Values(build_values_statement(inner)?),
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "SELECT or VALUES CTE body",
+                            actual: inner.as_str().into(),
+                        });
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(CommonTableExpr {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        column_names,
+        body: body.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -521,11 +595,13 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
 }
 
 fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
+    let mut with = Vec::new();
     let mut table_name = None;
     let mut columns = None;
     let mut values = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::cte_clause => with = build_cte_clause(part)?,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::ident_list => {
                 columns = Some(part.into_inner().map(build_identifier).collect::<Vec<_>>())
@@ -535,6 +611,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         }
     }
     Ok(InsertStatement {
+        with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         columns,
         values,
@@ -743,11 +820,13 @@ fn build_maintenance_target(pair: Pair<'_, Rule>) -> Result<MaintenanceTarget, P
 }
 
 fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
+    let mut with = Vec::new();
     let mut table_name = None;
     let mut assignments = Vec::new();
     let mut where_clause = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::cte_clause => with = build_cte_clause(part)?,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::assignment => assignments.push(build_assignment(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
@@ -755,6 +834,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         }
     }
     Ok(UpdateStatement {
+        with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         assignments,
         where_clause,
@@ -762,16 +842,19 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
 }
 
 fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
+    let mut with = Vec::new();
     let mut table_name = None;
     let mut where_clause = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::cte_clause => with = build_cte_clause(part)?,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::expr => where_clause = Some(build_expr(part)?),
             _ => {}
         }
     }
     Ok(DeleteStatement {
+        with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         where_clause,
     })

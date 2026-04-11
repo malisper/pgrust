@@ -1,14 +1,19 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ explain_stmt | select_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ explain_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }
 explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
 explain_option = { explain_option_name ~ explain_option_value? }
 explain_option_name = { kw_analyze | kw_buffers | kw_costs | kw_timing | kw_verbose | kw_summary | kw_format }
 explain_option_value = { kw_off | kw_true | kw_false | kw_text | kw_json | kw_yaml | kw_xml | kw_on_value }
-select_stmt = { kw_select ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
+select_stmt = { cte_clause? ~ kw_select ~ (empty_select_list | select_list)? ~ (kw_from ~ from_item)? ~ (kw_where ~ expr)? ~ group_by_clause? ~ having_clause? ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
+values_stmt = { cte_clause? ~ kw_values ~ values_row ~ ("," ~ values_row)* ~ order_by_clause? ~ limit_clause? ~ offset_clause? }
+cte_clause = { kw_with ~ common_table_expr ~ ("," ~ common_table_expr)* }
+common_table_expr = { identifier ~ cte_column_list? ~ kw_as ~ "(" ~ cte_body ~ ")" }
+cte_column_list = { "(" ~ ident_list ~ ")" }
+cte_body = { select_stmt | values_stmt }
 empty_select_list = { &kw_from }
 group_by_clause = { kw_group ~ kw_by ~ expr ~ ("," ~ expr)* }
 having_clause = { kw_having ~ expr }
@@ -25,8 +30,8 @@ set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_va
 signed_set_value = { ("+" | "-") ~ (numeric_literal | integer | identifier) }
 
 show_tables_stmt = { kw_show ~ kw_tables }
-insert_stmt = { kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_values ~ values_row ~ ("," ~ values_row)* }
-create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ identifier ~ create_table_tail ~ with_clause? }
+insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_values ~ values_row ~ ("," ~ values_row)* }
+create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ identifier ~ create_table_tail ~ table_with_clause? }
 temp_clause = { kw_temp | kw_temporary }
 create_table_tail = { create_table_column_form | create_table_as_form }
 create_table_column_form = { "(" ~ column_def ~ ("," ~ column_def)* ~ ")" ~ on_commit_clause? | "(" ~ ")" ~ on_commit_clause? }
@@ -34,8 +39,8 @@ create_table_as_form = { ctas_column_list? ~ on_commit_clause? ~ kw_as ~ select_
 ctas_column_list = { "(" ~ ident_list ~ ")" }
 on_commit_clause = { kw_on ~ kw_commit ~ on_commit_action }
 on_commit_action = { kw_preserve ~ kw_rows | kw_delete ~ kw_rows | kw_drop }
-with_clause = { kw_with ~ "(" ~ with_item ~ ("," ~ with_item)* ~ ")" }
-with_item = { identifier ~ ("=" ~ (identifier | integer))? }
+table_with_clause = { kw_with ~ "(" ~ table_with_item ~ ("," ~ table_with_item)* ~ ")" }
+table_with_item = { identifier ~ ("=" ~ (identifier | integer))? }
 drop_table_stmt = { kw_drop ~ kw_table ~ if_exists_clause? ~ ident_list }
 truncate_table_stmt = { kw_truncate ~ kw_table? ~ ident_list }
 vacuum_stmt = { kw_vacuum ~ (kw_analyze ~ maintenance_target_list | vacuum_option_block ~ maintenance_target_list? | maintenance_target_list) }
@@ -55,8 +60,8 @@ maintenance_target = { only_clause? ~ identifier ~ maintenance_column_list? }
 maintenance_column_list = { "(" ~ ident_list ~ ")" }
 only_clause = { kw_only }
 if_exists_clause = { kw_if ~ kw_exists }
-update_stmt = { kw_update ~ identifier ~ kw_set ~ assignment ~ ("," ~ assignment)* ~ (kw_where ~ expr)? }
-delete_stmt = { kw_delete ~ kw_from ~ identifier ~ (kw_where ~ expr)? }
+update_stmt = { cte_clause? ~ kw_update ~ identifier ~ kw_set ~ assignment ~ ("," ~ assignment)* ~ (kw_where ~ expr)? }
+delete_stmt = { cte_clause? ~ kw_delete ~ kw_from ~ identifier ~ (kw_where ~ expr)? }
 begin_stmt = { (kw_begin | (kw_start ~ kw_transaction)) }
 commit_stmt = { (kw_commit | kw_end) }
 rollback_stmt = { kw_rollback }

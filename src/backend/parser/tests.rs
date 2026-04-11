@@ -126,6 +126,54 @@
     }
 
     #[test]
+    fn parse_with_select_and_values_ctes() {
+        let stmt = parse_select(
+            "with x(a) as (values (1), (2)), y as (select id from people) select * from x, y",
+        )
+        .unwrap();
+        assert_eq!(stmt.with.len(), 2);
+        assert_eq!(stmt.with[0].name, "x");
+        assert_eq!(stmt.with[0].column_names, vec!["a"]);
+        assert!(matches!(stmt.with[0].body, CteBody::Values(_)));
+        assert!(matches!(stmt.with[1].body, CteBody::Select(_)));
+        assert!(matches!(stmt.from, Some(FromItem::Join { .. })));
+    }
+
+    #[test]
+    fn parse_top_level_values_with_order_limit_offset() {
+        let stmt =
+            parse_statement("values (2), (1) order by 1 desc limit 1 offset 0").unwrap();
+        match stmt {
+            Statement::Values(values) => {
+                assert_eq!(values.rows.len(), 2);
+                assert_eq!(values.order_by.len(), 1);
+                assert_eq!(values.limit, Some(1));
+                assert_eq!(values.offset, Some(0));
+            }
+            other => panic!("expected values statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_with_on_insert_update_delete() {
+        assert!(matches!(
+            parse_statement("with q as (select 1) insert into people (id) values ((select 1 from q))")
+                .unwrap(),
+            Statement::Insert(InsertStatement { with, .. }) if with.len() == 1
+        ));
+        assert!(matches!(
+            parse_statement("with q as (values (1)) update people set note = (select column1::text from q) where id = 1")
+                .unwrap(),
+            Statement::Update(UpdateStatement { with, .. }) if with.len() == 1
+        ));
+        assert!(matches!(
+            parse_statement("with q as (select 1) delete from people where id in (select 1 from q)")
+                .unwrap(),
+            Statement::Delete(DeleteStatement { with, .. }) if with.len() == 1
+        ));
+    }
+
+    #[test]
     fn parse_boolean_is_predicates_lower_to_existing_ast() {
         let stmt = parse_select(
             "select b is true, b is not false, b is unknown, b is not unknown from people",

@@ -552,7 +552,7 @@ impl Database {
                 execute_analyze(analyze_stmt.clone(), &visible_catalog)
             }
             Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
-            Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
+            Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let (plan_or_stmt, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
@@ -561,6 +561,7 @@ impl Database {
                                 crate::backend::parser::build_plan(select, &visible_catalog)?;
                             collect_rels_from_plan(&plan, &mut rels);
                         }
+                        Statement::Values(_) => {}
                         Statement::Explain(explain) => {
                             if let Statement::Select(select) = explain.statement.as_ref() {
                                 let plan =

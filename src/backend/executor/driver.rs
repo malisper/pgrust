@@ -44,6 +44,10 @@ pub fn execute_statement(
     let result = match stmt {
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
+        Statement::Values(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "VALUES execution added in a later slice",
+            actual: "VALUES".into(),
+        })),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::ShowTables => execute_show_tables(catalog),

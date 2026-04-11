@@ -119,6 +119,7 @@ impl fmt::Display for ParseError {
 pub enum Statement {
     Explain(ExplainStatement),
     Select(SelectStatement),
+    Values(ValuesStatement),
     Analyze(AnalyzeStatement),
     Set(SetStatement),
     Reset(ResetStatement),
@@ -186,6 +187,7 @@ pub struct AnalyzeStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectStatement {
+    pub with: Vec<CommonTableExpr>,
     pub from: Option<FromItem>,
     pub targets: Vec<SelectItem>,
     pub where_clause: Option<SqlExpr>,
@@ -194,6 +196,28 @@ pub struct SelectStatement {
     pub order_by: Vec<OrderByItem>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValuesStatement {
+    pub with: Vec<CommonTableExpr>,
+    pub rows: Vec<Vec<SqlExpr>>,
+    pub order_by: Vec<OrderByItem>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonTableExpr {
+    pub name: String,
+    pub column_names: Vec<String>,
+    pub body: CteBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CteBody {
+    Select(Box<SelectStatement>),
+    Values(ValuesStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +267,7 @@ pub struct OrderByItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertStatement {
+    pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub columns: Option<Vec<String>>,
     pub values: Vec<Vec<SqlExpr>>,
@@ -384,6 +409,7 @@ impl SqlType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateStatement {
+    pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub assignments: Vec<Assignment>,
     pub where_clause: Option<SqlExpr>,
@@ -391,6 +417,7 @@ pub struct UpdateStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteStatement {
+    pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub where_clause: Option<SqlExpr>,
 }
