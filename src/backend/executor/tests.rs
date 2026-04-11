@@ -6330,6 +6330,43 @@
     }
 
     #[test]
+    fn generate_series_supports_numeric_arguments() {
+        let base = temp_dir("generate_series_numeric");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(0.0::numeric, 4.0::numeric)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows.len(), 5);
+                assert_eq!(rows[0], vec![Value::Numeric("0.0".into())]);
+                assert_eq!(rows[4], vec![Value::Numeric("4.0".into())]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+        // With explicit step
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(0.0::numeric, 1.0::numeric, 0.3::numeric)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows.len(), 4);
+                assert_eq!(rows[0], vec![Value::Numeric("0.0".into())]);
+                assert_eq!(rows[3], vec![Value::Numeric("0.9".into())]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn mod_function_works_for_numeric_values() {
         let base = temp_dir("mod_function_numeric");
         let txns = TransactionManager::new_durable(&base).unwrap();

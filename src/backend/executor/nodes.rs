@@ -517,40 +517,68 @@ impl PlanNode for GenerateSeriesState {
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if !self.initialized {
             let mut dummy = TupleSlot::empty(0);
-            self.current = match eval_expr(&self.start, &mut dummy, ctx)? {
-                Value::Int32(v) => i64::from(v),
-                Value::Int64(v) => v,
-                other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "generate_series start",
-                        left: other,
-                        right: Value::Null,
-                    });
-                }
-            };
-            self.end = match eval_expr(&self.stop, &mut dummy, ctx)? {
-                Value::Int32(v) => i64::from(v),
-                Value::Int64(v) => v,
-                other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "generate_series stop",
-                        left: other,
-                        right: Value::Null,
-                    });
-                }
-            };
-            self.step_val = match eval_expr(&self.step, &mut dummy, ctx)? {
-                Value::Int32(v) => i64::from(v),
-                Value::Int64(v) => v,
-                other => {
-                    return Err(ExecError::TypeMismatch {
-                        op: "generate_series step",
-                        left: other,
-                        right: Value::Null,
-                    });
-                }
-            };
+            let start_val = eval_expr(&self.start, &mut dummy, ctx)?;
+            let stop_val = eval_expr(&self.stop, &mut dummy, ctx)?;
+            let step_val = eval_expr(&self.step, &mut dummy, ctx)?;
+
+            if matches!(self.output_type.kind, SqlTypeKind::Numeric) {
+                use crate::include::nodes::datum::NumericValue;
+                let to_numeric = |v: Value, label: &'static str| -> Result<NumericValue, ExecError> {
+                    match v {
+                        Value::Numeric(n) => Ok(n),
+                        Value::Int32(i) => Ok(NumericValue::from_i64(i64::from(i))),
+                        Value::Int64(i) => Ok(NumericValue::from_i64(i)),
+                        other => Err(ExecError::TypeMismatch {
+                            op: label,
+                            left: other,
+                            right: Value::Null,
+                        }),
+                    }
+                };
+                self.num_current = Some(to_numeric(start_val, "generate_series start")?);
+                self.num_end = Some(to_numeric(stop_val, "generate_series stop")?);
+                self.num_step = Some(to_numeric(step_val, "generate_series step")?);
+            } else {
+                let to_i64 = |v: Value, label: &'static str| -> Result<i64, ExecError> {
+                    match v {
+                        Value::Int32(v) => Ok(i64::from(v)),
+                        Value::Int64(v) => Ok(v),
+                        other => Err(ExecError::TypeMismatch {
+                            op: label,
+                            left: other,
+                            right: Value::Null,
+                        }),
+                    }
+                };
+                self.current = to_i64(start_val, "generate_series start")?;
+                self.end = to_i64(stop_val, "generate_series stop")?;
+                self.step_val = to_i64(step_val, "generate_series step")?;
+            }
             self.initialized = true;
+        }
+
+        if matches!(self.output_type.kind, SqlTypeKind::Numeric) {
+            use crate::include::nodes::datum::NumericValue;
+            use std::cmp::Ordering;
+            let current = self.num_current.as_ref().unwrap();
+            let end = self.num_end.as_ref().unwrap();
+            let step = self.num_step.as_ref().unwrap();
+            let step_cmp = step.cmp(&NumericValue::zero());
+            let done = match step_cmp {
+                Ordering::Greater => current.cmp(end) == Ordering::Greater,
+                Ordering::Less => current.cmp(end) == Ordering::Less,
+                Ordering::Equal => return Err(ExecError::GenerateSeriesZeroStep),
+            };
+            if done {
+                return Ok(None);
+            }
+            let val = current.clone();
+            self.num_current = Some(current.add(step));
+            self.slot.kind = SlotKind::Virtual;
+            self.slot.tts_values.clear();
+            self.slot.tts_values.push(Value::Numeric(val));
+            self.slot.tts_nvalid = 1;
+            return Ok(Some(&mut self.slot));
         }
 
         let done = if self.step_val > 0 {
