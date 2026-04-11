@@ -285,6 +285,12 @@ impl Database {
         catalog
     }
 
+    pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
+        if self.temp_relations.read().contains_key(&client_id) {
+            let _ = self.visible_catalog(client_id);
+        }
+    }
+
     pub(crate) fn temp_entry(
         &self,
         client_id: ClientId,
@@ -492,8 +498,9 @@ impl Database {
         cid: u32,
     ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) = normalize_create_table_as_name(create_stmt)?;
-        let visible_catalog = self.visible_catalog(client_id);
-        let plan = build_plan(&create_stmt.query, &visible_catalog)?;
+        self.sync_visible_catalog_heaps(client_id);
+        let visible_relcache = self.visible_relcache(client_id);
+        let plan = build_plan(&create_stmt.query, &visible_relcache)?;
         let rels = {
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
@@ -521,7 +528,7 @@ impl Database {
         };
         let query_result = execute_readonly_statement(
             Statement::Select(create_stmt.query.clone()),
-            &visible_catalog,
+            &visible_relcache,
             &mut ctx,
         );
         if xid.is_none() {
@@ -675,27 +682,29 @@ impl Database {
         use crate::backend::executor::execute_readonly_statement;
 
         let stmt = self.plan_cache.get_statement(sql)?;
-        let visible_catalog = self.visible_catalog(client_id);
 
         match stmt {
             Statement::Analyze(ref analyze_stmt) => {
-                execute_analyze(analyze_stmt.clone(), &visible_catalog)
+                let visible_relcache = self.visible_relcache(client_id);
+                execute_analyze(analyze_stmt.clone(), &visible_relcache)
             }
             Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
+                self.sync_visible_catalog_heaps(client_id);
+                let visible_relcache = self.visible_relcache(client_id);
                 let (plan_or_stmt, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
                         Statement::Select(select) => {
                             let plan =
-                                crate::backend::parser::build_plan(select, &visible_catalog)?;
+                                crate::backend::parser::build_plan(select, &visible_relcache)?;
                             collect_rels_from_plan(&plan, &mut rels);
                         }
                         Statement::Values(_) => {}
                         Statement::Explain(explain) => {
                             if let Statement::Select(select) = explain.statement.as_ref() {
                                 let plan =
-                                    crate::backend::parser::build_plan(select, &visible_catalog)?;
+                                    crate::backend::parser::build_plan(select, &visible_relcache)?;
                                 collect_rels_from_plan(&plan, &mut rels);
                             }
                         }
@@ -717,7 +726,7 @@ impl Database {
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result = execute_readonly_statement(plan_or_stmt, &visible_catalog, &mut ctx);
+                let result = execute_readonly_statement(plan_or_stmt, &visible_relcache, &mut ctx);
                 drop(ctx);
 
                 unlock_relations(&self.table_locks, client_id, &rels);
@@ -919,7 +928,7 @@ impl Database {
                     timed: false,
                 };
                 let result =
-                    execute_truncate_table(truncate_stmt.clone(), &visible_catalog, &mut ctx);
+                    execute_truncate_table(truncate_stmt.clone(), &relcache, &mut ctx);
                 drop(ctx);
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
@@ -928,7 +937,8 @@ impl Database {
             }
 
             Statement::Vacuum(ref vacuum_stmt) => {
-                execute_vacuum(vacuum_stmt.clone(), &visible_catalog)
+                let visible_relcache = self.visible_relcache(client_id);
+                execute_vacuum(vacuum_stmt.clone(), &visible_relcache)
             }
 
             Statement::Begin | Statement::Commit | Statement::Rollback => {
@@ -956,8 +966,9 @@ impl Database {
         use crate::backend::parser::build_plan;
 
         let (plan, rels) = {
-            let visible_catalog = self.visible_catalog(client_id);
-            let plan = build_plan(select_stmt, &visible_catalog)?;
+            self.sync_visible_catalog_heaps(client_id);
+            let visible_relcache = self.visible_relcache(client_id);
+            let plan = build_plan(select_stmt, &visible_relcache)?;
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
             (plan, rels.into_iter().collect::<Vec<_>>())
