@@ -135,6 +135,8 @@ pub enum Statement {
     ShowTables,
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
+    CreateIndex(CreateIndexStatement),
+    AlterTableSet(AlterTableSetStatement),
     DropTable(DropTableStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
@@ -312,6 +314,26 @@ pub struct CreateTableAsStatement {
     pub on_commit: OnCommitAction,
     pub column_names: Vec<String>,
     pub query: SelectStatement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateIndexStatement {
+    pub unique: bool,
+    pub index_name: String,
+    pub table_name: String,
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetStatement {
+    pub table_name: String,
+    pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelOption {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

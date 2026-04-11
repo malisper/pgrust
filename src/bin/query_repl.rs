@@ -439,7 +439,10 @@ fn run_statement(
     clear_notices();
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
-        Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::Set(_)
+        | Statement::Reset(_)
+        | Statement::CreateIndex(_)
+        | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),

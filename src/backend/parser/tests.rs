@@ -82,6 +82,43 @@
     }
 
     #[test]
+    fn parse_transaction_alias_statements() {
+        assert_eq!(parse_statement("begin transaction").unwrap(), Statement::Begin);
+        assert_eq!(parse_statement("commit transaction").unwrap(), Statement::Commit);
+    }
+
+    #[test]
+    fn parse_create_unique_index_statement() {
+        let stmt =
+            parse_statement("create unique index num_exp_add_idx on num_exp_add (id1, id2)")
+                .unwrap();
+        assert_eq!(
+            stmt,
+            Statement::CreateIndex(CreateIndexStatement {
+                unique: true,
+                index_name: "num_exp_add_idx".into(),
+                table_name: "num_exp_add".into(),
+                columns: vec!["id1".into(), "id2".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn parse_alter_table_set_statement() {
+        let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::AlterTableSet(AlterTableSetStatement {
+                table_name: "num_variance".into(),
+                options: vec![RelOption {
+                    name: "parallel_workers".into(),
+                    value: "4".into(),
+                }],
+            })
+        );
+    }
+
+    #[test]
     fn parse_do_statement_defaults_to_plpgsql() {
         let stmt = parse_statement("do $$ begin null; end $$").unwrap();
         assert_eq!(
