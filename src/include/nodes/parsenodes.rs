@@ -465,7 +465,9 @@ impl SqlType {
             None
         } else {
             let packed = self.typmod - Self::VARHDRSZ;
-            Some(((packed >> 16) & 0xffff, packed & 0xffff))
+            let precision = (packed >> 16) & 0xffff;
+            let scale = ((packed & 0xffff) as i16) as i32;
+            Some((precision, scale))
         }
     }
 }

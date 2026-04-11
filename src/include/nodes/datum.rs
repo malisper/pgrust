@@ -65,6 +65,8 @@ pub enum Value {
 #[derive(Debug, Clone)]
 pub enum NumericValue {
     Finite { coeff: BigInt, scale: u32 },
+    PosInf,
+    NegInf,
     NaN,
 }
 
@@ -85,6 +87,7 @@ impl NumericValue {
 
     pub fn normalize(self) -> Self {
         match self {
+            Self::PosInf | Self::NegInf => self,
             Self::NaN => Self::NaN,
             Self::Finite {
                 mut coeff,
@@ -109,6 +112,7 @@ impl NumericValue {
 
     fn canonical_eq(&self) -> Self {
         match self {
+            Self::PosInf | Self::NegInf => self.clone(),
             Self::NaN => Self::NaN,
             Self::Finite { coeff, .. } if coeff.is_zero() => Self::zero(),
             _ => self.clone().normalize(),
@@ -117,7 +121,7 @@ impl NumericValue {
 
     pub fn digit_count(&self) -> i32 {
         match self {
-            Self::NaN => 0,
+            Self::PosInf | Self::NegInf | Self::NaN => 0,
             Self::Finite { coeff, .. } => coeff
                 .to_str_radix(10)
                 .trim_start_matches('-')
@@ -129,6 +133,8 @@ impl NumericValue {
 
     pub fn negate(&self) -> Self {
         match self {
+            Self::PosInf => Self::NegInf,
+            Self::NegInf => Self::PosInf,
             Self::NaN => Self::NaN,
             Self::Finite { coeff, scale } => Self::Finite {
                 coeff: -coeff.clone(),
@@ -139,6 +145,7 @@ impl NumericValue {
 
     pub fn abs(&self) -> Self {
         match self {
+            Self::PosInf | Self::NegInf => Self::PosInf,
             Self::NaN => Self::NaN,
             Self::Finite { coeff, scale } => Self::Finite {
                 coeff: coeff.abs(),
@@ -149,6 +156,8 @@ impl NumericValue {
 
     pub fn render(&self) -> String {
         match self {
+            Self::PosInf => "Infinity".to_string(),
+            Self::NegInf => "-Infinity".to_string(),
             Self::NaN => "NaN".to_string(),
             Self::Finite { coeff, scale } => {
                 let negative = coeff.is_negative();
@@ -188,6 +197,7 @@ impl NumericValue {
 impl PartialEq for NumericValue {
     fn eq(&self, other: &Self) -> bool {
         match (self.canonical_eq(), other.canonical_eq()) {
+            (Self::PosInf, Self::PosInf) | (Self::NegInf, Self::NegInf) => true,
             (Self::NaN, Self::NaN) => true,
             (
                 Self::Finite {
@@ -212,8 +222,14 @@ impl Hash for NumericValue {
             Self::NaN => {
                 0u8.hash(state);
             }
-            Self::Finite { coeff, scale } => {
+            Self::PosInf => {
                 1u8.hash(state);
+            }
+            Self::NegInf => {
+                2u8.hash(state);
+            }
+            Self::Finite { coeff, scale } => {
+                3u8.hash(state);
                 coeff.hash(state);
                 scale.hash(state);
             }
@@ -234,12 +250,17 @@ impl From<String> for NumericValue {
 }
 
 fn parse_numeric_literal(text: &str) -> Option<NumericValue> {
-    if text.eq_ignore_ascii_case("nan") {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("nan") {
         return Some(NumericValue::NaN);
     }
-    let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "inf" | "+inf" | "infinity" | "+infinity" => return Some(NumericValue::PosInf),
+        "-inf" | "-infinity" => return Some(NumericValue::NegInf),
+        _ => {}
     }
     let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
         Some(index) => (&trimmed[..index], trimmed[index + 1..].parse::<i32>().ok()?),

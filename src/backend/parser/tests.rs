@@ -119,6 +119,14 @@
     }
 
     #[test]
+    fn parse_numeric_type_with_negative_scale() {
+        assert_eq!(
+            parse_type_name("numeric(3, -6)").unwrap(),
+            SqlType::with_numeric_precision_scale(3, -6)
+        );
+    }
+
+    #[test]
     fn parse_do_statement_defaults_to_plpgsql() {
         let stmt = parse_statement("do $$ begin null; end $$").unwrap();
         assert_eq!(

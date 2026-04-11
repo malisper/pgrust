@@ -82,8 +82,9 @@ pub(super) fn bind_values_rows(
     let mut column_types = Vec::with_capacity(width);
     for col_idx in 0..width {
         let mut common = None;
+        let mut common_expr: Option<&SqlExpr> = None;
         for row in rows {
-            let ty = infer_sql_expr_type_with_ctes(
+            let inferred = infer_sql_expr_type_with_ctes(
                 &row[col_idx],
                 &empty,
                 catalog,
@@ -92,18 +93,31 @@ pub(super) fn bind_values_rows(
                 ctes,
             );
             common = Some(match common {
-                None => ty.element_type(),
-                Some(existing) => resolve_common_scalar_type(existing, ty).ok_or_else(|| {
-                    ParseError::UnexpectedToken {
-                        expected: "VALUES columns with a common type",
-                        actual: format!(
-                            "VALUES column {} cannot reconcile {} and {}",
-                            col_idx + 1,
-                            sql_type_name(existing),
-                            sql_type_name(ty)
-                        ),
-                    }
-                })?,
+                None => {
+                    common_expr = Some(&row[col_idx]);
+                    inferred.element_type()
+                }
+                Some(existing) => {
+                    let existing = coerce_unknown_string_literal_type(
+                        common_expr.expect("common expr"),
+                        existing,
+                        inferred,
+                    );
+                    let adjusted = coerce_unknown_string_literal_type(&row[col_idx], inferred, existing);
+                    let resolved = resolve_common_scalar_type(existing, adjusted).ok_or_else(|| {
+                        ParseError::UnexpectedToken {
+                            expected: "VALUES columns with a common type",
+                            actual: format!(
+                                "VALUES column {} cannot reconcile {} and {}",
+                                col_idx + 1,
+                                sql_type_name(existing),
+                                sql_type_name(adjusted)
+                            ),
+                        }
+                    })?;
+                    common_expr = Some(&row[col_idx]);
+                    resolved
+                }
             });
         }
         column_types.push(common.unwrap_or(SqlType::new(SqlTypeKind::Text)));
