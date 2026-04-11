@@ -291,6 +291,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Int2 => ScalarType::Int16,
         SqlTypeKind::Int4 => ScalarType::Int32,
         SqlTypeKind::Int8 => ScalarType::Int64,
+        SqlTypeKind::Oid => ScalarType::Int32,
         SqlTypeKind::Float4 => ScalarType::Float32,
         SqlTypeKind::Float8 => ScalarType::Float64,
         SqlTypeKind::Numeric => ScalarType::Numeric,
@@ -309,6 +310,7 @@ fn encode_sql_type(sql_type: SqlType) -> String {
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int4 => "int4",
         SqlTypeKind::Int8 => "int8",
+        SqlTypeKind::Oid => "oid",
         SqlTypeKind::Float4 => "float4",
         SqlTypeKind::Float8 => "float8",
         SqlTypeKind::Numeric => "numeric",
@@ -348,6 +350,11 @@ fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
         },
         "int8" => SqlType {
             kind: SqlTypeKind::Int8,
+            typmod,
+            is_array: false,
+        },
+        "oid" => SqlType {
+            kind: SqlTypeKind::Oid,
             typmod,
             is_array: false,
         },

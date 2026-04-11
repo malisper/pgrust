@@ -59,6 +59,10 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                     .parse::<i32>()
                     .map(Value::Int32)
                     .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(value.clone())))?,
+                SqlTypeKind::Oid => value
+                    .parse::<i32>()
+                    .map(Value::Int32)
+                    .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(value.clone())))?,
                 SqlTypeKind::Int8 => value
                     .parse::<i64>()
                     .map(Value::Int64)
