@@ -110,12 +110,10 @@ impl Database {
             let mut recovery_smgr = MdStorageManager::new_in_recovery(&base_dir);
             {
                 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-                let cat = catalog.catalog();
-                for name in cat.table_names().collect::<Vec<_>>() {
-                    if let Some(entry) = cat.get(name) {
-                        let _ = recovery_smgr.open(entry.rel);
-                        let _ = recovery_smgr.create(entry.rel, ForkNumber::Main, false);
-                    }
+                let relcache = catalog.relcache()?;
+                for (_, entry) in relcache.entries() {
+                    let _ = recovery_smgr.open(entry.rel);
+                    let _ = recovery_smgr.create(entry.rel, ForkNumber::Main, false);
                 }
             }
             let stats = crate::backend::access::transam::xlog::replay::perform_wal_recovery(
@@ -141,16 +139,14 @@ impl Database {
         // Open storage files for all existing relations so inserts don't need to.
         {
             use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-            let cat = catalog.catalog();
-            for name in cat.table_names().collect::<Vec<_>>() {
-                if let Some(entry) = cat.get(name) {
-                    let rel = entry.rel;
-                    pool.with_storage_mut(|s| {
-                        let _ = s.smgr.open(rel);
-                        // Use is_redo=true so create tolerates existing fork files on restart.
-                        let _ = s.smgr.create(rel, ForkNumber::Main, true);
-                    });
-                }
+            let relcache = catalog.relcache()?;
+            for (_, entry) in relcache.entries() {
+                let rel = entry.rel;
+                pool.with_storage_mut(|s| {
+                    let _ = s.smgr.open(rel);
+                    // Use is_redo=true so create tolerates existing fork files on restart.
+                    let _ = s.smgr.create(rel, ForkNumber::Main, true);
+                });
             }
         }
 

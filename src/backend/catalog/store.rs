@@ -6,6 +6,7 @@ use crate::backend::access::heap::heapam::{heap_flush, heap_insert, heap_scan_be
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::catalog::catalog::{column_desc, Catalog, CatalogEntry, CatalogError};
+use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::value_io::decode_value;
 use crate::backend::executor::RelationDesc;
@@ -97,6 +98,27 @@ impl CatalogStore {
 
     pub fn catalog_mut(&mut self) -> &mut Catalog {
         &mut self.catalog
+    }
+
+    pub fn relcache(&self) -> Result<RelCache, CatalogError> {
+        RelCache::from_physical(&self.base_dir)
+    }
+
+    pub fn relation(&self, name: &str) -> Result<Option<RelCacheEntry>, CatalogError> {
+        Ok(self.relcache()?.get_by_name(name).cloned())
+    }
+
+    pub fn visible_table_names(&self) -> Result<Vec<String>, CatalogError> {
+        let mut names = self
+            .relcache()?
+            .entries()
+            .map(|(name, _)| name.to_string())
+            .filter(|name| !name.contains('.'))
+            .filter(|name| !name.starts_with("pg_"))
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        Ok(names)
     }
 
     pub fn create_table(

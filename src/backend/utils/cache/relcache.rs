@@ -94,6 +94,10 @@ impl RelCache {
     pub fn get_by_oid(&self, oid: u32) -> Option<&RelCacheEntry> {
         self.by_oid.get(&oid)
     }
+
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &RelCacheEntry)> {
+        self.by_name.iter().map(|(name, entry)| (name.as_str(), entry))
+    }
 }
 
 fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
