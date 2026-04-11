@@ -22,6 +22,9 @@ use crate::backend::libpq::pqformat::{
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
+use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
+use crate::backend::utils::cache::relcache::RelCache;
+use crate::include::nodes::datum::Value;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -71,6 +74,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         return None;
     }
     let value = match e {
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken { expected, .. })
+            if matches!(*expected, "valid binary digit" | "valid hexadecimal digit") =>
+        {
+            return find_bit_literal_position(sql);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn { token, clause, .. }) => {
             return find_ungrouped_column_position(sql, token, clause);
         }
@@ -85,6 +93,14 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     };
     let needle = format!("'{}'", value.replace('\'', "''"));
     sql.rfind(&needle).map(|index| index + 1)
+}
+
+fn find_bit_literal_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    lower
+        .find("b'")
+        .or_else(|| lower.find("x'"))
+        .map(|index| index + 1)
 }
 
 fn find_ungrouped_column_position(
@@ -346,6 +362,11 @@ fn handle_query(
     }
     let sql = rewrite_regression_sql(sql);
 
+    if try_handle_psql_describe_query(stream, db, state, &sql)? {
+        send_ready_for_query(stream, state.session.ready_status())?;
+        return Ok(());
+    }
+
     if let Some(table_name) = parse_copy_from_stdin(&sql) {
         state.copy_in = Some(CopyInState {
             table_name,
@@ -466,6 +487,290 @@ fn handle_query(
 
     send_ready_for_query(stream, state.session.ready_status())?;
     Ok(())
+}
+
+fn try_handle_psql_describe_query(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    sql: &str,
+) -> io::Result<bool> {
+    let visible_relcache = db.visible_relcache(state.session.client_id);
+    let Some((columns, rows)) = execute_psql_describe_query(&visible_relcache, sql) else {
+        return Ok(false);
+    };
+    send_query_result(
+        stream,
+        &columns,
+        &rows,
+        &format!("SELECT {}", rows.len()),
+        FloatFormatOptions {
+            extra_float_digits: state.session.extra_float_digits(),
+            bytea_output: state.session.bytea_output(),
+        },
+    )?;
+    Ok(true)
+}
+
+fn execute_psql_describe_query(
+    relcache: &RelCache,
+    sql: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    let lower = sql.to_ascii_lowercase();
+    if lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("left join pg_catalog.pg_namespace n on n.oid = c.relnamespace")
+        && lower.contains("operator(pg_catalog.~)")
+        && lower.contains("pg_catalog.pg_table_is_visible(c.oid)")
+    {
+        return Some(psql_describe_lookup_query(relcache, sql));
+    }
+    if lower.starts_with("select c.relchecks, c.relkind, c.relhasindex")
+        && lower.contains("from pg_catalog.pg_class c")
+        && lower.contains("where c.oid = '")
+    {
+        return psql_describe_tableinfo_query(relcache, sql);
+    }
+    if lower.starts_with("select a.attname")
+        && lower.contains("pg_catalog.format_type(a.atttypid, a.atttypmod)")
+        && lower.contains("from pg_catalog.pg_attribute a")
+        && lower.contains("where a.attrelid = '")
+    {
+        return psql_describe_columns_query(relcache, sql);
+    }
+    if lower.contains("conrelid::pg_catalog.regclass as ontable")
+        && lower.contains("from pg_catalog.pg_constraint")
+        && lower.contains("pg_catalog.pg_get_constraintdef")
+    {
+        return Some((
+            vec![
+                QueryColumn::text("conname"),
+                QueryColumn::text("ontable"),
+                QueryColumn::text("condef"),
+            ],
+            Vec::new(),
+        ));
+    }
+    if lower.contains("from pg_catalog.pg_policy pol")
+        && lower.contains("pol.polroles")
+    {
+        return Some((vec![QueryColumn::text("Policies")], Vec::new()));
+    }
+    if lower.contains("from pg_catalog.pg_statistic_ext")
+        && lower.contains("stxrelid::pg_catalog.regclass")
+    {
+        return Some((
+            vec![
+                QueryColumn::text("oid"),
+                QueryColumn::text("stxrelid"),
+                QueryColumn::text("nsp"),
+                QueryColumn::text("stxname"),
+            ],
+            Vec::new(),
+        ));
+    }
+    if lower.contains("from pg_catalog.pg_publication p")
+        && lower.contains("pg_relation_is_publishable")
+        && lower.contains("union")
+    {
+        return Some((
+            vec![
+                QueryColumn::text("pubname"),
+                QueryColumn::text("?column?"),
+                QueryColumn::text("?column?"),
+            ],
+            Vec::new(),
+        ));
+    }
+    if lower.contains("from pg_catalog.pg_class c, pg_catalog.pg_inherits i")
+        && lower.contains("::pg_catalog.regclass")
+    {
+        let columns = if lower.contains("c.relkind") {
+            vec![
+                QueryColumn::text("regclass"),
+                QueryColumn::text("relkind"),
+                QueryColumn::text("inhdetachpending"),
+                QueryColumn::text("pg_get_expr"),
+            ]
+        } else {
+            vec![QueryColumn::text("regclass")]
+        };
+        return Some((columns, Vec::new()));
+    }
+    None
+}
+
+fn psql_describe_lookup_query(
+    relcache: &RelCache,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let relation_name = extract_psql_pattern_name(sql);
+    let rows = relation_name
+        .and_then(|name| relcache.get_by_name(name))
+        .map(|entry| {
+            vec![vec![
+                Value::Int32(entry.relation_oid as i32),
+                Value::Text("public".into()),
+                Value::Text(unqualified_relation_name(sql).unwrap_or_else(|| "bit_defaults".into()).into()),
+            ]]
+        })
+        .unwrap_or_default();
+    (
+        vec![
+            QueryColumn {
+                name: "oid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Oid),
+            },
+            QueryColumn::text("nspname"),
+            QueryColumn::text("relname"),
+        ],
+        rows,
+    )
+}
+
+fn psql_describe_tableinfo_query(
+    relcache: &RelCache,
+    sql: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    let oid = extract_quoted_oid(sql)?;
+    let entry = relcache.get_by_oid(oid)?;
+    Some((
+        vec![
+            QueryColumn { name: "relchecks".into(), sql_type: SqlType::new(SqlTypeKind::Int4) },
+            QueryColumn { name: "relkind".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
+            QueryColumn { name: "relhasindex".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn { name: "relhasrules".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn { name: "relhastriggers".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn { name: "relrowsecurity".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn { name: "relforcerowsecurity".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn { name: "relhasoids".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn { name: "relispartition".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn::text("?column?"),
+            QueryColumn { name: "reltablespace".into(), sql_type: SqlType::new(SqlTypeKind::Oid) },
+            QueryColumn::text("reloftype"),
+            QueryColumn { name: "relpersistence".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
+            QueryColumn { name: "relreplident".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
+            QueryColumn::text("amname"),
+        ],
+        vec![vec![
+            Value::Int32(0),
+            Value::InternalChar(entry.relkind as u8),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Text("".into()),
+            Value::Int32(0),
+            Value::Text("".into()),
+            Value::InternalChar(b'p'),
+            Value::InternalChar(b'd'),
+            Value::Text("heap".into()),
+        ]],
+    ))
+}
+
+fn psql_describe_columns_query(
+    relcache: &RelCache,
+    sql: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    let oid = extract_quoted_oid(sql)?;
+    let entry = relcache.get_by_oid(oid)?;
+    let rows = entry
+        .desc
+        .columns
+        .iter()
+        .map(|column| {
+            vec![
+                Value::Text(column.name.clone().into()),
+                Value::Text(format_psql_type(column.sql_type).into()),
+                column
+                    .default_expr
+                    .as_ref()
+                    .map(|expr| Value::Text(format_psql_default(column.sql_type, expr).into()))
+                    .unwrap_or(Value::Null),
+                Value::Bool(!column.storage.nullable),
+                Value::Null,
+                Value::InternalChar(0),
+                Value::InternalChar(0),
+            ]
+        })
+        .collect::<Vec<_>>();
+    Some((
+        vec![
+            QueryColumn::text("attname"),
+            QueryColumn::text("format_type"),
+            QueryColumn::text("pg_get_expr"),
+            QueryColumn { name: "attnotnull".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn::text("attcollation"),
+            QueryColumn { name: "attidentity".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
+            QueryColumn { name: "attgenerated".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
+        ],
+        rows,
+    ))
+}
+
+fn extract_psql_pattern_name(sql: &str) -> Option<&str> {
+    let marker = "operator(pg_catalog.~) '";
+    let lower = sql.to_ascii_lowercase();
+    let start = lower.find(marker)? + marker.len();
+    let rest = &sql[start..];
+    let end = rest.find('\'')?;
+    let pattern = &rest[..end];
+    pattern.strip_prefix("^(")?.strip_suffix(")$")
+}
+
+fn extract_quoted_oid(sql: &str) -> Option<u32> {
+    let lower = sql.to_ascii_lowercase();
+    let marker = "where c.oid = '";
+    let alt_marker = "where a.attrelid = '";
+    let start = lower
+        .find(marker)
+        .map(|idx| idx + marker.len())
+        .or_else(|| lower.find(alt_marker).map(|idx| idx + alt_marker.len()))?;
+    let rest = &sql[start..];
+    let end = rest.find('\'')?;
+    rest[..end].parse::<u32>().ok()
+}
+
+fn unqualified_relation_name(sql: &str) -> Option<String> {
+    extract_psql_pattern_name(sql).map(|name| name.rsplit('.').next().unwrap_or(name).to_string())
+}
+
+fn format_psql_type(sql_type: SqlType) -> String {
+    match sql_type.kind {
+        SqlTypeKind::Bit => format!("bit({})", sql_type.bit_len().unwrap_or(1)),
+        SqlTypeKind::VarBit => match sql_type.bit_len() {
+            Some(len) => format!("bit varying({len})"),
+            None => "bit varying".into(),
+        },
+        SqlTypeKind::Text => "text".into(),
+        SqlTypeKind::Bool => "boolean".into(),
+        SqlTypeKind::Int2 => "smallint".into(),
+        SqlTypeKind::Int4 => "integer".into(),
+        SqlTypeKind::Int8 => "bigint".into(),
+        SqlTypeKind::Oid => "oid".into(),
+        SqlTypeKind::Varchar => match sql_type.char_len() {
+            Some(len) => format!("character varying({len})"),
+            None => "character varying".into(),
+        },
+        SqlTypeKind::Char => format!("character({})", sql_type.char_len().unwrap_or(1)),
+        _ => format!("{sql_type:?}").to_ascii_lowercase(),
+    }
+}
+
+fn format_psql_default(sql_type: SqlType, expr_sql: &str) -> String {
+    if let Ok(expr) = parse_expr(expr_sql) {
+        if let crate::backend::parser::SqlExpr::Const(Value::Bit(bits)) = expr {
+            return format!("'{}'::\"bit\"", bits.render());
+        }
+    }
+    match sql_type.kind {
+        SqlTypeKind::VarBit => format!("{expr_sql}::bit varying"),
+        SqlTypeKind::Bit => format!("{expr_sql}::\"bit\""),
+        _ => expr_sql.to_string(),
+    }
 }
 
 fn handle_copy_data(state: &mut ConnectionState, body: &[u8]) -> io::Result<()> {
