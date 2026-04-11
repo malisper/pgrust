@@ -96,6 +96,10 @@ impl CatalogStore {
         &self.catalog
     }
 
+    pub fn catalog_snapshot(&self) -> Result<Catalog, CatalogError> {
+        load_catalog_from_physical(&self.base_dir)
+    }
+
     pub fn catalog_mut(&mut self) -> &mut Catalog {
         &mut self.catalog
     }
