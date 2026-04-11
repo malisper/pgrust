@@ -1,4 +1,5 @@
 use super::exec_expr::parse_numeric_text;
+use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::node_types::*;
@@ -299,11 +300,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind: SqlTypeKind::Bool,
                 ..
-            } => Err(ExecError::TypeMismatch {
-                op: "::bool",
-                left: Value::Int16(v),
-                right: Value::Bool(false),
-            }),
+            } => Ok(cast_integer_to_bool(v as i64)),
         },
         Value::Int32(v) => match ty {
             SqlType {
@@ -352,11 +349,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind: SqlTypeKind::Bool,
                 ..
-            } => Err(ExecError::TypeMismatch {
-                op: "::bool",
-                left: Value::Int32(v),
-                right: Value::Bool(false),
-            }),
+            } => Ok(cast_integer_to_bool(v as i64)),
         },
         Value::Bool(v) => match ty {
             SqlType {
@@ -467,11 +460,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind: SqlTypeKind::Bool,
                 ..
-            } => Err(ExecError::TypeMismatch {
-                op: "::bool",
-                left: Value::Int64(v),
-                right: Value::Bool(false),
-            }),
+            } => Ok(cast_integer_to_bool(v)),
         },
         Value::Float64(v) => match ty {
             SqlType {

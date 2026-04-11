@@ -76,6 +76,10 @@ pub(super) fn eval_boolne(values: &[Value]) -> Result<Value, ExecError> {
     }
 }
 
+pub(super) fn cast_integer_to_bool(value: i64) -> Value {
+    Value::Bool(value != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{order_bool_values, parse_pg_bool_text};
