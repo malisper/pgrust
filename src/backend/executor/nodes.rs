@@ -558,11 +558,7 @@ impl PlanNode for GenerateSeriesState {
         } else if self.step_val < 0 {
             self.current < self.end
         } else {
-            return Err(ExecError::TypeMismatch {
-                op: "generate_series step must be non-zero",
-                left: Value::Int32(0),
-                right: Value::Null,
-            });
+            return Err(ExecError::GenerateSeriesZeroStep);
         };
 
         if done {
