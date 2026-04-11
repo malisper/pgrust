@@ -1,17 +1,21 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::backend::access::heap::heapam::{heap_flush, heap_insert};
+use crate::backend::access::heap::heapam::{heap_flush, heap_insert, heap_scan_begin, heap_scan_next};
+use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::catalog::catalog::{column_desc, Catalog, CatalogEntry, CatalogError};
 use crate::backend::executor::value_io::tuple_from_values;
+use crate::backend::executor::value_io::decode_value;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
-    bootstrap_catalog_kinds, bootstrap_relation_desc,
+    bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_relation_desc,
+    builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::BufferPool;
@@ -23,7 +27,6 @@ pub(crate) const DEFAULT_FIRST_USER_OID: u32 = 16_384;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogStore {
     base_dir: PathBuf,
-    schema_path: PathBuf,
     control_path: PathBuf,
     catalog: Catalog,
 }
@@ -38,24 +41,15 @@ struct CatalogControl {
 impl CatalogStore {
     pub fn load(base_dir: impl Into<PathBuf>) -> Result<Self, CatalogError> {
         let base_dir = base_dir.into();
-        let catalog_dir = base_dir.join("catalog");
         let global_dir = base_dir.join("global");
-        let schema_path = catalog_dir.join("schema");
         let control_path = global_dir.join("pg_control");
-        if let Some(parent) = schema_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| CatalogError::Io(e.to_string()))?;
-        }
         if let Some(parent) = control_path.parent() {
             fs::create_dir_all(parent).map_err(|e| CatalogError::Io(e.to_string()))?;
         }
 
         let (mut catalog, control) = if control_path.exists() {
             let control = load_control_file(&control_path)?;
-            let mut catalog = if schema_path.exists() {
-                load_catalog_file(&schema_path)?
-            } else {
-                Catalog::default()
-            };
+            let mut catalog = load_catalog_from_physical(&base_dir)?;
             catalog.next_oid = catalog.next_oid.max(control.next_oid);
             catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
             (catalog, control)
@@ -67,7 +61,6 @@ impl CatalogStore {
                 bootstrap_complete: true,
             };
             persist_control_file(&control_path, &control)?;
-            persist_catalog_file(&schema_path, &catalog)?;
             (catalog, control)
         };
 
@@ -85,7 +78,6 @@ impl CatalogStore {
 
         Ok(Self {
             base_dir,
-            schema_path,
             control_path,
             catalog,
         })
@@ -108,7 +100,6 @@ impl CatalogStore {
                 bootstrap_complete: true,
             },
         )?;
-        persist_catalog_file(&self.schema_path, &self.catalog)?;
         sync_physical_catalogs(&self.base_dir, &self.catalog)
     }
 }
@@ -220,40 +211,6 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
     ]
 }
 
-fn persist_catalog_file(path: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
-    let mut bytes = Vec::new();
-    for (name, entry) in &catalog.tables {
-        bytes.extend_from_slice(
-            format!(
-                "table\t{name}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                entry.rel.spc_oid,
-                entry.rel.db_oid,
-                entry.rel.rel_number,
-                entry.relation_oid,
-                entry.namespace_oid,
-                entry.row_type_oid,
-                entry.relkind,
-                entry.desc.columns.len()
-            )
-            .as_bytes(),
-        );
-        for column in &entry.desc.columns {
-            bytes.extend_from_slice(
-                format!(
-                    "col\t{}\t{}\t{}\t{}\n",
-                    column.name,
-                    encode_sql_type(column.sql_type),
-                    if column.storage.nullable { "null" } else { "not_null" },
-                    column.sql_type.typmod,
-                )
-                .as_bytes(),
-            );
-        }
-    }
-
-    fs::write(path, bytes).map_err(|e| CatalogError::Io(e.to_string()))
-}
-
 fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), CatalogError> {
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&CONTROL_FILE_MAGIC.to_le_bytes());
@@ -263,82 +220,239 @@ fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), Cat
     fs::write(path, bytes).map_err(|e| CatalogError::Io(e.to_string()))
 }
 
-fn load_catalog_file(path: &Path) -> Result<Catalog, CatalogError> {
-    let text = fs::read_to_string(path).map_err(|e| CatalogError::Io(e.to_string()))?;
-    let mut catalog = Catalog::default();
-    catalog.tables.clear();
-    let mut lines = text.lines();
-    while let Some(line) = lines.next() {
-        let mut parts = line.split('\t');
-        if parts.next() != Some("table") {
-            return Err(CatalogError::Corrupt("expected table record"));
+fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
+    let mut smgr = MdStorageManager::new(base_dir);
+    let mut rels = BTreeMap::new();
+    for kind in bootstrap_catalog_kinds() {
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: kind.relation_oid(),
+        };
+        if !smgr.exists(rel, ForkNumber::Main) {
+            return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
         }
-        let name = parts
-            .next()
-            .ok_or(CatalogError::Corrupt("missing table name"))?
-            .to_string();
-        let spc_oid = parse_u32(parts.next(), "invalid spc oid")?;
-        let db_oid = parse_u32(parts.next(), "invalid db oid")?;
-        let rel_number = parse_u32(parts.next(), "invalid rel number")?;
-        let relation_oid = parse_u32(parts.next(), "invalid relation oid")?;
-        let namespace_oid = parse_u32(parts.next(), "invalid namespace oid")?;
-        let row_type_oid = parse_u32(parts.next(), "invalid row type oid")?;
-        let relkind = parts
-            .next()
-            .and_then(|value| value.chars().next())
-            .ok_or(CatalogError::Corrupt("invalid relkind"))?;
-        let ncols = parse_u32(parts.next(), "invalid column count")? as usize;
+        smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
+        rels.insert(kind, rel);
+    }
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
 
-        let mut columns = Vec::with_capacity(ncols);
-        for _ in 0..ncols {
-            let col_line = lines
-                .next()
-                .ok_or(CatalogError::Corrupt("missing column record"))?;
-            let mut col_parts = col_line.split('\t');
-            if col_parts.next() != Some("col") {
-                return Err(CatalogError::Corrupt("expected column record"));
-            }
-            let column_name = col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing column name"))?
-                .to_string();
-            let type_name = col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing column type"))?;
-            let nullable = match col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing nullable flag"))?
-            {
-                "null" => true,
-                "not_null" => false,
-                _ => return Err(CatalogError::Corrupt("invalid nullable flag")),
-            };
-            let typmod = col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing typmod"))?
-                .parse::<i32>()
-                .map_err(|_| CatalogError::Corrupt("invalid typmod"))?;
-            let sql_type = decode_sql_type(type_name, typmod)?;
-            columns.push(column_desc(column_name, sql_type, nullable));
-        }
+    let namespace_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgNamespace],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
+    )?
+    .into_iter()
+    .map(namespace_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let type_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgType],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
+    )?
+    .into_iter()
+    .map(pg_type_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let class_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgClass],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
+    )?
+    .into_iter()
+    .map(pg_class_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let attribute_rows = scan_catalog_relation(
+        &pool,
+        rels[&BootstrapCatalogKind::PgAttribute],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
+    )?
+    .into_iter()
+    .map(pg_attribute_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
 
+    let namespace_names = namespace_rows
+        .iter()
+        .map(|row| (row.oid, row.nspname.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let type_by_oid = type_rows
+        .iter()
+        .map(|row| (row.oid, row.sql_type))
+        .collect::<BTreeMap<_, _>>();
+    let mut attrs_by_relid = BTreeMap::<u32, Vec<PgAttributeRow>>::new();
+    for row in attribute_rows {
+        attrs_by_relid.entry(row.attrelid).or_default().push(row);
+    }
+    for rows in attrs_by_relid.values_mut() {
+        rows.sort_by_key(|row| row.attnum);
+    }
+
+    let mut catalog = Catalog {
+        tables: BTreeMap::new(),
+        next_rel_number: DEFAULT_FIRST_REL_NUMBER,
+        next_oid: DEFAULT_FIRST_USER_OID,
+    };
+    for row in class_rows {
+        let attrs = attrs_by_relid
+            .get(&row.oid)
+            .ok_or(CatalogError::Corrupt("missing pg_attribute rows for relation"))?;
+        let columns = attrs
+            .iter()
+            .map(|attr| {
+                let sql_type = *type_by_oid
+                    .get(&attr.atttypid)
+                    .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
+                Ok(column_desc(attr.attname.clone(), SqlType { typmod: attr.atttypmod, ..sql_type }, !attr.attnotnull))
+            })
+            .collect::<Result<Vec<_>, CatalogError>>()?;
+        let namespace_name = namespace_names
+            .get(&row.relnamespace)
+            .copied()
+            .unwrap_or("pg_catalog");
+        let name = match namespace_name {
+            "public" | "pg_catalog" => row.relname.clone(),
+            other => format!("{other}.{}", row.relname),
+        };
         catalog.insert(
             name,
             CatalogEntry {
                 rel: RelFileLocator {
-                    spc_oid,
-                    db_oid,
-                    rel_number,
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: row.relfilenode,
                 },
-                relation_oid,
-                namespace_oid,
-                row_type_oid,
-                relkind,
+                relation_oid: row.oid,
+                namespace_oid: row.relnamespace,
+                row_type_oid: row.reltype,
+                relkind: row.relkind,
                 desc: RelationDesc { columns },
             },
         );
+        catalog.next_oid = catalog
+            .next_oid
+            .max(row.oid.saturating_add(1))
+            .max(row.reltype.saturating_add(1));
+        catalog.next_rel_number = catalog
+            .next_rel_number
+            .max(row.relfilenode.saturating_add(1));
     }
     Ok(catalog)
+}
+
+fn scan_catalog_relation(
+    pool: &BufferPool<SmgrStorageBackend>,
+    rel: RelFileLocator,
+    desc: &RelationDesc,
+) -> Result<Vec<Vec<Value>>, CatalogError> {
+    let mut scan = heap_scan_begin(pool, rel).map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+    let attr_descs = desc.attribute_descs();
+    let mut rows = Vec::new();
+    while let Some((_tid, tuple)) = heap_scan_next(pool, INVALID_TRANSACTION_ID, &mut scan)
+        .map_err(|e| CatalogError::Io(format!("{e:?}")))?
+    {
+        let raw = tuple
+            .deform(&attr_descs)
+            .map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+        let row = desc
+            .columns
+            .iter()
+            .zip(raw.into_iter())
+            .map(|(column, datum)| decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}"))))
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn expect_oid(value: &Value) -> Result<u32, CatalogError> {
+    match value {
+        Value::Int64(v) => u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value")),
+        Value::Int32(v) => u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value")),
+        _ => Err(CatalogError::Corrupt("expected oid value")),
+    }
+}
+
+fn expect_text(value: &Value) -> Result<String, CatalogError> {
+    match value {
+        Value::Text(text) => Ok(text.to_string()),
+        _ => Err(CatalogError::Corrupt("expected text value")),
+    }
+}
+
+fn expect_bool(value: &Value) -> Result<bool, CatalogError> {
+    match value {
+        Value::Bool(v) => Ok(*v),
+        _ => Err(CatalogError::Corrupt("expected bool value")),
+    }
+}
+
+fn expect_int16(value: &Value) -> Result<i16, CatalogError> {
+    match value {
+        Value::Int16(v) => Ok(*v),
+        _ => Err(CatalogError::Corrupt("expected int2 value")),
+    }
+}
+
+fn expect_int32(value: &Value) -> Result<i32, CatalogError> {
+    match value {
+        Value::Int32(v) => Ok(*v),
+        _ => Err(CatalogError::Corrupt("expected int4 value")),
+    }
+}
+
+fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespaceRow, CatalogError> {
+    Ok(PgNamespaceRow {
+        oid: expect_oid(&values[0])?,
+        nspname: expect_text(&values[1])?,
+    })
+}
+
+fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
+    let relkind = match &values[5] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relkind"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected relkind text")),
+    };
+    Ok(PgClassRow {
+        oid: expect_oid(&values[0])?,
+        relname: expect_text(&values[1])?,
+        relnamespace: expect_oid(&values[2])?,
+        reltype: expect_oid(&values[3])?,
+        relfilenode: expect_oid(&values[4])?,
+        relkind,
+    })
+}
+
+fn pg_attribute_row_from_values(values: Vec<Value>) -> Result<PgAttributeRow, CatalogError> {
+    Ok(PgAttributeRow {
+        attrelid: expect_oid(&values[0])?,
+        attname: expect_text(&values[1])?,
+        atttypid: expect_oid(&values[2])?,
+        attnum: expect_int16(&values[3])?,
+        attnotnull: expect_bool(&values[4])?,
+        atttypmod: expect_int32(&values[5])?,
+        sql_type: SqlType::new(SqlTypeKind::Text),
+    })
+}
+
+fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, CatalogError> {
+    let oid = expect_oid(&values[0])?;
+    let typrelid = expect_oid(&values[3])?;
+    Ok(PgTypeRow {
+        oid,
+        typname: expect_text(&values[1])?,
+        typnamespace: expect_oid(&values[2])?,
+        typrelid,
+        sql_type: decode_builtin_sql_type(oid).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+    })
+}
+
+fn decode_builtin_sql_type(oid: u32) -> Option<SqlType> {
+    for row in builtin_type_rows().into_iter().chain(bootstrap_composite_type_rows()) {
+        if row.oid == oid {
+            return Some(row.sql_type);
+        }
+    }
+    None
 }
 
 fn load_control_file(path: &Path) -> Result<CatalogControl, CatalogError> {
@@ -363,65 +477,6 @@ fn load_control_file(path: &Path) -> Result<CatalogControl, CatalogError> {
         next_rel_number,
         bootstrap_complete,
     })
-}
-
-fn parse_u32(part: Option<&str>, err: &'static str) -> Result<u32, CatalogError> {
-    part.ok_or(CatalogError::Corrupt(err))?
-        .parse::<u32>()
-        .map_err(|_| CatalogError::Corrupt(err))
-}
-
-fn encode_sql_type(sql_type: SqlType) -> String {
-    let base = match sql_type.kind {
-        SqlTypeKind::Int2 => "int2",
-        SqlTypeKind::Int4 => "int4",
-        SqlTypeKind::Int8 => "int8",
-        SqlTypeKind::Oid => "oid",
-        SqlTypeKind::Bytea => "bytea",
-        SqlTypeKind::Float4 => "float4",
-        SqlTypeKind::Float8 => "float8",
-        SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::Json => "json",
-        SqlTypeKind::Jsonb => "jsonb",
-        SqlTypeKind::JsonPath => "jsonpath",
-        SqlTypeKind::Text => "text",
-        SqlTypeKind::Bool => "bool",
-        SqlTypeKind::Timestamp => "timestamp",
-        SqlTypeKind::InternalChar => "\"char\"",
-        SqlTypeKind::Char => "char",
-        SqlTypeKind::Varchar => "varchar",
-    };
-    if sql_type.is_array {
-        format!("{base}[]")
-    } else {
-        base.to_string()
-    }
-}
-
-fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
-    let is_array = name.ends_with("[]");
-    let base = if is_array { &name[..name.len() - 2] } else { name };
-    let mut sql_type = match base {
-        "int2" => SqlType { kind: SqlTypeKind::Int2, typmod, is_array: false },
-        "int4" => SqlType { kind: SqlTypeKind::Int4, typmod, is_array: false },
-        "int8" => SqlType { kind: SqlTypeKind::Int8, typmod, is_array: false },
-        "oid" => SqlType { kind: SqlTypeKind::Oid, typmod, is_array: false },
-        "float4" => SqlType { kind: SqlTypeKind::Float4, typmod, is_array: false },
-        "float8" => SqlType { kind: SqlTypeKind::Float8, typmod, is_array: false },
-        "numeric" => SqlType { kind: SqlTypeKind::Numeric, typmod, is_array: false },
-        "json" => SqlType { kind: SqlTypeKind::Json, typmod, is_array: false },
-        "jsonb" => SqlType { kind: SqlTypeKind::Jsonb, typmod, is_array: false },
-        "jsonpath" => SqlType { kind: SqlTypeKind::JsonPath, typmod, is_array: false },
-        "text" => SqlType { kind: SqlTypeKind::Text, typmod, is_array: false },
-        "\"char\"" => SqlType { kind: SqlTypeKind::InternalChar, typmod, is_array: false },
-        "bool" => SqlType { kind: SqlTypeKind::Bool, typmod, is_array: false },
-        "timestamp" => SqlType { kind: SqlTypeKind::Timestamp, typmod, is_array: false },
-        "char" => SqlType { kind: SqlTypeKind::Char, typmod, is_array: false },
-        "varchar" => SqlType { kind: SqlTypeKind::Varchar, typmod, is_array: false },
-        other => return Err(CatalogError::UnknownType(other.to_string())),
-    };
-    sql_type.is_array = is_array;
-    Ok(sql_type)
 }
 
 #[cfg(test)]
@@ -476,5 +531,31 @@ mod tests {
             let meta = fs::metadata(path).unwrap();
             assert!(meta.len() > 0, "{name} should have heap data");
         }
+    }
+
+    #[test]
+    fn catalog_store_loads_from_physical_catalogs_without_schema_file() {
+        let base = temp_dir("physical_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        store
+            .catalog_mut()
+            .create_table(
+                "shipments",
+                RelationDesc {
+                    columns: vec![column_desc(
+                        "tags",
+                        SqlType::array_of(SqlType::new(SqlTypeKind::Varchar)),
+                        true,
+                    )],
+                },
+            )
+            .unwrap();
+        store.persist().unwrap();
+        let reopened = CatalogStore::load(&base).unwrap();
+        let entry = reopened.catalog().get("shipments").unwrap();
+        assert_eq!(
+            entry.desc.columns[0].sql_type,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
+        );
     }
 }

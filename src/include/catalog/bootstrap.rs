@@ -15,20 +15,37 @@ pub const PG_CLASS_ROWTYPE_OID: u32 = 83;
 pub const BOOL_TYPE_OID: u32 = 16;
 pub const BYTEA_TYPE_OID: u32 = 17;
 pub const INTERNAL_CHAR_TYPE_OID: u32 = 18;
+pub const BOOL_ARRAY_TYPE_OID: u32 = 1000;
+pub const BYTEA_ARRAY_TYPE_OID: u32 = 1001;
+pub const INTERNAL_CHAR_ARRAY_TYPE_OID: u32 = 1002;
 pub const INT8_TYPE_OID: u32 = 20;
 pub const INT2_TYPE_OID: u32 = 21;
 pub const INT4_TYPE_OID: u32 = 23;
+pub const INT2_ARRAY_TYPE_OID: u32 = 1005;
+pub const INT4_ARRAY_TYPE_OID: u32 = 1007;
 pub const TEXT_TYPE_OID: u32 = 25;
 pub const OID_TYPE_OID: u32 = 26;
+pub const TEXT_ARRAY_TYPE_OID: u32 = 1009;
+pub const BPCHAR_ARRAY_TYPE_OID: u32 = 1014;
+pub const VARCHAR_ARRAY_TYPE_OID: u32 = 1015;
+pub const INT8_ARRAY_TYPE_OID: u32 = 1016;
 pub const FLOAT4_TYPE_OID: u32 = 700;
 pub const FLOAT8_TYPE_OID: u32 = 701;
+pub const FLOAT4_ARRAY_TYPE_OID: u32 = 1021;
+pub const FLOAT8_ARRAY_TYPE_OID: u32 = 1022;
 pub const VARCHAR_TYPE_OID: u32 = 1043;
 pub const BPCHAR_TYPE_OID: u32 = 1042;
 pub const TIMESTAMP_TYPE_OID: u32 = 1114;
+pub const TIMESTAMP_ARRAY_TYPE_OID: u32 = 1115;
 pub const NUMERIC_TYPE_OID: u32 = 1700;
+pub const NUMERIC_ARRAY_TYPE_OID: u32 = 1231;
 pub const JSON_TYPE_OID: u32 = 114;
+pub const JSON_ARRAY_TYPE_OID: u32 = 199;
+pub const OID_ARRAY_TYPE_OID: u32 = 1028;
 pub const JSONB_TYPE_OID: u32 = 3802;
+pub const JSONB_ARRAY_TYPE_OID: u32 = 3807;
 pub const JSONPATH_TYPE_OID: u32 = 4072;
+pub const JSONPATH_ARRAY_TYPE_OID: u32 = 4073;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootstrapCatalogRelation {
@@ -36,7 +53,7 @@ pub struct BootstrapCatalogRelation {
     pub name: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BootstrapCatalogKind {
     PgNamespace,
     PgClass,
