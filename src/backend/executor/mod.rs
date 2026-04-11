@@ -1,4 +1,5 @@
 mod agg;
+mod expr_bit;
 mod expr_casts;
 mod expr_bool;
 mod expr_compile;
@@ -37,6 +38,7 @@ pub use driver::{
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::cast_value;
+pub(crate) use expr_bit::render_bit_text;
 pub use expr_casts::render_internal_char_text;
 pub use startup::executor_start;
 
@@ -111,6 +113,18 @@ pub enum ExecError {
     InvalidNumericInput(String),
     InvalidByteaInput {
         value: String,
+    },
+    InvalidBitInput {
+        digit: char,
+        is_hex: bool,
+    },
+    BitStringLengthMismatch {
+        actual: i32,
+        expected: i32,
+    },
+    BitStringTooLong {
+        actual: i32,
+        limit: i32,
     },
     InvalidBooleanInput {
         value: String,

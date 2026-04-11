@@ -1,6 +1,7 @@
 use super::exec_expr::eval_expr;
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
+use crate::backend::executor::render_bit_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
@@ -395,6 +396,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
     match value {
         Value::Null => Ok("".into()),
         Value::Text(_) | Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::Bit(v) => Ok(render_bit_text(v)),
         Value::Bytea(v) => Ok(format_bytea_text(v, ByteaOutputFormat::Hex)),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::Int16(v) => Ok(v.to_string()),
@@ -747,6 +749,7 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
             .unwrap_or(SerdeJsonValue::Null),
         Value::Numeric(v) => parse_json_text(&v.render()).unwrap_or(SerdeJsonValue::Null),
         Value::Bool(v) => SerdeJsonValue::Bool(*v),
+        Value::Bit(v) => SerdeJsonValue::String(render_bit_text(v)),
         Value::JsonPath(text) => SerdeJsonValue::String(text.to_string()),
         Value::Json(text) => parse_json_text(text.as_str()).unwrap_or(SerdeJsonValue::Null),
         Value::Jsonb(bytes) => decode_jsonb(bytes)

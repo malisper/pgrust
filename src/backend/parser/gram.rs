@@ -998,6 +998,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int4 => "int4",
         SqlTypeKind::Int8 => "int8",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::Bit => "bit",
+        SqlTypeKind::VarBit => "varbit",
         SqlTypeKind::Float4 => "float4",
         SqlTypeKind::Float8 => "float8",
         SqlTypeKind::Numeric => "numeric",
@@ -1058,6 +1060,30 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
         Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
         Rule::kw_oid => SqlType::new(SqlTypeKind::Oid),
+        Rule::bit_type => {
+            let len = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("bit length");
+            match len {
+                Some(len) => SqlType::with_bit_len(SqlTypeKind::Bit, len),
+                None => SqlType::with_bit_len(SqlTypeKind::Bit, 1),
+            }
+        }
+        Rule::varbit_type => {
+            let len = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("varbit length");
+            match len {
+                Some(len) => SqlType::with_bit_len(SqlTypeKind::VarBit, len),
+                None => SqlType::new(SqlTypeKind::VarBit),
+            }
+        }
         Rule::kw_bytea => SqlType::new(SqlTypeKind::Bytea),
         Rule::kw_float4 | Rule::kw_real => SqlType::new(SqlTypeKind::Float4),
         Rule::kw_float8 | Rule::double_precision_type => SqlType::new(SqlTypeKind::Float8),

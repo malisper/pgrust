@@ -4,6 +4,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{NumericValue, Value};
 use crate::include::nodes::plannodes::AggFunc;
 use crate::pgrust::session::ByteaOutputFormat;
+use super::render_bit_text;
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -300,6 +301,7 @@ fn json_object_agg_key(key: &Value) -> String {
     match key {
         Value::Null => "null".to_string(),
         Value::Text(_) | Value::TextRef(_, _) => key.as_text().unwrap().to_string(),
+        Value::Bit(v) => render_bit_text(v),
         Value::Bytea(v) => format_bytea_text(v, ByteaOutputFormat::Hex),
         Value::InternalChar(v) => crate::backend::executor::render_internal_char_text(*v),
         Value::Json(v) => v.to_string(),
@@ -336,6 +338,7 @@ fn value_to_json_text(value: &Value) -> String {
                 "false".into()
             }
         }
+        Value::Bit(v) => serde_json::to_string(&render_bit_text(v)).unwrap(),
         Value::JsonPath(v) => serde_json::to_string(v.as_str()).unwrap(),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),

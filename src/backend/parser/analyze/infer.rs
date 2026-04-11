@@ -33,6 +33,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
+        SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::Const(Value::Numeric(_)) => SqlType::new(SqlTypeKind::Numeric),

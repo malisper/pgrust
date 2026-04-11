@@ -1,4 +1,5 @@
 use super::exec_expr::parse_numeric_text;
+use super::expr_bit::{coerce_bit_string, parse_bit_text, render_bit_text};
 use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
@@ -260,6 +261,8 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
             | SqlTypeKind::Int4
             | SqlTypeKind::Int8
             | SqlTypeKind::Oid
+            | SqlTypeKind::Bit
+            | SqlTypeKind::VarBit
             | SqlTypeKind::Bytea
             | SqlTypeKind::Float4
             | SqlTypeKind::Float8
@@ -297,6 +300,19 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::InvalidByteaInput { .. } => {
             format!("invalid input syntax for type bytea: \"{text}\"")
         }
+        ExecError::InvalidBitInput { digit, is_hex } => {
+            if *is_hex {
+                format!("\"{digit}\" is not a valid hexadecimal digit")
+            } else {
+                format!("\"{digit}\" is not a valid binary digit")
+            }
+        }
+        ExecError::BitStringLengthMismatch { actual, expected } => {
+            format!("bit string length {actual} does not match type bit({expected})")
+        }
+        ExecError::BitStringTooLong { limit, .. } => {
+            format!("bit string too long for type bit varying({limit})")
+        }
         ExecError::InvalidBooleanInput { .. } => {
             format!("invalid input syntax for type boolean: \"{text}\"")
         }
@@ -320,7 +336,10 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         ExecError::InvalidIntegerInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. } => "22P02",
+        ExecError::BitStringLengthMismatch { .. } => "22026",
+        ExecError::BitStringTooLong { .. } => "22001",
         ExecError::IntegerOutOfRange { .. }
         | ExecError::Int2OutOfRange
         | ExecError::Int4OutOfRange
@@ -434,6 +453,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::InternalChar
+                    | SqlTypeKind::Bit
+                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -492,6 +513,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::InternalChar
+                    | SqlTypeKind::Bit
+                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -522,6 +545,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::InternalChar
+                    | SqlTypeKind::Bit
+                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -555,7 +580,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
         }
         Value::InternalChar(byte) => match ty.kind {
             SqlTypeKind::InternalChar => Ok(Value::InternalChar(byte)),
-            SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(
+            SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Text(
                 CompactString::from_owned(render_internal_char_text(byte)),
             )),
             SqlTypeKind::Json => {
@@ -649,6 +674,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::InternalChar
+                    | SqlTypeKind::Bit
+                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -690,6 +717,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::InternalChar
+                    | SqlTypeKind::Bit
+                    | SqlTypeKind::VarBit
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -731,6 +760,17 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             }),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
+        Value::Bit(bits) => match ty.kind {
+            SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(bits, ty, true)?)),
+            SqlTypeKind::Text | SqlTypeKind::Timestamp => {
+                Ok(Value::Text(CompactString::from_owned(render_bit_text(&bits))))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::bit",
+                left: Value::Bit(bits),
+                right: Value::Null,
+            }),
+        },
         Value::Array(items) => Ok(Value::Array(items)),
     }
 }
@@ -739,6 +779,9 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
     match ty.kind {
         SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
+        SqlTypeKind::Bit | SqlTypeKind::VarBit => {
+            Ok(Value::Bit(coerce_bit_string(parse_bit_text(text)?, ty, explicit)?))
+        }
         SqlTypeKind::Bytea => Ok(Value::Bytea(parse_bytea_text(text)?)),
         SqlTypeKind::Json => {
             validate_json_text(text)?;
@@ -794,6 +837,7 @@ pub(super) fn cast_numeric_value(
             Ok(Value::JsonPath(canonicalize_jsonpath_text(&rendered)?))
         }
         SqlTypeKind::InternalChar => cast_text_value(&value.render(), ty, explicit),
+        SqlTypeKind::Bit | SqlTypeKind::VarBit => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Char | SqlTypeKind::Varchar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Float4 => {
             let rendered = value.render();

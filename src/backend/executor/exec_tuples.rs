@@ -233,6 +233,10 @@ impl CompiledTupleDecoder {
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
                             ])),
+                            ScalarType::BitString => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                             ScalarType::Float32 => Value::Float64(f32::from_le_bytes([
                                 bytes[0], bytes[1], bytes[2], bytes[3],
                             ])
@@ -487,6 +491,19 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
         ScalarType::Numeric => Ok(Value::Numeric(
             unsafe { std::str::from_utf8_unchecked(bytes) }.into(),
         )),
+        ScalarType::BitString => {
+            if bytes.len() < 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "bit array element payload too short".into(),
+                });
+            }
+            let bit_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
+            Ok(Value::Bit(crate::include::nodes::datum::BitString::new(
+                bit_len,
+                bytes[4..].to_vec(),
+            )))
+        }
         ScalarType::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         ScalarType::Json => Ok(Value::Json(
             crate::pgrust::compact_string::CompactString::new(unsafe {
