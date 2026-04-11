@@ -282,6 +282,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_cast_function_syntax_expression() {
+        let stmt = parse_select("select cast(p.name as text) from people p").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "name");
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
+                assert!(matches!(**inner, SqlExpr::Column(ref name) if name == "p.name"));
+            }
+            other => panic!("expected cast expression, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_typed_string_literal_expression() {
         let stmt = parse_select("select int2 '7', int4 '9', varchar(3) 'abc'").unwrap();
         assert_eq!(stmt.targets.len(), 3);
