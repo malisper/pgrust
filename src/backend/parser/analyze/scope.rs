@@ -337,9 +337,12 @@ pub(super) fn bind_from_item_with_ctes(
                 let stop_type =
                     infer_sql_expr_type(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer);
                 let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
-                if !matches!(common.kind, SqlTypeKind::Int4 | SqlTypeKind::Int8) {
+                if !matches!(
+                    common.kind,
+                    SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+                ) {
                     return Err(ParseError::UnexpectedToken {
-                        expected: "generate_series integer arguments",
+                        expected: "generate_series integer or numeric arguments",
                         actual: sql_type_name(common),
                     });
                 }
@@ -362,6 +365,9 @@ pub(super) fn bind_from_item_with_ctes(
                 } else {
                     match common.kind {
                         SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),
+                        SqlTypeKind::Numeric => Expr::Const(Value::Numeric(
+                            crate::include::nodes::datum::NumericValue::from_i64(1),
+                        )),
                         _ => Expr::Const(Value::Int32(1)),
                     }
                 };
