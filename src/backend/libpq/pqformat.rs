@@ -368,8 +368,15 @@ pub(crate) fn send_error(
 }
 
 fn format_float8_text(value: f64) -> String {
-    if value.is_nan() || value.is_infinite() {
-        return value.to_string();
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        };
     }
 
     let abs = value.abs();
@@ -386,8 +393,15 @@ fn format_float8_text(value: f64) -> String {
 
 fn format_float4_text(value: f64) -> String {
     let value = value as f32;
-    if value.is_nan() || value.is_infinite() {
-        return value.to_string();
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-Infinity".to_string()
+        } else {
+            "Infinity".to_string()
+        };
     }
 
     let abs = value.abs();
@@ -426,5 +440,15 @@ mod tests {
             "4.56789e+15"
         );
         assert_eq!(format_float4_text(123.0), "123");
+    }
+
+    #[test]
+    fn float_special_values_use_postgres_spelling() {
+        assert_eq!(format_float8_text(f64::NAN), "NaN");
+        assert_eq!(format_float8_text(f64::INFINITY), "Infinity");
+        assert_eq!(format_float8_text(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(format_float4_text(f64::NAN), "NaN");
+        assert_eq!(format_float4_text(f64::INFINITY), "Infinity");
+        assert_eq!(format_float4_text(f64::NEG_INFINITY), "-Infinity");
     }
 }

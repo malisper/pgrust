@@ -536,6 +536,11 @@ fn eval_sqrt(value: f64) -> Result<f64, ExecError> {
 }
 
 fn eval_power(base: f64, exp: f64) -> Result<f64, ExecError> {
+    if base == 0.0 && exp.is_infinite() && exp.is_sign_negative() {
+        return Err(float_domain_error(
+            "zero raised to a negative power is undefined",
+        ));
+    }
     if exp.is_nan() {
         return if base == 1.0 {
             Ok(1.0)
