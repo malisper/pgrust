@@ -700,6 +700,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut ctas_columns = Vec::new();
     let mut query = None;
     let mut is_ctas = false;
+    let mut if_not_exists = false;
     for part in pair.into_inner() {
         let part = if part.as_rule() == Rule::create_table_tail {
             part.into_inner().next().ok_or(ParseError::UnexpectedEof)?
@@ -708,6 +709,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         };
         match part.as_rule() {
             Rule::temp_clause => persistence = TablePersistence::Temporary,
+            Rule::if_not_exists_clause => if_not_exists = true,
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_relation_name(part))
             }
@@ -750,6 +752,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             on_commit,
             column_names: ctas_columns,
             query: query.ok_or(ParseError::UnexpectedEof)?,
+            if_not_exists,
         }))
     } else {
         Ok(Statement::CreateTable(CreateTableStatement {
@@ -758,6 +761,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             persistence,
             on_commit,
             columns,
+            if_not_exists,
         }))
     }
 }

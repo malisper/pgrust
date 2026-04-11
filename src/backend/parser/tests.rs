@@ -1202,6 +1202,7 @@ y$tag$"#).unwrap();
             persistence: TablePersistence::Temporary,
             on_commit: OnCommitAction::PreserveRows,
             columns: vec![],
+            if_not_exists: false,
         })
         .unwrap_err();
         assert!(matches!(err, ParseError::TempTableInNonTempSchema(_)));
@@ -1212,9 +1213,29 @@ y$tag$"#).unwrap();
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::DeleteRows,
             columns: vec![],
+            if_not_exists: false,
         })
         .unwrap_err();
         assert!(matches!(err, ParseError::OnCommitOnlyForTempTables));
+    }
+
+    #[test]
+    fn parse_create_table_if_not_exists() {
+        match parse_statement("CREATE TABLE IF NOT EXISTS foo (id int4)").unwrap() {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.table_name, "foo");
+                assert!(ct.if_not_exists);
+            }
+            other => panic!("expected CreateTable, got {:?}", other),
+        }
+        // Without IF NOT EXISTS
+        match parse_statement("CREATE TABLE bar (id int4)").unwrap() {
+            Statement::CreateTable(ct) => {
+                assert_eq!(ct.table_name, "bar");
+                assert!(!ct.if_not_exists);
+            }
+            other => panic!("expected CreateTable, got {:?}", other),
+        }
     }
 
     #[test]

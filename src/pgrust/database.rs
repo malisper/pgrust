@@ -427,8 +427,12 @@ impl Database {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
                 let result = catalog_guard
-                    .create_table(table_name.clone(), desc.clone())
-                    .map_err(|err| match err {
+                    .create_table(table_name.clone(), desc.clone());
+                match result {
+                    Err(CatalogError::TableAlreadyExists(name)) if create_stmt.if_not_exists => {
+                        Ok(StatementResult::AffectedRows(0))
+                    }
+                    Err(err) => Err(match err {
                         CatalogError::TableAlreadyExists(name) => {
                             ExecError::Parse(ParseError::TableAlreadyExists(name))
                         }
@@ -444,21 +448,22 @@ impl Database {
                                 actual: "catalog error".into(),
                             })
                         }
-                    });
-                if let Ok(entry) = &result {
-                    let rel = entry.rel;
-                    let _ = self.pool.with_storage_mut(|s| {
-                        use crate::backend::storage::smgr::StorageManager;
-                        let _ = s.smgr.open(rel);
-                        let _ = s.smgr.create(
-                            rel,
-                            crate::backend::storage::smgr::ForkNumber::Main,
-                            false,
-                        );
-                    });
-                    self.plan_cache.invalidate_all();
+                    }),
+                    Ok(entry) => {
+                        let rel = entry.rel;
+                        let _ = self.pool.with_storage_mut(|s| {
+                            use crate::backend::storage::smgr::StorageManager;
+                            let _ = s.smgr.open(rel);
+                            let _ = s.smgr.create(
+                                rel,
+                                crate::backend::storage::smgr::ForkNumber::Main,
+                                false,
+                            );
+                        });
+                        self.plan_cache.invalidate_all();
+                        Ok(StatementResult::AffectedRows(0))
+                    }
                 }
-                result.map(|_| StatementResult::AffectedRows(0))
             }
             TablePersistence::Temporary => {
                 let _ =
@@ -565,6 +570,7 @@ impl Database {
                             default_expr: None,
                         })
                         .collect(),
+                    if_not_exists: create_stmt.if_not_exists,
                 };
                 let entry = catalog_guard
                     .create_table(table_name.clone(), create_relation_desc(&stmt))
