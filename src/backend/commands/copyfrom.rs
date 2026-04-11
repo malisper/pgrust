@@ -1,3 +1,4 @@
+use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
 
@@ -96,7 +97,14 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                     } else if matches!(element_type.kind, SqlTypeKind::Jsonb) {
                         Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text(&value)?)
                     } else if matches!(element_type.kind, SqlTypeKind::JsonPath) {
-                        Value::JsonPath(value.into())
+                        Value::JsonPath(
+                            canonicalize_jsonpath(&value).map_err(|_| ExecError::InvalidStorageValue {
+                                column: "<array>".into(),
+                                details: format!(
+                                    "invalid input syntax for type jsonpath: \"{value}\""
+                                ),
+                            })?.into()
+                        )
                     } else {
                         Value::Text(value.into())
                     }

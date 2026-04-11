@@ -15,8 +15,8 @@ use crate::backend::executor::jsonb::{
     render_jsonb_bytes,
 };
 use crate::backend::executor::jsonpath::{
-    EvaluationContext as JsonPathEvaluationContext, evaluate_jsonpath, parse_jsonpath,
-    validate_jsonpath,
+    EvaluationContext as JsonPathEvaluationContext, canonicalize_jsonpath, evaluate_jsonpath,
+    parse_jsonpath, validate_jsonpath,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::pgrust::compact_string::CompactString;
@@ -44,6 +44,15 @@ fn validate_jsonpath_text(text: &str) -> Result<(), ExecError> {
         column: "jsonpath".into(),
         details: format!("invalid input syntax for type jsonpath: \"{text}\""),
     })
+}
+
+fn canonicalize_jsonpath_text(text: &str) -> Result<CompactString, ExecError> {
+    canonicalize_jsonpath(text)
+        .map(CompactString::from_owned)
+        .map_err(|_| ExecError::InvalidStorageValue {
+            column: "jsonpath".into(),
+            details: format!("invalid input syntax for type jsonpath: \"{text}\""),
+        })
 }
 
 enum ParsedJsonValue {
@@ -1635,8 +1644,7 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             )?))),
             SqlTypeKind::JsonPath => {
                 let rendered = render_jsonb_bytes(&bytes)?;
-                validate_jsonpath_text(&rendered)?;
-                Ok(Value::JsonPath(CompactString::from_owned(rendered)))
+                Ok(Value::JsonPath(canonicalize_jsonpath_text(&rendered)?))
             }
             SqlTypeKind::Text
             | SqlTypeKind::Timestamp
@@ -1769,8 +1777,7 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
         SqlTypeKind::JsonPath => {
-            validate_jsonpath_text(text)?;
-            Ok(Value::JsonPath(CompactString::new(text)))
+            Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
         SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
             coerce_character_string(text, ty, explicit)?,
@@ -1849,8 +1856,7 @@ fn cast_numeric_value(
         }
         SqlTypeKind::JsonPath => {
             let rendered = value.render();
-            validate_jsonpath_text(&rendered)?;
-            Ok(Value::JsonPath(CompactString::from_owned(rendered)))
+            Ok(Value::JsonPath(canonicalize_jsonpath_text(&rendered)?))
         }
         SqlTypeKind::Char | SqlTypeKind::Varchar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Float4 => {
@@ -2605,8 +2611,7 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 });
             }
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
-            validate_jsonpath_text(text)?;
-            Ok(Value::JsonPath(CompactString::new(text)))
+            Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -3235,8 +3240,7 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
         }
         SqlTypeKind::JsonPath => {
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
-            validate_jsonpath_text(text)?;
-            Ok(Value::JsonPath(CompactString::new(text)))
+            Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {

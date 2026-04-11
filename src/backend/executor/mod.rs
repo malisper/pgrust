@@ -4563,7 +4563,7 @@ mod tests {
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![
-                    Value::JsonPath("strict $.a".into()),
+                    Value::JsonPath("strict $.\"a\"".into()),
                     Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("[]").unwrap()),
                     Value::Null,
                 ]]);
