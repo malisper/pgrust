@@ -325,6 +325,8 @@ fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), Cat
 }
 
 fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
+    // :HACK: Merge defaults from the temporary sidecar store until pg_attrdef or
+    // equivalent catalog-backed default metadata exists.
     let default_exprs = load_default_exprs(base_dir)?;
     let rows = load_physical_catalog_rows(base_dir)?;
     let namespace_rows = rows.namespaces;
