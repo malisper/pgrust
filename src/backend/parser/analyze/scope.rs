@@ -94,7 +94,16 @@ pub(super) fn resolve_column_with_outer(
                 && scopes_match(&grouped.scope, outer_scope)
                 && !outer_column_is_grouped(index, &grouped.scope, &grouped.group_by_exprs)
             {
-                return Err(ParseError::UngroupedColumn(name.to_string()));
+                let column = &outer_scope.columns[index];
+                let display_name = match &column.relation_name {
+                    Some(relation_name) => format!("{relation_name}.{}", column.output_name),
+                    None => column.output_name.clone(),
+                };
+                return Err(ParseError::UngroupedColumn {
+                    display_name,
+                    token: name.to_string(),
+                    clause: UngroupedColumnClause::Other,
+                });
             }
             return Ok(ResolvedColumn::Outer { depth, index });
         }

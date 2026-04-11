@@ -3,6 +3,13 @@ use crate::include::nodes::plannodes::AggFunc;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UngroupedColumnClause {
+    SelectTarget,
+    Having,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     UnexpectedEof,
     UnexpectedToken {
@@ -27,7 +34,11 @@ pub enum ParseError {
         left_type: String,
         right_type: String,
     },
-    UngroupedColumn(String),
+    UngroupedColumn {
+        display_name: String,
+        token: String,
+        clause: UngroupedColumnClause,
+    },
     AggInWhere,
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
@@ -66,10 +77,10 @@ impl fmt::Display for ParseError {
             } => {
                 write!(f, "operator does not exist: {left_type} {op} {right_type}")
             }
-            ParseError::UngroupedColumn(name) => {
+            ParseError::UngroupedColumn { display_name, .. } => {
                 write!(
                     f,
-                    "column \"{name}\" must appear in the GROUP BY clause or be used in an aggregate function"
+                    "column \"{display_name}\" must appear in the GROUP BY clause or be used in an aggregate function"
                 )
             }
             ParseError::AggInWhere => {

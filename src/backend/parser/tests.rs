@@ -1084,7 +1084,10 @@ y$tag$"#).unwrap();
     fn ungrouped_column_rejected_at_plan_time() {
         let stmt = parse_select("select name, count(*) from people").unwrap();
         assert!(
-            matches!(build_plan(&stmt, &catalog()), Err(ParseError::UngroupedColumn(name)) if name == "name")
+            matches!(
+                build_plan(&stmt, &catalog()),
+                Err(ParseError::UngroupedColumn { token, .. }) if token == "name"
+            )
         );
     }
 
@@ -1718,7 +1721,7 @@ y$tag$"#).unwrap();
         .unwrap();
         assert!(matches!(
             build_plan(&stmt, &catalog),
-            Err(ParseError::UngroupedColumn(name)) if name == "p.name" || name == "name"
+            Err(ParseError::UngroupedColumn { token, .. }) if token == "p.name" || token == "name"
         ));
     }
 
