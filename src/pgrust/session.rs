@@ -231,7 +231,7 @@ impl Session {
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
-            Statement::Select(_) | Statement::Explain(_) | Statement::ShowTables => {
+            Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let visible_catalog = db.visible_catalog(client_id);
                 let mut ctx = ExecutorContext {
