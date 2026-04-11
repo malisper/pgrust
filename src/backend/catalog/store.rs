@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert};
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::catalog::catalog::{column_desc, Catalog, CatalogEntry, CatalogError};
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::RelationDesc;
@@ -10,9 +11,7 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
-    bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_pg_attribute_rows,
-    bootstrap_pg_class_rows, bootstrap_pg_namespace_rows, bootstrap_relation_desc,
-    builtin_type_rows,
+    bootstrap_catalog_kinds, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
 use crate::BufferPool;
@@ -23,6 +22,7 @@ pub(crate) const DEFAULT_FIRST_USER_OID: u32 = 16_384;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogStore {
+    base_dir: PathBuf,
     schema_path: PathBuf,
     control_path: PathBuf,
     catalog: Catalog,
@@ -66,7 +66,6 @@ impl CatalogStore {
                 next_rel_number: catalog.next_rel_number,
                 bootstrap_complete: true,
             };
-            bootstrap_physical_catalogs(&base_dir, &catalog)?;
             persist_control_file(&control_path, &control)?;
             persist_catalog_file(&schema_path, &catalog)?;
             (catalog, control)
@@ -82,8 +81,10 @@ impl CatalogStore {
                 bootstrap_complete: control.bootstrap_complete,
             },
         )?;
+        sync_physical_catalogs(&base_dir, &catalog)?;
 
         Ok(Self {
+            base_dir,
             schema_path,
             control_path,
             catalog,
@@ -107,11 +108,12 @@ impl CatalogStore {
                 bootstrap_complete: true,
             },
         )?;
-        persist_catalog_file(&self.schema_path, &self.catalog)
+        persist_catalog_file(&self.schema_path, &self.catalog)?;
+        sync_physical_catalogs(&self.base_dir, &self.catalog)
     }
 }
 
-fn bootstrap_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
+fn sync_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     for kind in bootstrap_catalog_kinds() {
         let rel = catalog
@@ -119,21 +121,20 @@ fn bootstrap_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(),
             .ok_or(CatalogError::Corrupt("missing bootstrap catalog entry"))?
             .rel;
         smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
+        smgr.unlink(rel, Some(ForkNumber::Main), false);
         smgr.create(rel, ForkNumber::Main, false)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
     }
 
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
+    let catcache = CatCache::from_catalog(catalog);
     insert_catalog_rows(
         &pool,
         catalog
             .get("pg_namespace")
             .ok_or(CatalogError::Corrupt("missing pg_namespace"))?,
         &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
-        bootstrap_pg_namespace_rows()
-            .into_iter()
-            .map(namespace_row_values)
-            .collect(),
+        catcache.namespace_rows().into_iter().map(namespace_row_values).collect(),
     )?;
     insert_catalog_rows(
         &pool,
@@ -141,20 +142,15 @@ fn bootstrap_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(),
             .get("pg_class")
             .ok_or(CatalogError::Corrupt("missing pg_class"))?,
         &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
-        bootstrap_pg_class_rows()
-            .into_iter()
-            .map(pg_class_row_values)
-            .collect(),
+        catcache.class_rows().into_iter().map(pg_class_row_values).collect(),
     )?;
-    let mut type_rows = builtin_type_rows();
-    type_rows.extend(bootstrap_composite_type_rows());
     insert_catalog_rows(
         &pool,
         catalog
             .get("pg_type")
             .ok_or(CatalogError::Corrupt("missing pg_type"))?,
         &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
-        type_rows.into_iter().map(pg_type_row_values).collect(),
+        catcache.type_rows().into_iter().map(pg_type_row_values).collect(),
     )?;
     insert_catalog_rows(
         &pool,
@@ -162,10 +158,7 @@ fn bootstrap_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(),
             .get("pg_attribute")
             .ok_or(CatalogError::Corrupt("missing pg_attribute"))?,
         &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
-        bootstrap_pg_attribute_rows()
-            .into_iter()
-            .map(pg_attribute_row_values)
-            .collect(),
+        catcache.attribute_rows().into_iter().map(pg_attribute_row_values).collect(),
     )?;
     Ok(())
 }
