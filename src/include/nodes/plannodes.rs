@@ -148,6 +148,7 @@ pub enum BuiltinScalarFunction {
     Gcd,
     Lcm,
     Div,
+    Mod,
     Scale,
     MinScale,
     TrimScale,

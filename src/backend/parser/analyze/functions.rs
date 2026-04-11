@@ -44,6 +44,7 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "gcd" => Some(BuiltinScalarFunction::Gcd),
         "lcm" => Some(BuiltinScalarFunction::Lcm),
         "div" => Some(BuiltinScalarFunction::Div),
+        "mod" => Some(BuiltinScalarFunction::Mod),
         "scale" => Some(BuiltinScalarFunction::Scale),
         "min_scale" => Some(BuiltinScalarFunction::MinScale),
         "trim_scale" => Some(BuiltinScalarFunction::TrimScale),
@@ -181,7 +182,8 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Atan2d
         | BuiltinScalarFunction::BoolEq
         | BuiltinScalarFunction::BoolNe
-        | BuiltinScalarFunction::Div => args.len() == 2,
+        | BuiltinScalarFunction::Div
+        | BuiltinScalarFunction::Mod => args.len() == 2,
         BuiltinScalarFunction::WidthBucket => args.len() == 4,
         BuiltinScalarFunction::GetBit => args.len() == 2,
         BuiltinScalarFunction::SetBit => args.len() == 3,

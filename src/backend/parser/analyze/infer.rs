@@ -207,6 +207,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 },
             ),
             Some(BuiltinScalarFunction::Div)
+            | Some(BuiltinScalarFunction::Mod)
             | Some(BuiltinScalarFunction::TrimScale)
             | Some(BuiltinScalarFunction::NumericInc)
             | Some(BuiltinScalarFunction::Factorial) => SqlType::new(SqlTypeKind::Numeric),
