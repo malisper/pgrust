@@ -97,6 +97,18 @@ fn is_string_literal_expr(expr: &SqlExpr) -> bool {
     )
 }
 
+pub(super) fn coerce_unknown_string_literal_type(
+    expr: &SqlExpr,
+    expr_type: SqlType,
+    peer_type: SqlType,
+) -> SqlType {
+    if is_string_literal_expr(expr) && is_numeric_family(peer_type) {
+        peer_type.element_type()
+    } else {
+        expr_type
+    }
+}
+
 pub(super) fn should_use_text_concat(
     left_expr: &SqlExpr,
     left_type: SqlType,

@@ -907,17 +907,27 @@ fn bind_arithmetic_expr(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<Expr, ParseError> {
-    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
-    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let raw_left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+    let raw_right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let left_type = coerce_unknown_string_literal_type(
+        left,
+        raw_left_type,
+        raw_right_type,
+    );
+    let right_type = coerce_unknown_string_literal_type(
+        right,
+        raw_right_type,
+        left_type,
+    );
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?,
-        left_type,
+        raw_left_type,
         common,
     );
     let right = coerce_bound_expr(
         bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
-        right_type,
+        raw_right_type,
         common,
     );
     Ok(make(Box::new(left), Box::new(right)))
@@ -932,15 +942,25 @@ fn bind_comparison_expr(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<Expr, ParseError> {
-    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
-    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let raw_left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+    let raw_right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let left_type = coerce_unknown_string_literal_type(
+        left,
+        raw_left_type,
+        raw_right_type,
+    );
+    let right_type = coerce_unknown_string_literal_type(
+        right,
+        raw_right_type,
+        left_type,
+    );
     let left_bound = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
     let right_bound = bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?;
     let (left, right) = if is_numeric_family(left_type) && is_numeric_family(right_type) {
         let common = resolve_numeric_binary_type("=", left_type, right_type)?;
         (
-            coerce_bound_expr(left_bound, left_type, common),
-            coerce_bound_expr(right_bound, right_type, common),
+            coerce_bound_expr(left_bound, raw_left_type, common),
+            coerce_bound_expr(right_bound, raw_right_type, common),
         )
     } else {
         (left_bound, right_bound)

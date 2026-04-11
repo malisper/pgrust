@@ -1,5 +1,5 @@
 use super::exec_expr::parse_numeric_text;
-use super::expr_casts::{cast_numeric_value, cast_text_value};
+use super::expr_casts::{cast_numeric_value, cast_text_value, cast_value};
 use super::node_types::*;
 use super::ExecError;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
@@ -73,7 +73,16 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
-        Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Float64(v) => match target.kind {
+            SqlTypeKind::Float4
+            | SqlTypeKind::Float8
+            | SqlTypeKind::Numeric
+            | SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Oid => cast_value(Value::Float64(*v), target),
+            _ => cast_text_value(&v.to_string(), target, false),
+        },
         Value::Numeric(numeric) => cast_numeric_value(numeric.clone(), target, false),
         Value::JsonPath(text) => cast_text_value(text.as_str(), target, false),
         Value::Json(text) => cast_text_value(text.as_str(), target, false),
