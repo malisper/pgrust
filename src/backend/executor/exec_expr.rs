@@ -24,7 +24,7 @@ use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
     jsonb_from_value,
 };
-use crate::backend::parser::SubqueryComparisonOp;
+use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::pgrust::compact_string::CompactString;
 
 extern crate rand;
@@ -306,6 +306,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Atan2d => eval_binary_float_function("atan2d", &values, |y, x| {
             Ok(snap_degree(y.atan2(x).to_degrees()))
         }),
+        BuiltinScalarFunction::Float4Send => eval_float_send_function("float4send", &values, true),
+        BuiltinScalarFunction::Float8Send => {
+            eval_float_send_function("float8send", &values, false)
+        }
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
@@ -445,12 +449,17 @@ fn eval_unary_float_function(
     };
     match value {
         Value::Null => Ok(Value::Null),
-        Value::Float64(v) => Ok(Value::Float64(func(*v)?)),
-        other => Err(ExecError::TypeMismatch {
-            op,
-            left: other.clone(),
-            right: Value::Null,
-        }),
+        value => {
+            let coerced = cast_value(value.clone(), SqlType::new(SqlTypeKind::Float8))?;
+            match coerced {
+                Value::Float64(v) => Ok(Value::Float64(func(v)?)),
+                other => Err(ExecError::TypeMismatch {
+                    op,
+                    left: other,
+                    right: Value::Null,
+                }),
+            }
+        }
     }
 }
 
@@ -467,11 +476,45 @@ fn eval_binary_float_function(
     };
     match (left, right) {
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-        (Value::Float64(left), Value::Float64(right)) => Ok(Value::Float64(func(*left, *right)?)),
-        (left, right) => Err(ExecError::TypeMismatch {
+        (left, right) => {
+            let left = cast_value(left.clone(), SqlType::new(SqlTypeKind::Float8))?;
+            let right = cast_value(right.clone(), SqlType::new(SqlTypeKind::Float8))?;
+            match (left, right) {
+                (Value::Float64(left), Value::Float64(right)) => {
+                    Ok(Value::Float64(func(left, right)?))
+                }
+                (left, right) => Err(ExecError::TypeMismatch { op, left, right }),
+            }
+        }
+    }
+}
+
+fn eval_float_send_function(
+    op: &'static str,
+    values: &[Value],
+    narrow: bool,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Float64(v) => {
+            let bytes = if narrow {
+                (f64::from(*v as f32) as f32).to_bits().to_be_bytes().to_vec()
+            } else {
+                v.to_bits().to_be_bytes().to_vec()
+            };
+            let mut out = String::from("\\x");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            Ok(Value::Text(out.into()))
+        }
+        other => Err(ExecError::TypeMismatch {
             op,
-            left: left.clone(),
-            right: right.clone(),
+            left: other.clone(),
+            right: Value::Null,
         }),
     }
 }
@@ -493,6 +536,46 @@ fn eval_sqrt(value: f64) -> Result<f64, ExecError> {
 }
 
 fn eval_power(base: f64, exp: f64) -> Result<f64, ExecError> {
+    if exp.is_nan() {
+        return if base == 1.0 {
+            Ok(1.0)
+        } else {
+            Ok(f64::NAN)
+        };
+    }
+    if exp.is_infinite() {
+        if base == 1.0 || base == -1.0 {
+            return Ok(1.0);
+        }
+        let abs_base = base.abs();
+        if exp.is_sign_positive() {
+            return Ok(if abs_base < 1.0 { 0.0 } else { f64::INFINITY });
+        }
+        return Ok(if abs_base < 1.0 { f64::INFINITY } else { 0.0 });
+    }
+    if base.is_infinite() {
+        if exp == 0.0 {
+            return Ok(1.0);
+        }
+        if base.is_sign_positive() {
+            return Ok(if exp.is_sign_positive() { f64::INFINITY } else { 0.0 });
+        }
+        if exp.fract() != 0.0 {
+            return Err(float_domain_error(
+                "a negative number raised to a non-integer power yields a complex result",
+            ));
+        }
+        let odd_integer = (exp as i64).abs() % 2 == 1;
+        return if exp.is_sign_positive() {
+            Ok(if odd_integer {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            })
+        } else {
+            Ok(if odd_integer { -0.0 } else { 0.0 })
+        };
+    }
     if base == 0.0 && exp < 0.0 {
         return Err(float_domain_error(
             "zero raised to a negative power is undefined",
@@ -504,7 +587,7 @@ fn eval_power(base: f64, exp: f64) -> Result<f64, ExecError> {
         ));
     }
     let result = base.powf(exp);
-    if result == 0.0 && base != 0.0 && exp.is_finite() {
+    if result == 0.0 && base != 0.0 && exp.is_finite() && base.is_finite() {
         let abs_result = result.abs();
         if abs_result == 0.0 && !base.is_nan() {
             return Err(ExecError::FloatUnderflow);

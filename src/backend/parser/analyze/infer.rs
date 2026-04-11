@@ -179,6 +179,9 @@ pub(super) fn infer_sql_expr_type(
                 | BuiltinScalarFunction::Atand
                 | BuiltinScalarFunction::Atan2d,
             ) => SqlType::new(SqlTypeKind::Float8),
+            Some(BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send) => {
+                SqlType::new(SqlTypeKind::Text)
+            }
             Some(BuiltinScalarFunction::Gcd) | Some(BuiltinScalarFunction::Lcm) => args.first().zip(args.get(1)).map_or(
                 SqlType::new(SqlTypeKind::Text),
                 |(left, right)| {
