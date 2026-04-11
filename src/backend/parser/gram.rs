@@ -853,6 +853,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Text => "text",
+        SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
         SqlTypeKind::InternalChar => "char",
@@ -905,6 +906,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
         Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
         Rule::kw_oid => SqlType::new(SqlTypeKind::Oid),
+        Rule::kw_bytea => SqlType::new(SqlTypeKind::Bytea),
         Rule::kw_float4 | Rule::kw_real => SqlType::new(SqlTypeKind::Float4),
         Rule::kw_float8 | Rule::double_precision_type => SqlType::new(SqlTypeKind::Float8),
         Rule::numeric_type => {

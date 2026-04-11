@@ -138,6 +138,10 @@ fn render_value(value: &Value) -> String {
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
+        Value::Bytea(v) => pgrust::backend::libpq::pqformat::format_bytea_text(
+            v,
+            pgrust::pgrust::session::ByteaOutputFormat::Hex,
+        ),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap().to_string(),
         Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),

@@ -64,6 +64,7 @@ pub(crate) fn compare_order_values(
             }
         }
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
         (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
             parsed_numeric_value(a)
@@ -131,6 +132,7 @@ pub(crate) fn compare_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             Ok(Value::Bool(
@@ -175,6 +177,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int32(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int64(r)) => l != r,
+        (Value::Bytea(l), Value::Bytea(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             parsed_numeric_value(l)
@@ -524,6 +527,7 @@ pub(crate) fn order_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,
             "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,

@@ -29,6 +29,7 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "lower" => Some(BuiltinScalarFunction::Lower),
         "position" => Some(BuiltinScalarFunction::Position),
         "convert_from" => Some(BuiltinScalarFunction::ConvertFrom),
+        "md5" => Some(BuiltinScalarFunction::Md5),
         "to_char" => Some(BuiltinScalarFunction::ToChar),
         "abs" => Some(BuiltinScalarFunction::Abs),
         "gcd" => Some(BuiltinScalarFunction::Gcd),
@@ -79,6 +80,7 @@ pub(super) fn resolve_function_cast_type(name: &str) -> Option<SqlType> {
         "int4" | "int" | "integer" => Some(SqlType::new(SqlTypeKind::Int4)),
         "int8" | "bigint" => Some(SqlType::new(SqlTypeKind::Int8)),
         "oid" => Some(SqlType::new(SqlTypeKind::Oid)),
+        "bytea" => Some(SqlType::new(SqlTypeKind::Bytea)),
         "float4" | "real" => Some(SqlType::new(SqlTypeKind::Float4)),
         "float8" => Some(SqlType::new(SqlTypeKind::Float8)),
         "numeric" | "decimal" => Some(SqlType::new(SqlTypeKind::Numeric)),
@@ -143,6 +145,7 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Erfc
         | BuiltinScalarFunction::Gamma
         | BuiltinScalarFunction::Lgamma
+        | BuiltinScalarFunction::Md5
         | BuiltinScalarFunction::BitcastIntegerToFloat4
         | BuiltinScalarFunction::BitcastBigintToFloat8
         | BuiltinScalarFunction::BpcharToText => args.len() == 1,

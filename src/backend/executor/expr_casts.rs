@@ -123,6 +123,62 @@ fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
     Ok(Value::Int64(oid as i64))
 }
 
+pub(crate) fn parse_bytea_text(text: &str) -> Result<Vec<u8>, ExecError> {
+    if let Some(rest) = text.strip_prefix("\\x") {
+        let normalized: String = rest.chars().filter(|ch| !ch.is_ascii_whitespace()).collect();
+        if normalized.len() % 2 != 0 {
+            return Err(ExecError::InvalidByteaInput {
+                value: text.to_string(),
+            });
+        }
+        let mut out = Vec::with_capacity(normalized.len() / 2);
+        for chunk in normalized.as_bytes().chunks(2) {
+            let hex = std::str::from_utf8(chunk).map_err(|_| ExecError::InvalidByteaInput {
+                value: text.to_string(),
+            })?;
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| ExecError::InvalidByteaInput {
+                value: text.to_string(),
+            })?);
+        }
+        return Ok(out);
+    }
+
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'\\' {
+            out.push(bytes[idx]);
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        if idx >= bytes.len() {
+            return Err(ExecError::InvalidByteaInput {
+                value: text.to_string(),
+            });
+        }
+        if bytes[idx] == b'\\' {
+            out.push(b'\\');
+            idx += 1;
+            continue;
+        }
+        if idx + 2 >= bytes.len()
+            || !(b'0'..=b'7').contains(&bytes[idx])
+            || !(b'0'..=b'7').contains(&bytes[idx + 1])
+            || !(b'0'..=b'7').contains(&bytes[idx + 2])
+        {
+            return Err(ExecError::InvalidByteaInput {
+                value: text.to_string(),
+            });
+        }
+        let value = (bytes[idx] - b'0') * 64 + (bytes[idx + 1] - b'0') * 8 + (bytes[idx + 2] - b'0');
+        out.push(value);
+        idx += 3;
+    }
+    Ok(out)
+}
+
 fn parse_oid_token_prefix(text: &str) -> Option<usize> {
     let bytes = text.as_bytes();
     if bytes.is_empty() {
@@ -204,6 +260,7 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
             | SqlTypeKind::Int4
             | SqlTypeKind::Int8
             | SqlTypeKind::Oid
+            | SqlTypeKind::Bytea
             | SqlTypeKind::Float4
             | SqlTypeKind::Float8
             | SqlTypeKind::Text
@@ -237,6 +294,9 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::InvalidNumericInput(_) => {
             format!("invalid input syntax for type numeric: \"{text}\"")
         }
+        ExecError::InvalidByteaInput { .. } => {
+            format!("invalid input syntax for type bytea: \"{text}\"")
+        }
         ExecError::InvalidBooleanInput { .. } => {
             format!("invalid input syntax for type boolean: \"{text}\"")
         }
@@ -259,6 +319,7 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
         ExecError::InvalidIntegerInput { .. }
         | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidByteaInput { .. }
         | ExecError::InvalidBooleanInput { .. } => "22P02",
         ExecError::IntegerOutOfRange { .. }
         | ExecError::Int2OutOfRange
@@ -384,6 +445,14 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::Bool,
                 ..
             } => Ok(cast_integer_to_bool(v as i64)),
+            SqlType {
+                kind: SqlTypeKind::Bytea,
+                ..
+            } => Err(ExecError::TypeMismatch {
+                op: "::bytea",
+                left: Value::Int16(v),
+                right: Value::Bytea(Vec::new()),
+            }),
         },
         Value::Int32(v) => match ty {
             SqlType {
@@ -434,6 +503,14 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::Bool,
                 ..
             } => Ok(cast_integer_to_bool(v as i64)),
+            SqlType {
+                kind: SqlTypeKind::Bytea,
+                ..
+            } => Err(ExecError::TypeMismatch {
+                op: "::bytea",
+                left: Value::Int32(v),
+                right: Value::Bytea(Vec::new()),
+            }),
         },
         Value::Bool(v) => match ty {
             SqlType {
@@ -456,10 +533,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Int2
                     | SqlTypeKind::Int4
-                    | SqlTypeKind::Int8
-                    | SqlTypeKind::Oid
-                    | SqlTypeKind::Float4
-                    | SqlTypeKind::Float8
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Oid
+            | SqlTypeKind::Bytea
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Float8
                     | SqlTypeKind::Numeric,
                 ..
             } => Err(ExecError::TypeMismatch {
@@ -504,6 +582,14 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
         },
         Value::JsonPath(text) => cast_text_value(text.as_str(), ty, true),
         Value::Json(text) => cast_text_value(text.as_str(), ty, true),
+        Value::Bytea(bytes) => match ty.kind {
+            SqlTypeKind::Bytea => Ok(Value::Bytea(bytes)),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::bytea",
+                left: Value::Bytea(bytes),
+                right: Value::Null,
+            }),
+        },
         Value::Jsonb(bytes) => match ty.kind {
             SqlTypeKind::Jsonb => Ok(Value::Jsonb(bytes)),
             SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(render_jsonb_bytes(
@@ -574,6 +660,14 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::Bool,
                 ..
             } => Ok(cast_integer_to_bool(v)),
+            SqlType {
+                kind: SqlTypeKind::Bytea,
+                ..
+            } => Err(ExecError::TypeMismatch {
+                op: "::bytea",
+                left: Value::Int64(v),
+                right: Value::Bytea(Vec::new()),
+            }),
         },
         Value::Float64(v) => match ty {
             SqlType {
@@ -627,6 +721,14 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 left: Value::Float64(v),
                 right: Value::Bool(false),
             }),
+            SqlType {
+                kind: SqlTypeKind::Bytea,
+                ..
+            } => Err(ExecError::TypeMismatch {
+                op: "::bytea",
+                left: Value::Float64(v),
+                right: Value::Bytea(Vec::new()),
+            }),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Array(items) => Ok(Value::Array(items)),
@@ -637,6 +739,7 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
     match ty.kind {
         SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
+        SqlTypeKind::Bytea => Ok(Value::Bytea(parse_bytea_text(text)?)),
         SqlTypeKind::Json => {
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
@@ -728,6 +831,11 @@ pub(super) fn cast_numeric_value(
             op: "::bool",
             left: Value::Numeric(value),
             right: Value::Bool(false),
+        }),
+        SqlTypeKind::Bytea => Err(ExecError::TypeMismatch {
+            op: "::bytea",
+            left: Value::Numeric(value),
+            right: Value::Bytea(Vec::new()),
         }),
     }
 }

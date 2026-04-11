@@ -301,6 +301,7 @@ pub enum SqlTypeKind {
     Int4,
     Int8,
     Oid,
+    Bytea,
     Float4,
     Float8,
     Numeric,

@@ -796,6 +796,20 @@ fn bind_scalar_function_call(
                 )],
             })
         }
+        BuiltinScalarFunction::Md5 => {
+            let arg_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            if !matches!(arg_type.kind, SqlTypeKind::Text | SqlTypeKind::Bytea) || arg_type.is_array {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "text or bytea argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![bound_args[0].clone()],
+            })
+        }
         BuiltinScalarFunction::ToChar => {
             let value_type =
                 infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);

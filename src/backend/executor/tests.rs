@@ -3317,6 +3317,66 @@
     }
 
     #[test]
+    fn bytea_text_input_and_pg_input_helpers_follow_postgres_rules() {
+        let base = temp_dir("bytea_input_helpers");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select E'\\\\xDe Ad Be Ef'::bytea, E'a\\\\\\\\b\\\\123'::bytea, pg_input_is_valid(E'\\\\xDe Ad Be Ef', 'bytea'), pg_input_is_valid(E'\\\\x123', 'bytea')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bytea(vec![0xde, 0xad, 0xbe, 0xef]),
+                Value::Bytea(vec![b'a', b'\\', b'b', 0o123]),
+                Value::Bool(true),
+                Value::Bool(false),
+            ]],
+        );
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info(E'\\\\x123', 'bytea')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("invalid input syntax for type bytea: \"\\x123\"".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("22P02".into()),
+            ]],
+        );
+    }
+
+    #[test]
+    fn md5_supports_text_and_bytea_vectors() {
+        let base = temp_dir("md5_vectors");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select md5(''), md5('abc'), md5(''::bytea), md5('abc'::bytea)",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("d41d8cd98f00b204e9800998ecf8427e".into()),
+                Value::Text("900150983cd24fb0d6963f7d28e17f72".into()),
+                Value::Text("d41d8cd98f00b204e9800998ecf8427e".into()),
+                Value::Text("900150983cd24fb0d6963f7d28e17f72".into()),
+            ]],
+        );
+    }
+
+    #[test]
     fn qualified_star_target_expands_relation_columns() {
         let base = temp_dir("qualified_star_target");
         let mut txns = TransactionManager::new_durable(&base).unwrap();

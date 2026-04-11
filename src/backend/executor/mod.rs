@@ -35,6 +35,7 @@ pub use driver::{
     exec_next, execute_plan, execute_readonly_statement, execute_sql, execute_statement,
 };
 pub use exec_expr::eval_expr;
+pub(crate) use expr_casts::parse_bytea_text;
 pub use expr_casts::render_internal_char_text;
 pub use startup::executor_start;
 
@@ -105,6 +106,9 @@ pub enum ExecError {
         value: String,
     },
     InvalidNumericInput(String),
+    InvalidByteaInput {
+        value: String,
+    },
     InvalidBooleanInput {
         value: String,
     },

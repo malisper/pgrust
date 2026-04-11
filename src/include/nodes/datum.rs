@@ -9,6 +9,7 @@ pub enum Value {
     Int16(i16),
     Int32(i32),
     Int64(i64),
+    Bytea(Vec<u8>),
     Float64(f64),
     Numeric(NumericValue),
     Json(CompactString),
@@ -258,6 +259,7 @@ impl Value {
             Value::Int16(v) => Value::Int16(*v),
             Value::Int32(v) => Value::Int32(*v),
             Value::Int64(v) => Value::Int64(*v),
+            Value::Bytea(v) => Value::Bytea(v.clone()),
             Value::Float64(v) => Value::Float64(*v),
             Value::Numeric(v) => Value::Numeric(v.clone()),
             Value::Json(s) => Value::Json(s.clone()),
@@ -299,6 +301,7 @@ impl PartialEq for Value {
             (Value::Int16(a), Value::Int16(b)) => a == b,
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
+            (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
             (Value::Json(a), Value::Json(b)) => a == b,
@@ -331,6 +334,10 @@ impl std::hash::Hash for Value {
             }
             Value::Int64(v) => {
                 2u8.hash(state);
+                v.hash(state);
+            }
+            Value::Bytea(v) => {
+                13u8.hash(state);
                 v.hash(state);
             }
             Value::Float64(v) => {

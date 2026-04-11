@@ -36,6 +36,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(oid.to_le_bytes().to_vec()))
         }
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Bytea, Value::Bytea(v)) => Ok(TupleValue::Bytes(v)),
         (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec())),
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Numeric, Value::Numeric(numeric)) => Ok(TupleValue::Bytes(numeric.render().into_bytes())),
@@ -91,6 +92,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::JsonPath(text) => cast_text_value(text.as_str(), target, false),
         Value::Json(text) => cast_text_value(text.as_str(), target, false),
         Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
+        Value::Bytea(bytes) => cast_value(Value::Bytea(bytes.clone()), target),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
@@ -135,6 +137,12 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 column: column.name.clone(),
                 details: "int8 must be exactly 8 bytes".into(),
             })?)))
+        }
+        ScalarType::Bytea => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+            }
+            Ok(Value::Bytea(bytes.to_vec()))
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
@@ -236,6 +244,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Bytea(v) => Ok(v),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
         Value::Numeric(text) => Ok(text.render().into_bytes()),
         Value::Json(text) => Ok(text.as_bytes().to_vec()),
@@ -311,6 +320,7 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             column: "<array>".into(),
             details: "invalid numeric array element".into(),
         })?)),
+        SqlTypeKind::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         SqlTypeKind::Json => {
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             validate_json_text(text)?;
@@ -353,6 +363,15 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
+            Value::Bytea(v) => {
+                let rendered = crate::backend::libpq::pqformat::format_bytea_text(
+                    v,
+                    crate::pgrust::session::ByteaOutputFormat::Hex,
+                );
+                out.push('"');
+                out.push_str(&rendered);
+                out.push('"');
+            }
             Value::Json(v) => {
                 out.push('"');
                 for ch in v.chars() {

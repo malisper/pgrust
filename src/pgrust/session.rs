@@ -9,6 +9,7 @@ use crate::backend::commands::tablecmds::{
 };
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement,
+    parse_bytea_text,
 };
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::parser::{
@@ -50,6 +51,12 @@ pub struct Session {
     gucs: HashMap<String, String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteaOutputFormat {
+    Hex,
+    Escape,
+}
+
 impl Session {
     pub fn new(client_id: ClientId) -> Self {
         Self {
@@ -80,6 +87,17 @@ impl Session {
             .get("extra_float_digits")
             .and_then(|value| value.parse::<i32>().ok())
             .unwrap_or(1)
+    }
+
+    pub fn bytea_output(&self) -> ByteaOutputFormat {
+        match self
+            .gucs
+            .get("bytea_output")
+            .map(|value| value.trim().to_ascii_lowercase())
+        {
+            Some(value) if value == "escape" => ByteaOutputFormat::Escape,
+            _ => ByteaOutputFormat::Hex,
+        }
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
@@ -569,6 +587,7 @@ impl Session {
                                     })?
                                     .into(),
                             )),
+                            ScalarType::Bytea => Ok(Value::Bytea(parse_bytea_text(raw)?)),
                             ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),

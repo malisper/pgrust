@@ -22,6 +22,7 @@ pub(super) fn infer_sql_expr_type(
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
+        SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::Const(Value::Numeric(_)) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Const(Value::Json(_)) => SqlType::new(SqlTypeKind::Json),
@@ -146,6 +147,7 @@ pub(super) fn infer_sql_expr_type(
             | Some(BuiltinScalarFunction::Lower)
             | Some(BuiltinScalarFunction::Left)
             | Some(BuiltinScalarFunction::Repeat)
+            | Some(BuiltinScalarFunction::Md5)
             | Some(BuiltinScalarFunction::ConvertFrom) => SqlType::new(SqlTypeKind::Text),
             Some(BuiltinScalarFunction::JsonArrayLength)
             | Some(BuiltinScalarFunction::JsonbArrayLength) => SqlType::new(SqlTypeKind::Int4),

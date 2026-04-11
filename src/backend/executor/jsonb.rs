@@ -6,8 +6,10 @@ use serde_json::{Map, Value as SerdeJsonValue};
 
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::format_array_text;
+use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::include::nodes::execnodes::{NumericValue, Value};
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::session::ByteaOutputFormat;
 
 const JENTRY_OFFLENMASK: u32 = 0x0FFF_FFFF;
 const JENTRY_TYPEMASK: u32 = 0x7000_0000;
@@ -161,6 +163,7 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::JsonPath(text) => JsonbValue::String(text.to_string()),
         Value::Text(text) => JsonbValue::String(text.to_string()),
         Value::TextRef(_, _) => JsonbValue::String(value.as_text().unwrap().to_string()),
+        Value::Bytea(bytes) => JsonbValue::String(format_bytea_text(bytes, ByteaOutputFormat::Hex)),
         Value::InternalChar(v) => {
             JsonbValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
@@ -386,6 +389,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
         Value::Text(text) => Ok(text.to_string()),
         Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::Bytea(bytes) => Ok(format_bytea_text(bytes, ByteaOutputFormat::Hex)),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::JsonPath(text) => Ok(text.to_string()),
         Value::Json(text) => Ok(text.to_string()),
