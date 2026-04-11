@@ -6,6 +6,7 @@ use serde_json::{Map, Value as SerdeJsonValue};
 
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::format_array_text;
+use crate::backend::executor::render_bit_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::include::nodes::execnodes::{NumericValue, Value};
 use crate::pgrust::compact_string::CompactString;
@@ -160,6 +161,7 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         ),
         Value::Numeric(v) => JsonbValue::Numeric(v.clone()),
         Value::Bool(v) => JsonbValue::Bool(*v),
+        Value::Bit(v) => JsonbValue::String(render_bit_text(v)),
         Value::JsonPath(text) => JsonbValue::String(text.to_string()),
         Value::Text(text) => JsonbValue::String(text.to_string()),
         Value::TextRef(_, _) => JsonbValue::String(value.as_text().unwrap().to_string()),
@@ -387,6 +389,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
+        Value::Bit(v) => Ok(render_bit_text(v)),
         Value::Text(text) => Ok(text.to_string()),
         Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
         Value::Bytea(bytes) => Ok(format_bytea_text(bytes, ByteaOutputFormat::Hex)),

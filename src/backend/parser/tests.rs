@@ -468,6 +468,37 @@
             parse_type_name("bytea").unwrap(),
             SqlType::new(SqlTypeKind::Bytea)
         );
+        assert_eq!(
+            parse_type_name("bit").unwrap(),
+            SqlType::with_bit_len(SqlTypeKind::Bit, 1)
+        );
+        assert_eq!(
+            parse_type_name("bit(4)").unwrap(),
+            SqlType::with_bit_len(SqlTypeKind::Bit, 4)
+        );
+        assert_eq!(
+            parse_type_name("bit varying(8)").unwrap(),
+            SqlType::with_bit_len(SqlTypeKind::VarBit, 8)
+        );
+        assert_eq!(
+            parse_type_name("varbit").unwrap(),
+            SqlType::new(SqlTypeKind::VarBit)
+        );
+    }
+
+    #[test]
+    fn parse_bit_type_cast_expression() {
+        let stmt = parse_select("select '0101'::bit(4), cast('0101' as bit varying(8))").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(_, ty) => assert_eq!(*ty, SqlType::with_bit_len(SqlTypeKind::Bit, 4)),
+            other => panic!("expected cast expression, got {other:?}"),
+        }
+        match &stmt.targets[1].expr {
+            SqlExpr::Cast(_, ty) => {
+                assert_eq!(*ty, SqlType::with_bit_len(SqlTypeKind::VarBit, 8))
+            }
+            other => panic!("expected cast expression, got {other:?}"),
+        }
     }
 
     #[test]

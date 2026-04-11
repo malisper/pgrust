@@ -3377,6 +3377,60 @@
     }
 
     #[test]
+    fn bit_text_casts_and_pg_input_helpers_follow_postgres_rules() {
+        let base = temp_dir("bit_input_helpers");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select '10'::bit(4), '101011'::varbit(4), pg_input_is_valid('10', 'bit(4)'), pg_input_is_valid('01010Z01', 'varbit')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1000_0000])),
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1010_0000])),
+                Value::Bool(false),
+                Value::Bool(false),
+            ]],
+        );
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info('10', 'bit(4)')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("bit string length 2 does not match type bit(4)".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("22026".into()),
+            ]],
+        );
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info('01010Z01', 'varbit')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("\"Z\" is not a valid binary digit".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("22P02".into()),
+            ]],
+        );
+    }
+
+    #[test]
     fn md5_supports_text_and_bytea_vectors() {
         let base = temp_dir("md5_vectors");
         let txns = TransactionManager::new_durable(&base).unwrap();

@@ -166,6 +166,7 @@ fn render_raise_value(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Bit(v) => crate::backend::executor::render_bit_text(v),
         Value::InternalChar(v) => char::from(*v).to_string(),
         Value::Json(text) | Value::JsonPath(text) => text.to_string(),
         Value::Jsonb(bytes) => String::from_utf8_lossy(bytes).into_owned(),

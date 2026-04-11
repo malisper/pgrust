@@ -1,4 +1,5 @@
 use super::exec_expr::parse_numeric_text;
+use super::expr_bit::render_bit_text;
 use super::expr_casts::{cast_numeric_value, cast_text_value, cast_value, render_internal_char_text};
 use super::node_types::*;
 use super::ExecError;
@@ -36,6 +37,12 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(oid.to_le_bytes().to_vec()))
         }
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::BitString, Value::Bit(v)) => {
+            let mut bytes = Vec::with_capacity(4 + v.bytes.len());
+            bytes.extend_from_slice(&(v.bit_len as u32).to_le_bytes());
+            bytes.extend_from_slice(&v.bytes);
+            Ok(TupleValue::Bytes(bytes))
+        }
         (ScalarType::Bytea, Value::Bytea(v)) => Ok(TupleValue::Bytes(v)),
         (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec())),
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
@@ -80,6 +87,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Bit(bits) => cast_value(Value::Bit(bits.clone()), target),
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
         Value::Float64(v) => match target.kind {
             SqlTypeKind::Float4
@@ -140,6 +148,22 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 column: column.name.clone(),
                 details: "int8 must be exactly 8 bytes".into(),
             })?)))
+        }
+        ScalarType::BitString => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+            }
+            if bytes.len() < 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "bit payload too short".into(),
+                });
+            }
+            let bit_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
+            Ok(Value::Bit(crate::include::nodes::datum::BitString::new(
+                bit_len,
+                bytes[4..].to_vec(),
+            )))
         }
         ScalarType::Bytea => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -247,6 +271,12 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Bit(v) => {
+            let mut bytes = Vec::with_capacity(4 + v.bytes.len());
+            bytes.extend_from_slice(&(v.bit_len as u32).to_le_bytes());
+            bytes.extend_from_slice(&v.bytes);
+            Ok(bytes)
+        }
         Value::Bytea(v) => Ok(v),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
         Value::Numeric(text) => Ok(text.render().into_bytes()),
@@ -323,6 +353,16 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             column: "<array>".into(),
             details: "invalid numeric array element".into(),
         })?)),
+        SqlTypeKind::Bit | SqlTypeKind::VarBit => {
+            if bytes.len() < 4 {
+                return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "bit array element payload too short".into() });
+            }
+            let bit_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
+            Ok(Value::Bit(crate::include::nodes::datum::BitString::new(
+                bit_len,
+                bytes[4..].to_vec(),
+            )))
+        }
         SqlTypeKind::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         SqlTypeKind::Json => {
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
@@ -366,6 +406,7 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
+            Value::Bit(v) => out.push_str(&render_bit_text(v)),
             Value::Bytea(v) => {
                 let rendered = crate::backend::libpq::pqformat::format_bytea_text(
                     v,

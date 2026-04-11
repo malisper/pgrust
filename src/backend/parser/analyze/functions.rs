@@ -80,6 +80,8 @@ pub(super) fn resolve_function_cast_type(name: &str) -> Option<SqlType> {
         "int4" | "int" | "integer" => Some(SqlType::new(SqlTypeKind::Int4)),
         "int8" | "bigint" => Some(SqlType::new(SqlTypeKind::Int8)),
         "oid" => Some(SqlType::new(SqlTypeKind::Oid)),
+        "bit" => Some(SqlType::with_bit_len(SqlTypeKind::Bit, 1)),
+        "varbit" | "bit varying" => Some(SqlType::new(SqlTypeKind::VarBit)),
         "bytea" => Some(SqlType::new(SqlTypeKind::Bytea)),
         "float4" | "real" => Some(SqlType::new(SqlTypeKind::Float4)),
         "float8" => Some(SqlType::new(SqlTypeKind::Float8)),

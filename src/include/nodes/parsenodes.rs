@@ -341,6 +341,8 @@ pub enum SqlTypeKind {
     Int4,
     Int8,
     Oid,
+    Bit,
+    VarBit,
     Bytea,
     Float4,
     Float8,
@@ -383,6 +385,14 @@ impl SqlType {
         }
     }
 
+    pub const fn with_bit_len(kind: SqlTypeKind, len: i32) -> Self {
+        Self {
+            kind,
+            typmod: Self::VARHDRSZ + len,
+            is_array: false,
+        }
+    }
+
     pub const fn with_numeric_precision_scale(precision: i32, scale: i32) -> Self {
         Self {
             kind: SqlTypeKind::Numeric,
@@ -405,6 +415,14 @@ impl SqlType {
     }
 
     pub const fn char_len(self) -> Option<i32> {
+        if self.typmod >= Self::VARHDRSZ {
+            Some(self.typmod - Self::VARHDRSZ)
+        } else {
+            None
+        }
+    }
+
+    pub const fn bit_len(self) -> Option<i32> {
         if self.typmod >= Self::VARHDRSZ {
             Some(self.typmod - Self::VARHDRSZ)
         } else {

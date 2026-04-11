@@ -3,7 +3,8 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::catalog::{
-    BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
+    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
+    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
     BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
     FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
     INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
@@ -13,8 +14,8 @@ use crate::include::catalog::{
     PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_NAMESPACE_RELATION_OID,
     PG_NAMESPACE_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID,
+    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,10 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
     vec![
         builtin_type_row("bool", BOOL_TYPE_OID, SqlType::new(SqlTypeKind::Bool)),
         builtin_type_row("_bool", BOOL_ARRAY_TYPE_OID, SqlType::array_of(SqlType::new(SqlTypeKind::Bool))),
+        builtin_type_row("bit", BIT_TYPE_OID, SqlType::new(SqlTypeKind::Bit)),
+        builtin_type_row("_bit", BIT_ARRAY_TYPE_OID, SqlType::array_of(SqlType::new(SqlTypeKind::Bit))),
+        builtin_type_row("varbit", VARBIT_TYPE_OID, SqlType::new(SqlTypeKind::VarBit)),
+        builtin_type_row("_varbit", VARBIT_ARRAY_TYPE_OID, SqlType::array_of(SqlType::new(SqlTypeKind::VarBit))),
         builtin_type_row("bytea", BYTEA_TYPE_OID, SqlType::new(SqlTypeKind::Bytea)),
         builtin_type_row("_bytea", BYTEA_ARRAY_TYPE_OID, SqlType::array_of(SqlType::new(SqlTypeKind::Bytea))),
         builtin_type_row("\"char\"", INTERNAL_CHAR_TYPE_OID, SqlType::new(SqlTypeKind::InternalChar)),

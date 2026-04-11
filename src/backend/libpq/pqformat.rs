@@ -42,6 +42,19 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::InvalidByteaInput { value } => {
             format!("invalid input syntax for type bytea: \"{value}\"")
         }
+        ExecError::InvalidBitInput { digit, is_hex } => {
+            if *is_hex {
+                format!("\"{digit}\" is not a valid hexadecimal digit")
+            } else {
+                format!("\"{digit}\" is not a valid binary digit")
+            }
+        }
+        ExecError::BitStringLengthMismatch { actual, expected } => {
+            format!("bit string length {actual} does not match type bit({expected})")
+        }
+        ExecError::BitStringTooLong { limit, .. } => {
+            format!("bit string too long for type bit varying({limit})")
+        }
         ExecError::InvalidBooleanInput { value } => {
             format!("invalid input syntax for type boolean: \"{value}\"")
         }
@@ -169,6 +182,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::Bit => 1561,
+            SqlTypeKind::VarBit => 1563,
             SqlTypeKind::Bytea => 1001,
             SqlTypeKind::Float4 => 1021,
             SqlTypeKind::Float8 => 1022,
@@ -188,6 +203,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),
+        SqlTypeKind::VarBit => (1562, -1, col.sql_type.typmod),
         SqlTypeKind::Bytea => (17, -1, -1),
         SqlTypeKind::Float4 => (700, 4, -1),
         SqlTypeKind::Float8 => (701, 8, -1),
@@ -255,6 +272,11 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Bytea(v) => {
                 let rendered = format_bytea_text(v, float_format.bytea_output);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::Bit(v) => {
+                let rendered = crate::backend::executor::render_bit_text(v);
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

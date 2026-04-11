@@ -7,7 +7,8 @@ use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::catalog::CatalogError;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
+    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
+    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
     BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
     FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
     INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
@@ -15,7 +16,8 @@ use crate::include::catalog::{
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
     PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_namespace_rows, builtin_type_rows,
 };
 
@@ -228,6 +230,10 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
     match (sql_type.kind, sql_type.is_array) {
         (SqlTypeKind::Bool, false) => BOOL_TYPE_OID,
         (SqlTypeKind::Bool, true) => BOOL_ARRAY_TYPE_OID,
+        (SqlTypeKind::Bit, false) => BIT_TYPE_OID,
+        (SqlTypeKind::Bit, true) => BIT_ARRAY_TYPE_OID,
+        (SqlTypeKind::VarBit, false) => VARBIT_TYPE_OID,
+        (SqlTypeKind::VarBit, true) => VARBIT_ARRAY_TYPE_OID,
         (SqlTypeKind::Bytea, false) => BYTEA_TYPE_OID,
         (SqlTypeKind::Bytea, true) => BYTEA_ARRAY_TYPE_OID,
         (SqlTypeKind::InternalChar, false) => INTERNAL_CHAR_TYPE_OID,

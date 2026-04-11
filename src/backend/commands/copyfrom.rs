@@ -1,5 +1,5 @@
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
-use crate::backend::executor::{ExecError, Value, parse_bytea_text};
+use crate::backend::executor::{ExecError, Value, cast_value, parse_bytea_text};
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
 
 pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Value, ExecError> {
@@ -86,6 +86,9 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                         });
                     }
                 },
+                SqlTypeKind::Bit | SqlTypeKind::VarBit => {
+                    cast_value(Value::Text(value.into()), element_type)?
+                }
                 SqlTypeKind::Text
                 | SqlTypeKind::Numeric
                 | SqlTypeKind::Json

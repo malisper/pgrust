@@ -9,7 +9,7 @@ use crate::backend::commands::tablecmds::{
 };
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement,
-    parse_bytea_text,
+    cast_value, parse_bytea_text,
 };
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::parser::{
@@ -575,6 +575,9 @@ impl Session {
                                 raw.parse::<i64>().map(Value::Int64).map_err(|_| {
                                     ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
                                 })
+                            }
+                            ScalarType::BitString => {
+                                cast_value(Value::Text(raw.clone().into()), column.sql_type)
                             }
                             ScalarType::Float32 | ScalarType::Float64 => raw
                                 .parse::<f64>()

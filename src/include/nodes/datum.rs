@@ -4,11 +4,49 @@ use num_integer::Integer;
 use num_traits::{Signed, Zero};
 use std::hash::{Hash, Hasher};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BitString {
+    pub bit_len: i32,
+    pub bytes: Vec<u8>,
+}
+
+impl BitString {
+    pub fn new(bit_len: i32, mut bytes: Vec<u8>) -> Self {
+        let required = Self::byte_len(bit_len);
+        bytes.truncate(required);
+        if bytes.len() < required {
+            bytes.resize(required, 0);
+        }
+        if let Some(last) = bytes.last_mut() {
+            let used_bits = (bit_len as usize) % 8;
+            if used_bits != 0 {
+                *last &= 0xff << (8 - used_bits);
+            }
+        }
+        Self { bit_len, bytes }
+    }
+
+    pub fn byte_len(bit_len: i32) -> usize {
+        (bit_len.max(0) as usize).div_ceil(8)
+    }
+
+    pub fn render(&self) -> String {
+        let mut out = String::with_capacity(self.bit_len.max(0) as usize);
+        for bit_idx in 0..self.bit_len.max(0) as usize {
+            let byte = self.bytes[bit_idx / 8];
+            let shift = 7 - (bit_idx % 8);
+            out.push(if ((byte >> shift) & 1) != 0 { '1' } else { '0' });
+        }
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Int16(i16),
     Int32(i32),
     Int64(i64),
+    Bit(BitString),
     Bytea(Vec<u8>),
     Float64(f64),
     Numeric(NumericValue),
@@ -259,6 +297,7 @@ impl Value {
             Value::Int16(v) => Value::Int16(*v),
             Value::Int32(v) => Value::Int32(*v),
             Value::Int64(v) => Value::Int64(*v),
+            Value::Bit(v) => Value::Bit(v.clone()),
             Value::Bytea(v) => Value::Bytea(v.clone()),
             Value::Float64(v) => Value::Float64(*v),
             Value::Numeric(v) => Value::Numeric(v.clone()),
@@ -301,6 +340,7 @@ impl PartialEq for Value {
             (Value::Int16(a), Value::Int16(b)) => a == b,
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
+            (Value::Bit(a), Value::Bit(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
@@ -334,6 +374,10 @@ impl std::hash::Hash for Value {
             }
             Value::Int64(v) => {
                 2u8.hash(state);
+                v.hash(state);
+            }
+            Value::Bit(v) => {
+                14u8.hash(state);
                 v.hash(state);
             }
             Value::Bytea(v) => {

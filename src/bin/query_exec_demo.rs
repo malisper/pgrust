@@ -66,6 +66,7 @@ fn render_value(value: &Value) -> String {
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
+        Value::Bit(v) => v.render(),
         Value::Bytea(v) => pgrust::backend::libpq::pqformat::format_bytea_text(
             v,
             pgrust::pgrust::session::ByteaOutputFormat::Hex,
