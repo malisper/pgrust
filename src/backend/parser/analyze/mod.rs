@@ -137,7 +137,7 @@ fn build_plan_with_outer(
         }
     }
 
-    let mut plan = if let Some(predicate) = &stmt.where_clause {
+    let filtered_plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
             input: Box::new(base),
             predicate: bind_expr_with_outer(
@@ -154,6 +154,24 @@ fn build_plan_with_outer(
 
     let needs_agg =
         !stmt.group_by.is_empty() || targets_contain_agg(&stmt.targets) || stmt.having.is_some();
+
+    let can_skip_scan_for_degenerate_having = needs_agg
+        && stmt.group_by.is_empty()
+        && !targets_contain_agg(&stmt.targets)
+        && stmt
+            .having
+            .as_ref()
+            .is_some_and(|having| !expr_contains_agg(having) && !expr_references_input_scope(having))
+        && stmt
+            .targets
+            .iter()
+            .all(|target| !expr_references_input_scope(&target.expr));
+
+    let mut plan = if can_skip_scan_for_degenerate_having {
+        Plan::Result
+    } else {
+        filtered_plan
+    };
 
     if needs_agg {
         let mut aggs: Vec<(AggFunc, Vec<SqlExpr>, bool)> = Vec::new();
