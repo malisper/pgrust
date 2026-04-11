@@ -6293,3 +6293,65 @@
             ],
         );
     }
+
+    #[test]
+    fn numeric_typmod_accepts_zero_in_full_scale_columns() {
+        let base = temp_dir("numeric_typmod_zero_full_scale");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        // numeric(4,4) has 0 digits before the decimal — zero must be accepted
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '0.0'::numeric(4,4), '0.1234'::numeric(4,4)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("0.0000".into()),
+                        Value::Numeric("0.1234".into()),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+        // Values >= 1.0 should still overflow
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '1.0'::numeric(4,4)",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::NumericFieldOverflow));
+    }
+
+    #[test]
+    fn trunc_and_round_preserve_requested_scale() {
+        let base = temp_dir("trunc_round_scale");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select trunc(1.0, 1), trunc(1.999, 2), round(1.5, 0), round(1.0, 3)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("1.0".into()),
+                        Value::Numeric("1.99".into()),
+                        Value::Numeric("2".into()),
+                        Value::Numeric("1.000".into()),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
