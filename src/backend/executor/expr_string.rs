@@ -3,6 +3,7 @@ use super::expr_format::to_char_int;
 use super::node_types::Value;
 use crate::pgrust::compact_string::CompactString;
 use encoding_rs::Encoding;
+use md5::{Digest, Md5};
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
@@ -121,6 +122,29 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
         right: Value::Text("".into()),
     })?;
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
+}
+
+pub(super) fn eval_md5_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let bytes: Vec<u8> = match value {
+        Value::Text(text) => text.as_bytes().to_vec(),
+        Value::TextRef(_, _) => value.as_text().unwrap().as_bytes().to_vec(),
+        Value::Bytea(bytes) => bytes.clone(),
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "md5",
+                left: other.clone(),
+                right: Value::Null,
+            });
+        }
+    };
+    let digest = Md5::digest(bytes);
+    Ok(Value::Text(CompactString::from_owned(format!("{digest:x}"))))
 }
 
 pub(super) fn eval_bpchar_to_text_function(values: &[Value]) -> Result<Value, ExecError> {

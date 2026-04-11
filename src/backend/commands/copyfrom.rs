@@ -1,5 +1,5 @@
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
-use crate::backend::executor::{ExecError, Value};
+use crate::backend::executor::{ExecError, Value, parse_bytea_text};
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
 
 pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Value, ExecError> {
@@ -92,6 +92,7 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                 | SqlTypeKind::Jsonb
                 | SqlTypeKind::JsonPath
                 | SqlTypeKind::Timestamp
+                | SqlTypeKind::Bytea
                 | SqlTypeKind::Char
                 | SqlTypeKind::Varchar => {
                     if matches!(element_type.kind, SqlTypeKind::Numeric) {
@@ -109,6 +110,8 @@ pub fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Valu
                                 ),
                             })?.into()
                         )
+                    } else if matches!(element_type.kind, SqlTypeKind::Bytea) {
+                        Value::Bytea(parse_bytea_text(&value)?)
                     } else {
                         Value::Text(value.into())
                     }

@@ -258,6 +258,10 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
+                            ScalarType::Bytea => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                             ScalarType::Text => {
                                 values.push(Value::Null);
                                 continue;
@@ -315,6 +319,9 @@ impl CompiledTupleDecoder {
                                     }),
                                 ));
                             }
+                            ScalarType::Bytea => {
+                                values.push(Value::Bytea(bytes_slice.to_vec()));
+                            }
                             ScalarType::Text => {
                                 values.push(Value::TextRef(
                                     bytes_slice.as_ptr(),
@@ -364,6 +371,9 @@ impl CompiledTupleDecoder {
                                         std::str::from_utf8_unchecked(bytes)
                                     }),
                                 ));
+                            }
+                            ScalarType::Bytea => {
+                                values.push(Value::Bytea(bytes.to_vec()));
                             }
                             ScalarType::Text => {
                                 values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
@@ -477,6 +487,7 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
         ScalarType::Numeric => Ok(Value::Numeric(
             unsafe { std::str::from_utf8_unchecked(bytes) }.into(),
         )),
+        ScalarType::Bytea => Ok(Value::Bytea(bytes.to_vec())),
         ScalarType::Json => Ok(Value::Json(
             crate::pgrust::compact_string::CompactString::new(unsafe {
                 std::str::from_utf8_unchecked(bytes)

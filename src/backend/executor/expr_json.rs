@@ -1,6 +1,7 @@
 use super::exec_expr::eval_expr;
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
+use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value, parse_jsonb_text,
@@ -11,6 +12,7 @@ use crate::backend::executor::jsonpath::{
     parse_jsonpath, validate_jsonpath,
 };
 use crate::include::nodes::plannodes::BuiltinScalarFunction;
+use crate::pgrust::session::ByteaOutputFormat;
 use crate::pgrust::compact_string::CompactString;
 use serde_json::Value as SerdeJsonValue;
 
@@ -393,6 +395,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
     match value {
         Value::Null => Ok("".into()),
         Value::Text(_) | Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::Bytea(v) => Ok(format_bytea_text(v, ByteaOutputFormat::Hex)),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
@@ -752,6 +755,7 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         Value::Text(_) | Value::TextRef(_, _) => {
             SerdeJsonValue::String(value.as_text().unwrap().to_string())
         }
+        Value::Bytea(v) => SerdeJsonValue::String(format_bytea_text(v, ByteaOutputFormat::Hex)),
         Value::InternalChar(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_internal_char_text(*v))
         }

@@ -344,6 +344,10 @@
             parse_type_name("\"char\"").unwrap(),
             SqlType::new(SqlTypeKind::InternalChar)
         );
+        assert_eq!(
+            parse_type_name("bytea").unwrap(),
+            SqlType::new(SqlTypeKind::Bytea)
+        );
     }
 
     #[test]

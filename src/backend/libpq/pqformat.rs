@@ -6,18 +6,21 @@ use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::{render_internal_char_text, ExecError, QueryColumn, Value};
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::TupleError;
+use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_traits::One;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FloatFormatOptions {
     pub(crate) extra_float_digits: i32,
+    pub(crate) bytea_output: ByteaOutputFormat,
 }
 
 impl Default for FloatFormatOptions {
     fn default() -> Self {
         Self {
             extra_float_digits: 1,
+            bytea_output: ByteaOutputFormat::Hex,
         }
     }
 }
@@ -34,6 +37,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         }
         ExecError::InvalidNumericInput(value) => {
             format!("invalid input syntax for type numeric: \"{value}\"")
+        }
+        ExecError::InvalidByteaInput { value } => {
+            format!("invalid input syntax for type bytea: \"{value}\"")
         }
         ExecError::InvalidBooleanInput { value } => {
             format!("invalid input syntax for type boolean: \"{value}\"")
@@ -161,6 +167,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::Bytea => 1001,
             SqlTypeKind::Float4 => 1021,
             SqlTypeKind::Float8 => 1022,
             SqlTypeKind::Numeric => 1231,
@@ -179,6 +186,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::Bytea => (17, -1, -1),
         SqlTypeKind::Float4 => (700, 4, -1),
         SqlTypeKind::Float8 => (701, 8, -1),
         SqlTypeKind::Numeric => (1700, -1, col.sql_type.typmod),
@@ -243,6 +251,11 @@ pub(crate) fn send_typed_data_row(
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }
+            Value::Bytea(v) => {
+                let rendered = format_bytea_text(v, float_format.bytea_output);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
             Value::Float64(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
@@ -306,6 +319,35 @@ pub(crate) fn send_typed_data_row(
     w.write_all(&((buf.len() + 4) as i32).to_be_bytes())?;
     w.write_all(buf)?;
     Ok(())
+}
+
+pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {
+    match output {
+        ByteaOutputFormat::Hex => {
+            let mut out = String::with_capacity(2 + bytes.len() * 2);
+            out.push('\\');
+            out.push('x');
+            for byte in bytes {
+                use std::fmt::Write as _;
+                let _ = write!(&mut out, "{:02x}", byte);
+            }
+            out
+        }
+        ByteaOutputFormat::Escape => {
+            let mut out = String::new();
+            for &byte in bytes {
+                match byte {
+                    b'\\' => out.push_str("\\\\"),
+                    0x20..=0x7e => out.push(byte as char),
+                    _ => {
+                        use std::fmt::Write as _;
+                        let _ = write!(&mut out, "\\{:03o}", byte);
+                    }
+                }
+            }
+            out
+        }
+    }
 }
 
 pub(crate) fn send_command_complete(w: &mut impl Write, tag: &str) -> io::Result<()> {
@@ -829,7 +871,8 @@ fn trim_fractional_zeros(text: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{FloatFormatOptions, format_float4_text, format_float8_text};
+    use super::{FloatFormatOptions, format_bytea_text, format_float4_text, format_float8_text};
+    use crate::pgrust::session::ByteaOutputFormat;
 
     #[test]
     fn large_float8_values_render_in_scientific_notation() {
@@ -879,6 +922,7 @@ mod tests {
     fn extra_float_digits_zero_uses_rounded_general_format() {
         let options = FloatFormatOptions {
             extra_float_digits: 0,
+            bytea_output: ByteaOutputFormat::Hex,
         };
         assert_eq!(format_float8_text(31.690692639953454, options), "31.6906926399535");
         assert_eq!(format_float8_text(1004.3000000000004, options), "1004.3");
@@ -905,6 +949,18 @@ mod tests {
     fn shortest_format_preserves_negative_zero() {
         assert_eq!(format_float8_text(-0.0, FloatFormatOptions::default()), "-0");
         assert_eq!(format_float4_text(-0.0, FloatFormatOptions::default()), "-0");
+    }
+
+    #[test]
+    fn bytea_text_output_supports_hex_and_escape() {
+        assert_eq!(
+            format_bytea_text(&[0xde, 0xad, 0xbe, 0xef], ByteaOutputFormat::Hex),
+            "\\xdeadbeef"
+        );
+        assert_eq!(
+            format_bytea_text(&[b'a', b'\\', 0, 0xff], ByteaOutputFormat::Escape),
+            "a\\\\\\000\\377"
+        );
     }
 
     #[test]

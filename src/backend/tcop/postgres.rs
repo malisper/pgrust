@@ -28,6 +28,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
         | ExecError::InvalidIntegerInput { .. }
         | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidByteaInput { .. }
         | ExecError::InvalidBooleanInput { .. }
         | ExecError::InvalidFloatInput { .. } => "22P02",
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
@@ -67,6 +68,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidNumericInput(value) => value.as_str(),
+        ExecError::InvalidByteaInput { value } => value.as_str(),
         ExecError::InvalidBooleanInput { value } => value.as_str(),
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
@@ -374,6 +376,7 @@ fn handle_query(
                                         &mut row_buf,
                                         FloatFormatOptions {
                                             extra_float_digits: state.session.extra_float_digits(),
+                                            bytea_output: state.session.bytea_output(),
                                         },
                                     )?;
                                     row_count += 1;
@@ -426,6 +429,7 @@ fn handle_query(
                     &format!("SELECT {}", rows.len()),
                     FloatFormatOptions {
                         extra_float_digits: state.session.extra_float_digits(),
+                        bytea_output: state.session.bytea_output(),
                     },
                 )?;
             }
@@ -674,6 +678,7 @@ fn execute_portal(
                 &mut row_buf,
                 FloatFormatOptions {
                     extra_float_digits: session.extra_float_digits(),
+                    bytea_output: session.bytea_output(),
                 },
             )?;
         }
@@ -692,6 +697,7 @@ fn execute_portal(
                     &mut row_buf,
                     FloatFormatOptions {
                         extra_float_digits: session.extra_float_digits(),
+                        bytea_output: session.bytea_output(),
                     },
                 )?;
             }

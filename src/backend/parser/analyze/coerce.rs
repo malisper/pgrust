@@ -64,6 +64,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Int4 => "integer",
         SqlTypeKind::Int8 => "bigint",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Numeric => "numeric",
