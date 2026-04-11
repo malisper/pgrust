@@ -800,9 +800,12 @@ impl NumericValue {
                     scale: rscale,
                 },
             ) => {
-                let exp = out_scale.checked_add(*rscale)?.checked_sub(*lscale)?;
-                let factor = pow10_bigint(exp);
-                let num = lcoeff * factor;
+                let exp = (out_scale as i64) + (*rscale as i64) - (*lscale as i64);
+                let num = if exp >= 0 {
+                    lcoeff * pow10_bigint(exp as u32)
+                } else {
+                    lcoeff / pow10_bigint((-exp) as u32)
+                };
                 let (quotient, remainder) = num.div_rem(rcoeff);
                 let twice = remainder.abs() * 2u8;
                 let rounded = if twice >= rcoeff.abs() {

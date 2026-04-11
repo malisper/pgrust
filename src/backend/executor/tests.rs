@@ -6330,6 +6330,32 @@
     }
 
     #[test]
+    fn numeric_division_works_with_large_scale_operands() {
+        let base = temp_dir("numeric_div_large_scale");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        // Division where lscale > out_scale + rscale should not error
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select (1.0 / 3.0) / 7.0",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                // Should produce a numeric result, not a TypeMismatch error
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].len(), 1);
+                match &rows[0][0] {
+                    Value::Numeric(_) => {}
+                    other => panic!("expected numeric, got {:?}", other),
+                }
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn trunc_and_round_preserve_requested_scale() {
         let base = temp_dir("trunc_round_scale");
         let txns = TransactionManager::new_durable(&base).unwrap();
