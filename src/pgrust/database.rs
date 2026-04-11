@@ -24,6 +24,7 @@ use crate::backend::storage::lmgr::{
 };
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::cache::plancache::PlanCache;
+use crate::backend::utils::cache::relcache::RelCache;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
@@ -342,7 +343,8 @@ impl Database {
                     catalog_guard.catalog_mut(),
                 );
                 if result.is_ok() {
-                    if let Some(entry) = catalog_guard.catalog().get(&table_name) {
+                    let relcache = RelCache::from_catalog(catalog_guard.catalog());
+                    if let Some(entry) = relcache.get_by_name(&table_name) {
                         let rel = entry.rel;
                         let _ = self.pool.with_storage_mut(|s| {
                             use crate::backend::storage::smgr::StorageManager;
@@ -698,11 +700,12 @@ impl Database {
             }
 
             Statement::DropTable(ref drop_stmt) => {
+                let relcache = RelCache::from_catalog(&visible_catalog);
                 let rels = {
                     drop_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
+                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in &rels {
@@ -763,11 +766,12 @@ impl Database {
             }
 
             Statement::TruncateTable(ref truncate_stmt) => {
+                let relcache = RelCache::from_catalog(&visible_catalog);
                 let rels = {
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
+                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in &rels {

@@ -21,6 +21,7 @@ use crate::backend::libpq::pqformat::{
 };
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::UngroupedColumnClause;
+use crate::backend::utils::cache::relcache::RelCache;
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
@@ -862,7 +863,9 @@ fn execute_special_query(
     let normalized = sql.trim().to_ascii_lowercase();
     if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
         let table_name = params.first()?.as_ref()?.to_ascii_lowercase();
-        let exists = db.visible_catalog(client_id).get(&table_name).is_some();
+        let visible_catalog = db.visible_catalog(client_id);
+        let relcache = RelCache::from_catalog(&visible_catalog);
+        let exists = relcache.get_by_name(&table_name).is_some();
         let rows = if exists {
             vec![vec![Value::Text("r".into())]]
         } else {

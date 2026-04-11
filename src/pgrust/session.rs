@@ -17,6 +17,7 @@ use crate::backend::parser::{
     bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
+use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
@@ -325,11 +326,12 @@ impl Session {
             }
             Statement::DropTable(ref drop_stmt) => {
                 let visible_catalog = db.visible_catalog(client_id);
+                let relcache = RelCache::from_catalog(&visible_catalog);
                 let rels = {
                     drop_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
+                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
@@ -375,11 +377,12 @@ impl Session {
             }
             Statement::TruncateTable(ref truncate_stmt) => {
                 let visible_catalog = db.visible_catalog(client_id);
+                let relcache = RelCache::from_catalog(&visible_catalog);
                 let rels = {
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| visible_catalog.get(name).map(|e| e.rel))
+                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
@@ -519,8 +522,9 @@ impl Session {
         txn.next_command_id = txn.next_command_id.saturating_add(1);
 
         let visible_catalog = db.visible_catalog(self.client_id);
+        let relcache = RelCache::from_catalog(&visible_catalog);
         let (rel, desc) = {
-            let entry = visible_catalog.get(table_name).ok_or_else(|| {
+            let entry = relcache.get_by_name(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
             })?;
             (entry.rel, entry.desc.clone())

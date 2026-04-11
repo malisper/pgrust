@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::utils::cache::relcache::RelCache;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -299,8 +300,9 @@ pub(super) fn bind_from_item_with_ctes(
                     scope_for_relation(Some(name), &desc),
                 ));
             }
-            let entry = catalog
-                .get(name)
+            let relcache = RelCache::from_catalog(catalog);
+            let entry = relcache
+                .get_by_name(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.clone()))?;
             let desc = entry.desc.clone();
             Ok((

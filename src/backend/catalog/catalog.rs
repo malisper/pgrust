@@ -96,6 +96,10 @@ impl Catalog {
         self.tables.keys().map(String::as_str)
     }
 
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &CatalogEntry)> {
+        self.tables.iter().map(|(name, entry)| (name.as_str(), entry))
+    }
+
     pub fn next_oid(&self) -> u32 {
         self.next_oid
     }
