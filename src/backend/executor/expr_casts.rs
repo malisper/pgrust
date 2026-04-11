@@ -1038,7 +1038,7 @@ fn numeric_digits_before_decimal(value: &NumericValue) -> i32 {
                 .trim_start_matches('0')
                 .len()
                 .max(1) as i32;
-            (digits - *scale as i32).max(1)
+            (digits - *scale as i32).max(0)
         }
         _ => 0,
     }
