@@ -2,6 +2,7 @@ use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -21,7 +22,7 @@ pub enum Value {
     Null,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub enum NumericValue {
     Finite { coeff: BigInt, scale: u32 },
     NaN,
@@ -50,7 +51,7 @@ impl NumericValue {
                 mut scale,
             } => {
                 if coeff.is_zero() {
-                    return Self::zero();
+                    return Self::Finite { coeff, scale };
                 }
                 let ten = BigInt::from(10u8);
                 while scale > 0 {
@@ -63,6 +64,14 @@ impl NumericValue {
                 }
                 Self::Finite { coeff, scale }
             }
+        }
+    }
+
+    fn canonical_eq(&self) -> Self {
+        match self {
+            Self::NaN => Self::NaN,
+            Self::Finite { coeff, .. } if coeff.is_zero() => Self::zero(),
+            _ => self.clone().normalize(),
         }
     }
 
@@ -131,6 +140,42 @@ impl NumericValue {
                     }
                     out
                 }
+            }
+        }
+    }
+}
+
+impl PartialEq for NumericValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.canonical_eq(), other.canonical_eq()) {
+            (Self::NaN, Self::NaN) => true,
+            (
+                Self::Finite {
+                    coeff: left_coeff,
+                    scale: left_scale,
+                },
+                Self::Finite {
+                    coeff: right_coeff,
+                    scale: right_scale,
+                },
+            ) => left_coeff == right_coeff && left_scale == right_scale,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for NumericValue {}
+
+impl Hash for NumericValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self.canonical_eq() {
+            Self::NaN => {
+                0u8.hash(state);
+            }
+            Self::Finite { coeff, scale } => {
+                1u8.hash(state);
+                coeff.hash(state);
+                scale.hash(state);
             }
         }
     }
@@ -328,6 +373,23 @@ impl std::hash::Hash for Value {
                 8u8.hash(state);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NumericValue;
+
+    #[test]
+    fn numeric_zero_preserves_display_scale() {
+        assert_eq!(NumericValue::from("0.0").render(), "0.0");
+        assert_eq!(NumericValue::from("0.00").render(), "0.00");
+    }
+
+    #[test]
+    fn numeric_zero_equality_ignores_scale() {
+        assert_eq!(NumericValue::from("0"), NumericValue::from("0.0"));
+        assert_eq!(NumericValue::from("0.0"), NumericValue::from("0.00"));
     }
 }
 
