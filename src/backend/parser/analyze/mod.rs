@@ -13,7 +13,6 @@ use crate::backend::executor::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, Plan, QueryColumn,
     RelationDesc, TargetEntry, Value,
 };
-use crate::backend::utils::cache::relcache::RelCache;
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
@@ -645,10 +644,7 @@ pub fn bind_insert_prepared(
     num_params: usize,
     catalog: &Catalog,
 ) -> Result<PreparedInsert, ParseError> {
-    let relcache = RelCache::from_catalog(catalog);
-    let entry = relcache
-        .get_by_name(table_name)
-        .ok_or_else(|| ParseError::UnknownTable(table_name.to_string()))?;
+    let entry = lookup_relation(catalog, table_name)?;
 
     let target_columns = if let Some(columns) = columns {
         let scope = scope_for_relation(Some(table_name), &entry.desc);
@@ -701,10 +697,7 @@ pub fn bind_insert(
     catalog: &Catalog,
 ) -> Result<BoundInsertStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
-    let relcache = RelCache::from_catalog(catalog);
-    let entry = relcache
-        .get_by_name(&stmt.table_name)
-        .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+    let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
 
     let target_columns = if let Some(columns) = &stmt.columns {
@@ -748,10 +741,7 @@ pub fn bind_update(
     catalog: &Catalog,
 ) -> Result<BoundUpdateStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
-    let relcache = RelCache::from_catalog(catalog);
-    let entry = relcache
-        .get_by_name(&stmt.table_name)
-        .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+    let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
 
     Ok(BoundUpdateStatement {
@@ -787,10 +777,7 @@ pub fn bind_delete(
     catalog: &Catalog,
 ) -> Result<BoundDeleteStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
-    let relcache = RelCache::from_catalog(catalog);
-    let entry = relcache
-        .get_by_name(&stmt.table_name)
-        .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+    let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
 
     Ok(BoundDeleteStatement {
