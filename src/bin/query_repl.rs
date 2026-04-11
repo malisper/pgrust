@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::backend::catalog::catalog::{Catalog, DurableCatalog, column_desc};
+use pgrust::backend::catalog::{Catalog, CatalogStore, column_desc};
 use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_statement,
@@ -360,7 +360,7 @@ fn read_repl_line(prompt: &str, history: &mut ReplHistory) -> Result<Option<Stri
     }
 }
 
-fn ensure_default_people_table(catalog_store: &mut DurableCatalog) -> Result<(), String> {
+fn ensure_default_people_table(catalog_store: &mut CatalogStore) -> Result<(), String> {
     if catalog_store.catalog().get("people").is_some() {
         return Ok(());
     }
@@ -402,7 +402,7 @@ fn run_statement(
     sql: &str,
     pool: &std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     txns: &Arc<RwLock<TransactionManager>>,
-    catalog_store: &mut DurableCatalog,
+    catalog_store: &mut CatalogStore,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
     let needs_catalog_persist = matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
@@ -683,7 +683,7 @@ fn main() -> Result<(), String> {
     let txns = Arc::new(RwLock::new(
         TransactionManager::new_durable(&base_dir).map_err(|e| format!("{e:?}"))?,
     ));
-    let mut catalog_store = DurableCatalog::load(&base_dir).map_err(|e| format!("{e:?}"))?;
+    let mut catalog_store = CatalogStore::load(&base_dir).map_err(|e| format!("{e:?}"))?;
     ensure_default_people_table(&mut catalog_store)?;
 
     let smgr = MdStorageManager::new(&base_dir);

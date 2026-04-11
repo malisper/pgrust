@@ -9,7 +9,7 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, DurableCatalog};
+use crate::backend::catalog::{Catalog, CatalogEntry, CatalogError, CatalogStore};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
 };
@@ -60,7 +60,7 @@ pub struct Database {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Arc<WalWriter>,
     pub txns: Arc<RwLock<TransactionManager>>,
-    pub catalog: Arc<RwLock<DurableCatalog>>,
+    pub catalog: Arc<RwLock<CatalogStore>>,
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
@@ -98,7 +98,7 @@ impl Database {
             .map_err(|e| DatabaseError::Catalog(CatalogError::Io(e.to_string())))?;
 
         let mut txns = TransactionManager::new_durable(&base_dir)?;
-        let catalog = DurableCatalog::load(&base_dir)?;
+        let catalog = CatalogStore::load(&base_dir)?;
 
         // --- WAL Recovery ---
         let wal_dir = base_dir.join("pg_wal");
