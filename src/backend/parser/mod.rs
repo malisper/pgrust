@@ -295,6 +295,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_oid_cast_type() {
+        let stmt = parse_select("select cast(42 as oid)").unwrap();
+        assert!(matches!(
+            stmt.targets[0].expr,
+            SqlExpr::Cast(_, ty) if ty == SqlType::new(SqlTypeKind::Oid)
+        ));
+        assert_eq!(stmt.targets[0].output_name, "oid");
+    }
+
+    #[test]
     fn parse_typed_string_literal_expression() {
         let stmt = parse_select("select int2 '7', int4 '9', varchar(3) 'abc'").unwrap();
         assert_eq!(stmt.targets.len(), 3);

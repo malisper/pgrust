@@ -104,6 +104,7 @@ pub enum ExecError {
     Int2OutOfRange,
     Int4OutOfRange,
     Int8OutOfRange,
+    OidOutOfRange,
     NumericFieldOverflow,
     RequestedLengthTooLarge,
 }
@@ -1951,6 +1952,33 @@ mod tests {
                 vec![Value::Int64(4_567_890_123_456_791)],
                 vec![Value::Int64(4_567_890_123_456_793)],
             ],
+        );
+    }
+
+    #[test]
+    fn cast_int8_to_oid_reports_range_error() {
+        let err = expr_casts::cast_value(
+            Value::Int64(-1),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Oid),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::OidOutOfRange));
+    }
+
+    #[test]
+    fn synthetic_pg_class_exposes_oid_column() {
+        let base = temp_dir("pg_class_oid");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select oid::int8 from pg_class where relname = 'pg_class'",
+            )
+            .unwrap(),
+            vec![vec![Value::Int64(1259)]],
         );
     }
 

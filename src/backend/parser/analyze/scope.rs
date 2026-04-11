@@ -124,6 +124,31 @@ pub(super) fn bind_from_item(
 ) -> Result<(Plan, BoundScope), ParseError> {
     match stmt {
         FromItem::Table { name } => {
+            if name.eq_ignore_ascii_case("pg_class") {
+                let output_columns = vec![
+                    QueryColumn {
+                        name: "oid".into(),
+                        sql_type: SqlType::new(SqlTypeKind::Oid),
+                    },
+                    QueryColumn::text("relname"),
+                ];
+                let desc = RelationDesc {
+                    columns: output_columns
+                        .iter()
+                        .map(|col| column_desc(col.name.clone(), col.sql_type, false))
+                        .collect(),
+                };
+                return Ok((
+                    Plan::Values {
+                        rows: vec![vec![
+                            Expr::Const(Value::Int32(1259)),
+                            Expr::Const(Value::Text("pg_class".into())),
+                        ]],
+                        output_columns: output_columns.clone(),
+                    },
+                    scope_for_relation(Some(name), &desc),
+                ));
+            }
             let entry = catalog
                 .get(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.clone()))?;

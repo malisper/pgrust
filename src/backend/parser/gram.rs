@@ -825,6 +825,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int4 => "int4",
         SqlTypeKind::Int8 => "int8",
+        SqlTypeKind::Oid => "oid",
         SqlTypeKind::Float4 => "float4",
         SqlTypeKind::Float8 => "float8",
         SqlTypeKind::Numeric => "numeric",
@@ -882,6 +883,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_int2 | Rule::kw_smallint => SqlType::new(SqlTypeKind::Int2),
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
         Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
+        Rule::kw_oid => SqlType::new(SqlTypeKind::Oid),
         Rule::kw_float4 | Rule::kw_real => SqlType::new(SqlTypeKind::Float4),
         Rule::kw_float8 | Rule::double_precision_type => SqlType::new(SqlTypeKind::Float8),
         Rule::numeric_type => {

@@ -264,7 +264,7 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             }
             Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().unwrap())))
         }
-        SqlTypeKind::Int4 => {
+        SqlTypeKind::Int4 | SqlTypeKind::Oid => {
             if bytes.len() != 4 {
                 return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "int4 array element must be 4 bytes".into() });
             }

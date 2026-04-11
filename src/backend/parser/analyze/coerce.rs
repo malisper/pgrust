@@ -36,7 +36,7 @@ pub(super) fn resolve_numeric_binary_type(
     if matches!(left.kind, Int8) || matches!(right.kind, Int8) {
         return Ok(SqlType::new(Int8));
     }
-    if matches!(left.kind, Int4) || matches!(right.kind, Int4) {
+    if matches!(left.kind, Int4 | Oid) || matches!(right.kind, Int4 | Oid) {
         return Ok(SqlType::new(Int4));
     }
     Ok(SqlType::new(Int2))
@@ -47,6 +47,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int4 => "integer",
         SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Oid => "oid",
         SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Numeric => "numeric",
@@ -68,6 +69,7 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
         SqlTypeKind::Int2
             | SqlTypeKind::Int4
             | SqlTypeKind::Int8
+            | SqlTypeKind::Oid
             | SqlTypeKind::Float4
             | SqlTypeKind::Float8
             | SqlTypeKind::Numeric
@@ -77,7 +79,7 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
 pub(super) fn is_integer_family(ty: SqlType) -> bool {
     matches!(
         ty.element_type().kind,
-        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
     )
 }
 
