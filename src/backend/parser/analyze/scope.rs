@@ -18,6 +18,13 @@ pub(crate) struct GroupedOuterScope {
     pub(crate) group_by_exprs: Vec<SqlExpr>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BoundCte {
+    pub(crate) name: String,
+    pub(crate) plan: Plan,
+    pub(crate) desc: RelationDesc,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ResolvedColumn {
     Local(usize),
@@ -39,6 +46,7 @@ pub(super) fn bind_values_rows(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<(Plan, BoundScope), ParseError> {
     let width = rows.first().map(Vec::len).unwrap_or(0);
     for row in rows {
@@ -67,8 +75,14 @@ pub(super) fn bind_values_rows(
     for col_idx in 0..width {
         let mut common = None;
         for row in rows {
-            let ty =
-                infer_sql_expr_type(&row[col_idx], &empty, catalog, outer_scopes, grouped_outer);
+            let ty = infer_sql_expr_type_with_ctes(
+                &row[col_idx],
+                &empty,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             common = Some(match common {
                 None => ty.element_type(),
                 Some(existing) => resolve_common_scalar_type(existing, ty).ok_or_else(|| {
@@ -93,9 +107,23 @@ pub(super) fn bind_values_rows(
             row.iter()
                 .zip(column_types.iter())
                 .map(|(expr, ty)| {
-                    let from = infer_sql_expr_type(expr, &empty, catalog, outer_scopes, grouped_outer);
+                    let from = infer_sql_expr_type_with_ctes(
+                        expr,
+                        &empty,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
                     Ok(coerce_bound_expr(
-                        bind_expr_with_outer(expr, &empty, catalog, outer_scopes, grouped_outer)?,
+                        bind_expr_with_outer_and_ctes(
+                            expr,
+                            &empty,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
                         from,
                         *ty,
                     ))
@@ -228,8 +256,24 @@ pub(super) fn bind_from_item(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<(Plan, BoundScope), ParseError> {
+    bind_from_item_with_ctes(stmt, catalog, outer_scopes, grouped_outer, &[])
+}
+
+pub(super) fn bind_from_item_with_ctes(
+    stmt: &FromItem,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(Plan, BoundScope), ParseError> {
     match stmt {
         FromItem::Table { name } => {
+            if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
+                return Ok((
+                    cte.plan.clone(),
+                    scope_for_relation(Some(name), &cte.desc),
+                ));
+            }
             if name.eq_ignore_ascii_case("pg_class") {
                 let output_columns = vec![
                     QueryColumn {
@@ -268,7 +312,7 @@ pub(super) fn bind_from_item(
             ))
         }
         FromItem::Values { rows } => {
-            bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer)
+            bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
         }
         FromItem::FunctionCall { name, args } => match name.as_str() {
             "generate_series" => {
@@ -555,7 +599,7 @@ pub(super) fn bind_from_item(
             }
         },
         FromItem::DerivedTable(select) => {
-            let plan = build_plan_with_outer(select, catalog, &[], None)?;
+            let plan = build_plan_with_outer(select, catalog, &[], None, ctes)?;
             let desc = synthetic_desc_from_plan(&plan);
             Ok((plan, scope_for_relation(None, &desc)))
         }
@@ -566,13 +610,20 @@ pub(super) fn bind_from_item(
             on,
         } => {
             let (left_plan, left_scope) =
-                bind_from_item(left, catalog, outer_scopes, grouped_outer)?;
+                bind_from_item_with_ctes(left, catalog, outer_scopes, grouped_outer, ctes)?;
             let (right_plan, right_scope) =
-                bind_from_item(right, catalog, outer_scopes, grouped_outer)?;
+                bind_from_item_with_ctes(right, catalog, outer_scopes, grouped_outer, ctes)?;
             let scope = combine_scopes(&left_scope, &right_scope);
             let on = match (kind, on) {
                 (JoinKind::Inner, Some(on)) => {
-                    bind_expr_with_outer(on, &scope, catalog, outer_scopes, grouped_outer)?
+                    bind_expr_with_outer_and_ctes(
+                        on,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?
                 }
                 (JoinKind::Cross, None) => Expr::Const(Value::Bool(true)),
                 _ => {
@@ -596,7 +647,8 @@ pub(super) fn bind_from_item(
             alias,
             column_aliases,
         } => {
-            let (plan, scope) = bind_from_item(source, catalog, outer_scopes, grouped_outer)?;
+            let (plan, scope) =
+                bind_from_item_with_ctes(source, catalog, outer_scopes, grouped_outer, ctes)?;
             apply_relation_alias(plan, scope, alias, column_aliases)
         }
     }

@@ -9,9 +9,12 @@ pub(super) fn bind_arithmetic_expr(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let raw_left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
-    let raw_right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type = coerce_unknown_string_literal_type(
         left,
         raw_left_type,
@@ -24,12 +27,12 @@ pub(super) fn bind_arithmetic_expr(
     );
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
-        bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?,
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
         raw_left_type,
         common,
     );
     let right = coerce_bound_expr(
-        bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
         raw_right_type,
         common,
     );
@@ -44,9 +47,12 @@ pub(super) fn bind_comparison_expr(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let raw_left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
-    let raw_right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type = coerce_unknown_string_literal_type(
         left,
         raw_left_type,
@@ -57,8 +63,10 @@ pub(super) fn bind_comparison_expr(
         raw_right_type,
         left_type,
     );
-    let left_bound = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
-    let right_bound = bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?;
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     let (left, right) = if is_numeric_family(left_type) && is_numeric_family(right_type) {
         let common = if is_oid_integer_comparison(left_type, right_type) {
             SqlType::new(SqlTypeKind::Oid)
@@ -92,9 +100,12 @@ pub(super) fn bind_shift_expr(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
-    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     if !is_integer_family(left_type) || !is_integer_family(right_type) {
         return Err(ParseError::UndefinedOperator {
             op,
@@ -103,9 +114,10 @@ pub(super) fn bind_shift_expr(
         });
     }
 
-    let left = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
+    let left =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     let right = coerce_bound_expr(
-        bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
         right_type,
         SqlType::new(SqlTypeKind::Int4),
     );
@@ -121,9 +133,12 @@ pub(super) fn bind_bitwise_expr(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
-    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    let left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     if !is_integer_family(left_type) || !is_integer_family(right_type) {
         return Err(ParseError::UndefinedOperator {
             op,
@@ -133,12 +148,12 @@ pub(super) fn bind_bitwise_expr(
     }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
-        bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?,
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
         left_type,
         common,
     );
     let right = coerce_bound_expr(
-        bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
         right_type,
         common,
     );
@@ -152,11 +167,16 @@ pub(super) fn bind_concat_expr(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
-    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
-    let left_bound = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
-    let right_bound = bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?;
+    let left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     bind_concat_operands(left, left_type, left_bound, right, right_type, right_bound)
 }
 

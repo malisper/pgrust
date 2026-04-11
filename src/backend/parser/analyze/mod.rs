@@ -84,6 +84,103 @@ pub fn normalize_create_table_as_name(
     )
 }
 
+fn relation_desc_from_plan(plan: &Plan) -> RelationDesc {
+    RelationDesc {
+        columns: plan
+            .column_names()
+            .into_iter()
+            .zip(plan.columns())
+            .map(|(name, col)| column_desc(name, col.sql_type, true))
+            .collect(),
+    }
+}
+
+fn apply_cte_column_names(
+    plan: Plan,
+    desc: RelationDesc,
+    column_names: &[String],
+) -> Result<(Plan, RelationDesc), ParseError> {
+    if column_names.is_empty() {
+        return Ok((plan, desc));
+    }
+    if column_names.len() != desc.columns.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CTE column alias count matching query width",
+            actual: format!(
+                "CTE query has {} columns but {} column aliases were specified",
+                desc.columns.len(),
+                column_names.len()
+            ),
+        });
+    }
+    let renamed_desc = RelationDesc {
+        columns: desc
+            .columns
+            .iter()
+            .zip(column_names.iter())
+            .map(|(column, name)| {
+                let mut column = column.clone();
+                column.name = name.clone();
+                column.storage.name = name.clone();
+                column
+            })
+            .collect(),
+    };
+    let projection = Plan::Projection {
+        input: Box::new(plan),
+        targets: renamed_desc
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| TargetEntry {
+                name: column.name.clone(),
+                expr: Expr::Column(index),
+                sql_type: column.sql_type,
+            })
+            .collect(),
+    };
+    Ok((projection, renamed_desc))
+}
+
+fn bind_ctes(
+    ctes: &[CommonTableExpr],
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    outer_ctes: &[BoundCte],
+) -> Result<Vec<BoundCte>, ParseError> {
+    let mut bound = Vec::with_capacity(ctes.len());
+    for cte in ctes {
+        let mut visible = bound.clone();
+        visible.extend_from_slice(outer_ctes);
+        let (plan, desc) = match &cte.body {
+            CteBody::Select(select) => {
+                let plan =
+                    build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.clone(), &visible)?;
+                let desc = relation_desc_from_plan(&plan);
+                apply_cte_column_names(plan, desc, &cte.column_names)?
+            }
+            CteBody::Values(values) => {
+                let plan = build_values_plan_with_outer(
+                    values,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.clone(),
+                    &visible,
+                )?;
+                let desc = relation_desc_from_plan(&plan);
+                apply_cte_column_names(plan, desc, &cte.column_names)?
+            }
+        };
+        bound.push(BoundCte {
+            name: cte.name.clone(),
+            plan,
+            desc,
+        });
+    }
+    Ok(bound)
+}
+
 pub fn bind_create_table(
     stmt: &CreateTableStatement,
     catalog: &mut Catalog,
@@ -112,11 +209,26 @@ pub fn bind_create_table(
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
-    build_plan_with_outer(stmt, catalog, &[], None)
+    build_plan_with_outer(stmt, catalog, &[], None, &[])
 }
 
 pub fn build_values_plan(stmt: &ValuesStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
-    let (mut plan, scope) = bind_values_rows(&stmt.rows, None, catalog, &[], None)?;
+    build_values_plan_with_outer(stmt, catalog, &[], None, &[])
+}
+
+fn build_values_plan_with_outer(
+    stmt: &ValuesStatement,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<GroupedOuterScope>,
+    outer_ctes: &[BoundCte],
+) -> Result<Plan, ParseError> {
+    let local_ctes =
+        bind_ctes(&stmt.with, catalog, outer_scopes, grouped_outer.clone(), outer_ctes)?;
+    let mut visible_ctes = local_ctes;
+    visible_ctes.extend_from_slice(outer_ctes);
+    let (mut plan, scope) =
+        bind_values_rows(&stmt.rows, None, catalog, outer_scopes, grouped_outer.as_ref(), &visible_ctes)?;
     let output_columns = match &plan {
         Plan::Values { output_columns, .. } => output_columns.clone(),
         other => {
@@ -140,7 +252,14 @@ pub fn build_values_plan(stmt: &ValuesStatement, catalog: &Catalog) -> Result<Pl
         plan = Plan::OrderBy {
             input: Box::new(plan),
             items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                bind_expr_with_outer(expr, &scope, catalog, &[], None)
+                bind_expr_with_outer_and_ctes(
+                    expr,
+                    &scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.as_ref(),
+                    &visible_ctes,
+                )
             })?,
         };
     }
@@ -161,13 +280,18 @@ fn build_plan_with_outer(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
+    outer_ctes: &[BoundCte],
 ) -> Result<Plan, ParseError> {
+    let local_ctes = bind_ctes(&stmt.with, catalog, outer_scopes, grouped_outer.clone(), outer_ctes)?;
+    let mut visible_ctes = local_ctes;
+    visible_ctes.extend_from_slice(outer_ctes);
+
     if stmt.targets.is_empty() && stmt.from.is_none() {
         return Err(ParseError::EmptySelectList);
     }
 
     let (base, scope) = if let Some(from) = &stmt.from {
-        bind_from_item(from, catalog, outer_scopes, grouped_outer.as_ref())?
+        bind_from_item_with_ctes(from, catalog, outer_scopes, grouped_outer.as_ref(), &visible_ctes)?
     } else {
         (Plan::Result, empty_scope())
     };
@@ -181,12 +305,13 @@ fn build_plan_with_outer(
     let filtered_plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
             input: Box::new(base),
-            predicate: bind_expr_with_outer(
+            predicate: bind_expr_with_outer_and_ctes(
                 predicate,
                 &scope,
                 catalog,
                 outer_scopes,
                 grouped_outer.as_ref(),
+                &visible_ctes,
             )?,
         }
     } else {
@@ -226,7 +351,16 @@ fn build_plan_with_outer(
         let group_keys: Vec<Expr> = stmt
             .group_by
             .iter()
-            .map(|e| bind_expr_with_outer(e, &scope, catalog, outer_scopes, grouped_outer.as_ref()))
+            .map(|e| {
+                bind_expr_with_outer_and_ctes(
+                    e,
+                    &scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.as_ref(),
+                    &visible_ctes,
+                )
+            })
             .collect::<Result<_, _>>()?;
 
         let accumulators: Vec<AggAccum> = aggs
@@ -234,19 +368,27 @@ fn build_plan_with_outer(
             .map(|(func, args, distinct)| {
                 validate_aggregate_arity(*func, args)?;
                 let arg_type = args.first().map(|e| {
-                    infer_sql_expr_type(e, &scope, catalog, outer_scopes, grouped_outer.as_ref())
+                    infer_sql_expr_type_with_ctes(
+                        e,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &visible_ctes,
+                    )
                 });
                 Ok(AggAccum {
                     func: *func,
                     args: args
                         .iter()
                         .map(|e| {
-                            bind_expr_with_outer(
+                            bind_expr_with_outer_and_ctes(
                                 e,
                                 &scope,
                                 catalog,
                                 outer_scopes,
                                 grouped_outer.as_ref(),
+                                &visible_ctes,
                             )
                         })
                         .collect::<Result<_, _>>()?,
@@ -261,12 +403,13 @@ fn build_plan_with_outer(
         for gk in &stmt.group_by {
             output_columns.push(QueryColumn {
                 name: sql_expr_name(gk),
-                sql_type: infer_sql_expr_type(
+                sql_type: infer_sql_expr_type_with_ctes(
                     gk,
                     &scope,
                     catalog,
                     outer_scopes,
                     grouped_outer.as_ref(),
+                    &visible_ctes,
                 ),
             });
         }
@@ -276,12 +419,13 @@ fn build_plan_with_outer(
                 sql_type: aggregate_sql_type(
                     *func,
                     args.first().map(|e| {
-                        infer_sql_expr_type(
+                        infer_sql_expr_type_with_ctes(
                             e,
                             &scope,
                             catalog,
                             outer_scopes,
                             grouped_outer.as_ref(),
+                            &visible_ctes,
                         )
                     }),
                 ),
@@ -343,12 +487,13 @@ fn build_plan_with_outer(
                             &aggs,
                             n_keys,
                         )?,
-                        sql_type: infer_sql_expr_type(
+                        sql_type: infer_sql_expr_type_with_ctes(
                             &item.expr,
                             &scope,
                             catalog,
                             outer_scopes,
                             grouped_outer.as_ref(),
+                            &visible_ctes,
                         ),
                     })
                 })
@@ -397,13 +542,21 @@ fn build_plan_with_outer(
             catalog,
             outer_scopes,
             grouped_outer.as_ref(),
+            &visible_ctes,
         )?;
 
         if !stmt.order_by.is_empty() {
             plan = Plan::OrderBy {
                 input: Box::new(plan),
                 items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                    bind_expr_with_outer(expr, &scope, catalog, outer_scopes, grouped_outer.as_ref())
+                    bind_expr_with_outer_and_ctes(
+                        expr,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &visible_ctes,
+                    )
                 })?,
             };
         }

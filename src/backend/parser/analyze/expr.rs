@@ -24,6 +24,17 @@ pub(crate) fn bind_expr_with_outer(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<Expr, ParseError> {
+    bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
+}
+
+pub(crate) fn bind_expr_with_outer_and_ctes(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
     Ok(match expr {
         SqlExpr::Column(name) => {
             match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer)? {
@@ -43,6 +54,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Sub(left, right) => bind_arithmetic_expr(
             "-",
@@ -53,6 +65,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::BitAnd(left, right) => bind_bitwise_expr(
             "&",
@@ -63,6 +76,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::BitOr(left, right) => bind_bitwise_expr(
             "|",
@@ -73,6 +87,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::BitXor(left, right) => bind_bitwise_expr(
             "#",
@@ -83,6 +98,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Shl(left, right) => bind_shift_expr(
             "<<",
@@ -93,6 +109,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Shr(left, right) => bind_shift_expr(
             ">>",
@@ -103,6 +120,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Mul(left, right) => bind_arithmetic_expr(
             "*",
@@ -113,6 +131,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Div(left, right) => bind_arithmetic_expr(
             "/",
@@ -123,6 +142,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Mod(left, right) => bind_arithmetic_expr(
             "%",
@@ -133,6 +153,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Concat(left, right) => bind_concat_expr(
             left,
@@ -141,23 +162,33 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
-        SqlExpr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(bind_expr_with_outer(
+        SqlExpr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(bind_expr_with_outer_and_ctes(
             inner,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?)),
-        SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr_with_outer(
+        SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr_with_outer_and_ctes(
             inner,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?)),
         SqlExpr::BitNot(inner) => {
-            let inner_type = infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer);
+            let inner_type = infer_sql_expr_type_with_ctes(
+                inner,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if !is_integer_family(inner_type) {
                 return Err(ParseError::UndefinedOperator {
                     op: "~",
@@ -165,12 +196,13 @@ pub(crate) fn bind_expr_with_outer(
                     right_type: "unknown".to_string(),
                 });
             }
-            Expr::BitNot(Box::new(bind_expr_with_outer(
+            Expr::BitNot(Box::new(bind_expr_with_outer_and_ctes(
                 inner,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?))
         }
         SqlExpr::Cast(inner, ty) => {
@@ -179,19 +211,27 @@ pub(crate) fn bind_expr_with_outer(
                     elements: elements
                         .iter()
                         .map(|element| {
-                            bind_expr_with_outer(
+                            bind_expr_with_outer_and_ctes(
                                 element,
                                 scope,
                                 catalog,
                                 outer_scopes,
                                 grouped_outer,
+                                ctes,
                             )
                         })
                         .collect::<Result<_, _>>()?,
                     array_type: *ty,
                 }
             } else {
-                bind_expr_with_outer(inner, scope, catalog, outer_scopes, grouped_outer)?
+                bind_expr_with_outer_and_ctes(
+                    inner,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
             };
             Expr::Cast(Box::new(bound_inner), *ty)
         }
@@ -203,6 +243,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::NotEq(left, right) => bind_comparison_expr(
             Expr::NotEq,
@@ -212,6 +253,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Lt(left, right) => bind_comparison_expr(
             Expr::Lt,
@@ -221,6 +263,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::LtEq(left, right) => bind_comparison_expr(
             Expr::LtEq,
@@ -230,6 +273,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::Gt(left, right) => bind_comparison_expr(
             Expr::Gt,
@@ -239,6 +283,7 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::GtEq(left, right) => bind_comparison_expr(
             Expr::GtEq,
@@ -248,137 +293,165 @@ pub(crate) fn bind_expr_with_outer(
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?,
         SqlExpr::RegexMatch(left, right) => Expr::RegexMatch(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::And(left, right) => Expr::And(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::Or(left, right) => Expr::Or(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
-        SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr_with_outer(
+        SqlExpr::Not(inner) => Expr::Not(Box::new(bind_expr_with_outer_and_ctes(
             inner,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?)),
-        SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr_with_outer(
+        SqlExpr::IsNull(inner) => Expr::IsNull(Box::new(bind_expr_with_outer_and_ctes(
             inner,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?)),
-        SqlExpr::IsNotNull(inner) => Expr::IsNotNull(Box::new(bind_expr_with_outer(
+        SqlExpr::IsNotNull(inner) => Expr::IsNotNull(Box::new(bind_expr_with_outer_and_ctes(
             inner,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
+            ctes,
         )?)),
         SqlExpr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::ArrayLiteral(elements) => Expr::ArrayLiteral {
             elements: elements
                 .iter()
                 .map(|element| {
-                    bind_expr_with_outer(element, scope, catalog, outer_scopes, grouped_outer)
+                    bind_expr_with_outer_and_ctes(
+                        element,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
                 })
                 .collect::<Result<_, _>>()?,
-            array_type: infer_array_literal_type(
+            array_type: infer_array_literal_type_with_ctes(
                 elements,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
-            )?,
+                ctes,
+            )
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "ARRAY[...] with a typed element or explicit cast",
+                actual: "ARRAY[]".into(),
+            })?,
         },
         SqlExpr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::AggCall { .. } => {
@@ -391,7 +464,7 @@ pub(crate) fn bind_expr_with_outer(
             let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
             child_outer.push(scope.clone());
             child_outer.extend_from_slice(outer_scopes);
-            let plan = build_plan_with_outer(select, catalog, &child_outer, None)?;
+            let plan = build_plan_with_outer(select, catalog, &child_outer, None, ctes)?;
             ensure_single_column_subquery(&plan)?;
             Expr::ScalarSubquery(Box::new(plan))
         }
@@ -404,6 +477,7 @@ pub(crate) fn bind_expr_with_outer(
                 catalog,
                 &child_outer,
                 None,
+                ctes,
             )?))
         }
         SqlExpr::InSubquery {
@@ -414,15 +488,16 @@ pub(crate) fn bind_expr_with_outer(
             let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
             child_outer.push(scope.clone());
             child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None)?;
+            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None, ctes)?;
             ensure_single_column_subquery(&subquery_plan)?;
             let any_expr = Expr::AnySubquery {
-                left: Box::new(bind_expr_with_outer(
+                left: Box::new(bind_expr_with_outer_and_ctes(
                     expr,
                     scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
+                    ctes,
                 )?),
                 op: SubqueryComparisonOp::Eq,
                 subquery: Box::new(subquery_plan),
@@ -442,28 +517,30 @@ pub(crate) fn bind_expr_with_outer(
             let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
             child_outer.push(scope.clone());
             child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None)?;
+            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None, ctes)?;
             ensure_single_column_subquery(&subquery_plan)?;
             if *is_all {
                 Expr::AllSubquery {
-                    left: Box::new(bind_expr_with_outer(
+                    left: Box::new(bind_expr_with_outer_and_ctes(
                         left,
                         scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
+                        ctes,
                     )?),
                     op: *op,
                     subquery: Box::new(subquery_plan),
                 }
             } else {
                 Expr::AnySubquery {
-                    left: Box::new(bind_expr_with_outer(
+                    left: Box::new(bind_expr_with_outer_and_ctes(
                         left,
                         scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
+                        ctes,
                     )?),
                     op: *op,
                     subquery: Box::new(subquery_plan),
@@ -478,217 +555,243 @@ pub(crate) fn bind_expr_with_outer(
         } => {
             if *is_all {
                 Expr::AllArray {
-                    left: Box::new(bind_expr_with_outer(
+                    left: Box::new(bind_expr_with_outer_and_ctes(
                         left,
                         scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
+                        ctes,
                     )?),
                     op: *op,
-                    right: Box::new(bind_expr_with_outer(
+                    right: Box::new(bind_expr_with_outer_and_ctes(
                         array,
                         scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
+                        ctes,
                     )?),
                 }
             } else {
                 Expr::AnyArray {
-                    left: Box::new(bind_expr_with_outer(
+                    left: Box::new(bind_expr_with_outer_and_ctes(
                         left,
                         scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
+                        ctes,
                     )?),
                     op: *op,
-                    right: Box::new(bind_expr_with_outer(
+                    right: Box::new(bind_expr_with_outer_and_ctes(
                         array,
                         scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
+                        ctes,
                     )?),
                 }
             }
         }
         SqlExpr::Random => Expr::Random,
         SqlExpr::JsonGet(left, right) => Expr::JsonGet(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonGetText(left, right) => Expr::JsonGetText(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonPath(left, right) => Expr::JsonPath(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonPathText(left, right) => Expr::JsonPathText(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonbContains(left, right) => Expr::JsonbContains(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonbContained(left, right) => Expr::JsonbContained(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonbExists(left, right) => Expr::JsonbExists(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonbExistsAny(left, right) => Expr::JsonbExistsAny(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonbPathExists(left, right) => Expr::JsonbPathExists(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
-            Box::new(bind_expr_with_outer(
+            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?),
         ),
         SqlExpr::FuncCall { name, args } => {
@@ -699,15 +802,22 @@ pub(crate) fn bind_expr_with_outer(
                         actual: format!("{name}({} args)", args.len()),
                     });
                 }
-                let arg_type =
-                    infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+                let arg_type = infer_sql_expr_type_with_ctes(
+                    &args[0],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
                 return Ok(Expr::Cast(
-                    Box::new(bind_expr_with_outer(
+                    Box::new(bind_expr_with_outer_and_ctes(
                         &args[0],
                         scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
+                        ctes,
                     )?),
                     if arg_type == target_type {
                         arg_type
@@ -721,7 +831,7 @@ pub(crate) fn bind_expr_with_outer(
                 actual: name.clone(),
             })?;
             validate_scalar_function_arity(func, args)?;
-            bind_scalar_function_call(func, args, scope, catalog, outer_scopes, grouped_outer)?
+            bind_scalar_function_call(func, args, scope, catalog, outer_scopes, grouped_outer, ctes)?
         }
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
@@ -734,15 +844,32 @@ fn bind_scalar_function_call(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     let bound_args = args
         .iter()
-        .map(|arg| bind_expr_with_outer(arg, scope, catalog, outer_scopes, grouped_outer))
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     match func {
         BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
-            let left_type = infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
-            let right_type = infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            let left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if !should_use_text_concat(&args[0], left_type, &args[0], left_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text argument",
@@ -764,10 +891,22 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Position | BuiltinScalarFunction::ConvertFrom => {
-            let left_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
-            let right_type =
-                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            let left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             Ok(Expr::FuncCall {
                 func,
                 args: vec![
@@ -785,8 +924,14 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Lower => {
-            let arg_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             Ok(Expr::FuncCall {
                 func,
                 args: vec![coerce_bound_expr(
@@ -797,8 +942,14 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Md5 => {
-            let arg_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if !matches!(arg_type.kind, SqlTypeKind::Text | SqlTypeKind::Bytea) || arg_type.is_array {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text or bytea argument",
@@ -811,10 +962,22 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::ToChar => {
-            let value_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
-            let format_type =
-                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            let value_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let format_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if !is_numeric_family(value_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "numeric argument",
@@ -834,10 +997,22 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => {
-            let left_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
-            let right_type =
-                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            let left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if !is_integer_family(left_type) || !is_integer_family(right_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "integer arguments",
@@ -884,8 +1059,14 @@ fn bind_scalar_function_call(
         | BuiltinScalarFunction::Erfc
         | BuiltinScalarFunction::Gamma
         | BuiltinScalarFunction::Lgamma => {
-            let raw_arg_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let arg_type = coerce_unknown_string_literal_type(
                 &args[0],
                 raw_arg_type,
@@ -907,8 +1088,14 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::BitcastIntegerToFloat4 => {
-            let arg_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if arg_type != SqlType::new(SqlTypeKind::Int4) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "integer argument",
@@ -921,8 +1108,14 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::BitcastBigintToFloat8 => {
-            let arg_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             if arg_type != SqlType::new(SqlTypeKind::Int8) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "bigint argument",
@@ -935,10 +1128,22 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => {
-            let raw_left_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
-            let raw_right_type =
-                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            let raw_left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let raw_right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let left_type = coerce_unknown_string_literal_type(
                 &args[0],
                 raw_left_type,
@@ -976,8 +1181,14 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send => {
-            let arg_type =
-                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let target_type = if matches!(func, BuiltinScalarFunction::Float4Send) {
                 SqlType::new(SqlTypeKind::Float4)
             } else {
@@ -1000,8 +1211,22 @@ fn bind_scalar_function_call(
         | BuiltinScalarFunction::PgInputErrorHint
         | BuiltinScalarFunction::PgInputErrorSqlState => {
             let text_type = SqlType::new(SqlTypeKind::Text);
-            let left_type = infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
-            let right_type = infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            let left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             Ok(Expr::FuncCall {
                 func,
                 args: vec![
