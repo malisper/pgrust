@@ -640,6 +640,8 @@ fn pg_float_cmp(left: f64, right: f64) -> Ordering {
 impl NumericValue {
     pub(crate) fn round_to_scale(&self, target_scale: u32) -> Option<Self> {
         match self {
+            Self::PosInf => Some(Self::PosInf),
+            Self::NegInf => Some(Self::NegInf),
             Self::NaN => Some(Self::NaN),
             Self::Finite { coeff, scale } => {
                 if *scale <= target_scale {
@@ -675,6 +677,9 @@ impl NumericValue {
     pub(crate) fn add(&self, other: &Self) -> Self {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
+            (Self::PosInf, Self::NegInf) | (Self::NegInf, Self::PosInf) => Self::NaN,
+            (Self::PosInf, _) | (_, Self::PosInf) => Self::PosInf,
+            (Self::NegInf, _) | (_, Self::NegInf) => Self::NegInf,
             (
                 Self::Finite {
                     coeff: lcoeff,
@@ -704,6 +709,30 @@ impl NumericValue {
     fn mul(&self, other: &Self) -> Self {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
+            (Self::PosInf | Self::NegInf, Self::Finite { coeff, .. })
+            | (Self::Finite { coeff, .. }, Self::PosInf | Self::NegInf)
+                if coeff.is_zero() =>
+            {
+                Self::NaN
+            }
+            (Self::PosInf, Self::PosInf) | (Self::NegInf, Self::NegInf) => Self::PosInf,
+            (Self::PosInf, Self::NegInf) | (Self::NegInf, Self::PosInf) => Self::NegInf,
+            (Self::PosInf, Self::Finite { coeff, .. })
+            | (Self::Finite { coeff, .. }, Self::PosInf) => {
+                if coeff.is_negative() {
+                    Self::NegInf
+                } else {
+                    Self::PosInf
+                }
+            }
+            (Self::NegInf, Self::Finite { coeff, .. })
+            | (Self::Finite { coeff, .. }, Self::NegInf) => {
+                if coeff.is_negative() {
+                    Self::PosInf
+                } else {
+                    Self::NegInf
+                }
+            }
             (
                 Self::Finite {
                     coeff: lcoeff,
@@ -724,6 +753,8 @@ impl NumericValue {
     fn rem(&self, other: &Self) -> Option<Self> {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
+            (Self::PosInf | Self::NegInf, _) => Some(Self::NaN),
+            (_, Self::PosInf | Self::NegInf) => Some(self.clone()),
             (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
             (
                 Self::Finite {
@@ -753,6 +784,18 @@ impl NumericValue {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
             (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
+            (Self::PosInf | Self::NegInf, Self::PosInf | Self::NegInf) => Some(Self::NaN),
+            (Self::PosInf, Self::Finite { coeff, .. }) => Some(if coeff.is_negative() {
+                Self::NegInf
+            } else {
+                Self::PosInf
+            }),
+            (Self::NegInf, Self::Finite { coeff, .. }) => Some(if coeff.is_negative() {
+                Self::PosInf
+            } else {
+                Self::NegInf
+            }),
+            (Self::Finite { .. }, Self::PosInf | Self::NegInf) => Some(Self::zero()),
             (
                 Self::Finite {
                     coeff: lcoeff,
@@ -789,6 +832,11 @@ impl NumericValue {
             (Self::NaN, Self::NaN) => Ordering::Equal,
             (Self::NaN, _) => Ordering::Greater,
             (_, Self::NaN) => Ordering::Less,
+            (Self::PosInf, Self::PosInf) | (Self::NegInf, Self::NegInf) => Ordering::Equal,
+            (Self::PosInf, _) => Ordering::Greater,
+            (_, Self::PosInf) => Ordering::Less,
+            (Self::NegInf, _) => Ordering::Less,
+            (_, Self::NegInf) => Ordering::Greater,
             (
                 Self::Finite {
                     coeff: lcoeff,
@@ -902,24 +950,71 @@ fn pow10_bigint(exp: u32) -> BigInt {
 }
 
 pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
-    if text.eq_ignore_ascii_case("nan") {
+    let trimmed = text.trim();
+    if trimmed.eq_ignore_ascii_case("nan") {
         return Some(NumericValue::NaN);
     }
-
-    let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "inf" | "+inf" | "infinity" | "+infinity" => return Some(NumericValue::PosInf),
+        "-inf" | "-infinity" => return Some(NumericValue::NegInf),
+        _ => {}
+    }
+    if trimmed.chars().any(|ch| ch.is_ascii_whitespace()) {
+        return None;
+    }
+
+    let (negative, unsigned) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, trimmed)
+    };
+
+    if let Some(rest) = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
+        let digits = normalize_numeric_digits(rest, |ch| ch.is_ascii_hexdigit())?;
+        let mut coeff = BigInt::parse_bytes(digits.as_bytes(), 16)?;
+        if negative {
+            coeff = -coeff;
+        }
+        return Some(NumericValue::Finite { coeff, scale: 0 }.normalize());
+    }
+    if let Some(rest) = unsigned
+        .strip_prefix("0o")
+        .or_else(|| unsigned.strip_prefix("0O"))
+    {
+        let digits = normalize_numeric_digits(rest, |ch| matches!(ch, '0'..='7'))?;
+        let mut coeff = BigInt::parse_bytes(digits.as_bytes(), 8)?;
+        if negative {
+            coeff = -coeff;
+        }
+        return Some(NumericValue::Finite { coeff, scale: 0 }.normalize());
+    }
+    if let Some(rest) = unsigned
+        .strip_prefix("0b")
+        .or_else(|| unsigned.strip_prefix("0B"))
+    {
+        let digits = normalize_numeric_digits(rest, |ch| matches!(ch, '0' | '1'))?;
+        let mut coeff = BigInt::parse_bytes(digits.as_bytes(), 2)?;
+        if negative {
+            coeff = -coeff;
+        }
+        return Some(NumericValue::Finite { coeff, scale: 0 }.normalize());
     }
 
     let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
         Some(index) => {
-            let exponent = trimmed[index + 1..].parse::<i32>().ok()?;
+            let exponent = parse_numeric_exponent(&trimmed[index + 1..])?;
             (&trimmed[..index], exponent)
         }
         None => (trimmed, 0),
     };
-
-    let negative = mantissa.starts_with('-');
     let unsigned = mantissa.strip_prefix(['+', '-']).unwrap_or(mantissa);
     let parts: Vec<&str> = unsigned.split('.').collect();
     if parts.len() > 2 {
@@ -930,10 +1025,8 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
     if whole.is_empty() && frac.is_empty() {
         return None;
     }
-    if !whole.chars().all(|ch| ch.is_ascii_digit()) || !frac.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-
+    let whole = normalize_numeric_decimal_component(whole, true)?;
+    let frac = normalize_numeric_decimal_component(frac, true)?;
     let mut digits = format!("{whole}{frac}");
     if digits.is_empty() {
         digits.push('0');
@@ -954,6 +1047,44 @@ pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
         }
         .normalize(),
     )
+}
+
+fn normalize_numeric_decimal_component(component: &str, allow_empty: bool) -> Option<String> {
+    if component.is_empty() {
+        return allow_empty.then(String::new);
+    }
+    normalize_numeric_digits(component, |ch| ch.is_ascii_digit())
+}
+
+fn normalize_numeric_digits(
+    digits: &str,
+    valid_digit: impl Fn(char) -> bool,
+) -> Option<String> {
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return None;
+    }
+    let normalized: String = digits.chars().filter(|&ch| ch != '_').collect();
+    if normalized.is_empty() || !normalized.chars().all(valid_digit) {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn parse_numeric_exponent(text: &str) -> Option<i32> {
+    let (negative, digits) = if let Some(rest) = text.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = text.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, text)
+    };
+    let digits = normalize_numeric_digits(digits, |ch| ch.is_ascii_digit())?;
+    let value = digits.parse::<i32>().ok()?;
+    Some(if negative { -value } else { value })
 }
 
 fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {

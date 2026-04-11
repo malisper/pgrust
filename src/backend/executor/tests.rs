@@ -3954,6 +3954,89 @@
     }
 
     #[test]
+    fn numeric_special_values_and_extended_input_forms_parse() {
+        let base = temp_dir("numeric_special_values_extended");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 'Infinity'::numeric, '-inf'::numeric, 'NaN '::numeric, '0xFF'::numeric, '.000_000_000_123e1_0'::numeric",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows[0][0], Value::Numeric(crate::include::nodes::datum::NumericValue::PosInf));
+                assert_eq!(rows[0][1], Value::Numeric(crate::include::nodes::datum::NumericValue::NegInf));
+                assert_eq!(rows[0][2], Value::Numeric("NaN".into()));
+                assert_eq!(rows[0][3], Value::Numeric("255".into()));
+                assert_eq!(rows[0][4], Value::Numeric("1.23".into()));
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn values_can_reconcile_numeric_and_string_numeric_literals() {
+        let base = temp_dir("values_numeric_string_literals");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "with v(x) as (values ('0'::numeric), ('inf'), ('-inf'), ('nan')) select x::text from v order by 1",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![Value::Text("-Infinity".into())],
+                        vec![Value::Text("0".into())],
+                        vec![Value::Text("Infinity".into())],
+                        vec![Value::Text("NaN".into())],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn numeric_negative_scale_typmods_round_on_insert() {
+        let base = temp_dir("numeric_negative_scale_typmod");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '123456'::numeric(3,-3), '123456789'::numeric(3,-6)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, columns, .. } => {
+                assert_eq!(
+                    columns[0].sql_type,
+                    crate::backend::parser::SqlType::with_numeric_precision_scale(3, -3)
+                );
+                assert_eq!(
+                    columns[1].sql_type,
+                    crate::backend::parser::SqlType::with_numeric_precision_scale(3, -6)
+                );
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("123000".into()),
+                        Value::Numeric("123000000".into())
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn float_nan_comparisons_follow_postgres_ordering() {
         let base = temp_dir("float_nan_comparisons");
         let txns = TransactionManager::new_durable(&base).unwrap();

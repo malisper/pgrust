@@ -8,6 +8,8 @@ use super::ExecError;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::pgrust::compact_string::CompactString;
+use num_integer::Integer;
+use num_traits::Signed;
 
 pub(crate) struct InputErrorInfo {
     pub(crate) message: String,
@@ -982,15 +984,72 @@ fn coerce_numeric_value(parsed: NumericValue, ty: SqlType) -> Result<NumericValu
         return Ok(parsed);
     };
 
-    let rounded = parsed
-        .round_to_scale(scale as u32)
-        .ok_or(ExecError::NumericFieldOverflow)?;
+    let rounded = if scale >= 0 {
+        parsed
+            .round_to_scale(scale as u32)
+            .ok_or(ExecError::NumericFieldOverflow)?
+    } else {
+        coerce_numeric_negative_scale(parsed, scale)?
+    };
 
-    if rounded.digit_count() > precision {
-        return Err(ExecError::NumericFieldOverflow);
+    match rounded {
+        NumericValue::NaN => Ok(NumericValue::NaN),
+        NumericValue::PosInf | NumericValue::NegInf => Err(ExecError::NumericFieldOverflow),
+        NumericValue::Finite { .. } => {
+            let max_digits_before_decimal = precision - scale;
+            let digits_before_decimal = numeric_digits_before_decimal(&rounded);
+            if digits_before_decimal > max_digits_before_decimal {
+                return Err(ExecError::NumericFieldOverflow);
+            }
+            Ok(rounded)
+        }
     }
+}
 
-    Ok(rounded)
+fn coerce_numeric_negative_scale(parsed: NumericValue, scale: i32) -> Result<NumericValue, ExecError> {
+    let shift = scale.unsigned_abs();
+    match parsed {
+        NumericValue::Finite { coeff, scale: current_scale } => {
+            let integer = coeff;
+            let factor = pow10_bigint(current_scale.saturating_add(shift));
+            let (quotient, remainder) = integer.div_rem(&factor);
+            let twice = remainder.abs() * 2u8;
+            let rounded = if twice >= factor.abs() {
+                quotient + integer.signum()
+            } else {
+                quotient
+            };
+            Ok(NumericValue::Finite {
+                coeff: rounded * pow10_bigint(shift),
+                scale: 0,
+            }
+            .normalize())
+        }
+        other => Ok(other),
+    }
+}
+
+fn numeric_digits_before_decimal(value: &NumericValue) -> i32 {
+    match value {
+        NumericValue::Finite { coeff, scale } => {
+            let digits = coeff
+                .to_str_radix(10)
+                .trim_start_matches('-')
+                .trim_start_matches('0')
+                .len()
+                .max(1) as i32;
+            (digits - *scale as i32).max(1)
+        }
+        _ => 0,
+    }
+}
+
+fn pow10_bigint(exp: u32) -> num_bigint::BigInt {
+    let mut value = num_bigint::BigInt::from(1u8);
+    for _ in 0..exp {
+        value *= 10u8;
+    }
+    value
 }
 
 fn parse_pg_float(text: &str, kind: SqlTypeKind) -> Result<f64, ExecError> {

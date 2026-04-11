@@ -33,6 +33,8 @@ const NUMERIC_NEG: u16 = 0x4000;
 const NUMERIC_SHORT: u16 = 0x8000;
 const NUMERIC_SPECIAL: u16 = 0xC000;
 const NUMERIC_NAN: u16 = 0xC000;
+const NUMERIC_PINF: u16 = 0xD000;
+const NUMERIC_NINF: u16 = 0xF000;
 const NUMERIC_DSCALE_MASK: u16 = 0x3FFF;
 const NUMERIC_SHORT_SIGN_MASK: u16 = 0x2000;
 const NUMERIC_SHORT_DSCALE_MASK: u16 = 0x1F80;
@@ -672,6 +674,18 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
             push_u16(&mut out, NUMERIC_NAN);
             out
         }
+        NumericValue::PosInf => {
+            let mut out = Vec::with_capacity(6);
+            push_i32(&mut out, 6);
+            push_u16(&mut out, NUMERIC_PINF);
+            out
+        }
+        NumericValue::NegInf => {
+            let mut out = Vec::with_capacity(6);
+            push_i32(&mut out, 6);
+            push_u16(&mut out, NUMERIC_NINF);
+            out
+        }
         NumericValue::Finite { coeff, scale } => {
             let (sign, mut digits, weight) = decimal_to_pg_digits(coeff, *scale);
             while matches!(digits.first(), Some(0)) {
@@ -727,6 +741,10 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
     if header & NUMERIC_SPECIAL == NUMERIC_SPECIAL {
         return if header == NUMERIC_NAN {
             Ok(NumericValue::NaN)
+        } else if header == NUMERIC_PINF {
+            Ok(NumericValue::PosInf)
+        } else if header == NUMERIC_NINF {
+            Ok(NumericValue::NegInf)
         } else {
             Err(corrupt_jsonb())
         };

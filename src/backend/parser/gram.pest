@@ -108,7 +108,7 @@ base_type_name = { internal_char_type | kw_int2 | kw_smallint | kw_int4 | kw_int
 internal_char_type = @{ ^"\"char\"" }
 array_suffix = { "[" ~ "]" }
 double_precision_type = { kw_double ~ kw_precision }
-numeric_type = { (kw_numeric | kw_decimal) ~ ("(" ~ integer ~ ("," ~ integer)? ~ ")")? }
+numeric_type = { (kw_numeric | kw_decimal) ~ ("(" ~ integer ~ ("," ~ signed_integer)? ~ ")")? }
 bit_type = { kw_bit ~ ("(" ~ integer ~ ")")? }
 varbit_type = { (kw_varbit ~ ("(" ~ integer ~ ")")?) | (kw_bit ~ kw_varying ~ ("(" ~ integer ~ ")")?) }
 char_type = { kw_char ~ ("(" ~ integer ~ ")")? }
@@ -183,6 +183,7 @@ numeric_literal = @{
     | (ASCII_DIGIT+ ~ exponent)
 }
 integer = @{ ASCII_DIGIT+ }
+signed_integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
 exponent = _{ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
 quoted_string_literal = _{ escape_string_literal | dollar_string_literal | string_literal }
 string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }

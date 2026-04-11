@@ -1214,8 +1214,8 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::numeric_type => {
             let dims = pair
                 .into_inner()
-                .filter(|part| part.as_rule() == Rule::integer)
-                .map(build_type_len)
+                .filter(|part| matches!(part.as_rule(), Rule::integer | Rule::signed_integer))
+                .map(build_numeric_typemod_component)
                 .collect::<Result<Vec<_>, _>>()
                 .expect("numeric precision/scale");
             match dims.as_slice() {
@@ -1261,6 +1261,12 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
 }
 
 fn build_type_len(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
+    pair.as_str()
+        .parse::<i32>()
+        .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
+}
+
+fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
     pair.as_str()
         .parse::<i32>()
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
@@ -1375,8 +1381,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         op: SubqueryComparisonOp::Eq,
                         is_all: negated,
                         array: Box::new(SqlExpr::ArrayLiteral(values)),
-                    })
-                }
+        })
+}
+
                 Rule::in_subquery_suffix => {
                     let mut negated = false;
                     let mut subquery = None;
