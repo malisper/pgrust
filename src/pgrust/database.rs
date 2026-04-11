@@ -209,6 +209,31 @@ impl Database {
         entry
     }
 
+    pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
+        let catalog_guard = self.catalog.read();
+        let mut relcache = catalog_guard
+            .relcache()
+            .unwrap_or_else(|_| RelCache::from_catalog(catalog_guard.catalog()));
+        drop(catalog_guard);
+        if let Some(namespace) = self.temp_relations.read().get(&client_id) {
+            for (name, temp) in &namespace.tables {
+                relcache.insert(name.clone(), temp.entry.clone());
+                relcache.insert(format!("pg_temp.{name}"), temp.entry.clone());
+            }
+            for kind in [
+                BootstrapCatalogKind::PgNamespace,
+                BootstrapCatalogKind::PgClass,
+                BootstrapCatalogKind::PgAttribute,
+                BootstrapCatalogKind::PgType,
+            ] {
+                let entry = Self::temp_catalog_entry(client_id, kind);
+                relcache.insert(kind.relation_name(), entry.clone());
+                relcache.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
+            }
+        }
+        relcache
+    }
+
     pub(crate) fn visible_catalog(&self, client_id: ClientId) -> Catalog {
         let catalog_guard = self.catalog.read();
         let base_dir = catalog_guard.base_dir().to_path_buf();
@@ -695,7 +720,8 @@ impl Database {
             }
 
             Statement::Insert(ref insert_stmt) => {
-                let bound = bind_insert(insert_stmt, &visible_catalog)?;
+                let visible_relcache = self.visible_relcache(client_id);
+                let bound = bind_insert(insert_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 self.table_locks
                     .lock_table(rel, TableLockMode::RowExclusive, client_id);
@@ -721,7 +747,8 @@ impl Database {
             }
 
             Statement::Update(ref update_stmt) => {
-                let bound = bind_update(update_stmt, &visible_catalog)?;
+                let visible_relcache = self.visible_relcache(client_id);
+                let bound = bind_update(update_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 self.table_locks
                     .lock_table(rel, TableLockMode::RowExclusive, client_id);
@@ -753,7 +780,8 @@ impl Database {
             }
 
             Statement::Delete(ref delete_stmt) => {
-                let bound = bind_delete(delete_stmt, &visible_catalog)?;
+                let visible_relcache = self.visible_relcache(client_id);
+                let bound = bind_delete(delete_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 self.table_locks
                     .lock_table(rel, TableLockMode::RowExclusive, client_id);
@@ -792,7 +820,7 @@ impl Database {
             }
 
             Statement::DropTable(ref drop_stmt) => {
-                let relcache = RelCache::from_catalog(&visible_catalog);
+                let relcache = self.visible_relcache(client_id);
                 let rels = {
                     drop_stmt
                         .table_names
@@ -862,7 +890,7 @@ impl Database {
             }
 
             Statement::TruncateTable(ref truncate_stmt) => {
-                let relcache = RelCache::from_catalog(&visible_catalog);
+                let relcache = self.visible_relcache(client_id);
                 let rels = {
                     truncate_stmt
                         .table_names

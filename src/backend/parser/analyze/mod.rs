@@ -54,6 +54,30 @@ impl CatalogLookup for Catalog {
     }
 }
 
+impl CatalogLookup for RelCache {
+    fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            desc: entry.desc.clone(),
+        })
+    }
+
+    fn visible_table_names(&self) -> Vec<String> {
+        let mut names = self
+            .entries()
+            .map(|(name, _)| name)
+            .filter(|name| !name.contains('.'))
+            .filter(|name| !name.starts_with("pg_temp."))
+            .filter(|name| !name.starts_with("pg_"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
     RelationDesc {
         columns: stmt

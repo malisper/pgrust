@@ -18,7 +18,6 @@ use crate::backend::parser::{
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::storage::smgr::StorageManager;
-use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
@@ -227,8 +226,8 @@ impl Session {
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::Analyze(ref analyze_stmt) => {
-                let visible_catalog = db.visible_catalog(client_id);
-                execute_analyze(analyze_stmt.clone(), &visible_catalog)
+                let visible_relcache = db.visible_relcache(client_id);
+                execute_analyze(analyze_stmt.clone(), &visible_relcache)
             }
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
@@ -248,8 +247,8 @@ impl Session {
                 execute_readonly_statement(stmt, &visible_catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
-                let visible_catalog = db.visible_catalog(client_id);
-                let bound = bind_insert(insert_stmt, &visible_catalog)?;
+                let visible_relcache = db.visible_relcache(client_id);
+                let bound = bind_insert(insert_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -270,8 +269,8 @@ impl Session {
                 execute_insert(bound, &mut ctx, xid, cid)
             }
             Statement::Update(ref update_stmt) => {
-                let visible_catalog = db.visible_catalog(client_id);
-                let bound = bind_update(update_stmt, &visible_catalog)?;
+                let visible_relcache = db.visible_relcache(client_id);
+                let bound = bind_update(update_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -298,8 +297,8 @@ impl Session {
                 )
             }
             Statement::Delete(ref delete_stmt) => {
-                let visible_catalog = db.visible_catalog(client_id);
-                let bound = bind_delete(delete_stmt, &visible_catalog)?;
+                let visible_relcache = db.visible_relcache(client_id);
+                let bound = bind_delete(delete_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -326,8 +325,7 @@ impl Session {
                 db.execute_create_table_as_stmt(client_id, create_stmt, Some(xid), cid)
             }
             Statement::DropTable(ref drop_stmt) => {
-                let visible_catalog = db.visible_catalog(client_id);
-                let relcache = RelCache::from_catalog(&visible_catalog);
+                let relcache = db.visible_relcache(client_id);
                 let rels = {
                     drop_stmt
                         .table_names
@@ -384,13 +382,12 @@ impl Session {
                 Ok(StatementResult::AffectedRows(dropped))
             }
             Statement::TruncateTable(ref truncate_stmt) => {
-                let visible_catalog = db.visible_catalog(client_id);
-                let relcache = RelCache::from_catalog(&visible_catalog);
+                let visible_relcache = db.visible_relcache(client_id);
                 let rels = {
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
+                        .filter_map(|name| visible_relcache.get_by_name(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
@@ -411,7 +408,7 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_truncate_table(truncate_stmt.clone(), &visible_catalog, &mut ctx)
+                execute_truncate_table(truncate_stmt.clone(), &visible_relcache, &mut ctx)
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 unreachable!("handled in Session::execute")
@@ -458,12 +455,12 @@ impl Session {
         columns: Option<&[String]>,
         num_params: usize,
     ) -> Result<PreparedInsert, ExecError> {
-        let visible_catalog = db.visible_catalog(self.client_id);
+        let visible_relcache = db.visible_relcache(self.client_id);
         Ok(bind_insert_prepared(
             table_name,
             columns,
             num_params,
-            &visible_catalog,
+            &visible_relcache,
         )?)
     }
 
@@ -529,10 +526,9 @@ impl Session {
         let cid = txn.next_command_id;
         txn.next_command_id = txn.next_command_id.saturating_add(1);
 
-        let visible_catalog = db.visible_catalog(self.client_id);
-        let relcache = RelCache::from_catalog(&visible_catalog);
+        let visible_relcache = db.visible_relcache(self.client_id);
         let (rel, desc) = {
-            let entry = relcache.get_by_name(table_name).ok_or_else(|| {
+            let entry = visible_relcache.get_by_name(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
             })?;
             (entry.rel, entry.desc.clone())
