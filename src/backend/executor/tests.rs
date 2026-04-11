@@ -5479,6 +5479,28 @@
     }
 
     #[test]
+    fn top_level_values_orders_limits_and_names_columns() {
+        let base = temp_dir("top_level_values");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "values (2, 'b'), (1, 'a') order by 1 limit 1",
+        )
+        .unwrap()
+        {
+            StatementResult::Query {
+                column_names, rows, ..
+            } => {
+                assert_eq!(column_names, vec!["column1".to_string(), "column2".to_string()]);
+                assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("a".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn scalar_subquery_zero_rows_yields_null() {
         let base = temp_dir("scalar_subquery_zero_rows");
         let mut txns = TransactionManager::new_durable(&base).unwrap();

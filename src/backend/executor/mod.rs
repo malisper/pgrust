@@ -46,7 +46,8 @@ use crate::backend::access::transam::xact::{
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
-    ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, parse_statement,
+    ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,
+    parse_statement,
 };
 use crate::include::access::htup::TupleError;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};

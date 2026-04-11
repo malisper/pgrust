@@ -115,6 +115,47 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &Catalog) -> Result<Plan, Par
     build_plan_with_outer(stmt, catalog, &[], None)
 }
 
+pub fn build_values_plan(stmt: &ValuesStatement, catalog: &Catalog) -> Result<Plan, ParseError> {
+    let (mut plan, scope) = bind_values_rows(&stmt.rows, None, catalog, &[], None)?;
+    let output_columns = match &plan {
+        Plan::Values { output_columns, .. } => output_columns.clone(),
+        other => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "VALUES plan",
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+    let targets = output_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| TargetEntry {
+            name: column.name.clone(),
+            expr: Expr::Column(index),
+            sql_type: column.sql_type,
+        })
+        .collect::<Vec<_>>();
+
+    if !stmt.order_by.is_empty() {
+        plan = Plan::OrderBy {
+            input: Box::new(plan),
+            items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                bind_expr_with_outer(expr, &scope, catalog, &[], None)
+            })?,
+        };
+    }
+
+    if stmt.limit.is_some() || stmt.offset.is_some() {
+        plan = Plan::Limit {
+            input: Box::new(plan),
+            limit: stmt.limit,
+            offset: stmt.offset.unwrap_or(0),
+        };
+    }
+
+    Ok(plan)
+}
+
 fn build_plan_with_outer(
     stmt: &SelectStatement,
     catalog: &Catalog,

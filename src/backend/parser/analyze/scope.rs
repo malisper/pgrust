@@ -33,6 +33,103 @@ pub(super) fn empty_scope() -> BoundScope {
     }
 }
 
+pub(super) fn bind_values_rows(
+    rows: &[Vec<SqlExpr>],
+    column_names: Option<&[String]>,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<(Plan, BoundScope), ParseError> {
+    let width = rows.first().map(Vec::len).unwrap_or(0);
+    for row in rows {
+        if row.len() != width {
+            return Err(ParseError::UnexpectedToken {
+                expected: "VALUES rows with consistent column counts",
+                actual: format!("VALUES row has {} columns, expected {width}", row.len()),
+            });
+        }
+    }
+
+    if let Some(column_names) = column_names
+        && column_names.len() != width
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "VALUES column alias count matching VALUES width",
+            actual: format!(
+                "VALUES has {width} columns but {} column aliases were specified",
+                column_names.len()
+            ),
+        });
+    }
+
+    let empty = empty_scope();
+    let mut column_types = Vec::with_capacity(width);
+    for col_idx in 0..width {
+        let mut common = None;
+        for row in rows {
+            let ty =
+                infer_sql_expr_type(&row[col_idx], &empty, catalog, outer_scopes, grouped_outer);
+            common = Some(match common {
+                None => ty.element_type(),
+                Some(existing) => resolve_common_scalar_type(existing, ty).ok_or_else(|| {
+                    ParseError::UnexpectedToken {
+                        expected: "VALUES columns with a common type",
+                        actual: format!(
+                            "VALUES column {} cannot reconcile {} and {}",
+                            col_idx + 1,
+                            sql_type_name(existing),
+                            sql_type_name(ty)
+                        ),
+                    }
+                })?,
+            });
+        }
+        column_types.push(common.unwrap_or(SqlType::new(SqlTypeKind::Text)));
+    }
+
+    let bound_rows = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .zip(column_types.iter())
+                .map(|(expr, ty)| {
+                    let from = infer_sql_expr_type(expr, &empty, catalog, outer_scopes, grouped_outer);
+                    Ok(coerce_bound_expr(
+                        bind_expr_with_outer(expr, &empty, catalog, outer_scopes, grouped_outer)?,
+                        from,
+                        *ty,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ParseError>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let output_columns = column_types
+        .iter()
+        .enumerate()
+        .map(|(idx, ty)| QueryColumn {
+            name: column_names
+                .and_then(|names| names.get(idx))
+                .cloned()
+                .unwrap_or_else(|| format!("column{}", idx + 1)),
+            sql_type: *ty,
+        })
+        .collect::<Vec<_>>();
+    let desc = RelationDesc {
+        columns: output_columns
+            .iter()
+            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+            .collect(),
+    };
+    Ok((
+        Plan::Values {
+            rows: bound_rows,
+            output_columns,
+        },
+        scope_for_relation(None, &desc),
+    ))
+}
+
 pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
     if name == "*" {
         return Err(ParseError::UnexpectedToken {
@@ -171,76 +268,7 @@ pub(super) fn bind_from_item(
             ))
         }
         FromItem::Values { rows } => {
-            let width = rows.first().map(Vec::len).unwrap_or(0);
-            for row in rows {
-                if row.len() != width {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "VALUES rows with consistent column counts",
-                        actual: format!("VALUES row has {} columns, expected {width}", row.len()),
-                    });
-                }
-            }
-
-            let empty = empty_scope();
-            let mut column_types = Vec::with_capacity(width);
-            for col_idx in 0..width {
-                let mut common = None;
-                for row in rows {
-                    let ty = infer_sql_expr_type(&row[col_idx], &empty, catalog, outer_scopes, grouped_outer);
-                    common = Some(match common {
-                        None => ty.element_type(),
-                        Some(existing) => resolve_common_scalar_type(existing, ty).ok_or_else(|| ParseError::UnexpectedToken {
-                            expected: "VALUES columns with a common type",
-                            actual: format!(
-                                "VALUES column {} cannot reconcile {} and {}",
-                                col_idx + 1,
-                                sql_type_name(existing),
-                                sql_type_name(ty)
-                            ),
-                        })?,
-                    });
-                }
-                column_types.push(common.unwrap_or(SqlType::new(SqlTypeKind::Text)));
-            }
-
-            let bound_rows = rows
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .zip(column_types.iter())
-                        .map(|(expr, ty)| {
-                            let from = infer_sql_expr_type(expr, &empty, catalog, outer_scopes, grouped_outer);
-                            Ok(coerce_bound_expr(
-                                bind_expr_with_outer(expr, &empty, catalog, outer_scopes, grouped_outer)?,
-                                from,
-                                *ty,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, ParseError>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let output_columns = column_types
-                .iter()
-                .enumerate()
-                .map(|(idx, ty)| QueryColumn {
-                    name: format!("column{}", idx + 1),
-                    sql_type: *ty,
-                })
-                .collect::<Vec<_>>();
-            let desc = RelationDesc {
-                columns: output_columns
-                    .iter()
-                    .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                    .collect(),
-            };
-            Ok((
-                Plan::Values {
-                    rows: bound_rows,
-                    output_columns,
-                },
-                scope_for_relation(None, &desc),
-            ))
+            bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer)
         }
         FromItem::FunctionCall { name, args } => match name.as_str() {
             "generate_series" => {
