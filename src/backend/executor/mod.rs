@@ -2364,6 +2364,48 @@ mod tests {
     }
 
     #[test]
+    fn gcd_and_lcm_support_integer_widths_and_overflow() {
+        let base = temp_dir("gcd_lcm_integer_widths");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select gcd((-330)::int4, 462::int4), lcm((-330)::int4, 462::int4), gcd((-9223372036854775808)::int8, 1073741824::int8)",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Int32(66),
+                Value::Int32(2310),
+                Value::Int64(1073741824),
+            ]],
+        );
+
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select gcd((-2147483648)::int4, 0::int4)",
+            )
+            .unwrap_err(),
+            ExecError::Int4OutOfRange
+        ));
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select lcm(9223372036854775807::int8, 9223372036854775806::int8)",
+            )
+            .unwrap_err(),
+            ExecError::Int8OutOfRange
+        ));
+    }
+
+    #[test]
     fn int2_text_input_accepts_prefixed_and_underscored_literals() {
         let base = temp_dir("int2_text_input_literals");
         let txns = TransactionManager::new_durable(&base).unwrap();

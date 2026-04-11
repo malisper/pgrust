@@ -146,6 +146,17 @@ pub(super) fn infer_sql_expr_type(
                 SqlType::new(SqlTypeKind::Text),
                 |arg| infer_sql_expr_type(arg, scope, catalog, outer_scopes, grouped_outer),
             ),
+            Some(BuiltinScalarFunction::Gcd) | Some(BuiltinScalarFunction::Lcm) => args.first().zip(args.get(1)).map_or(
+                SqlType::new(SqlTypeKind::Text),
+                |(left, right)| {
+                    resolve_numeric_binary_type(
+                        "+",
+                        infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer),
+                        infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer),
+                    )
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text))
+                },
+            ),
             Some(BuiltinScalarFunction::PgInputIsValid) => SqlType::new(SqlTypeKind::Bool),
             Some(BuiltinScalarFunction::PgInputErrorMessage)
             | Some(BuiltinScalarFunction::PgInputErrorDetail)
