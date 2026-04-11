@@ -15,13 +15,14 @@ use crate::backend::libpq::pqformat::{
     FloatFormatOptions,
     format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
     send_close_complete, send_command_complete, send_copy_in_response,
-    send_empty_query, send_error, send_no_data, send_notice, send_parameter_description, send_parameter_status,
-    send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
-    send_typed_data_row,
+    send_empty_query, send_error, send_no_data, send_notice, send_notice_with_severity,
+    send_parameter_description, send_parameter_status, send_parse_complete, send_query_result,
+    send_ready_for_query, send_row_description, send_typed_data_row,
 };
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
+use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
@@ -352,6 +353,7 @@ fn handle_query(
         .get_statement(&sql)
         .map_err(|e| io::Error::other(format!("{e:?}")));
     if let Ok(Statement::Select(ref select_stmt)) = parsed {
+        clear_notices();
         match state.session.execute_streaming(db, select_stmt) {
             Ok(mut guard) => {
                 use crate::backend::executor::exec_next;
@@ -398,6 +400,7 @@ fn handle_query(
                 drop(guard);
 
                 if let Some(e) = err {
+                    send_plpgsql_notices(stream, &take_notices())?;
                     send_error(
                         stream,
                         exec_error_sqlstate(&e),
@@ -405,6 +408,7 @@ fn handle_query(
                         exec_error_position(&sql, &e),
                     )?;
                 } else {
+                    send_plpgsql_notices(stream, &take_notices())?;
                     if !header_sent {
                         send_row_description(stream, &columns)?;
                     }
@@ -412,6 +416,7 @@ fn handle_query(
                 }
             }
             Err(e) => {
+                send_plpgsql_notices(stream, &take_notices())?;
                 send_error(
                     stream,
                     exec_error_sqlstate(&e),
@@ -421,8 +426,10 @@ fn handle_query(
             }
         }
     } else {
+        clear_notices();
         match state.session.execute(db, &sql) {
             Ok(StatementResult::Query { columns, rows, .. }) => {
+                send_plpgsql_notices(stream, &take_notices())?;
                 send_query_result(
                     stream,
                     &columns,
@@ -435,9 +442,11 @@ fn handle_query(
                 )?;
             }
             Ok(StatementResult::AffectedRows(n)) => {
+                send_plpgsql_notices(stream, &take_notices())?;
                 send_command_complete(stream, &infer_command_tag(&sql, n))?;
             }
             Err(e) => {
+                send_plpgsql_notices(stream, &take_notices())?;
                 send_error(
                     stream,
                     exec_error_sqlstate(&e),
@@ -673,8 +682,10 @@ fn execute_portal(
     let sql =
         rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &visible_relcache))
             .into_owned();
+    clear_notices();
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
+            send_plpgsql_notices(stream, &take_notices())?;
             for row in &rows {
                 send_typed_data_row(
                     stream,
@@ -690,9 +701,11 @@ fn execute_portal(
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
         }
         Ok(StatementResult::AffectedRows(n)) => {
+            send_plpgsql_notices(stream, &take_notices())?;
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
         }
         Err(e) => {
+            send_plpgsql_notices(stream, &take_notices())?;
             send_error(
                 stream,
                 exec_error_sqlstate(&e),
@@ -700,6 +713,18 @@ fn execute_portal(
                 exec_error_position(&sql, &e),
             )?;
         }
+    }
+    Ok(())
+}
+
+fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> io::Result<()> {
+    for notice in notices {
+        let (severity, sqlstate) = match notice.level {
+            RaiseLevel::Notice => ("NOTICE", "00000"),
+            RaiseLevel::Warning => ("WARNING", "01000"),
+            RaiseLevel::Exception => continue,
+        };
+        send_notice_with_severity(stream, severity, sqlstate, &notice.message, None, None)?;
     }
     Ok(())
 }

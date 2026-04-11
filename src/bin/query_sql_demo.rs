@@ -14,7 +14,8 @@ use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::parser::{SqlType, SqlTypeKind, parse_statement};
+use pgrust::parser::{SqlType, SqlTypeKind, Statement, parse_statement};
+use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, take_notices};
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
 use std::path::PathBuf;
@@ -142,7 +143,20 @@ fn main() -> Result<(), ExecError> {
     };
 
     let stmt = parse_statement(&sql)?;
-    match execute_readonly_statement(stmt, &relcache, &mut ctx)? {
+    clear_notices();
+    let result = match stmt {
+        Statement::Do(stmt) => pgrust::pl::plpgsql::execute_do(&stmt)?,
+        other => execute_readonly_statement(other, &relcache, &mut ctx)?,
+    };
+    for notice in take_notices() {
+        let level = match notice.level {
+            RaiseLevel::Notice => "NOTICE",
+            RaiseLevel::Warning => "WARNING",
+            RaiseLevel::Exception => "EXCEPTION",
+        };
+        println!("{level}: {}", notice.message);
+    }
+    match result {
         StatementResult::Query {
             column_names, rows, ..
         } => {
