@@ -180,8 +180,12 @@ impl Database {
     }
 
     pub(crate) fn visible_catalog(&self, client_id: ClientId) -> Catalog {
-        let mut catalog = self.catalog.read().catalog().clone();
-        let base_dir = self.catalog.read().base_dir().to_path_buf();
+        let catalog_guard = self.catalog.read();
+        let base_dir = catalog_guard.base_dir().to_path_buf();
+        let mut catalog = catalog_guard
+            .catalog_snapshot()
+            .unwrap_or_else(|_| catalog_guard.catalog().clone());
+        drop(catalog_guard);
         let permanent_entries = catalog
             .entries()
             .map(|(name, entry)| (name.to_string(), entry.clone()))
