@@ -1,10 +1,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::backend::access::heap::heapam::{heap_flush, heap_insert};
 use crate::backend::catalog::catalog::{column_desc, Catalog, CatalogEntry, CatalogError};
+use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
+use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+use crate::include::catalog::{
+    BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
+    bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_pg_attribute_rows,
+    bootstrap_pg_class_rows, bootstrap_pg_namespace_rows, bootstrap_relation_desc,
+    builtin_type_rows,
+};
+use crate::include::nodes::datum::Value;
+use crate::BufferPool;
 
 const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
 pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
@@ -55,6 +66,7 @@ impl CatalogStore {
                 next_rel_number: catalog.next_rel_number,
                 bootstrap_complete: true,
             };
+            bootstrap_physical_catalogs(&base_dir, &catalog)?;
             persist_control_file(&control_path, &control)?;
             persist_catalog_file(&schema_path, &catalog)?;
             (catalog, control)
@@ -97,6 +109,122 @@ impl CatalogStore {
         )?;
         persist_catalog_file(&self.schema_path, &self.catalog)
     }
+}
+
+fn bootstrap_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
+    let mut smgr = MdStorageManager::new(base_dir);
+    for kind in bootstrap_catalog_kinds() {
+        let rel = catalog
+            .get(kind.relation_name())
+            .ok_or(CatalogError::Corrupt("missing bootstrap catalog entry"))?
+            .rel;
+        smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
+        smgr.create(rel, ForkNumber::Main, false)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
+    }
+
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
+    insert_catalog_rows(
+        &pool,
+        catalog
+            .get("pg_namespace")
+            .ok_or(CatalogError::Corrupt("missing pg_namespace"))?,
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
+        bootstrap_pg_namespace_rows()
+            .into_iter()
+            .map(namespace_row_values)
+            .collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        catalog
+            .get("pg_class")
+            .ok_or(CatalogError::Corrupt("missing pg_class"))?,
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
+        bootstrap_pg_class_rows()
+            .into_iter()
+            .map(pg_class_row_values)
+            .collect(),
+    )?;
+    let mut type_rows = builtin_type_rows();
+    type_rows.extend(bootstrap_composite_type_rows());
+    insert_catalog_rows(
+        &pool,
+        catalog
+            .get("pg_type")
+            .ok_or(CatalogError::Corrupt("missing pg_type"))?,
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
+        type_rows.into_iter().map(pg_type_row_values).collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        catalog
+            .get("pg_attribute")
+            .ok_or(CatalogError::Corrupt("missing pg_attribute"))?,
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
+        bootstrap_pg_attribute_rows()
+            .into_iter()
+            .map(pg_attribute_row_values)
+            .collect(),
+    )?;
+    Ok(())
+}
+
+fn insert_catalog_rows(
+    pool: &BufferPool<SmgrStorageBackend>,
+    entry: &CatalogEntry,
+    desc: &RelationDesc,
+    rows: Vec<Vec<Value>>,
+) -> Result<(), CatalogError> {
+    for values in rows {
+        let tuple = tuple_from_values(desc, &values)
+            .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
+        heap_insert(pool, 0, entry.rel, &tuple)
+            .map_err(|e| CatalogError::Io(format!("catalog tuple insert failed: {e:?}")))?;
+    }
+    let nblocks = pool
+        .with_storage_mut(|s| s.smgr.nblocks(entry.rel, ForkNumber::Main))
+        .map_err(|e| CatalogError::Io(e.to_string()))?;
+    for block in 0..nblocks {
+        heap_flush(pool, 0, entry.rel, block)
+            .map_err(|e| CatalogError::Io(format!("catalog flush failed: {e:?}")))?;
+    }
+    Ok(())
+}
+
+fn namespace_row_values(row: PgNamespaceRow) -> Vec<Value> {
+    vec![Value::Int32(row.oid as i32), Value::Text(row.nspname.into())]
+}
+
+fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.relname.into()),
+        Value::Int32(row.relnamespace as i32),
+        Value::Int32(row.reltype as i32),
+        Value::Int32(row.relfilenode as i32),
+        Value::Text(row.relkind.to_string().into()),
+    ]
+}
+
+fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.attrelid as i32),
+        Value::Text(row.attname.into()),
+        Value::Int32(row.atttypid as i32),
+        Value::Int16(row.attnum),
+        Value::Bool(row.attnotnull),
+        Value::Int32(row.atttypmod),
+    ]
+}
+
+fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.typname.into()),
+        Value::Int32(row.typnamespace as i32),
+        Value::Int32(row.typrelid as i32),
+    ]
 }
 
 fn persist_catalog_file(path: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
@@ -306,6 +434,7 @@ fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::storage::smgr::segment_path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -342,5 +471,17 @@ mod tests {
         let reopened_entry = reopened.catalog().get("people").unwrap();
         assert_eq!(reopened_entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert_eq!(reopened_entry.desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn catalog_store_bootstraps_physical_core_catalog_relfiles() {
+        let base = temp_dir("physical_bootstrap");
+        let store = CatalogStore::load(&base).unwrap();
+        for name in ["pg_namespace", "pg_type", "pg_attribute", "pg_class"] {
+            let entry = store.catalog().get(name).unwrap();
+            let path = segment_path(&base, entry.rel, ForkNumber::Main, 0);
+            let meta = fs::metadata(path).unwrap();
+            assert!(meta.len() > 0, "{name} should have heap data");
+        }
     }
 }
