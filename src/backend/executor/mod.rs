@@ -94,6 +94,10 @@ pub enum ExecError {
         ty: &'static str,
         value: String,
     },
+    IntegerOutOfRange {
+        ty: &'static str,
+        value: String,
+    },
     InvalidNumericInput(String),
     InvalidFloatInput(String),
     Int2OutOfRange,
@@ -2406,7 +2410,16 @@ mod tests {
             &Value::Text("100000".into()),
         )
         .unwrap_err();
-        assert!(matches!(err, ExecError::Int2OutOfRange), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                ExecError::IntegerOutOfRange {
+                    ty: "smallint",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]

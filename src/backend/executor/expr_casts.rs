@@ -80,21 +80,30 @@ fn cast_text_to_int2(text: &str) -> Result<Value, ExecError> {
     let value = parse_pg_integer_text(text, "smallint")?;
     i16::try_from(value)
         .map(Value::Int16)
-        .map_err(|_| ExecError::Int2OutOfRange)
+        .map_err(|_| ExecError::IntegerOutOfRange {
+            ty: "smallint",
+            value: text.to_string(),
+        })
 }
 
 fn cast_text_to_int4(text: &str) -> Result<Value, ExecError> {
     let value = parse_pg_integer_text(text, "integer")?;
     i32::try_from(value)
         .map(Value::Int32)
-        .map_err(|_| ExecError::Int4OutOfRange)
+        .map_err(|_| ExecError::IntegerOutOfRange {
+            ty: "integer",
+            value: text.to_string(),
+        })
 }
 
 fn cast_text_to_int8(text: &str) -> Result<Value, ExecError> {
     let value = parse_pg_integer_text(text, "bigint")?;
     i64::try_from(value)
         .map(Value::Int64)
-        .map_err(|_| ExecError::Int8OutOfRange)
+        .map_err(|_| ExecError::IntegerOutOfRange {
+            ty: "bigint",
+            value: text.to_string(),
+        })
 }
 
 fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
@@ -116,6 +125,9 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::InvalidIntegerInput { ty, .. } => {
             format!("invalid input syntax for type {ty}: \"{text}\"")
         }
+        ExecError::IntegerOutOfRange { ty, .. } => {
+            format!("value \"{text}\" is out of range for type {ty}")
+        }
         ExecError::Int2OutOfRange => {
             format!("value \"{text}\" is out of range for type smallint")
         }
@@ -135,7 +147,10 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
 fn input_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
         ExecError::InvalidIntegerInput { .. } | ExecError::InvalidNumericInput(_) => "22P02",
-        ExecError::Int2OutOfRange | ExecError::Int4OutOfRange | ExecError::Int8OutOfRange => {
+        ExecError::IntegerOutOfRange { .. }
+        | ExecError::Int2OutOfRange
+        | ExecError::Int4OutOfRange
+        | ExecError::Int8OutOfRange => {
             "22003"
         }
         _ => "XX000",
