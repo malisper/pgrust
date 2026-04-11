@@ -646,13 +646,10 @@ impl NumericValue {
             Self::Finite { coeff, scale } => {
                 if *scale <= target_scale {
                     let factor = pow10_bigint(target_scale - *scale);
-                    return Some(
-                        Self::Finite {
-                            coeff: coeff * factor,
-                            scale: target_scale,
-                        }
-                        .normalize(),
-                    );
+                    return Some(Self::Finite {
+                        coeff: coeff * factor,
+                        scale: target_scale,
+                    });
                 }
                 let diff = *scale - target_scale;
                 let factor = pow10_bigint(diff);
@@ -663,13 +660,10 @@ impl NumericValue {
                 } else {
                     quotient
                 };
-                Some(
-                    Self::Finite {
-                        coeff: rounded,
-                        scale: target_scale,
-                    }
-                    .normalize(),
-                )
+                Some(Self::Finite {
+                    coeff: rounded,
+                    scale: target_scale,
+                })
             }
         }
     }

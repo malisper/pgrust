@@ -103,7 +103,6 @@ fn round_numeric_to_scale(value: &NumericValue, target_scale: i32) -> NumericVal
                 coeff: rounded * pow10_bigint(shift),
                 scale: 0,
             }
-            .normalize()
         }
     }
 }
@@ -121,7 +120,13 @@ fn trunc_numeric_to_scale(value: &NumericValue, target_scale: i32) -> NumericVal
                     coeff: coeff / factor,
                     scale: target_scale as u32,
                 }
-                .normalize()
+            }
+            NumericValue::Finite { coeff, scale } if (*scale as i32) < target_scale => {
+                let factor = pow10_bigint(target_scale as u32 - *scale);
+                NumericValue::Finite {
+                    coeff: coeff * factor,
+                    scale: target_scale as u32,
+                }
             }
             _ => value.clone(),
         },
@@ -133,7 +138,6 @@ fn trunc_numeric_to_scale(value: &NumericValue, target_scale: i32) -> NumericVal
                 coeff: quotient * pow10_bigint(shift),
                 scale: 0,
             }
-            .normalize()
         }
     }
 }
