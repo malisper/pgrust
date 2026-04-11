@@ -142,6 +142,11 @@ pub(super) fn infer_sql_expr_type(
             Some(BuiltinScalarFunction::JsonbPathExists)
             | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
             Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
+            Some(BuiltinScalarFunction::PgInputIsValid) => SqlType::new(SqlTypeKind::Bool),
+            Some(BuiltinScalarFunction::PgInputErrorMessage)
+            | Some(BuiltinScalarFunction::PgInputErrorDetail)
+            | Some(BuiltinScalarFunction::PgInputErrorHint)
+            | Some(BuiltinScalarFunction::PgInputErrorSqlState) => SqlType::new(SqlTypeKind::Text),
             None => SqlType::new(SqlTypeKind::Text),
         },
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),

@@ -727,6 +727,22 @@ fn bind_scalar_function_call(
                 ],
             })
         }
+        BuiltinScalarFunction::PgInputIsValid
+        | BuiltinScalarFunction::PgInputErrorMessage
+        | BuiltinScalarFunction::PgInputErrorDetail
+        | BuiltinScalarFunction::PgInputErrorHint
+        | BuiltinScalarFunction::PgInputErrorSqlState => {
+            let text_type = SqlType::new(SqlTypeKind::Text);
+            let left_type = infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let right_type = infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    coerce_bound_expr(bound_args[0].clone(), left_type, text_type),
+                    coerce_bound_expr(bound_args[1].clone(), right_type, text_type),
+                ],
+            })
+        }
         _ => Ok(Expr::FuncCall {
             func,
             args: bound_args,

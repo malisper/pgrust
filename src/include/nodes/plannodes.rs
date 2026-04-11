@@ -122,6 +122,11 @@ pub enum BuiltinScalarFunction {
     JsonbPathQueryFirst,
     Left,
     Repeat,
+    PgInputIsValid,
+    PgInputErrorMessage,
+    PgInputErrorDetail,
+    PgInputErrorHint,
+    PgInputErrorSqlState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,6 +6,13 @@ use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::pgrust::compact_string::CompactString;
 
+pub(crate) struct InputErrorInfo {
+    pub(crate) message: String,
+    pub(crate) detail: Option<String>,
+    pub(crate) hint: Option<String>,
+    pub(crate) sqlstate: &'static str,
+}
+
 fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
@@ -88,6 +95,87 @@ fn cast_text_to_int8(text: &str) -> Result<Value, ExecError> {
     i64::try_from(value)
         .map(Value::Int64)
         .map_err(|_| ExecError::Int8OutOfRange)
+}
+
+fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
+    let ty = type_name.trim().to_ascii_lowercase();
+    let sql_type = match ty.as_str() {
+        "int2" | "smallint" => Some(SqlType::new(SqlTypeKind::Int2)),
+        "int4" | "int" | "integer" => Some(SqlType::new(SqlTypeKind::Int4)),
+        "int8" | "bigint" => Some(SqlType::new(SqlTypeKind::Int8)),
+        "text" => Some(SqlType::new(SqlTypeKind::Text)),
+        "bool" | "boolean" => Some(SqlType::new(SqlTypeKind::Bool)),
+        "numeric" | "decimal" => Some(SqlType::new(SqlTypeKind::Numeric)),
+        _ => None,
+    };
+    Ok(sql_type)
+}
+
+fn input_error_message(err: &ExecError, text: &str) -> String {
+    match err {
+        ExecError::InvalidIntegerInput { ty, .. } => {
+            format!("invalid input syntax for type {ty}: \"{text}\"")
+        }
+        ExecError::Int2OutOfRange => {
+            format!("value \"{text}\" is out of range for type smallint")
+        }
+        ExecError::Int4OutOfRange => {
+            format!("value \"{text}\" is out of range for type integer")
+        }
+        ExecError::Int8OutOfRange => {
+            format!("value \"{text}\" is out of range for type bigint")
+        }
+        ExecError::InvalidNumericInput(_) => {
+            format!("invalid input syntax for type numeric: \"{text}\"")
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+fn input_error_sqlstate(err: &ExecError) -> &'static str {
+    match err {
+        ExecError::InvalidIntegerInput { .. } | ExecError::InvalidNumericInput(_) => "22P02",
+        ExecError::Int2OutOfRange | ExecError::Int4OutOfRange | ExecError::Int8OutOfRange => {
+            "22003"
+        }
+        _ => "XX000",
+    }
+}
+
+pub(crate) fn soft_input_error_info(
+    text: &str,
+    type_name: &str,
+) -> Result<Option<InputErrorInfo>, ExecError> {
+    if type_name.trim().eq_ignore_ascii_case("int2vector") {
+        for item in text.split_ascii_whitespace() {
+            match cast_text_to_int2(item) {
+                Ok(_) => {}
+                Err(err) => {
+                    return Ok(Some(InputErrorInfo {
+                        message: input_error_message(&err, item),
+                        detail: None,
+                        hint: None,
+                        sqlstate: input_error_sqlstate(&err),
+                    }));
+                }
+            }
+        }
+        return Ok(None);
+    }
+
+    let ty = parse_input_type_name(type_name)?.ok_or_else(|| ExecError::InvalidStorageValue {
+        column: type_name.to_string(),
+        details: format!("unsupported type: {type_name}"),
+    })?;
+    match cast_text_value(text, ty, false) {
+        Ok(_) => Ok(None),
+        Err(err) => Ok(Some(InputErrorInfo {
+            message: input_error_message(&err, text),
+            detail: None,
+            hint: None,
+            sqlstate: input_error_sqlstate(&err),
+        })),
+    }
 }
 
 pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {

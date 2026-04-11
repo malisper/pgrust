@@ -319,6 +319,81 @@ pub(super) fn bind_from_item(
                     scope,
                 ))
             }
+            "pg_input_error_info" => {
+                if args.len() != 2 {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "pg_input_error_info(text, text)",
+                        actual: format!("pg_input_error_info with {} arguments", args.len()),
+                    });
+                }
+                let empty_scope = empty_scope();
+                let text_type = SqlType::new(SqlTypeKind::Text);
+                let left_type = infer_sql_expr_type(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer);
+                let right_type = infer_sql_expr_type(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer);
+                let left = coerce_bound_expr(
+                    bind_expr_with_outer(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer)?,
+                    left_type,
+                    text_type,
+                );
+                let right = coerce_bound_expr(
+                    bind_expr_with_outer(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer)?,
+                    right_type,
+                    text_type,
+                );
+                let output_columns = vec![
+                    QueryColumn::text("message"),
+                    QueryColumn::text("detail"),
+                    QueryColumn::text("hint"),
+                    QueryColumn::text("sql_error_code"),
+                ];
+                let desc = RelationDesc {
+                    columns: output_columns
+                        .iter()
+                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                        .collect(),
+                };
+                let scope = scope_for_relation(Some(name), &desc);
+                Ok((
+                    Plan::Projection {
+                        input: Box::new(Plan::Result),
+                        targets: vec![
+                            TargetEntry {
+                                name: "message".into(),
+                                expr: Expr::FuncCall {
+                                    func: BuiltinScalarFunction::PgInputErrorMessage,
+                                    args: vec![left.clone(), right.clone()],
+                                },
+                                sql_type: text_type,
+                            },
+                            TargetEntry {
+                                name: "detail".into(),
+                                expr: Expr::FuncCall {
+                                    func: BuiltinScalarFunction::PgInputErrorDetail,
+                                    args: vec![left.clone(), right.clone()],
+                                },
+                                sql_type: text_type,
+                            },
+                            TargetEntry {
+                                name: "hint".into(),
+                                expr: Expr::FuncCall {
+                                    func: BuiltinScalarFunction::PgInputErrorHint,
+                                    args: vec![left.clone(), right.clone()],
+                                },
+                                sql_type: text_type,
+                            },
+                            TargetEntry {
+                                name: "sql_error_code".into(),
+                                expr: Expr::FuncCall {
+                                    func: BuiltinScalarFunction::PgInputErrorSqlState,
+                                    args: vec![left, right],
+                                },
+                                sql_type: text_type,
+                            },
+                        ],
+                    },
+                    scope,
+                ))
+            }
             other => {
                 if let Some(kind) = resolve_json_table_function(other) {
                     if args.len() != 1 {
