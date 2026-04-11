@@ -2303,6 +2303,83 @@ mod tests {
     }
 
     #[test]
+    fn float_math_builtins_cover_common_operations() {
+        let base = temp_dir("float_math_builtins");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select trunc(42.8::float8), round(42.5::float8), ceil(42.2::float8), floor(42.8::float8), sign((-42.8)::float8), sqrt(81.0::float8), cbrt(27.0::float8), power(9.0::float8, 0.5::float8), exp(1.0::float8), ln(exp(1.0::float8))",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows[0],
+                    vec![
+                        Value::Float64(42.0),
+                        Value::Float64(43.0),
+                        Value::Float64(43.0),
+                        Value::Float64(42.0),
+                        Value::Float64(-1.0),
+                        Value::Float64(9.0),
+                        Value::Float64(3.0),
+                        Value::Float64(3.0),
+                        Value::Float64(std::f64::consts::E),
+                        Value::Float64(1.0),
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn float_math_domain_errors_are_explicit() {
+        let base = temp_dir("float_math_domain_errors");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        for sql in [
+            "select sqrt((-1.0)::float8)",
+            "select ln(0.0::float8)",
+            "select power((-1.0)::float8, 0.5::float8)",
+            "select acosh(0.5::float8)",
+            "select atanh(1.0::float8)",
+        ] {
+            assert!(matches!(
+                run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap_err(),
+                ExecError::InvalidStorageValue { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn degree_trig_builtins_snap_landmarks() {
+        let base = temp_dir("degree_trig_builtins");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select sind(30.0::float8), cosd(60.0::float8), tand(45.0::float8), cotd(45.0::float8), asind(0.5::float8), acosd(0.5::float8), atand(1.0::float8), atan2d(1.0::float8, 1.0::float8)",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Float64(0.5),
+                Value::Float64(0.5),
+                Value::Float64(1.0),
+                Value::Float64(1.0),
+                Value::Float64(30.0),
+                Value::Float64(60.0),
+                Value::Float64(45.0),
+                Value::Float64(45.0),
+            ]],
+        );
+    }
+
+    #[test]
     fn narrowing_integer_casts_raise_out_of_range_errors() {
         let base = temp_dir("narrowing_integer_casts");
         let txns = TransactionManager::new_durable(&base).unwrap();

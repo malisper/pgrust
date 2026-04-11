@@ -1,3 +1,4 @@
+use std::f64::consts::PI;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::expr_format::to_char_int;
@@ -275,6 +276,36 @@ fn eval_builtin_function(
             })
         }
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
+        BuiltinScalarFunction::Trunc => eval_unary_float_function("trunc", &values, |v| Ok(v.trunc())),
+        BuiltinScalarFunction::Round => eval_unary_float_function("round", &values, |v| Ok(v.round())),
+        BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => {
+            eval_unary_float_function("ceil", &values, |v| Ok(v.ceil()))
+        }
+        BuiltinScalarFunction::Floor => eval_unary_float_function("floor", &values, |v| Ok(v.floor())),
+        BuiltinScalarFunction::Sign => eval_unary_float_function("sign", &values, |v| Ok(v.signum())),
+        BuiltinScalarFunction::Sqrt => eval_unary_float_function("sqrt", &values, eval_sqrt),
+        BuiltinScalarFunction::Cbrt => eval_unary_float_function("cbrt", &values, |v| Ok(v.cbrt())),
+        BuiltinScalarFunction::Power => eval_binary_float_function("power", &values, eval_power),
+        BuiltinScalarFunction::Exp => eval_unary_float_function("exp", &values, eval_exp),
+        BuiltinScalarFunction::Ln => eval_unary_float_function("ln", &values, eval_ln),
+        BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
+        BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
+        BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),
+        BuiltinScalarFunction::Asinh => eval_unary_float_function("asinh", &values, |v| Ok(v.asinh())),
+        BuiltinScalarFunction::Acosh => eval_unary_float_function("acosh", &values, eval_acosh),
+        BuiltinScalarFunction::Atanh => eval_unary_float_function("atanh", &values, eval_atanh),
+        BuiltinScalarFunction::Sind => eval_unary_float_function("sind", &values, |v| Ok(sind(v))),
+        BuiltinScalarFunction::Cosd => eval_unary_float_function("cosd", &values, |v| Ok(cosd(v))),
+        BuiltinScalarFunction::Tand => eval_unary_float_function("tand", &values, |v| Ok(tand(v))),
+        BuiltinScalarFunction::Cotd => eval_unary_float_function("cotd", &values, |v| Ok(cotd(v))),
+        BuiltinScalarFunction::Asind => eval_unary_float_function("asind", &values, eval_asind),
+        BuiltinScalarFunction::Acosd => eval_unary_float_function("acosd", &values, eval_acosd),
+        BuiltinScalarFunction::Atand => {
+            eval_unary_float_function("atand", &values, |v| Ok(snap_degree(v.atan().to_degrees())))
+        }
+        BuiltinScalarFunction::Atan2d => eval_binary_float_function("atan2d", &values, |y, x| {
+            Ok(snap_degree(y.atan2(x).to_degrees()))
+        }),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
@@ -401,6 +432,210 @@ fn eval_abs_function(values: &[Value]) -> Result<Value, ExecError> {
             left: other.clone(),
             right: Value::Null,
         }),
+    }
+}
+
+fn eval_unary_float_function(
+    op: &'static str,
+    values: &[Value],
+    func: impl FnOnce(f64) -> Result<f64, ExecError>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Float64(v) => Ok(Value::Float64(func(*v)?)),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn eval_binary_float_function(
+    op: &'static str,
+    values: &[Value],
+    func: impl FnOnce(f64, f64) -> Result<f64, ExecError>,
+) -> Result<Value, ExecError> {
+    let Some(left) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(right) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Float64(left), Value::Float64(right)) => Ok(Value::Float64(func(*left, *right)?)),
+        (left, right) => Err(ExecError::TypeMismatch {
+            op,
+            left: left.clone(),
+            right: right.clone(),
+        }),
+    }
+}
+
+fn float_domain_error(message: impl Into<String>) -> ExecError {
+    ExecError::InvalidStorageValue {
+        column: String::new(),
+        details: message.into(),
+    }
+}
+
+fn eval_sqrt(value: f64) -> Result<f64, ExecError> {
+    if value < 0.0 {
+        return Err(float_domain_error(
+            "cannot take square root of a negative number",
+        ));
+    }
+    Ok(value.sqrt())
+}
+
+fn eval_power(base: f64, exp: f64) -> Result<f64, ExecError> {
+    if base == 0.0 && exp < 0.0 {
+        return Err(float_domain_error(
+            "zero raised to a negative power is undefined",
+        ));
+    }
+    if base < 0.0 && exp.fract() != 0.0 {
+        return Err(float_domain_error(
+            "a negative number raised to a non-integer power yields a complex result",
+        ));
+    }
+    let result = base.powf(exp);
+    if result == 0.0 && base != 0.0 && exp.is_finite() {
+        let abs_result = result.abs();
+        if abs_result == 0.0 && !base.is_nan() {
+            return Err(ExecError::FloatUnderflow);
+        }
+    }
+    if result.is_infinite() && base.is_finite() && exp.is_finite() {
+        return Err(ExecError::FloatOverflow);
+    }
+    Ok(result)
+}
+
+fn eval_exp(value: f64) -> Result<f64, ExecError> {
+    let result = value.exp();
+    if result.is_infinite() && value.is_finite() {
+        return Err(ExecError::FloatOverflow);
+    }
+    if result == 0.0 && value.is_finite() {
+        return Err(ExecError::FloatUnderflow);
+    }
+    Ok(result)
+}
+
+fn eval_ln(value: f64) -> Result<f64, ExecError> {
+    if value == 0.0 {
+        return Err(float_domain_error("cannot take logarithm of zero"));
+    }
+    if value < 0.0 {
+        return Err(float_domain_error(
+            "cannot take logarithm of a negative number",
+        ));
+    }
+    Ok(value.ln())
+}
+
+fn eval_acosh(value: f64) -> Result<f64, ExecError> {
+    if value < 1.0 {
+        return Err(float_domain_error("input is out of range"));
+    }
+    Ok(value.acosh())
+}
+
+fn eval_atanh(value: f64) -> Result<f64, ExecError> {
+    if !(-1.0..=1.0).contains(&value) || value == -1.0 || value == 1.0 {
+        return Err(float_domain_error("input is out of range"));
+    }
+    Ok(value.atanh())
+}
+
+fn eval_asind(value: f64) -> Result<f64, ExecError> {
+    if !(-1.0..=1.0).contains(&value) {
+        return Err(float_domain_error("input is out of range"));
+    }
+    Ok(snap_degree(value.asin().to_degrees()))
+}
+
+fn eval_acosd(value: f64) -> Result<f64, ExecError> {
+    if !(-1.0..=1.0).contains(&value) {
+        return Err(float_domain_error("input is out of range"));
+    }
+    Ok(snap_degree(value.acos().to_degrees()))
+}
+
+fn approx_eq(left: f64, right: f64) -> bool {
+    (left - right).abs() <= 1e-12
+}
+
+fn snap_degree_unit(value: f64) -> f64 {
+    for landmark in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+        if approx_eq(value, landmark) {
+            return landmark;
+        }
+    }
+    value
+}
+
+fn snap_degree(value: f64) -> f64 {
+    for landmark in [-180.0, -135.0, -90.0, -60.0, -45.0, -30.0, 0.0, 30.0, 45.0, 60.0, 90.0, 120.0, 135.0, 180.0] {
+        if approx_eq(value, landmark) {
+            return landmark;
+        }
+    }
+    value
+}
+
+fn normalize_degrees(value: f64) -> f64 {
+    let mut normalized = value % 360.0;
+    if normalized <= -180.0 {
+        normalized += 360.0;
+    } else if normalized > 180.0 {
+        normalized -= 360.0;
+    }
+    if approx_eq(normalized, 0.0) {
+        0.0
+    } else {
+        normalized
+    }
+}
+
+fn sind(value: f64) -> f64 {
+    snap_degree_unit((normalize_degrees(value) * PI / 180.0).sin())
+}
+
+fn cosd(value: f64) -> f64 {
+    snap_degree_unit((normalize_degrees(value) * PI / 180.0).cos())
+}
+
+fn tand(value: f64) -> f64 {
+    let normalized = normalize_degrees(value);
+    if approx_eq(normalized.abs(), 90.0) {
+        if normalized.is_sign_negative() {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        snap_degree_unit((normalized * PI / 180.0).tan())
+    }
+}
+
+fn cotd(value: f64) -> f64 {
+    let tangent = tand(value);
+    if tangent == 0.0 {
+        if value.is_sign_negative() {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }
+    } else if tangent.is_infinite() {
+        0.0
+    } else {
+        snap_degree_unit(1.0 / tangent)
     }
 }
 

@@ -874,6 +874,77 @@ fn bind_scalar_function_call(
                 ],
             })
         }
+        BuiltinScalarFunction::Trunc
+        | BuiltinScalarFunction::Round
+        | BuiltinScalarFunction::Ceil
+        | BuiltinScalarFunction::Ceiling
+        | BuiltinScalarFunction::Floor
+        | BuiltinScalarFunction::Sign
+        | BuiltinScalarFunction::Sqrt
+        | BuiltinScalarFunction::Cbrt
+        | BuiltinScalarFunction::Exp
+        | BuiltinScalarFunction::Ln
+        | BuiltinScalarFunction::Sinh
+        | BuiltinScalarFunction::Cosh
+        | BuiltinScalarFunction::Tanh
+        | BuiltinScalarFunction::Asinh
+        | BuiltinScalarFunction::Acosh
+        | BuiltinScalarFunction::Atanh
+        | BuiltinScalarFunction::Sind
+        | BuiltinScalarFunction::Cosd
+        | BuiltinScalarFunction::Tand
+        | BuiltinScalarFunction::Cotd
+        | BuiltinScalarFunction::Asind
+        | BuiltinScalarFunction::Acosd
+        | BuiltinScalarFunction::Atand => {
+            let arg_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            if !is_numeric_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    SqlType::new(SqlTypeKind::Float8),
+                )],
+            })
+        }
+        BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => {
+            let left_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let right_type =
+                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            if !is_numeric_family(left_type) || !is_numeric_family(right_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric arguments",
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(left_type),
+                        sql_type_name(right_type)
+                    ),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        left_type,
+                        SqlType::new(SqlTypeKind::Float8),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        right_type,
+                        SqlType::new(SqlTypeKind::Float8),
+                    ),
+                ],
+            })
+        }
         BuiltinScalarFunction::PgInputIsValid
         | BuiltinScalarFunction::PgInputErrorMessage
         | BuiltinScalarFunction::PgInputErrorDetail

@@ -30,6 +30,31 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "abs" => Some(BuiltinScalarFunction::Abs),
         "gcd" => Some(BuiltinScalarFunction::Gcd),
         "lcm" => Some(BuiltinScalarFunction::Lcm),
+        "trunc" => Some(BuiltinScalarFunction::Trunc),
+        "round" => Some(BuiltinScalarFunction::Round),
+        "ceil" => Some(BuiltinScalarFunction::Ceil),
+        "ceiling" => Some(BuiltinScalarFunction::Ceiling),
+        "floor" => Some(BuiltinScalarFunction::Floor),
+        "sign" => Some(BuiltinScalarFunction::Sign),
+        "sqrt" => Some(BuiltinScalarFunction::Sqrt),
+        "cbrt" => Some(BuiltinScalarFunction::Cbrt),
+        "power" => Some(BuiltinScalarFunction::Power),
+        "exp" => Some(BuiltinScalarFunction::Exp),
+        "ln" => Some(BuiltinScalarFunction::Ln),
+        "sinh" => Some(BuiltinScalarFunction::Sinh),
+        "cosh" => Some(BuiltinScalarFunction::Cosh),
+        "tanh" => Some(BuiltinScalarFunction::Tanh),
+        "asinh" => Some(BuiltinScalarFunction::Asinh),
+        "acosh" => Some(BuiltinScalarFunction::Acosh),
+        "atanh" => Some(BuiltinScalarFunction::Atanh),
+        "sind" => Some(BuiltinScalarFunction::Sind),
+        "cosd" => Some(BuiltinScalarFunction::Cosd),
+        "tand" => Some(BuiltinScalarFunction::Tand),
+        "cotd" => Some(BuiltinScalarFunction::Cotd),
+        "asind" => Some(BuiltinScalarFunction::Asind),
+        "acosd" => Some(BuiltinScalarFunction::Acosd),
+        "atand" => Some(BuiltinScalarFunction::Atand),
+        "atan2d" => Some(BuiltinScalarFunction::Atan2d),
         "pg_input_is_valid" => Some(BuiltinScalarFunction::PgInputIsValid),
         _ => None,
     }
@@ -74,7 +99,31 @@ pub(super) fn validate_scalar_function_arity(
         BuiltinScalarFunction::Random => args.is_empty(),
         BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
         BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
-        BuiltinScalarFunction::Abs => args.len() == 1,
+        BuiltinScalarFunction::Abs
+        | BuiltinScalarFunction::Trunc
+        | BuiltinScalarFunction::Round
+        | BuiltinScalarFunction::Ceil
+        | BuiltinScalarFunction::Ceiling
+        | BuiltinScalarFunction::Floor
+        | BuiltinScalarFunction::Sign
+        | BuiltinScalarFunction::Sqrt
+        | BuiltinScalarFunction::Cbrt
+        | BuiltinScalarFunction::Exp
+        | BuiltinScalarFunction::Ln
+        | BuiltinScalarFunction::Sinh
+        | BuiltinScalarFunction::Cosh
+        | BuiltinScalarFunction::Tanh
+        | BuiltinScalarFunction::Asinh
+        | BuiltinScalarFunction::Acosh
+        | BuiltinScalarFunction::Atanh
+        | BuiltinScalarFunction::Sind
+        | BuiltinScalarFunction::Cosd
+        | BuiltinScalarFunction::Tand
+        | BuiltinScalarFunction::Cotd
+        | BuiltinScalarFunction::Asind
+        | BuiltinScalarFunction::Acosd
+        | BuiltinScalarFunction::Atand => args.len() == 1,
+        BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => args.len() == 2,
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
