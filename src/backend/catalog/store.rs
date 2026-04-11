@@ -104,12 +104,25 @@ impl CatalogStore {
     }
 }
 
+pub(crate) fn sync_catalog_heaps(
+    base_dir: &Path,
+    catalog: &Catalog,
+) -> Result<(), CatalogError> {
+    sync_physical_catalogs(base_dir, catalog)
+}
+
 #[cfg(test)]
 pub(crate) fn sync_catalog_heaps_for_tests(
     base_dir: &Path,
     catalog: &Catalog,
 ) -> Result<(), CatalogError> {
-    sync_physical_catalogs(base_dir, catalog)
+    sync_catalog_heaps(base_dir, catalog)
+}
+
+impl CatalogStore {
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
 }
 
 fn sync_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
