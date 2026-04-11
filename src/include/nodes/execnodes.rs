@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::backend::executor::{AccumState, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
+pub use crate::include::nodes::parsenodes::SqlType;
 pub use crate::include::nodes::plannodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JsonTableFunction, OrderByEntry,
     Plan, QueryColumn, RelationDesc, ScalarType, TargetEntry,
@@ -282,9 +283,10 @@ pub struct GenerateSeriesState {
     pub(crate) start: Expr,
     pub(crate) stop: Expr,
     pub(crate) step: Expr,
-    pub(crate) current: i32,
-    pub(crate) end: i32,
-    pub(crate) step_val: i32,
+    pub(crate) output_type: SqlType,
+    pub(crate) current: i64,
+    pub(crate) end: i64,
+    pub(crate) step_val: i64,
     pub(crate) initialized: bool,
     pub(crate) slot: TupleSlot,
     pub(crate) column_names: Vec<String>,
