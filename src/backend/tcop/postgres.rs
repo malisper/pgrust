@@ -43,6 +43,18 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         _ => "XX000",
     }
 }
+
+fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
+    let value = match e {
+        ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
+        ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
+        ExecError::InvalidNumericInput(value) => value.as_str(),
+        ExecError::InvalidFloatInput(value) => value.as_str(),
+        _ => return None,
+    };
+    let needle = format!("'{}'", value.replace('\'', "''"));
+    sql.rfind(&needle).map(|index| index + 1)
+}
 use crate::ClientId;
 use crate::backend::parser::{Statement, parse_statement};
 use crate::pgrust::database::Database;
@@ -138,6 +150,7 @@ pub(crate) fn handle_connection(
                     &mut writer,
                     "08P01",
                     &format!("unsupported protocol version: {code}"),
+                    None,
                 )?;
                 writer.flush()?;
                 return Ok(());
@@ -229,6 +242,7 @@ pub(crate) fn handle_connection(
                     &mut writer,
                     "0A000",
                     &format!("unsupported message type: '{}'", msg_type as char),
+                    None,
                 )?;
                 send_ready_for_query(&mut writer, state.session.ready_status())?;
                 writer.flush()?;
@@ -303,7 +317,12 @@ fn handle_query(
                 drop(guard);
 
                 if let Some(e) = err {
-                    send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
+                    send_error(
+                        stream,
+                        exec_error_sqlstate(&e),
+                        &format_exec_error(&e),
+                        exec_error_position(sql, &e),
+                    )?;
                 } else {
                     if !header_sent {
                         send_row_description(stream, &columns)?;
@@ -312,7 +331,12 @@ fn handle_query(
                 }
             }
             Err(e) => {
-                send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
+                send_error(
+                    stream,
+                    exec_error_sqlstate(&e),
+                    &format_exec_error(&e),
+                    exec_error_position(sql, &e),
+                )?;
             }
         }
     } else {
@@ -324,7 +348,12 @@ fn handle_query(
                 send_command_complete(stream, &infer_command_tag(sql, n))?;
             }
             Err(e) => {
-                send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
+                send_error(
+                    stream,
+                    exec_error_sqlstate(&e),
+                    &format_exec_error(&e),
+                    exec_error_position(sql, &e),
+                )?;
             }
         }
     }
@@ -384,7 +413,7 @@ fn handle_copy_fail(
 ) -> io::Result<()> {
     state.copy_in = None;
     let message = cstr_from_bytes(body);
-    send_error(stream, "57014", &format!("copy failed: {message}"))?;
+    send_error(stream, "57014", &format!("copy failed: {message}"), None)?;
     send_ready_for_query(stream, state.session.ready_status())?;
     Ok(())
 }
@@ -452,7 +481,7 @@ fn handle_bind(
     }
 
     let Some(stmt) = state.prepared.get(&statement_name) else {
-        send_error(stream, "26000", "unknown prepared statement")?;
+        send_error(stream, "26000", "unknown prepared statement", None)?;
         return Ok(());
     };
     state.portals.insert(
@@ -510,7 +539,7 @@ fn handle_execute(
     let portal_name = read_cstr(body, &mut offset)?;
     let _max_rows = read_i32_bytes(body, &mut offset)?;
     let Some(portal) = state.portals.get(&portal_name) else {
-        send_error(stream, "26000", "unknown portal")?;
+        send_error(stream, "26000", "unknown portal", None)?;
         return Ok(());
     };
     execute_portal(stream, db, &mut state.session, portal)
@@ -569,7 +598,12 @@ fn execute_portal(
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
         }
         Err(e) => {
-            send_error(stream, exec_error_sqlstate(&e), &format_exec_error(&e))?;
+            send_error(
+                stream,
+                exec_error_sqlstate(&e),
+                &format_exec_error(&e),
+                exec_error_position(&sql, &e),
+            )?;
         }
     }
     Ok(())
