@@ -6,6 +6,7 @@ pub(crate) fn bind_select_targets(
     catalog: &Catalog,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
 ) -> Result<Vec<TargetEntry>, ParseError> {
     let mut entries = Vec::new();
     for item in targets {
@@ -22,19 +23,21 @@ pub(crate) fn bind_select_targets(
 
         entries.push(TargetEntry {
             name: item.output_name.clone(),
-            expr: bind_expr_with_outer(
+            expr: bind_expr_with_outer_and_ctes(
                 &item.expr,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             )?,
-            sql_type: infer_sql_expr_type(
+            sql_type: infer_sql_expr_type_with_ctes(
                 &item.expr,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
+                ctes,
             ),
         });
     }

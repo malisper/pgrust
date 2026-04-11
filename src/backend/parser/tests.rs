@@ -174,6 +174,31 @@
     }
 
     #[test]
+    fn build_plan_binds_select_ctes_and_nested_subqueries() {
+        let stmt = parse_select(
+            "with q as (values (2), (1)) select (select column1 from q order by 1 limit 1)",
+        )
+        .unwrap();
+        assert!(build_plan(&stmt, &catalog()).is_ok());
+    }
+
+    #[test]
+    fn build_plan_cte_shadows_catalog_table() {
+        let stmt = parse_select("with people as (values (42)) select column1 from people").unwrap();
+        assert!(build_plan(&stmt, &catalog()).is_ok());
+    }
+
+    #[test]
+    fn build_plan_rejects_forward_cte_references() {
+        let stmt = parse_select("with y as (select * from x), x as (values (1)) select * from y")
+            .unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnknownTable(name)) if name == "x"
+        ));
+    }
+
+    #[test]
     fn parse_boolean_is_predicates_lower_to_existing_ast() {
         let stmt = parse_select(
             "select b is true, b is not false, b is unknown, b is not unknown from people",

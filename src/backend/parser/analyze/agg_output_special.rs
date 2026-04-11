@@ -322,5 +322,6 @@ fn build_grouped_subquery_plan(
             scope: input_scope.clone(),
             group_by_exprs: group_by_exprs.to_vec(),
         }),
+        &[],
     )
 }

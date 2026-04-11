@@ -5501,6 +5501,22 @@
     }
 
     #[test]
+    fn select_ctes_bind_values_and_shadow_catalog_tables() {
+        let base = temp_dir("select_ctes_bind_values");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "with people(id) as (values (42)), q as (select id from people) select (select id from q)",
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(42)]],
+        );
+    }
+
+    #[test]
     fn scalar_subquery_zero_rows_yields_null() {
         let base = temp_dir("scalar_subquery_zero_rows");
         let mut txns = TransactionManager::new_durable(&base).unwrap();

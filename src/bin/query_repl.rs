@@ -443,6 +443,23 @@ fn run_statement(
                 INVALID_TRANSACTION_ID,
             )
         }
+        Statement::Values(stmt) => {
+            let mut ctx = ExecutorContext {
+                pool: std::sync::Arc::clone(pool),
+                txns: txns.clone(),
+                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                client_id: 21,
+                next_command_id: 0,
+                outer_rows: Vec::new(),
+                timed: false,
+            };
+            execute_statement(
+                Statement::Values(stmt),
+                catalog_store.catalog_mut(),
+                &mut ctx,
+                INVALID_TRANSACTION_ID,
+            )
+        }
         Statement::ShowTables => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),

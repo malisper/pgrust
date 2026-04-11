@@ -8,6 +8,17 @@ pub(super) fn infer_sql_expr_type(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> SqlType {
+    infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
+}
+
+pub(super) fn infer_sql_expr_type_with_ctes(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> SqlType {
     match expr {
         SqlExpr::Column(name) => {
             match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
@@ -47,22 +58,36 @@ pub(super) fn infer_sql_expr_type(
         | SqlExpr::Div(left, right)
         | SqlExpr::Mod(left, right) => infer_arithmetic_sql_type(
             expr,
-            infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer),
-            infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer),
+            infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes),
+            infer_sql_expr_type_with_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
         ),
         SqlExpr::Concat(left, right) => infer_concat_sql_type(
             expr,
-            infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer),
-            infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer),
+            infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes),
+            infer_sql_expr_type_with_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
         ),
         SqlExpr::UnaryPlus(inner) => {
-            infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer)
+            infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }
         SqlExpr::Negate(inner) => {
-            infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer)
+            infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }
         SqlExpr::BitNot(inner) => {
-            infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer)
+            infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }
         SqlExpr::Cast(_, ty) => *ty,
         SqlExpr::Eq(_, _)
@@ -89,7 +114,8 @@ pub(super) fn infer_sql_expr_type(
         | SqlExpr::JsonbPathMatch(_, _)
         | SqlExpr::QuantifiedArray { .. } => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::JsonGet(left, _) | SqlExpr::JsonPath(left, _) => {
-            let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+            let left_type =
+                infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
             if matches!(left_type.element_type().kind, SqlTypeKind::Jsonb) {
                 SqlType::new(SqlTypeKind::Jsonb)
             } else {
@@ -101,15 +127,16 @@ pub(super) fn infer_sql_expr_type(
         }
         SqlExpr::AggCall { func, args, .. } => aggregate_sql_type(
             *func,
-            args.first()
-                .map(|expr| infer_sql_expr_type(expr, scope, catalog, outer_scopes, grouped_outer)),
+            args.first().map(|expr| {
+                infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+            }),
         ),
         SqlExpr::ArrayLiteral(elements) => {
-            infer_array_literal_type(elements, scope, catalog, outer_scopes, grouped_outer)
+            infer_array_literal_type_with_ctes(elements, scope, catalog, outer_scopes, grouped_outer, ctes)
                 .unwrap_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text)))
         }
         SqlExpr::ScalarSubquery(select) => {
-            build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.cloned())
+            build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.cloned(), ctes)
                 .ok()
                 .and_then(|plan| {
                     let cols = plan.columns();
@@ -157,7 +184,9 @@ pub(super) fn infer_sql_expr_type(
             Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
             Some(BuiltinScalarFunction::Abs) => args.first().map_or(
                 SqlType::new(SqlTypeKind::Text),
-                |arg| infer_sql_expr_type(arg, scope, catalog, outer_scopes, grouped_outer),
+                |arg| {
+                    infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+                },
             ),
             Some(
                 BuiltinScalarFunction::Trunc
@@ -203,8 +232,22 @@ pub(super) fn infer_sql_expr_type(
                 |(left, right)| {
                     resolve_numeric_binary_type(
                         "+",
-                        infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer),
-                        infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer),
+                        infer_sql_expr_type_with_ctes(
+                            left,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        ),
+                        infer_sql_expr_type_with_ctes(
+                            right,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        ),
                     )
                     .unwrap_or(SqlType::new(SqlTypeKind::Text))
                 },
@@ -219,6 +262,27 @@ pub(super) fn infer_sql_expr_type(
         },
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
     }
+}
+
+pub(super) fn infer_array_literal_type_with_ctes(
+    elements: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Option<SqlType> {
+    let mut common = None;
+    for element in elements {
+        let ty = infer_sql_expr_type_with_ctes(element, scope, catalog, outer_scopes, grouped_outer, ctes);
+        common = Some(match common {
+            None => ty.element_type(),
+            Some(existing) => resolve_common_scalar_type(existing, ty)?,
+        });
+    }
+    Some(SqlType::array_of(
+        common.unwrap_or(SqlType::new(SqlTypeKind::Text)),
+    ))
 }
 
 
