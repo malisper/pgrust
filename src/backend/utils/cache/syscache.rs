@@ -1,19 +1,19 @@
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::utils::cache::catcache::CatCache;
-use crate::backend::utils::cache::relcache::RelCache;
+use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{PgAttributeRow, PgClassRow, PgNamespaceRow};
 
 pub fn relation_lookup_by_name<'a>(
     relcache: &'a RelCache,
     name: &str,
-) -> Option<&'a crate::backend::catalog::catalog::CatalogEntry> {
+) -> Option<&'a RelCacheEntry> {
     relcache.get_by_name(name)
 }
 
 pub fn relation_lookup_by_oid<'a>(
     relcache: &'a RelCache,
     oid: u32,
-) -> Option<&'a crate::backend::catalog::catalog::CatalogEntry> {
+) -> Option<&'a RelCacheEntry> {
     relcache.get_by_oid(oid)
 }
 
