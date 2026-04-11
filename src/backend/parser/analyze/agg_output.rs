@@ -11,6 +11,30 @@ pub(super) fn bind_agg_output_expr(
     agg_list: &[(AggFunc, Vec<SqlExpr>, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
+    bind_agg_output_expr_in_clause(
+        expr,
+        UngroupedColumnClause::Other,
+        group_by_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )
+}
+
+pub(super) fn bind_agg_output_expr_in_clause(
+    expr: &SqlExpr,
+    clause: UngroupedColumnClause,
+    group_by_exprs: &[SqlExpr],
+    input_scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[(AggFunc, Vec<SqlExpr>, bool)],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
         if gk == expr {
             return Ok(Expr::Column(i));
@@ -50,14 +74,17 @@ pub(super) fn bind_agg_output_expr(
                     return Ok(Expr::Column(i));
                 }
             }
-            Err(ParseError::UngroupedColumn(name.clone()))
+            Err(build_ungrouped_column_error(
+                input_scope, col_index, name, clause,
+            ))
         }
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
         SqlExpr::IntegerLiteral(value) => Ok(Expr::Const(bind_integer_literal(value)?)),
         SqlExpr::NumericLiteral(value) => Ok(Expr::Const(bind_numeric_literal(value)?)),
         SqlExpr::Add(l, r) => Ok(Expr::Add(
-            Box::new(bind_agg_output_expr(
+            Box::new(bind_agg_output_expr_in_clause(
                 l,
+                clause.clone(),
                 group_by_exprs,
                 input_scope,
                 catalog,
@@ -66,8 +93,9 @@ pub(super) fn bind_agg_output_expr(
                 agg_list,
                 n_keys,
             )?),
-            Box::new(bind_agg_output_expr(
+            Box::new(bind_agg_output_expr_in_clause(
                 r,
+                clause,
                 group_by_exprs,
                 input_scope,
                 catalog,
@@ -969,5 +997,23 @@ pub(super) fn bind_agg_output_expr(
             n_keys,
         ),
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
+    }
+}
+
+fn build_ungrouped_column_error(
+    input_scope: &BoundScope,
+    col_index: usize,
+    token: &str,
+    clause: UngroupedColumnClause,
+) -> ParseError {
+    let column = &input_scope.columns[col_index];
+    let display_name = match &column.relation_name {
+        Some(relation_name) => format!("{relation_name}.{}", column.output_name),
+        None => column.output_name.clone(),
+    };
+    ParseError::UngroupedColumn {
+        display_name,
+        token: token.to_string(),
+        clause,
     }
 }

@@ -20,6 +20,7 @@ use crate::backend::libpq::pqformat::{
     send_typed_data_row,
 };
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
+use crate::backend::parser::UngroupedColumnClause;
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
@@ -60,6 +61,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         return None;
     }
     let value = match e {
+        ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn { token, clause, .. }) => {
+            return find_ungrouped_column_position(sql, token, clause);
+        }
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidNumericInput(value) => value.as_str(),
@@ -70,6 +74,45 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     };
     let needle = format!("'{}'", value.replace('\'', "''"));
     sql.rfind(&needle).map(|index| index + 1)
+}
+
+fn find_ungrouped_column_position(
+    sql: &str,
+    token: &str,
+    clause: &UngroupedColumnClause,
+) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let (start, end) = match clause {
+        UngroupedColumnClause::SelectTarget => {
+            let start = lower.find("select")? + "select".len();
+            let end = lower.find(" from ").or_else(|| lower.find(" from"))?;
+            (start, end)
+        }
+        UngroupedColumnClause::Having => {
+            let start = lower.find("having")? + "having".len();
+            (start, sql.len())
+        }
+        UngroupedColumnClause::Other => (0, sql.len()),
+    };
+    let segment = &sql[start..end];
+    find_identifier_in_segment(segment, token).map(|offset| start + offset + 1)
+}
+
+fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
+    let token_lower = token.to_ascii_lowercase();
+    let segment_lower = segment.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(found) = segment_lower[from..].find(&token_lower) {
+        let idx = from + found;
+        let before = segment[..idx].chars().next_back();
+        let after = segment[idx + token.len()..].chars().next();
+        let is_ident = |ch: char| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.';
+        if !before.is_some_and(is_ident) && !after.is_some_and(is_ident) {
+            return Some(idx);
+        }
+        from = idx + token.len();
+    }
+    None
 }
 use crate::ClientId;
 use crate::backend::parser::{Statement, parse_statement};

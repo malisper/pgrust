@@ -233,8 +233,9 @@ fn build_plan_with_outer(
             .having
             .as_ref()
             .map(|e| {
-                bind_agg_output_expr(
+                bind_agg_output_expr_in_clause(
                     e,
+                    UngroupedColumnClause::Having,
                     &stmt.group_by,
                     &scope,
                     catalog,
@@ -272,8 +273,9 @@ fn build_plan_with_outer(
                 .map(|item| {
                     Ok(TargetEntry {
                         name: item.output_name.clone(),
-                        expr: bind_agg_output_expr(
+                        expr: bind_agg_output_expr_in_clause(
                             &item.expr,
+                            UngroupedColumnClause::SelectTarget,
                             &stmt.group_by,
                             &scope,
                             catalog,
@@ -301,8 +303,9 @@ fn build_plan_with_outer(
                     &stmt.order_by,
                     &targets,
                     |expr| {
-                        bind_agg_output_expr(
+                        bind_agg_output_expr_in_clause(
                             expr,
+                            UngroupedColumnClause::SelectTarget,
                             &stmt.group_by,
                             &scope,
                             catalog,
