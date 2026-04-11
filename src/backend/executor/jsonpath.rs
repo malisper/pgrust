@@ -533,19 +533,7 @@ impl<'a> Parser<'a> {
                 return Ok(Some(out));
             }
             if ch == '\\' {
-                let escaped = self
-                    .peek()
-                    .ok_or_else(|| exec_jsonpath_error("unterminated jsonpath string"))?;
-                self.bump();
-                out.push(match escaped {
-                    '\\' => '\\',
-                    '"' => '"',
-                    '\'' => '\'',
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    other => other,
-                });
+                self.parse_escape_sequence(&mut out)?;
             } else {
                 out.push(ch);
             }
@@ -608,6 +596,65 @@ impl<'a> Parser<'a> {
         while matches!(self.peek(), Some(ch) if ch.is_whitespace()) {
             self.bump();
         }
+    }
+
+    fn parse_escape_sequence(&mut self, out: &mut String) -> Result<(), ExecError> {
+        let escaped = self
+            .peek()
+            .ok_or_else(|| exec_jsonpath_error("unterminated jsonpath string"))?;
+        self.bump();
+        match escaped {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            '\'' => out.push('\''),
+            '/' => out.push('/'),
+            'b' => out.push('\u{0008}'),
+            'f' => out.push('\u{000C}'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'u' => {
+                let codepoint = self.parse_unicode_escape()?;
+                if (0xD800..=0xDBFF).contains(&codepoint) {
+                    self.expect("\\u")?;
+                    let low = self.parse_unicode_escape()?;
+                    if !(0xDC00..=0xDFFF).contains(&low) {
+                        return Err(exec_jsonpath_error("invalid low surrogate in jsonpath string"));
+                    }
+                    let scalar = 0x10000 + (((codepoint - 0xD800) as u32) << 10) + (low - 0xDC00) as u32;
+                    let ch = char::from_u32(scalar)
+                        .ok_or_else(|| exec_jsonpath_error("invalid Unicode scalar value in jsonpath string"))?;
+                    out.push(ch);
+                } else if (0xDC00..=0xDFFF).contains(&codepoint) {
+                    return Err(exec_jsonpath_error("invalid low surrogate in jsonpath string"));
+                } else if codepoint == 0 {
+                    return Err(exec_jsonpath_error("unsupported Unicode escape sequence"));
+                } else {
+                    let ch = char::from_u32(codepoint as u32)
+                        .ok_or_else(|| exec_jsonpath_error("invalid Unicode scalar value in jsonpath string"))?;
+                    out.push(ch);
+                }
+            }
+            _ => {
+                return Err(exec_jsonpath_error("invalid escape sequence in jsonpath string"));
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_unicode_escape(&mut self) -> Result<u16, ExecError> {
+        let mut value = 0u16;
+        for _ in 0..4 {
+            let ch = self
+                .peek()
+                .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?;
+            self.bump();
+            let digit = ch
+                .to_digit(16)
+                .ok_or_else(|| exec_jsonpath_error("invalid Unicode escape sequence"))?;
+            value = (value << 4) | digit as u16;
+        }
+        Ok(value)
     }
 
     fn take_while(&mut self, predicate: impl Fn(char) -> bool) -> Option<&'a str> {

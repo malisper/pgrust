@@ -276,6 +276,7 @@ fn eval_builtin_function(
         .collect::<Result<Vec<_>, _>>()?;
     match func {
         BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
+        BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::ToJson => {
             let value = values.first().cloned().unwrap_or(Value::Null);
             Ok(Value::Json(CompactString::from_owned(value_to_json_text(
