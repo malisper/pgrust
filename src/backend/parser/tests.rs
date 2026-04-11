@@ -340,6 +340,23 @@
             parse_type_name("varchar").unwrap(),
             SqlType::new(SqlTypeKind::Varchar)
         );
+        assert_eq!(
+            parse_type_name("\"char\"").unwrap(),
+            SqlType::new(SqlTypeKind::InternalChar)
+        );
+    }
+
+    #[test]
+    fn parse_internal_char_casts() {
+        let stmt = parse_select("select 'a'::\"char\", cast('b' as \"char\")").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(_, ty) => assert_eq!(*ty, SqlType::new(SqlTypeKind::InternalChar)),
+            other => panic!("expected cast expression, got {other:?}"),
+        }
+        match &stmt.targets[1].expr {
+            SqlExpr::Cast(_, ty) => assert_eq!(*ty, SqlType::new(SqlTypeKind::InternalChar)),
+            other => panic!("expected cast expression, got {other:?}"),
+        }
     }
 
     #[test]

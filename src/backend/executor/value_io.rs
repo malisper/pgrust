@@ -89,6 +89,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
+        Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
         Value::Array(items) => Ok(Value::Array(items.clone())),
     }
 }
@@ -231,6 +232,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Json(text) => Ok(text.as_bytes().to_vec()),
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
+        Value::InternalChar(v) => Ok(vec![v]),
         Value::Float64(v) => Ok(v.to_string().into_bytes()),
         Value::JsonPath(text) => Ok(text.as_bytes().to_vec()),
         Value::Array(_) => Err(ExecError::TypeMismatch { op: "array element", left: coerced, right: Value::Null }),
@@ -319,7 +321,11 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             }
             Ok(Value::Bool(bytes[0] != 0))
         }
-        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+        SqlTypeKind::Text
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::InternalChar
+        | SqlTypeKind::Char
+        | SqlTypeKind::Varchar => {
             Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
         }
     }
@@ -382,6 +388,20 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Text(_) | Value::TextRef(_, _) => {
                 out.push('"');
                 for ch in item.as_text().unwrap().chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
+            Value::InternalChar(byte) => {
+                let rendered = super::expr_casts::render_internal_char_text(*byte);
+                out.push('"');
+                for ch in rendered.chars() {
                     match ch {
                         '"' | '\\' => {
                             out.push('\\');

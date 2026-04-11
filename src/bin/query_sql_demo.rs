@@ -69,6 +69,7 @@ fn render_value(value: &Value) -> String {
         Value::JsonPath(v) => v.to_string(),
         Value::Text(v) => format!("{:?}", v),
         Value::TextRef(_, _) => format!("{:?}", value.as_text().unwrap()),
+        Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),
         Value::Bool(v) => v.to_string(),
         Value::Array(items) => format!(
             "{{{}}}",

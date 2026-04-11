@@ -17,6 +17,7 @@ pub enum Value {
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned.
     TextRef(*const u8, u32),
+    InternalChar(u8),
     Bool(bool),
     Array(Vec<Value>),
     Null,
@@ -269,6 +270,7 @@ impl Value {
                 Value::Text(CompactString::new(s))
             }
             Value::Text(s) => Value::Text(s.clone()),
+            Value::InternalChar(v) => Value::InternalChar(*v),
             Value::Bool(v) => Value::Bool(*v),
             Value::Array(values) => Value::Array(values.iter().map(Value::to_owned_value).collect()),
             Value::Null => Value::Null,
@@ -302,6 +304,7 @@ impl PartialEq for Value {
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Jsonb(a), Value::Jsonb(b)) => a == b,
             (Value::JsonPath(a), Value::JsonPath(b)) => a == b,
+            (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -360,6 +363,10 @@ impl std::hash::Hash for Value {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
                 };
                 s.hash(state);
+            }
+            Value::InternalChar(v) => {
+                12u8.hash(state);
+                v.hash(state);
             }
             Value::Bool(v) => {
                 6u8.hash(state);

@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::access::heap::heapam::HeapError;
-use crate::backend::executor::{ExecError, QueryColumn, Value};
+use crate::backend::executor::{render_internal_char_text, ExecError, QueryColumn, Value};
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::TupleError;
 use num_bigint::BigInt;
@@ -167,6 +167,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Json => 199,
             SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::JsonPath => 4073,
+            SqlTypeKind::InternalChar => 1002,
             SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => 1009,
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
@@ -184,6 +185,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
+        SqlTypeKind::InternalChar => (18, 1, -1),
         SqlTypeKind::Bool => (16, 1, -1),
         SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => {
@@ -278,6 +280,11 @@ pub(crate) fn send_typed_data_row(
                 let s = val.as_text().unwrap();
                 buf.extend_from_slice(&(s.len() as i32).to_be_bytes());
                 buf.extend_from_slice(s.as_bytes());
+            }
+            Value::InternalChar(byte) => {
+                let rendered = render_internal_char_text(*byte);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Bool(true) => {
                 buf.extend_from_slice(&1_i32.to_be_bytes());

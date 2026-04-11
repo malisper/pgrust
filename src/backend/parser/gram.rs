@@ -855,6 +855,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::InternalChar => "char",
         SqlTypeKind::Char => "bpchar",
         SqlTypeKind::Varchar => "varchar",
     }
@@ -926,6 +927,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_jsonpath => SqlType::new(SqlTypeKind::JsonPath),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
         Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
+        Rule::internal_char_type => SqlType::new(SqlTypeKind::InternalChar),
         Rule::char_type => {
             let len = pair
                 .into_inner()

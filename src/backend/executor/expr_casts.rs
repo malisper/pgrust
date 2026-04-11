@@ -116,6 +116,28 @@ fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
     Ok(Value::Int32(value as i32))
 }
 
+fn parse_internal_char_text(text: &str) -> u8 {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return 0;
+    }
+    if bytes.len() == 4
+        && bytes[0] == b'\\'
+        && bytes[1..].iter().all(|b| (b'0'..=b'7').contains(b))
+    {
+        return (bytes[1] - b'0') * 64 + (bytes[2] - b'0') * 8 + (bytes[3] - b'0');
+    }
+    bytes[0]
+}
+
+pub fn render_internal_char_text(byte: u8) -> String {
+    match byte {
+        0 => String::new(),
+        1..=127 => char::from(byte).to_string(),
+        _ => format!("\\{:03o}", byte),
+    }
+}
+
 fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
     let parsed = match parse_type_name(type_name.trim()) {
         Ok(ty) => ty,
@@ -132,6 +154,7 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
             | SqlTypeKind::Text
             | SqlTypeKind::Bool
             | SqlTypeKind::Numeric
+            | SqlTypeKind::InternalChar
             | SqlTypeKind::Char
             | SqlTypeKind::Varchar
     ) && !parsed.is_array;
@@ -291,6 +314,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::InternalChar
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -340,6 +364,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::InternalChar
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -361,6 +386,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::InternalChar
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -391,6 +417,33 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             };
             cast_text_value(text, ty, true)
         }
+        Value::InternalChar(byte) => match ty.kind {
+            SqlTypeKind::InternalChar => Ok(Value::InternalChar(byte)),
+            SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(
+                CompactString::from_owned(render_internal_char_text(byte)),
+            )),
+            SqlTypeKind::Json => {
+                let rendered = render_internal_char_text(byte);
+                validate_json_text(&rendered)?;
+                Ok(Value::Json(CompactString::from_owned(rendered)))
+            }
+            SqlTypeKind::Jsonb => {
+                let rendered = render_internal_char_text(byte);
+                Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
+            }
+            SqlTypeKind::JsonPath => {
+                let rendered = render_internal_char_text(byte);
+                Ok(Value::JsonPath(canonicalize_jsonpath_text(&rendered)?))
+            }
+            SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                cast_text_value(&render_internal_char_text(byte), ty, true)
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::char",
+                left: Value::InternalChar(byte),
+                right: Value::Null,
+            }),
+        },
         Value::JsonPath(text) => cast_text_value(text.as_str(), ty, true),
         Value::Json(text) => cast_text_value(text.as_str(), ty, true),
         Value::Jsonb(bytes) => match ty.kind {
@@ -451,6 +504,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::InternalChar
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -483,6 +537,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::InternalChar
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
@@ -523,6 +578,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::new(text))),
+        SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
         SqlTypeKind::Json => {
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
@@ -576,6 +632,7 @@ pub(super) fn cast_numeric_value(
             let rendered = value.render();
             Ok(Value::JsonPath(canonicalize_jsonpath_text(&rendered)?))
         }
+        SqlTypeKind::InternalChar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Char | SqlTypeKind::Varchar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Float4 => {
             let rendered = value.render();

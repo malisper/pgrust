@@ -3194,6 +3194,30 @@
     }
 
     #[test]
+    fn internal_char_casts_follow_postgres_io_rules() {
+        let base = temp_dir("internal_char_casts");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 'a'::\"char\", '\\101'::\"char\", '\\377'::\"char\", '\\377'::\"char\"::text, '\\000'::\"char\"::text, ''::text::\"char\"::text",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::InternalChar(b'a'),
+                Value::InternalChar(b'A'),
+                Value::InternalChar(0o377),
+                Value::Text("\\377".into()),
+                Value::Text("".into()),
+                Value::Text("".into()),
+            ]],
+        );
+    }
+
+    #[test]
     fn qualified_star_target_expands_relation_columns() {
         let base = temp_dir("qualified_star_target");
         let mut txns = TransactionManager::new_durable(&base).unwrap();
