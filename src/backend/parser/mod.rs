@@ -266,6 +266,7 @@ mod tests {
     #[test]
     fn parse_varchar_type_cast_expression() {
         let stmt = parse_select("select 'abc'::varchar(2)").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "varchar");
         match &stmt.targets[0].expr {
             SqlExpr::Cast(_, ty) => {
                 assert_eq!(*ty, SqlType::with_char_len(SqlTypeKind::Varchar, 2));
@@ -278,6 +279,9 @@ mod tests {
     fn parse_typed_string_literal_expression() {
         let stmt = parse_select("select int2 '7', int4 '9', varchar(3) 'abc'").unwrap();
         assert_eq!(stmt.targets.len(), 3);
+        assert_eq!(stmt.targets[0].output_name, "int2");
+        assert_eq!(stmt.targets[1].output_name, "int4");
+        assert_eq!(stmt.targets[2].output_name, "varchar");
         match &stmt.targets[0].expr {
             SqlExpr::Cast(inner, ty) => {
                 assert_eq!(*ty, SqlType::new(SqlTypeKind::Int2));
@@ -312,6 +316,7 @@ mod tests {
     #[test]
     fn parse_shift_expression_precedence() {
         let stmt = parse_select("select (-1::int2<<15)::text").unwrap();
+        assert_eq!(stmt.targets[0].output_name, "text");
         match &stmt.targets[0].expr {
             SqlExpr::Cast(inner, ty) => {
                 assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));

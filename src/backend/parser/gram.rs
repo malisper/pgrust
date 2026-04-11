@@ -804,14 +804,36 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
 }
 
 fn select_item_name(expr: &SqlExpr, index: usize) -> String {
+    let _ = index;
     match expr {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
-        SqlExpr::Cast(inner, _) => select_item_name(inner, index),
+        SqlExpr::Cast(inner, ty) => match inner.as_ref() {
+            SqlExpr::Column(_) | SqlExpr::Cast(_, _) => select_item_name(inner, index),
+            _ => sql_type_output_name(*ty).to_string(),
+        },
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::Random => "random".to_string(),
         SqlExpr::FuncCall { name, .. } => name.clone(),
-        SqlExpr::IntegerLiteral(_) | SqlExpr::NumericLiteral(_) => format!("expr{}", index + 1),
-        _ => format!("expr{}", index + 1),
+        _ => "?column?".to_string(),
+    }
+}
+
+fn sql_type_output_name(ty: SqlType) -> &'static str {
+    match ty.kind {
+        SqlTypeKind::Int2 => "int2",
+        SqlTypeKind::Int4 => "int4",
+        SqlTypeKind::Int8 => "int8",
+        SqlTypeKind::Float4 => "float4",
+        SqlTypeKind::Float8 => "float8",
+        SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Json => "json",
+        SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Bool => "bool",
+        SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::Char => "bpchar",
+        SqlTypeKind::Varchar => "varchar",
     }
 }
 
