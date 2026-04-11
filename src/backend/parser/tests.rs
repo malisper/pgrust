@@ -502,6 +502,19 @@
     }
 
     #[test]
+    fn parse_bit_string_literals() {
+        let stmt = parse_select("select B'0101', X'0f'").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Const(Value::Bit(bits)) => assert_eq!(bits.render(), "0101"),
+            other => panic!("expected bit literal, got {other:?}"),
+        }
+        match &stmt.targets[1].expr {
+            SqlExpr::Const(Value::Bit(bits)) => assert_eq!(bits.render(), "00001111"),
+            other => panic!("expected bit literal, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_internal_char_casts() {
         let stmt = parse_select("select 'a'::\"char\", cast('b' as \"char\")").unwrap();
         match &stmt.targets[0].expr {

@@ -323,6 +323,22 @@ impl CompiledTupleDecoder {
                                     }),
                                 ));
                             }
+                            ScalarType::BitString => {
+                                if bytes_slice.len() < 4 {
+                                    return Err(ExecError::InvalidStorageValue {
+                                        column: "<tuple>".into(),
+                                        details: "bit payload too short".into(),
+                                    });
+                                }
+                                let bit_len =
+                                    u32::from_le_bytes(bytes_slice[0..4].try_into().unwrap()) as i32;
+                                values.push(Value::Bit(
+                                    crate::include::nodes::datum::BitString::new(
+                                        bit_len,
+                                        bytes_slice[4..].to_vec(),
+                                    ),
+                                ));
+                            }
                             ScalarType::Bytea => {
                                 values.push(Value::Bytea(bytes_slice.to_vec()));
                             }
@@ -374,6 +390,22 @@ impl CompiledTupleDecoder {
                                     crate::pgrust::compact_string::CompactString::new(unsafe {
                                         std::str::from_utf8_unchecked(bytes)
                                     }),
+                                ));
+                            }
+                            ScalarType::BitString => {
+                                if bytes.len() < 4 {
+                                    return Err(ExecError::InvalidStorageValue {
+                                        column: "<tuple>".into(),
+                                        details: "bit payload too short".into(),
+                                    });
+                                }
+                                let bit_len =
+                                    u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
+                                values.push(Value::Bit(
+                                    crate::include::nodes::datum::BitString::new(
+                                        bit_len,
+                                        bytes[4..].to_vec(),
+                                    ),
                                 ));
                             }
                             ScalarType::Bytea => {
