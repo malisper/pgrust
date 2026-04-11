@@ -4,6 +4,8 @@ pub const PG_PAGE_LAYOUT_VERSION: u8 = 4;
 pub const ITEM_ID_SIZE: usize = 4;
 pub const SIZE_OF_PAGE_HEADER_DATA: usize = 24;
 pub const MAXALIGN: usize = 8;
+pub const MAX_HEAP_TUPLE_SIZE: usize =
+    BLCKSZ - ((SIZE_OF_PAGE_HEADER_DATA + ITEM_ID_SIZE + (MAXALIGN - 1)) & !(MAXALIGN - 1));
 
 pub type OffsetNumber = u16;
 pub type LocationIndex = u16;

@@ -5,9 +5,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use crate::backend::executor::{ExecError, QueryColumn, StatementResult, Value};
+use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
 };
+use crate::include::access::htup::TupleError;
 use crate::backend::libpq::pqformat::{
     format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
     send_close_complete, send_command_complete, send_copy_in_response, send_data_row,
@@ -32,6 +34,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::Int8OutOfRange
         | ExecError::NumericFieldOverflow => "22003",
         ExecError::RequestedLengthTooLarge => "54000",
+        ExecError::Heap(HeapError::Tuple(TupleError::Oversized { .. })) => "54000",
         ExecError::DivisionByZero(_) => "22012",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::CardinalityViolation(_) => "21000",
