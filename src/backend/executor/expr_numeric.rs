@@ -147,7 +147,7 @@ fn numeric_digits_before_decimal(value: &NumericValue) -> u32 {
                 .trim_start_matches('0')
                 .len()
                 .max(1) as u32;
-            digits.saturating_sub(*scale).max(1)
+            digits.saturating_sub(*scale)
         }
         _ => 0,
     }
