@@ -104,6 +104,14 @@ impl CatalogStore {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn sync_catalog_heaps_for_tests(
+    base_dir: &Path,
+    catalog: &Catalog,
+) -> Result<(), CatalogError> {
+    sync_physical_catalogs(base_dir, catalog)
+}
+
 fn sync_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     for kind in bootstrap_catalog_kinds() {

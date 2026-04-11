@@ -391,6 +391,8 @@
         sql: &str,
         mut catalog: Catalog,
     ) -> Result<StatementResult, ExecError> {
+        crate::backend::catalog::store::sync_catalog_heaps_for_tests(base, &catalog)
+            .unwrap();
         let smgr = MdStorageManager::new(base);
         let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
         for name in catalog.table_names().collect::<Vec<_>>() {

@@ -1,6 +1,4 @@
 use super::*;
-use crate::backend::catalog::system_catalogs::build_system_catalog_plan;
-use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCache;
 
 #[derive(Debug, Clone)]
@@ -275,12 +273,6 @@ pub(super) fn bind_from_item_with_ctes(
                 return Ok((
                     cte.plan.clone(),
                     scope_for_relation(Some(name), &cte.desc),
-                ));
-            }
-            if let Some((plan, desc)) = build_system_catalog_plan(name, catalog) {
-                return Ok((
-                    plan,
-                    scope_for_relation(Some(normalize_catalog_name(name)), &desc),
                 ));
             }
             let relcache = RelCache::from_catalog(catalog);
