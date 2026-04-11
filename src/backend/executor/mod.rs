@@ -90,6 +90,7 @@ pub enum ExecError {
     MissingRequiredColumn(String),
     InvalidRegex(String),
     DivisionByZero(&'static str),
+    GenerateSeriesZeroStep,
     InvalidIntegerInput {
         ty: &'static str,
         value: String,
