@@ -2873,6 +2873,23 @@
     }
 
     #[test]
+    fn pg_input_is_valid_reports_bool_results() {
+        let base = temp_dir("pg_input_is_valid_bool");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select pg_input_is_valid('true', 'bool'), pg_input_is_valid('asdf', 'bool'), pg_input_is_valid('  of  ', 'bool')",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(true), Value::Bool(false), Value::Bool(true)]],
+        );
+    }
+
+    #[test]
     fn pg_input_is_valid_reports_varchar_typmod_results() {
         let base = temp_dir("pg_input_is_valid_varchar");
         let txns = TransactionManager::new_durable(&base).unwrap();
@@ -2942,6 +2959,62 @@
                 Value::Text("22003".into()),
             ]],
         );
+    }
+
+    #[test]
+    fn pg_input_error_info_reports_bool_invalid_input() {
+        let base = temp_dir("pg_input_error_info_bool");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info('junk', 'bool')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("invalid input syntax for type boolean: \"junk\"".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("22P02".into()),
+            ]],
+        );
+    }
+
+    #[test]
+    fn boolean_text_cast_accepts_whitespace_and_aliases() {
+        let base = temp_dir("boolean_text_casts");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select bool '   f           ', bool 'yes', bool '1', '     FALSE'::text::boolean",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(false),
+            ]],
+        );
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select bool 'yeah'",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::InvalidBooleanInput { ref value } if value == "yeah"
+        ));
     }
 
     #[test]
