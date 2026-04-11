@@ -126,6 +126,14 @@ pub enum ExecError {
         actual: i32,
         limit: i32,
     },
+    BitStringSizeMismatch {
+        op: &'static str,
+    },
+    BitIndexOutOfRange {
+        index: i32,
+        max_index: i32,
+    },
+    NegativeSubstringLength,
     InvalidBooleanInput {
         value: String,
     },

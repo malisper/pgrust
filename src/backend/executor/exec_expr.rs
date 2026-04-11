@@ -7,9 +7,15 @@ use super::expr_math::{
     eval_lcm_function, eval_lgamma, eval_ln, eval_power, eval_sqrt, eval_unary_float_function,
     snap_degree, cosd, cotd, sind, tand,
 };
+use super::expr_bit::{
+    bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
+    overlay as eval_bit_overlay, position as eval_bit_position, substring as eval_bit_substring,
+    set_bit as eval_set_bit,
+};
 use super::expr_string::{
-    eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function, eval_lower_function,
-    eval_md5_function, eval_position_function, eval_repeat_function, eval_to_char_function,
+    eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
+    eval_length_function, eval_lower_function, eval_md5_function, eval_position_function,
+    eval_repeat_function, eval_to_char_function,
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::node_types::*;
@@ -380,11 +386,63 @@ fn eval_plpgsql_builtin_function(
         .map(|arg| eval_plpgsql_expr(arg, slot))
         .collect::<Result<Vec<_>, _>>()?;
     match func {
+        BuiltinScalarFunction::Length => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_length_function(&values),
+        },
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
-        BuiltinScalarFunction::Position => eval_position_function(&values),
+        BuiltinScalarFunction::Position => match values.as_slice() {
+            [Value::Bit(needle), Value::Bit(haystack)] => Ok(Value::Int32(eval_bit_position(needle, haystack))),
+            _ => eval_position_function(&values),
+        },
+        BuiltinScalarFunction::Substring => match values.as_slice() {
+            [Value::Bit(bits), Value::Int32(start)] => Ok(Value::Bit(eval_bit_substring(bits, *start, None)?)),
+            [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
+                Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
+            }
+            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "plpgsql builtin function supported by the standalone evaluator",
+                actual: format!("{func:?}"),
+            })),
+        },
+        BuiltinScalarFunction::Overlay => match values.as_slice() {
+            [Value::Bit(bits), Value::Bit(place), Value::Int32(start)] => {
+                Ok(Value::Bit(eval_bit_overlay(bits, place, *start, None)?))
+            }
+            [Value::Bit(bits), Value::Bit(place), Value::Int32(start), Value::Int32(len)] => {
+                Ok(Value::Bit(eval_bit_overlay(bits, place, *start, Some(*len))?))
+            }
+            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "plpgsql builtin function supported by the standalone evaluator",
+                actual: format!("{func:?}"),
+            })),
+        },
+        BuiltinScalarFunction::GetBit => match values.as_slice() {
+            [Value::Bit(bits), Value::Int32(index)] => Ok(Value::Int32(eval_get_bit(bits, *index)?)),
+            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "plpgsql builtin function supported by the standalone evaluator",
+                actual: format!("{func:?}"),
+            })),
+        },
+        BuiltinScalarFunction::SetBit => match values.as_slice() {
+            [Value::Bit(bits), Value::Int32(index), Value::Int32(new_value)] => {
+                Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?))
+            }
+            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "plpgsql builtin function supported by the standalone evaluator",
+                actual: format!("{func:?}"),
+            })),
+        },
+        BuiltinScalarFunction::BitCount => match values.as_slice() {
+            [Value::Bit(bits)] => Ok(Value::Int64(eval_bit_count(bits))),
+            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "plpgsql builtin function supported by the standalone evaluator",
+                actual: format!("{func:?}"),
+            })),
+        },
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
@@ -560,12 +618,49 @@ fn eval_builtin_function(
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::Length => match values.first() {
+            Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
+            _ => eval_length_function(&values),
+        },
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
-        BuiltinScalarFunction::Position => eval_position_function(&values),
+        BuiltinScalarFunction::Position => match values.as_slice() {
+            [Value::Bit(needle), Value::Bit(haystack)] => Ok(Value::Int32(eval_bit_position(needle, haystack))),
+            _ => eval_position_function(&values),
+        },
+        BuiltinScalarFunction::Substring => match values.as_slice() {
+            [Value::Bit(bits), Value::Int32(start)] => Ok(Value::Bit(eval_bit_substring(bits, *start, None)?)),
+            [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
+                Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
+            }
+            _ => unreachable!("validated bit substring arguments"),
+        },
+        BuiltinScalarFunction::Overlay => match values.as_slice() {
+            [Value::Bit(bits), Value::Bit(place), Value::Int32(start)] => {
+                Ok(Value::Bit(eval_bit_overlay(bits, place, *start, None)?))
+            }
+            [Value::Bit(bits), Value::Bit(place), Value::Int32(start), Value::Int32(len)] => {
+                Ok(Value::Bit(eval_bit_overlay(bits, place, *start, Some(*len))?))
+            }
+            _ => unreachable!("validated bit overlay arguments"),
+        },
+        BuiltinScalarFunction::GetBit => match values.as_slice() {
+            [Value::Bit(bits), Value::Int32(index)] => Ok(Value::Int32(eval_get_bit(bits, *index)?)),
+            _ => unreachable!("validated get_bit arguments"),
+        },
+        BuiltinScalarFunction::SetBit => match values.as_slice() {
+            [Value::Bit(bits), Value::Int32(index), Value::Int32(new_value)] => {
+                Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?))
+            }
+            _ => unreachable!("validated set_bit arguments"),
+        },
+        BuiltinScalarFunction::BitCount => match values.as_slice() {
+            [Value::Bit(bits)] => Ok(Value::Int64(eval_bit_count(bits))),
+            _ => unreachable!("validated bit_count arguments"),
+        },
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),

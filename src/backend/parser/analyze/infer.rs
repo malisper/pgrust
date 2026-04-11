@@ -177,9 +177,22 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             | Some(BuiltinScalarFunction::Repeat)
             | Some(BuiltinScalarFunction::Md5)
             | Some(BuiltinScalarFunction::ConvertFrom) => SqlType::new(SqlTypeKind::Text),
-            Some(BuiltinScalarFunction::JsonArrayLength)
+            Some(BuiltinScalarFunction::Length)
+            | Some(BuiltinScalarFunction::JsonArrayLength)
             | Some(BuiltinScalarFunction::JsonbArrayLength) => SqlType::new(SqlTypeKind::Int4),
             Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
+            Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => args
+                .first()
+                .map_or(SqlType::new(SqlTypeKind::Text), |arg| {
+                    infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+                }),
+            Some(BuiltinScalarFunction::GetBit) => SqlType::new(SqlTypeKind::Int4),
+            Some(BuiltinScalarFunction::SetBit) => args
+                .first()
+                .map_or(SqlType::new(SqlTypeKind::Text), |arg| {
+                    infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+                }),
+            Some(BuiltinScalarFunction::BitCount) => SqlType::new(SqlTypeKind::Int8),
             Some(BuiltinScalarFunction::JsonbPathExists)
             | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
             Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),

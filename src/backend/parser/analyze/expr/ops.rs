@@ -106,6 +106,23 @@ pub(super) fn bind_shift_expr(
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    if is_bit_string_type(left_type) {
+        if !is_integer_family(right_type) {
+            return Err(ParseError::UndefinedOperator {
+                op,
+                left_type: sql_type_name(left_type),
+                right_type: sql_type_name(right_type),
+            });
+        }
+        let left =
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let right = coerce_bound_expr(
+            bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+            right_type,
+            SqlType::new(SqlTypeKind::Int4),
+        );
+        return Ok(make(Box::new(left), Box::new(right)));
+    }
     if !is_integer_family(left_type) || !is_integer_family(right_type) {
         return Err(ParseError::UndefinedOperator {
             op,
@@ -139,6 +156,20 @@ pub(super) fn bind_bitwise_expr(
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    if is_bit_string_type(left_type) && is_bit_string_type(right_type) {
+        let common = resolve_common_scalar_type(left_type, right_type).unwrap_or(SqlType::new(SqlTypeKind::VarBit));
+        let left = coerce_bound_expr(
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+            left_type,
+            common,
+        );
+        let right = coerce_bound_expr(
+            bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+            right_type,
+            common,
+        );
+        return Ok(make(Box::new(left), Box::new(right)));
+    }
     if !is_integer_family(left_type) || !is_integer_family(right_type) {
         return Err(ParseError::UndefinedOperator {
             op,
@@ -208,6 +239,14 @@ pub(crate) fn bind_concat_operands(
         } else {
             coerce_bound_expr(right_bound, right_type, element_type)
         };
+        return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
+    }
+
+    if is_bit_string_type(left_type) && is_bit_string_type(right_type) {
+        let common = resolve_common_scalar_type(left_type, right_type)
+            .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
+        let left_expr = coerce_bound_expr(left_bound, left_type, common);
+        let right_expr = coerce_bound_expr(right_bound, right_type, common);
         return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
     }
 

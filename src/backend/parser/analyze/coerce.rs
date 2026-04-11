@@ -103,6 +103,10 @@ pub(super) fn is_integer_family(ty: SqlType) -> bool {
     )
 }
 
+pub(super) fn is_bit_string_type(ty: SqlType) -> bool {
+    !ty.is_array && matches!(ty.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
+}
+
 fn is_text_like_type(ty: SqlType) -> bool {
     matches!(
         ty.element_type().kind,
@@ -152,6 +156,15 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
     }
     if is_text_like_type(left) && is_text_like_type(right) {
         return Some(SqlType::new(SqlTypeKind::Text));
+    }
+    if is_bit_string_type(left) && is_bit_string_type(right) {
+        if matches!(left.kind, SqlTypeKind::VarBit) || matches!(right.kind, SqlTypeKind::VarBit) {
+            return Some(SqlType::new(SqlTypeKind::VarBit));
+        }
+        if left.bit_len() == right.bit_len() {
+            return Some(left);
+        }
+        return Some(SqlType::new(SqlTypeKind::VarBit));
     }
     if is_numeric_family(left) && is_numeric_family(right) {
         return resolve_numeric_binary_type("+", left, right).ok();
@@ -236,7 +249,13 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
         | SqlExpr::BitOr(_, _)
         | SqlExpr::BitXor(_, _)
         | SqlExpr::Shl(_, _)
-        | SqlExpr::Shr(_, _) => left,
+        | SqlExpr::Shr(_, _) => {
+            if is_bit_string_type(left) && (is_bit_string_type(right) || is_integer_family(right)) {
+                left
+            } else {
+                left
+            }
+        }
         _ => SqlType::new(Int4),
     }
 }
@@ -245,6 +264,9 @@ pub(super) fn infer_concat_sql_type(expr: &SqlExpr, left: SqlType, right: SqlTyp
     let _ = expr;
     if left.kind == SqlTypeKind::Jsonb && !left.is_array && right.kind == SqlTypeKind::Jsonb && !right.is_array {
         return SqlType::new(SqlTypeKind::Jsonb);
+    }
+    if is_bit_string_type(left) && is_bit_string_type(right) {
+        return resolve_common_scalar_type(left, right).unwrap_or(SqlType::new(SqlTypeKind::VarBit));
     }
     if left.is_array || right.is_array {
         if let Ok(element_type) = resolve_array_concat_element_type(left, right) {

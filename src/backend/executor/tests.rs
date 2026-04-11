@@ -3431,6 +3431,71 @@
     }
 
     #[test]
+    fn bit_functions_and_operators_follow_postgres_rules() {
+        let base = temp_dir("bit_functions_and_operators");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select B'0101' || B'11', length(B'0101'), substring(B'010101' from 2 for 3), overlay(B'010101' placing B'11' from 2), position(B'101' in B'010101'), get_bit(B'0101011000100', 10), set_bit(B'0101011000100100', 15, 1), bit_count(B'0101011100'::bit(10)), B'0011' & B'0101', B'0011' | B'0101', B'0011' # B'0101', ~B'0011', B'1100' << 1, B'1100' >> 2",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bit(crate::include::nodes::datum::BitString::new(6, vec![0b0101_1100])),
+                Value::Int32(4),
+                Value::Bit(crate::include::nodes::datum::BitString::new(3, vec![0b1010_0000])),
+                Value::Bit(crate::include::nodes::datum::BitString::new(6, vec![0b0111_0100])),
+                Value::Int32(2),
+                Value::Int32(1),
+                Value::Bit(crate::include::nodes::datum::BitString::new(16, vec![0b0101_0110, 0b0010_0101])),
+                Value::Int64(5),
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b0001_0000])),
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b0111_0000])),
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b0110_0000])),
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1100_0000])),
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1000_0000])),
+                Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b0011_0000])),
+            ]],
+        );
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select B'001' & B'10'",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::BitStringSizeMismatch { op: "&" }));
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select set_bit(B'0101011000100100', 16, 1)",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::BitIndexOutOfRange {
+                index: 16,
+                max_index: 15
+            }
+        ));
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select substring(B'01010101' from -10 for -2147483646)",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::NegativeSubstringLength));
+    }
+
+    #[test]
     fn md5_supports_text_and_bytea_vectors() {
         let base = temp_dir("md5_vectors");
         let txns = TransactionManager::new_durable(&base).unwrap();
