@@ -259,6 +259,22 @@
     }
 
     #[test]
+    fn parse_standalone_type_names() {
+        assert_eq!(
+            parse_type_name("varchar(4)").unwrap(),
+            SqlType::with_char_len(SqlTypeKind::Varchar, 4)
+        );
+        assert_eq!(
+            parse_type_name("character varying(4)").unwrap(),
+            SqlType::with_char_len(SqlTypeKind::Varchar, 4)
+        );
+        assert_eq!(
+            parse_type_name("varchar").unwrap(),
+            SqlType::new(SqlTypeKind::Varchar)
+        );
+    }
+
+    #[test]
     fn parse_cast_function_syntax_expression() {
         let stmt = parse_select("select cast(p.name as text) from people p").unwrap();
         assert_eq!(stmt.targets[0].output_name, "name");

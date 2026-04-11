@@ -3,7 +3,7 @@ use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::node_types::*;
 use super::ExecError;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
-use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) struct InputErrorInfo {
@@ -115,20 +115,24 @@ fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
 }
 
 fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
-    let ty = type_name.trim().to_ascii_lowercase();
-    let sql_type = match ty.as_str() {
-        "int2" | "smallint" => Some(SqlType::new(SqlTypeKind::Int2)),
-        "int4" | "int" | "integer" => Some(SqlType::new(SqlTypeKind::Int4)),
-        "int8" | "bigint" => Some(SqlType::new(SqlTypeKind::Int8)),
-        "oid" => Some(SqlType::new(SqlTypeKind::Oid)),
-        "float4" | "real" => Some(SqlType::new(SqlTypeKind::Float4)),
-        "float8" | "double precision" => Some(SqlType::new(SqlTypeKind::Float8)),
-        "text" => Some(SqlType::new(SqlTypeKind::Text)),
-        "bool" | "boolean" => Some(SqlType::new(SqlTypeKind::Bool)),
-        "numeric" | "decimal" => Some(SqlType::new(SqlTypeKind::Numeric)),
-        _ => None,
+    let parsed = match parse_type_name(type_name.trim()) {
+        Ok(ty) => ty,
+        Err(_) => return Ok(None),
     };
-    Ok(sql_type)
+    let supported = matches!(
+        parsed.kind,
+        SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Oid
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Float8
+            | SqlTypeKind::Text
+            | SqlTypeKind::Bool
+            | SqlTypeKind::Numeric
+            | SqlTypeKind::Varchar
+    ) && !parsed.is_array;
+    Ok(supported.then_some(parsed))
 }
 
 fn input_error_message(err: &ExecError, text: &str) -> String {
@@ -160,6 +164,9 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         }
         ExecError::FloatOverflow => "value out of range: overflow".to_string(),
         ExecError::FloatUnderflow => "value out of range: underflow".to_string(),
+        ExecError::StringDataRightTruncation { ty } => {
+            format!("value too long for type {ty}")
+        }
         other => format!("{other:?}"),
     }
 }
@@ -177,6 +184,7 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::FloatUnderflow => {
             "22003"
         }
+        ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::InvalidFloatInput { .. } => "22P02",
         _ => "XX000",
     }
