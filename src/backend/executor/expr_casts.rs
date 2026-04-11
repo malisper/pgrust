@@ -132,6 +132,7 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
             | SqlTypeKind::Text
             | SqlTypeKind::Bool
             | SqlTypeKind::Numeric
+            | SqlTypeKind::Char
             | SqlTypeKind::Varchar
     ) && !parsed.is_array;
     Ok(supported.then_some(parsed))
