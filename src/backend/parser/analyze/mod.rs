@@ -27,6 +27,7 @@ use scope::*;
 
 pub trait CatalogLookup {
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation>;
+    fn visible_table_names(&self) -> Vec<String>;
 }
 
 impl CatalogLookup for Catalog {
@@ -37,6 +38,19 @@ impl CatalogLookup for Catalog {
             relation_oid: entry.relation_oid,
             desc: entry.desc.clone(),
         })
+    }
+
+    fn visible_table_names(&self) -> Vec<String> {
+        let mut names = self
+            .table_names()
+            .filter(|name| !name.contains('.'))
+            .filter(|name| !name.starts_with("pg_temp."))
+            .filter(|name| !name.starts_with("pg_"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
     }
 }
 

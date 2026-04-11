@@ -864,6 +864,7 @@ fn resolve_regclass_param(value: &str, catalog: &dyn CatalogLookup) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::catalog::Catalog;
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};

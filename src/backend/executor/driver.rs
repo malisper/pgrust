@@ -5,6 +5,7 @@ use super::{
     execute_insert, execute_show_tables, execute_truncate_table, execute_update, execute_vacuum,
     executor_start, parse_statement,
 };
+use crate::backend::parser::CatalogLookup;
 
 pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementResult, ExecError> {
     let columns = plan.columns();
@@ -72,7 +73,7 @@ pub fn execute_statement(
 
 pub fn execute_readonly_statement(
     stmt: Statement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     match stmt {

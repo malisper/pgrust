@@ -10,11 +10,10 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::access::transam::xact::CommandId;
-use crate::backend::catalog::catalog::Catalog;
 use crate::pgrust::database::TransactionWaiter;
 use crate::backend::parser::{
     AnalyzeStatement, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement,
-    DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
+    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
     TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
@@ -28,7 +27,7 @@ use super::explain::{format_buffer_usage, format_explain_lines};
 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     let Statement::Select(select) = *stmt.statement else {
@@ -73,30 +72,25 @@ pub(crate) fn execute_explain(
     })
 }
 
-pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecError> {
-    let names = catalog
-        .table_names()
-        .filter(|name| !name.contains('.'))
-        .filter(|name| !name.starts_with("pg_temp."))
-        .filter(|name| !name.starts_with("pg_"))
-        .collect::<std::collections::BTreeSet<_>>();
+pub fn execute_show_tables(catalog: &dyn CatalogLookup) -> Result<StatementResult, ExecError> {
+    let names = catalog.visible_table_names();
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("table_name")],
         column_names: vec!["table_name".into()],
         rows: names
             .into_iter()
-            .map(|name| vec![Value::Text(name.to_string().into())])
+            .map(|name| vec![Value::Text(name.into())])
             .collect(),
     })
 }
 
 fn validate_maintenance_targets(
     targets: &[MaintenanceTarget],
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
     for target in targets {
         let entry = catalog
-            .get(&target.table_name)
+            .lookup_relation(&target.table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.table_name.clone())))?;
         for column in &target.columns {
             if !entry.desc.columns.iter().any(|desc| desc.name.eq_ignore_ascii_case(column)) {
@@ -109,7 +103,7 @@ fn validate_maintenance_targets(
 
 pub fn execute_analyze(
     stmt: AnalyzeStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<StatementResult, ExecError> {
     validate_maintenance_targets(&stmt.targets, catalog)?;
     Ok(StatementResult::AffectedRows(0))
@@ -117,7 +111,7 @@ pub fn execute_analyze(
 
 pub fn execute_vacuum(
     stmt: VacuumStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
 ) -> Result<StatementResult, ExecError> {
     validate_maintenance_targets(&stmt.targets, catalog)?;
     Ok(StatementResult::AffectedRows(0))
@@ -163,12 +157,12 @@ pub fn execute_drop_table(
 
 pub fn execute_truncate_table(
     stmt: TruncateTableStatement,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     for table_name in stmt.table_names {
         let entry = catalog
-            .get(&table_name)
+            .lookup_relation(&table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
         let _ = ctx.pool.invalidate_relation(entry.rel);
         ctx.pool
