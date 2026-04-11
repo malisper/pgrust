@@ -1,12 +1,12 @@
-use crate::backend::catalog::bootstrap::{bootstrap_relation_desc, BootstrapCatalogKind};
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::executor::{Expr, Plan, QueryColumn, RelationDesc};
 use crate::backend::utils::cache::syscache::{
     caches_for_catalog, relation_lookup_by_name,
 };
 use crate::include::catalog::{
-    PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow, PG_ATTRIBUTE_RELATION_OID,
-    PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
+    BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
+    PG_ATTRIBUTE_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+    PG_TYPE_RELATION_OID, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
 
