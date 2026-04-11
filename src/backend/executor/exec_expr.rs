@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::expr_format::to_char_int;
 use super::node_types::*;
 use super::expr_casts::{cast_value, soft_input_error_info};
 pub(crate) use super::expr_compile::{
@@ -278,8 +279,36 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
+        BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
     }
+}
+
+fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(format) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let number = match value {
+        Value::Int16(v) => *v as i128,
+        Value::Int32(v) => *v as i128,
+        Value::Int64(v) => *v as i128,
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "to_char",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    let fmt = format.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "to_char",
+        left: format.clone(),
+        right: Value::Text("".into()),
+    })?;
+    Ok(Value::Text(to_char_int(number, fmt)?.into()))
 }
 
 fn eval_left_function(values: &[Value]) -> Result<Value, ExecError> {
