@@ -719,8 +719,7 @@ fn execute_portal(
 }
 
 fn rewrite_regression_sql(sql: &str) -> std::borrow::Cow<'_, str> {
-    let rewritten = rewrite_values_cte(sql).unwrap_or_else(|| sql.to_string());
-    let rewritten = rewrite_hex_bit_literals(&rewritten);
+    let rewritten = rewrite_hex_bit_literals(sql);
     let rewritten = rewritten
         .replace(
             "bits::bigint::xfloat8::float8",
@@ -753,40 +752,6 @@ fn rewrite_hex_bit_literals(sql: &str) -> String {
         }
     })
     .into_owned()
-}
-
-fn rewrite_values_cte(sql: &str) -> Option<String> {
-    static WITH_VALUES_RE: OnceLock<regex::Regex> = OnceLock::new();
-    let re = WITH_VALUES_RE.get_or_init(|| {
-        regex::Regex::new(
-            r"(?is)^\s*with\s+([a-z_][a-z0-9_]*)\s*\(([^)]*)\)\s+as\s*\((values.*)\)\s*(select\b.*)$",
-        )
-        .unwrap()
-    });
-    let captures = re.captures(sql)?;
-    let name = captures.get(1)?.as_str();
-    let columns = captures.get(2)?.as_str().trim();
-    let values_body = strip_line_comments(captures.get(3)?.as_str()).trim().to_string();
-    let main_select = captures.get(4)?.as_str();
-    let from_re = regex::RegexBuilder::new(&format!(r"\bfrom\s+{}\b", regex::escape(name)))
-        .case_insensitive(true)
-        .build()
-        .ok()?;
-    Some(
-        from_re
-            .replace_all(
-                main_select,
-                format!("from ({values_body}) as {name}({columns})"),
-            )
-            .into_owned(),
-    )
-}
-
-fn strip_line_comments(sql: &str) -> String {
-    sql.lines()
-        .map(|line| line.split_once("--").map_or(line, |(prefix, _)| prefix))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn try_handle_float_shell_ddl(stream: &mut impl Write, sql: &str) -> io::Result<bool> {
