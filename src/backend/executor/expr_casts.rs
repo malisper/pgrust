@@ -621,13 +621,22 @@ pub(super) fn cast_numeric_value(
 }
 
 fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<String, ExecError> {
-    let Some(max_chars) = ty.char_len() else {
-        return Ok(text.to_string());
+    let max_chars = match ty.kind {
+        SqlTypeKind::Char => ty.char_len().unwrap_or(1),
+        SqlTypeKind::Varchar => match ty.char_len() {
+            Some(max_chars) => max_chars,
+            None => return Ok(text.to_string()),
+        },
+        _ => return Ok(text.to_string()),
     };
 
     let char_count = text.chars().count() as i32;
     if char_count <= max_chars {
-        return Ok(text.to_string());
+        return Ok(match ty.kind {
+            SqlTypeKind::Char => pad_char_string(text, max_chars as usize),
+            SqlTypeKind::Varchar => text.to_string(),
+            _ => text.to_string(),
+        });
     }
 
     let clip_idx = text
@@ -638,12 +647,28 @@ fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<St
     let truncated = &text[..clip_idx];
     let remainder = &text[clip_idx..];
     if explicit || remainder.chars().all(|ch| ch == ' ') {
-        Ok(truncated.to_string())
+        Ok(match ty.kind {
+            SqlTypeKind::Char => pad_char_string(truncated, max_chars as usize),
+            SqlTypeKind::Varchar => truncated.to_string(),
+            _ => truncated.to_string(),
+        })
     } else {
         Err(ExecError::StringDataRightTruncation {
-            ty: format!("character varying({max_chars})"),
+            ty: match ty.kind {
+                SqlTypeKind::Char => format!("character({max_chars})"),
+                SqlTypeKind::Varchar => format!("character varying({max_chars})"),
+                _ => format!("character varying({max_chars})"),
+            },
         })
     }
+}
+
+fn pad_char_string(text: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(max_chars.max(text.len()));
+    out.push_str(text);
+    let pad_chars = max_chars.saturating_sub(text.chars().count());
+    out.extend(std::iter::repeat_n(' ', pad_chars));
+    out
 }
 
 fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
