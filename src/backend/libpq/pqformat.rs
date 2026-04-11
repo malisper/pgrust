@@ -315,7 +315,12 @@ pub(crate) fn send_empty_query(w: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn send_error(w: &mut impl Write, sqlstate: &str, message: &str) -> io::Result<()> {
+pub(crate) fn send_error(
+    w: &mut impl Write,
+    sqlstate: &str,
+    message: &str,
+    position: Option<usize>,
+) -> io::Result<()> {
     let mut body = Vec::new();
     body.push(b'S');
     body.extend_from_slice(b"ERROR\0");
@@ -327,6 +332,11 @@ pub(crate) fn send_error(w: &mut impl Write, sqlstate: &str, message: &str) -> i
     body.push(b'M');
     body.extend_from_slice(message.as_bytes());
     body.push(0);
+    if let Some(position) = position {
+        body.push(b'P');
+        body.extend_from_slice(position.to_string().as_bytes());
+        body.push(0);
+    }
     body.push(0);
 
     w.write_all(&[b'E'])?;
