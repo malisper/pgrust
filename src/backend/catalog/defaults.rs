@@ -9,6 +9,8 @@ use crate::backend::catalog::catalog::{Catalog, CatalogError};
 pub type DefaultExprMap = BTreeMap<(u32, i16), String>;
 
 fn defaults_path(base_dir: &Path) -> PathBuf {
+    // :HACK: This sidecar file exists only to get column defaults through bit.sql
+    // without implementing PostgreSQL-shaped pg_attrdef storage/catalog reads yet.
     base_dir.join("catalog").join("defaults.json")
 }
 
@@ -53,6 +55,9 @@ pub fn persist_default_exprs(base_dir: &Path, catalog: &Catalog) -> Result<(), C
         fs::create_dir_all(parent).map_err(|e| CatalogError::Io(e.to_string()))?;
     }
 
+    // :HACK: Persist defaults out-of-band from the core catalogs for now. The
+    // intended end state is real default metadata, not JSON derived from the
+    // in-memory relation descriptors.
     let entries = catalog
         .entries()
         .flat_map(|(_, entry)| {

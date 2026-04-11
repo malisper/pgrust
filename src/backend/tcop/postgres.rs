@@ -516,6 +516,11 @@ fn execute_psql_describe_query(
     relcache: &RelCache,
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    // :HACK: psql's `\d bit_defaults` emits a long chain of catalog-heavy
+    // describe queries. We short-circuit the specific shapes bit.sql needs
+    // instead of implementing LEFT JOIN, pg_attrdef, format_type, regex
+    // operators, COLLATE, publications, inheritance footers, and related
+    // describe-only catalog features in the main SQL engine.
     let lower = sql.to_ascii_lowercase();
     if lower.contains("from pg_catalog.pg_class c")
         && lower.contains("left join pg_catalog.pg_namespace n on n.oid = c.relnamespace")

@@ -849,6 +849,9 @@ pub fn bind_insert(
                             )
                         })
                         .transpose()
+                        // :HACK: DEFAULT VALUES currently falls back to NULL by
+                        // descriptor inspection instead of using PostgreSQL's
+                        // richer default metadata/rules machinery.
                         .map(|expr| expr.unwrap_or(Expr::Const(Value::Null)))
                 })
                 .collect::<Result<Vec<_>, _>>()?,
