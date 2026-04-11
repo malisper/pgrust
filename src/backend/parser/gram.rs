@@ -848,6 +848,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_text => SqlType::new(SqlTypeKind::Text),
         Rule::kw_json => SqlType::new(SqlTypeKind::Json),
         Rule::kw_jsonb => SqlType::new(SqlTypeKind::Jsonb),
+        Rule::kw_jsonpath => SqlType::new(SqlTypeKind::JsonPath),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
         Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
         Rule::char_type => {
@@ -1021,6 +1022,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Ok(match next.as_str() {
                         "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
                         "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
+                        "@?" => SqlExpr::JsonbPathExists(Box::new(left), Box::new(right)),
+                        "@@" => SqlExpr::JsonbPathMatch(Box::new(left), Box::new(right)),
                         "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
                         "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
                         "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),

@@ -14,6 +14,10 @@ use crate::backend::executor::jsonb::{
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value, parse_jsonb_text,
     render_jsonb_bytes,
 };
+use crate::backend::executor::jsonpath::{
+    EvaluationContext as JsonPathEvaluationContext, evaluate_jsonpath, parse_jsonpath,
+    validate_jsonpath,
+};
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::pgrust::compact_string::CompactString;
 
@@ -32,6 +36,13 @@ fn parse_json_text(text: &str) -> Result<SerdeJsonValue, ExecError> {
     serde_json::from_str::<SerdeJsonValue>(text).map_err(|_| ExecError::InvalidStorageValue {
         column: "json".into(),
         details: format!("invalid input syntax for type json: \"{text}\""),
+    })
+}
+
+fn validate_jsonpath_text(text: &str) -> Result<(), ExecError> {
+    validate_jsonpath(text).map_err(|_| ExecError::InvalidStorageValue {
+        column: "jsonpath".into(),
+        details: format!("invalid input syntax for type jsonpath: \"{text}\""),
     })
 }
 
@@ -219,6 +230,8 @@ pub fn eval_expr(
         Expr::JsonbExistsAll(left, right) => {
             eval_jsonb_exists_all(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
+        Expr::JsonbPathExists(left, right) => eval_jsonpath_operator(left, right, false, slot, ctx),
+        Expr::JsonbPathMatch(left, right) => eval_jsonpath_operator(left, right, true, slot, ctx),
         Expr::ScalarSubquery(plan) => eval_scalar_subquery(plan, slot, ctx),
         Expr::ExistsSubquery(plan) => eval_exists_subquery(plan, slot, ctx),
         Expr::AnySubquery { left, op, subquery } => {
@@ -407,6 +420,18 @@ fn eval_builtin_function(
             Ok(Value::Jsonb(encode_jsonb(&jsonb_object_from_pairs(
                 &pairs,
             )?)))
+        }
+        BuiltinScalarFunction::JsonbPathExists => {
+            eval_jsonpath_function(&values, JsonPathFunctionKind::Exists)
+        }
+        BuiltinScalarFunction::JsonbPathMatch => {
+            eval_jsonpath_function(&values, JsonPathFunctionKind::Match)
+        }
+        BuiltinScalarFunction::JsonbPathQueryArray => {
+            eval_jsonpath_function(&values, JsonPathFunctionKind::QueryArray)
+        }
+        BuiltinScalarFunction::JsonbPathQueryFirst => {
+            eval_jsonpath_function(&values, JsonPathFunctionKind::QueryFirst)
         }
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
@@ -611,6 +636,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
+        Value::JsonPath(v) => Ok(v.to_string()),
         Value::Json(v) => Ok(v.to_string()),
         Value::Jsonb(v) => render_jsonb_bytes(v),
         Value::Array(_) => Err(ExecError::TypeMismatch {
@@ -703,6 +729,158 @@ fn eval_json_path(
             })
             .unwrap_or(Value::Null),
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JsonPathFunctionKind {
+    Exists,
+    Match,
+    QueryArray,
+    QueryFirst,
+}
+
+fn eval_jsonpath_operator(
+    left: &Expr,
+    right: &Expr,
+    as_match: bool,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let json_value = eval_expr(left, slot, ctx)?;
+    let path_value = eval_expr(right, slot, ctx)?;
+    if matches!(json_value, Value::Null) || matches!(path_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let target = parse_jsonpath_target_value(&json_value)?;
+    let path = parse_jsonpath_value_text(&path_value)?;
+    let parsed = parse_jsonpath(path.as_str())?;
+    let eval_ctx = JsonPathEvaluationContext {
+        root: &target,
+        vars: None,
+    };
+    let result = evaluate_jsonpath(&parsed, &eval_ctx);
+    if as_match {
+        jsonpath_match_result(result, true)
+    } else {
+        Ok(Value::Bool(result.map(|items| !items.is_empty()).unwrap_or(false)))
+    }
+}
+
+fn eval_jsonpath_function(
+    values: &[Value],
+    kind: JsonPathFunctionKind,
+) -> Result<Value, ExecError> {
+    let target = values.first().unwrap_or(&Value::Null);
+    let path = values.get(1).unwrap_or(&Value::Null);
+    if matches!(target, Value::Null) || matches!(path, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let vars = values.get(2);
+    let silent = values
+        .get(3)
+        .map(|value| match value {
+            Value::Bool(flag) => Ok(*flag),
+            Value::Null => Ok(false),
+            other => Err(ExecError::TypeMismatch {
+                op: "jsonpath silent",
+                left: other.clone(),
+                right: Value::Bool(false),
+            }),
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let target = parse_jsonpath_target_value(target)?;
+    let parsed = parse_jsonpath(parse_jsonpath_value_text(path)?.as_str())?;
+    let vars_json = match vars {
+        Some(Value::Null) | None => None,
+        Some(value) => Some(parse_jsonpath_target_value(value)?),
+    };
+    let eval_ctx = JsonPathEvaluationContext {
+        root: &target,
+        vars: vars_json.as_ref(),
+    };
+    let result = evaluate_jsonpath(&parsed, &eval_ctx);
+    match kind {
+        JsonPathFunctionKind::Exists => Ok(Value::Bool(result.map(|items| !items.is_empty()).unwrap_or(false))),
+        JsonPathFunctionKind::Match => jsonpath_match_result(result, silent),
+        JsonPathFunctionKind::QueryArray => match result {
+            Ok(items) => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items)))),
+            Err(err) if silent => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(vec![])))),
+            Err(err) => Err(err),
+        },
+        JsonPathFunctionKind::QueryFirst => match result {
+            Ok(items) => Ok(items.first().map(jsonb_to_value).unwrap_or(Value::Null)),
+            Err(err) if silent => Ok(Value::Null),
+            Err(err) => Err(err),
+        },
+    }
+}
+
+fn jsonpath_match_result(
+    result: Result<Vec<JsonbValue>, ExecError>,
+    silent: bool,
+) -> Result<Value, ExecError> {
+    match result {
+        Ok(items) => {
+            if items.len() == 1 {
+                return Ok(match &items[0] {
+                    JsonbValue::Bool(value) => Value::Bool(*value),
+                    JsonbValue::Null => Value::Null,
+                    _ if silent => Value::Null,
+                    _ => {
+                        return Err(ExecError::InvalidStorageValue {
+                            column: "jsonpath".into(),
+                            details: "single boolean result is expected".into(),
+                        });
+                    }
+                });
+            }
+            if silent {
+                Ok(Value::Null)
+            } else {
+                Err(ExecError::InvalidStorageValue {
+                    column: "jsonpath".into(),
+                    details: "single boolean result is expected".into(),
+                })
+            }
+        }
+        Err(err) if silent => Ok(Value::Null),
+        Err(err) => Err(err),
+    }
+}
+
+fn parse_jsonpath_target_value(value: &Value) -> Result<JsonbValue, ExecError> {
+    match value {
+        Value::Jsonb(bytes) => decode_jsonb(bytes),
+        Value::Json(text) => Ok(JsonbValue::from_serde(parse_json_text(text.as_str())?)?),
+        Value::Text(text) => Ok(decode_jsonb(&parse_jsonb_text(text.as_str())?)?),
+        Value::TextRef(_, _) => Ok(decode_jsonb(&parse_jsonb_text(value.as_text().unwrap())?)?),
+        other => Err(ExecError::TypeMismatch {
+            op: "jsonpath target",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn parse_jsonpath_value_text(value: &Value) -> Result<CompactString, ExecError> {
+    match value {
+        Value::JsonPath(text) => Ok(text.clone()),
+        Value::Text(text) => {
+            validate_jsonpath_text(text.as_str())?;
+            Ok(text.clone())
+        }
+        Value::TextRef(_, _) => {
+            let text = value.as_text().unwrap();
+            validate_jsonpath_text(text)?;
+            Ok(CompactString::new(text))
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "jsonpath",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
 }
 
 fn parse_json_path_args(args: &[Value]) -> Result<Vec<String>, ExecError> {
@@ -803,6 +981,7 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
             .unwrap_or(SerdeJsonValue::Null),
         Value::Numeric(v) => parse_json_text(&v.render()).unwrap_or(SerdeJsonValue::Null),
         Value::Bool(v) => SerdeJsonValue::Bool(*v),
+        Value::JsonPath(text) => SerdeJsonValue::String(text.to_string()),
         Value::Json(text) => parse_json_text(text.as_str()).unwrap_or(SerdeJsonValue::Null),
         Value::Jsonb(bytes) => decode_jsonb(bytes)
             .map(|value| value.to_serde())
@@ -1348,7 +1527,8 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
-                    | SqlTypeKind::Jsonb,
+                    | SqlTypeKind::Jsonb
+                    | SqlTypeKind::JsonPath,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1394,7 +1574,8 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
-                    | SqlTypeKind::Jsonb,
+                    | SqlTypeKind::Jsonb
+                    | SqlTypeKind::JsonPath,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1418,7 +1599,8 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
-                    | SqlTypeKind::Jsonb,
+                    | SqlTypeKind::Jsonb
+                    | SqlTypeKind::JsonPath,
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
@@ -1443,12 +1625,18 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
             };
             cast_text_value(text, ty, true)
         }
+        Value::JsonPath(text) => cast_text_value(text.as_str(), ty, true),
         Value::Json(text) => cast_text_value(text.as_str(), ty, true),
         Value::Jsonb(bytes) => match ty.kind {
             SqlTypeKind::Jsonb => Ok(Value::Jsonb(bytes)),
             SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(render_jsonb_bytes(
                 &bytes,
             )?))),
+            SqlTypeKind::JsonPath => {
+                let rendered = render_jsonb_bytes(&bytes)?;
+                validate_jsonpath_text(&rendered)?;
+                Ok(Value::JsonPath(CompactString::from_owned(rendered)))
+            }
             SqlTypeKind::Text
             | SqlTypeKind::Timestamp
             | SqlTypeKind::Char
@@ -1499,7 +1687,8 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
-                    | SqlTypeKind::Jsonb,
+                    | SqlTypeKind::Jsonb
+                    | SqlTypeKind::JsonPath,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1534,7 +1723,8 @@ fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
                     | SqlTypeKind::Char
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
-                    | SqlTypeKind::Jsonb,
+                    | SqlTypeKind::Jsonb
+                    | SqlTypeKind::JsonPath,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1577,6 +1767,10 @@ fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, Exe
             Ok(Value::Json(CompactString::new(text)))
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
+        SqlTypeKind::JsonPath => {
+            validate_jsonpath_text(text)?;
+            Ok(Value::JsonPath(CompactString::new(text)))
+        }
         SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
             coerce_character_string(text, ty, explicit)?,
         ))),
@@ -1651,6 +1845,11 @@ fn cast_numeric_value(
         SqlTypeKind::Jsonb => {
             let rendered = value.render();
             Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
+        }
+        SqlTypeKind::JsonPath => {
+            let rendered = value.render();
+            validate_jsonpath_text(&rendered)?;
+            Ok(Value::JsonPath(CompactString::from_owned(rendered)))
         }
         SqlTypeKind::Char | SqlTypeKind::Varchar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Float4 => {
@@ -2194,6 +2393,17 @@ pub(crate) fn encode_value(
                 }),
             }
         }
+        (ScalarType::JsonPath, v) => {
+            let coerced = coerce_assignment_value(v, column.sql_type)?;
+            match coerced {
+                Value::JsonPath(text) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
+                other => Err(ExecError::TypeMismatch {
+                    op: "assignment",
+                    left: Value::Null,
+                    right: other,
+                }),
+            }
+        }
         (ScalarType::Text, v) => {
             let coerced = coerce_assignment_value(v, column.sql_type)?;
             Ok(TupleValue::Bytes(
@@ -2251,6 +2461,7 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Bool(v) => cast_text_value(if *v { "true" } else { "false" }, target, false),
         Value::Float64(v) => cast_text_value(&v.to_string(), target, false),
         Value::Numeric(numeric) => cast_numeric_value(numeric.clone(), target, false),
+        Value::JsonPath(text) => cast_text_value(text.as_str(), target, false),
         Value::Json(text) => cast_text_value(text.as_str(), target, false),
         Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
@@ -2383,6 +2594,18 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
             }
             decode_jsonb(bytes)?;
             Ok(Value::Jsonb(bytes.to_vec()))
+        }
+        ScalarType::JsonPath => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            let text = unsafe { std::str::from_utf8_unchecked(bytes) };
+            validate_jsonpath_text(text)?;
+            Ok(Value::JsonPath(CompactString::new(text)))
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -2891,6 +3114,7 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
         Value::Float64(v) => Ok(v.to_string().into_bytes()),
+        Value::JsonPath(text) => Ok(text.as_bytes().to_vec()),
         Value::Array(_) => Err(ExecError::TypeMismatch {
             op: "array element",
             left: coerced,
@@ -3008,6 +3232,11 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             decode_jsonb(bytes)?;
             Ok(Value::Jsonb(bytes.to_vec()))
         }
+        SqlTypeKind::JsonPath => {
+            let text = unsafe { std::str::from_utf8_unchecked(bytes) };
+            validate_jsonpath_text(text)?;
+            Ok(Value::JsonPath(CompactString::new(text)))
+        }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {
@@ -3039,6 +3268,19 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
             Value::Json(v) => {
+                out.push('"');
+                for ch in v.chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
+            Value::JsonPath(v) => {
                 out.push('"');
                 for ch in v.chars() {
                     match ch {

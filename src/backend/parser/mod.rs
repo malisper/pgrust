@@ -1281,6 +1281,18 @@ y$tag$"#).unwrap();
     }
 
     #[test]
+    fn parse_jsonpath_type_and_operators() {
+        let stmt = parse_select(
+            "select '$.a'::jsonpath, '{\"a\":1}'::jsonb @? '$.a', '{\"a\":1}'::jsonb @@ '$.a == 1', jsonb_path_query_array('{\"a\":1}'::jsonb, '$.a')",
+        )
+        .unwrap();
+        assert!(matches!(stmt.targets[0].expr, SqlExpr::Cast(_, ty) if ty.kind == SqlTypeKind::JsonPath));
+        assert!(matches!(stmt.targets[1].expr, SqlExpr::JsonbPathExists(_, _)));
+        assert!(matches!(stmt.targets[2].expr, SqlExpr::JsonbPathMatch(_, _)));
+        assert!(matches!(stmt.targets[3].expr, SqlExpr::FuncCall { .. }));
+    }
+
+    #[test]
     fn parse_current_timestamp() {
         let stmt =
             parse_statement("insert into pgbench_history (mtime) values (current_timestamp)")

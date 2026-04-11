@@ -1,6 +1,7 @@
 pub mod exec_expr;
 pub(crate) mod exec_tuples;
 pub(crate) mod jsonb;
+pub(crate) mod jsonpath;
 pub(crate) mod expr {
     pub(crate) use super::exec_expr::*;
 }
@@ -429,6 +430,7 @@ fn json_object_agg_key(key: &Value) -> String {
                 "false".into()
             }
         }
+        Value::JsonPath(v) => v.to_string(),
         Value::Array(_) => value_to_json_text(key),
     }
 }
@@ -448,6 +450,7 @@ fn value_to_json_text(value: &Value) -> String {
                 "false".into()
             }
         }
+        Value::JsonPath(v) => serde_json::to_string(v.as_str()).unwrap(),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
         Value::Text(_) | Value::TextRef(_, _) => {
@@ -4518,6 +4521,59 @@ mod tests {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn jsonpath_operators_and_functions_work() {
+        let base = temp_dir("jsonpath_ops");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '{\"a\":1}'::jsonb @? '$.a', '[{\"a\":1},{\"a\":2}]'::jsonb @@ '$[*].a > 1', jsonb_path_exists('[{\"a\":1},{\"a\":2},{\"a\":3}]'::jsonb, '$[*] ? (@.a > $min && @.a < $max)', '{\"min\":1,\"max\":3}'::jsonb), jsonb_path_query_first('[{\"a\":1},{\"a\":2}]'::jsonb, '$[*].a ? (@ > 1)'), jsonb_path_query_array('[{\"a\":1},{\"a\":2}]'::jsonb, '$[*].a')",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("2").unwrap()),
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("[1,2]").unwrap()),
+                ]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn jsonpath_cast_and_silent_behavior_work() {
+        let base = temp_dir("jsonpath_cast");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 'strict $.a'::jsonpath, jsonb_path_query_array('{}'::jsonb, 'strict $.a', '{}'::jsonb, true), jsonb_path_match('1'::jsonb, '$', '{}'::jsonb, true)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![
+                    Value::JsonPath("strict $.a".into()),
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("[]").unwrap()),
+                    Value::Null,
+                ]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select 'strict $['::jsonpath")
+            .unwrap_err();
+        assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "jsonpath"));
     }
 
     #[test]

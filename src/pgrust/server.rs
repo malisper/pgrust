@@ -424,6 +424,25 @@ mod tests {
     }
 
     #[test]
+    fn row_description_reports_jsonpath_oids() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+        send_query(&mut stream, "select '$.a'::jsonpath, ARRAY['$.a']::jsonpath[]");
+        let response = read_until_ready(&mut stream, "jsonpath_row_description");
+        let fields = response
+            .iter()
+            .find(|(kind, _)| *kind == b'T')
+            .map(|(_, body)| row_description_fields(body))
+            .unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].1, 4072);
+        assert_eq!(fields[1].1, 4073);
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn simple_query_protocol_renders_array_text_values() {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);

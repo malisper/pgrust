@@ -551,6 +551,7 @@ impl Session {
                             ScalarType::Jsonb => Ok(Value::Jsonb(
                                 crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
                             )),
+                            ScalarType::JsonPath => Ok(Value::JsonPath(raw.clone().into())),
                             ScalarType::Text => Ok(Value::Text(raw.clone().into())),
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Ok(Value::Bool(true)),

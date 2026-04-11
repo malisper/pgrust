@@ -48,6 +48,10 @@ fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
         "jsonb_extract_path_text" => Some(BuiltinScalarFunction::JsonbExtractPathText),
         "jsonb_build_array" => Some(BuiltinScalarFunction::JsonbBuildArray),
         "jsonb_build_object" => Some(BuiltinScalarFunction::JsonbBuildObject),
+        "jsonb_path_exists" => Some(BuiltinScalarFunction::JsonbPathExists),
+        "jsonb_path_match" => Some(BuiltinScalarFunction::JsonbPathMatch),
+        "jsonb_path_query_array" => Some(BuiltinScalarFunction::JsonbPathQueryArray),
+        "jsonb_path_query_first" => Some(BuiltinScalarFunction::JsonbPathQueryFirst),
         "left" => Some(BuiltinScalarFunction::Left),
         "repeat" => Some(BuiltinScalarFunction::Repeat),
         _ => None,
@@ -89,6 +93,10 @@ fn validate_scalar_function_arity(
         | BuiltinScalarFunction::JsonbExtractPath
         | BuiltinScalarFunction::JsonbExtractPathText => !args.is_empty(),
         BuiltinScalarFunction::JsonbBuildArray | BuiltinScalarFunction::JsonbBuildObject => true,
+        BuiltinScalarFunction::JsonbPathExists
+        | BuiltinScalarFunction::JsonbPathMatch
+        | BuiltinScalarFunction::JsonbPathQueryArray
+        | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
         BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => args.len() == 2,
     };
 
@@ -1125,6 +1133,38 @@ pub(crate) fn bind_expr_with_outer(
                 grouped_outer,
             )?),
         ),
+        SqlExpr::JsonbPathExists(left, right) => Expr::JsonbPathExists(
+            Box::new(bind_expr_with_outer(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )?),
+            Box::new(bind_expr_with_outer(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )?),
+        ),
+        SqlExpr::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
+            Box::new(bind_expr_with_outer(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )?),
+            Box::new(bind_expr_with_outer(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )?),
+        ),
         SqlExpr::FuncCall { name, args } => {
             let func =
                 resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
@@ -1344,6 +1384,7 @@ fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Numeric => "numeric",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Timestamp => "timestamp",
@@ -2058,7 +2099,9 @@ fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::JsonbContained(l, r)
         | SqlExpr::JsonbExists(l, r)
         | SqlExpr::JsonbExistsAny(l, r)
-        | SqlExpr::JsonbExistsAll(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
+        | SqlExpr::JsonbExistsAll(l, r)
+        | SqlExpr::JsonbPathExists(l, r)
+        | SqlExpr::JsonbPathMatch(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
         SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
@@ -2133,7 +2176,9 @@ fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>, bool)>) {
         | SqlExpr::JsonbContained(l, r)
         | SqlExpr::JsonbExists(l, r)
         | SqlExpr::JsonbExistsAny(l, r)
-        | SqlExpr::JsonbExistsAll(l, r) => {
+        | SqlExpr::JsonbExistsAll(l, r)
+        | SqlExpr::JsonbPathExists(l, r)
+        | SqlExpr::JsonbPathMatch(l, r) => {
             collect_aggs(l, aggs);
             collect_aggs(r, aggs);
         }
@@ -2206,6 +2251,7 @@ fn infer_sql_expr_type(
         SqlExpr::Const(Value::Numeric(_)) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Const(Value::Json(_)) => SqlType::new(SqlTypeKind::Json),
         SqlExpr::Const(Value::Jsonb(_)) => SqlType::new(SqlTypeKind::Jsonb),
+        SqlExpr::Const(Value::JsonPath(_)) => SqlType::new(SqlTypeKind::JsonPath),
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
         | SqlExpr::Const(Value::Null) => SqlType::new(SqlTypeKind::Text),
@@ -2254,6 +2300,8 @@ fn infer_sql_expr_type(
         | SqlExpr::JsonbExists(_, _)
         | SqlExpr::JsonbExistsAny(_, _)
         | SqlExpr::JsonbExistsAll(_, _)
+        | SqlExpr::JsonbPathExists(_, _)
+        | SqlExpr::JsonbPathMatch(_, _)
         | SqlExpr::QuantifiedArray { .. } => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::JsonGet(left, _) | SqlExpr::JsonPath(left, _) => {
             let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
@@ -2300,7 +2348,9 @@ fn infer_sql_expr_type(
             Some(BuiltinScalarFunction::ToJsonb)
             | Some(BuiltinScalarFunction::JsonbExtractPath)
             | Some(BuiltinScalarFunction::JsonbBuildArray)
-            | Some(BuiltinScalarFunction::JsonbBuildObject) => SqlType::new(SqlTypeKind::Jsonb),
+            | Some(BuiltinScalarFunction::JsonbBuildObject)
+            | Some(BuiltinScalarFunction::JsonbPathQueryArray)
+            | Some(BuiltinScalarFunction::JsonbPathQueryFirst) => SqlType::new(SqlTypeKind::Jsonb),
             Some(BuiltinScalarFunction::JsonTypeof)
             | Some(BuiltinScalarFunction::JsonExtractPathText)
             | Some(BuiltinScalarFunction::JsonbTypeof)
@@ -2309,6 +2359,8 @@ fn infer_sql_expr_type(
             | Some(BuiltinScalarFunction::Repeat) => SqlType::new(SqlTypeKind::Text),
             Some(BuiltinScalarFunction::JsonArrayLength)
             | Some(BuiltinScalarFunction::JsonbArrayLength) => SqlType::new(SqlTypeKind::Int4),
+            Some(BuiltinScalarFunction::JsonbPathExists)
+            | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
             Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
             None => SqlType::new(SqlTypeKind::Text),
         },
@@ -3166,6 +3218,50 @@ fn bind_agg_output_expr(
             )?),
         )),
         SqlExpr::JsonbExistsAll(l, r) => Ok(Expr::JsonbExistsAll(
+            Box::new(bind_agg_output_expr(
+                l,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?),
+            Box::new(bind_agg_output_expr(
+                r,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?),
+        )),
+        SqlExpr::JsonbPathExists(l, r) => Ok(Expr::JsonbPathExists(
+            Box::new(bind_agg_output_expr(
+                l,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?),
+            Box::new(bind_agg_output_expr(
+                r,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?),
+        )),
+        SqlExpr::JsonbPathMatch(l, r) => Ok(Expr::JsonbPathMatch(
             Box::new(bind_agg_output_expr(
                 l,
                 group_by_exprs,
