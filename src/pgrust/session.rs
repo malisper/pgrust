@@ -21,6 +21,7 @@ use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
+use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
 
 pub struct SelectGuard<'a> {
@@ -105,6 +106,7 @@ impl Session {
         let stmt = db.plan_cache.get_statement(sql)?;
 
         match stmt {
+            Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::Begin => {
@@ -223,6 +225,7 @@ impl Session {
         let client_id = self.client_id;
 
         match stmt {
+            Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::Analyze(ref analyze_stmt) => {
