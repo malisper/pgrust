@@ -537,7 +537,13 @@ fn eval_gamma(value: f64) -> Result<f64, ExecError> {
     if value.is_nan() {
         return Ok(f64::NAN);
     }
-    if value == f64::NEG_INFINITY || value == 0.0 || (value.is_finite() && value < 0.0 && value.fract() == 0.0) {
+    if value == f64::INFINITY {
+        return Ok(f64::INFINITY);
+    }
+    if value == f64::NEG_INFINITY
+        || value == 0.0
+        || (value.is_finite() && value < 0.0 && value.fract() == 0.0)
+    {
         return Err(ExecError::FloatOverflow);
     }
     let result = unsafe { tgamma(value) };
@@ -548,7 +554,7 @@ fn eval_gamma(value: f64) -> Result<f64, ExecError> {
         if value.is_sign_negative() {
             return Err(ExecError::FloatUnderflow);
         }
-        return Err(ExecError::FloatOverflow);
+        return Ok(result);
     }
     if result == 0.0 && value.is_finite() && value < 0.0 {
         return Err(ExecError::FloatUnderflow);
@@ -560,12 +566,15 @@ fn eval_lgamma(value: f64) -> Result<f64, ExecError> {
     if value.is_nan() {
         return Ok(f64::NAN);
     }
-    if value == f64::NEG_INFINITY || value == 0.0 || (value.is_finite() && value < 0.0 && value.fract() == 0.0) {
+    if value == f64::INFINITY || value == f64::NEG_INFINITY {
+        return Ok(f64::INFINITY);
+    }
+    if value == 0.0 || (value.is_finite() && value < 0.0 && value.fract() == 0.0) {
         return Err(ExecError::FloatOverflow);
     }
     let result = unsafe { lgamma(value) };
     if result.is_infinite() {
-        return Err(ExecError::FloatOverflow);
+        return Ok(result);
     }
     if result.is_nan() {
         return Err(float_domain_error("input is out of range"));

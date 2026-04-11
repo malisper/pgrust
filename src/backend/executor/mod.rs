@@ -2474,7 +2474,7 @@ mod tests {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
-            "select erf(0.45::float8), erfc(0.45::float8), gamma(5.0::float8), lgamma(5.0::float8), atanh('nan'::float8)",
+            "select erf(0.45::float8), erfc(0.45::float8), gamma(5.0::float8), lgamma(5.0::float8), atanh('nan'::float8), gamma('infinity'::float8), lgamma('infinity'::float8), lgamma('-infinity'::float8)",
         )
         .unwrap()
         {
@@ -2496,6 +2496,9 @@ mod tests {
                     Value::Float64(v) => assert!(v.is_nan()),
                     other => panic!("expected NaN, got {other:?}"),
                 }
+                assert_eq!(rows[0][5], Value::Float64(f64::INFINITY));
+                assert_eq!(rows[0][6], Value::Float64(f64::INFINITY));
+                assert_eq!(rows[0][7], Value::Float64(f64::INFINITY));
             }
             other => panic!("expected query result, got {:?}", other),
         }
