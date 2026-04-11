@@ -302,6 +302,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_qualified_star_select_target() {
+        let stmt = parse_select("select p.* from people p").unwrap();
+        assert_eq!(stmt.targets.len(), 1);
+        assert_eq!(stmt.targets[0].output_name, "*");
+        assert!(matches!(&stmt.targets[0].expr, SqlExpr::Column(name) if name == "p.*"));
+    }
+
+    #[test]
     fn parse_shift_expression_precedence() {
         let stmt = parse_select("select (-1::int2<<15)::text").unwrap();
         match &stmt.targets[0].expr {
