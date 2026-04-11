@@ -6,6 +6,11 @@ use crate::backend::executor::{ExecError, QueryColumn, Value};
 use crate::include::access::htup::TupleError;
 use crate::backend::parser::SqlTypeKind;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct FloatFormatOptions {
+    pub(crate) extra_float_digits: i32,
+}
+
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
@@ -71,11 +76,12 @@ pub(crate) fn send_query_result(
     columns: &[QueryColumn],
     rows: &[Vec<Value>],
     tag: &str,
+    float_format: FloatFormatOptions,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
     for row in rows {
-        send_typed_data_row(stream, row, columns, &mut row_buf)?;
+        send_typed_data_row(stream, row, columns, &mut row_buf, float_format)?;
     }
     send_command_complete(stream, tag)
 }
@@ -176,8 +182,9 @@ pub(crate) fn send_data_row(
     w: &mut impl Write,
     values: &[Value],
     buf: &mut Vec<u8>,
+    float_format: FloatFormatOptions,
 ) -> io::Result<()> {
-    send_typed_data_row(w, values, &[], buf)
+    send_typed_data_row(w, values, &[], buf, float_format)
 }
 
 pub(crate) fn send_typed_data_row(
@@ -185,6 +192,7 @@ pub(crate) fn send_typed_data_row(
     values: &[Value],
     columns: &[QueryColumn],
     buf: &mut Vec<u8>,
+    float_format: FloatFormatOptions,
 ) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
@@ -223,8 +231,8 @@ pub(crate) fn send_typed_data_row(
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
                 let rendered = match sql_type.map(|ty| ty.kind) {
-                    Some(SqlTypeKind::Float4) => format_float4_text(*v),
-                    _ => format_float8_text(*v),
+                    Some(SqlTypeKind::Float4) => format_float4_text(*v, float_format),
+                    _ => format_float8_text(*v, float_format),
                 };
                 buf.extend_from_slice(rendered.as_bytes());
                 let text_len = (buf.len() - start - 4) as i32;
@@ -367,7 +375,7 @@ pub(crate) fn send_error(
     Ok(())
 }
 
-fn format_float8_text(value: f64) -> String {
+fn format_float8_text(value: f64, options: FloatFormatOptions) -> String {
     if value.is_nan() {
         return "NaN".to_string();
     }
@@ -379,19 +387,14 @@ fn format_float8_text(value: f64) -> String {
         };
     }
 
-    let abs = value.abs();
-    if abs != 0.0 && (abs >= 1.0e15 || abs < 1.0e-6) {
-        let rendered = format!("{value:.15e}");
-        let (mantissa, exponent) = rendered.split_once('e').unwrap_or((&rendered, "0"));
-        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
-        let exponent = exponent.parse::<i32>().unwrap_or(0);
-        return format!("{mantissa}e{exponent:+}");
+    if options.extra_float_digits <= 0 {
+        return format_float_with_precision(value, 15 + options.extra_float_digits);
     }
 
-    value.to_string()
+    format_float_shortest(value, false)
 }
 
-fn format_float4_text(value: f64) -> String {
+fn format_float4_text(value: f64, options: FloatFormatOptions) -> String {
     let value = value as f32;
     if value.is_nan() {
         return "NaN".to_string();
@@ -404,51 +407,135 @@ fn format_float4_text(value: f64) -> String {
         };
     }
 
+    if options.extra_float_digits <= 0 {
+        return format_float_with_precision(value as f64, 6 + options.extra_float_digits);
+    }
+
+    format_float_shortest(value as f64, true)
+}
+
+fn format_float_shortest(value: f64, is_float4: bool) -> String {
+    let raw = if is_float4 {
+        let mut buffer = ryu::Buffer::new();
+        buffer.format_finite(value as f32).to_string()
+    } else {
+        let mut buffer = ryu::Buffer::new();
+        buffer.format_finite(value).to_string()
+    };
+    normalize_float_rendering(raw)
+}
+
+fn format_float_with_precision(value: f64, precision: i32) -> String {
+    let precision = precision.max(1) as usize;
+    let sign = if value.is_sign_negative() { "-" } else { "" };
     let abs = value.abs();
-    if abs != 0.0 && (abs >= 1.0e6 || abs < 1.0e-6) {
-        let rendered = format!("{value:.6e}");
-        let (mantissa, exponent) = rendered.split_once('e').unwrap_or((&rendered, "0"));
-        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+    if abs == 0.0 {
+        return format!("{sign}0");
+    }
+
+    let rendered = format!("{:.*e}", precision - 1, abs);
+    let (mantissa, exponent) = rendered.split_once('e').unwrap_or((&rendered, "0"));
+    let exponent = exponent.parse::<i32>().unwrap_or(0);
+    let digits = mantissa.replace('.', "");
+    let body = if exponent < -4 || exponent >= precision as i32 {
+        let mantissa = trim_fractional_zeros(mantissa);
+        format!("{mantissa}e{exponent:+}")
+    } else {
+        let decimal_pos = exponent + 1;
+        let rendered = if decimal_pos <= 0 {
+            format!("0.{}{}", "0".repeat((-decimal_pos) as usize), digits)
+        } else if decimal_pos as usize >= digits.len() {
+            format!("{digits}{}", "0".repeat(decimal_pos as usize - digits.len()))
+        } else {
+            format!(
+                "{}.{}",
+                &digits[..decimal_pos as usize],
+                &digits[decimal_pos as usize..]
+            )
+        };
+        trim_fractional_zeros(&rendered).to_string()
+    };
+    format!("{sign}{body}")
+}
+
+fn normalize_float_rendering(raw: String) -> String {
+    if let Some((mantissa, exponent)) = raw.split_once(['e', 'E']) {
+        let mantissa = trim_fractional_zeros(mantissa);
         let exponent = exponent.parse::<i32>().unwrap_or(0);
         return format!("{mantissa}e{exponent:+}");
     }
+    trim_fractional_zeros(&raw).to_string()
+}
 
-    value.to_string()
+fn trim_fractional_zeros(text: &str) -> &str {
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "-" {
+        if text.starts_with('-') { "-0" } else { "0" }
+    } else {
+        trimmed
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_float4_text, format_float8_text};
+    use super::{FloatFormatOptions, format_float4_text, format_float8_text};
 
     #[test]
     fn large_float8_values_render_in_scientific_notation() {
         assert_eq!(
-            format_float8_text(4_567_890_123_456_789.0),
-            "4.567890123456789e+15"
+            format_float8_text(4_567_890_123_456_789.0, FloatFormatOptions::default()),
+            "4.56789012345679e+15"
         );
         assert_eq!(
-            format_float8_text(-4_567_890_123_456_789.0),
-            "-4.567890123456789e+15"
+            format_float8_text(-4_567_890_123_456_789.0, FloatFormatOptions::default()),
+            "-4.56789012345679e+15"
         );
-        assert_eq!(format_float8_text(123.0), "123");
+        assert_eq!(format_float8_text(123.0, FloatFormatOptions::default()), "123");
     }
 
     #[test]
     fn large_float4_values_render_in_scientific_notation() {
         assert_eq!(
-            format_float4_text(4_567_890_123_456_789.0),
+            format_float4_text(4_567_890_123_456_789.0, FloatFormatOptions::default()),
             "4.56789e+15"
         );
-        assert_eq!(format_float4_text(123.0), "123");
+        assert_eq!(format_float4_text(123.0, FloatFormatOptions::default()), "123");
     }
 
     #[test]
     fn float_special_values_use_postgres_spelling() {
-        assert_eq!(format_float8_text(f64::NAN), "NaN");
-        assert_eq!(format_float8_text(f64::INFINITY), "Infinity");
-        assert_eq!(format_float8_text(f64::NEG_INFINITY), "-Infinity");
-        assert_eq!(format_float4_text(f64::NAN), "NaN");
-        assert_eq!(format_float4_text(f64::INFINITY), "Infinity");
-        assert_eq!(format_float4_text(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(format_float8_text(f64::NAN, FloatFormatOptions::default()), "NaN");
+        assert_eq!(
+            format_float8_text(f64::INFINITY, FloatFormatOptions::default()),
+            "Infinity"
+        );
+        assert_eq!(
+            format_float8_text(f64::NEG_INFINITY, FloatFormatOptions::default()),
+            "-Infinity"
+        );
+        assert_eq!(format_float4_text(f64::NAN, FloatFormatOptions::default()), "NaN");
+        assert_eq!(
+            format_float4_text(f64::INFINITY, FloatFormatOptions::default()),
+            "Infinity"
+        );
+        assert_eq!(
+            format_float4_text(f64::NEG_INFINITY, FloatFormatOptions::default()),
+            "-Infinity"
+        );
+    }
+
+    #[test]
+    fn extra_float_digits_zero_uses_rounded_general_format() {
+        let options = FloatFormatOptions {
+            extra_float_digits: 0,
+        };
+        assert_eq!(format_float8_text(31.690692639953454, options), "31.6906926399535");
+        assert_eq!(format_float8_text(1004.3000000000004, options), "1004.3");
+        assert_eq!(format_float4_text(1.2345679402097818e20, options), "1.23457e+20");
+    }
+
+    #[test]
+    fn shortest_format_preserves_negative_zero() {
+        assert_eq!(format_float8_text(-0.0, FloatFormatOptions::default()), "-0");
     }
 }

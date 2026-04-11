@@ -11,6 +11,7 @@ use crate::backend::libpq::pqcomm::{
 };
 use crate::include::access::htup::TupleError;
 use crate::backend::libpq::pqformat::{
+    FloatFormatOptions,
     format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
     send_close_complete, send_command_complete, send_copy_in_response, send_data_row,
     send_empty_query, send_error, send_no_data, send_parameter_description, send_parameter_status,
@@ -304,7 +305,15 @@ fn handle_query(
                             }
                             match slot.values() {
                                 Ok(values) => {
-                                    send_typed_data_row(stream, values, &columns, &mut row_buf)?;
+                                    send_typed_data_row(
+                                        stream,
+                                        values,
+                                        &columns,
+                                        &mut row_buf,
+                                        FloatFormatOptions {
+                                            extra_float_digits: state.session.extra_float_digits(),
+                                        },
+                                    )?;
                                     row_count += 1;
                                 }
                                 Err(e) => {
@@ -348,7 +357,15 @@ fn handle_query(
     } else {
         match state.session.execute(db, sql) {
             Ok(StatementResult::Query { columns, rows, .. }) => {
-                send_query_result(stream, &columns, &rows, &format!("SELECT {}", rows.len()))?;
+                send_query_result(
+                    stream,
+                    &columns,
+                    &rows,
+                    &format!("SELECT {}", rows.len()),
+                    FloatFormatOptions {
+                        extra_float_digits: state.session.extra_float_digits(),
+                    },
+                )?;
             }
             Ok(StatementResult::AffectedRows(n)) => {
                 send_command_complete(stream, &infer_command_tag(sql, n))?;
@@ -586,7 +603,14 @@ fn execute_portal(
         execute_special_query(db, session.client_id, &portal.sql, &portal.params)
     {
         for row in &rows {
-            send_data_row(stream, row, &mut row_buf)?;
+            send_data_row(
+                stream,
+                row,
+                &mut row_buf,
+                FloatFormatOptions {
+                    extra_float_digits: session.extra_float_digits(),
+                },
+            )?;
         }
         send_command_complete(stream, &tag)?;
         return Ok(());
@@ -596,7 +620,15 @@ fn execute_portal(
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
             for row in &rows {
-                send_typed_data_row(stream, row, &columns, &mut row_buf)?;
+                send_typed_data_row(
+                    stream,
+                    row,
+                    &columns,
+                    &mut row_buf,
+                    FloatFormatOptions {
+                        extra_float_digits: session.extra_float_digits(),
+                    },
+                )?;
             }
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
         }
