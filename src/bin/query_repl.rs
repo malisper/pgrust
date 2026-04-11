@@ -649,9 +649,7 @@ fn run_statement(
         }
     };
 
-    if result.is_ok() {
-        print_plpgsql_notices();
-    }
+    print_plpgsql_notices();
     result
 }
 

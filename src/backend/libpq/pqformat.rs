@@ -28,6 +28,7 @@ impl Default for FloatFormatOptions {
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
+        ExecError::RaiseException(message) => message.clone(),
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
         ExecError::InvalidIntegerInput { ty, value } => {
             format!("invalid input syntax for type {ty}: \"{value}\"")
