@@ -2267,6 +2267,56 @@ mod tests {
     }
 
     #[test]
+    fn int2_text_input_accepts_prefixed_and_underscored_literals() {
+        let base = temp_dir("int2_text_input_literals");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select int2 '0b100101', int2 '0o273', int2 '0x42F', int2 '1_000', int2 '0b_10_0101', int2 '-0x8000'",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Int16(37),
+                Value::Int16(187),
+                Value::Int16(1071),
+                Value::Int16(1000),
+                Value::Int16(37),
+                Value::Int16(-32768),
+            ]],
+        );
+    }
+
+    #[test]
+    fn int2_assignment_uses_input_errors_instead_of_type_mismatch() {
+        let column = crate::backend::catalog::catalog::column_desc(
+            "f1",
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int2),
+            true,
+        );
+
+        let err = crate::backend::executor::value_io::encode_value(
+            &column,
+            &Value::Text("34.5".into()),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ExecError::InvalidIntegerInput { ty: "smallint", .. }),
+            "got {err:?}"
+        );
+
+        let err = crate::backend::executor::value_io::encode_value(
+            &column,
+            &Value::Text("100000".into()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::Int2OutOfRange), "got {err:?}");
+    }
+
+    #[test]
     fn comparison_operators_work_for_extended_numeric_types() {
         let base = temp_dir("extended_numeric_comparisons");
         let txns = TransactionManager::new_durable(&base).unwrap();

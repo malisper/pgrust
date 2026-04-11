@@ -6,6 +6,90 @@ use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::pgrust::compact_string::CompactString;
 
+fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
+    let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    if trimmed.is_empty() {
+        return Err(ExecError::InvalidIntegerInput {
+            ty,
+            value: text.to_string(),
+        });
+    }
+
+    let (negative, rest) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, trimmed)
+    };
+
+    let (base, digits, allow_prefix_underscore) =
+        if let Some(rest) = rest.strip_prefix("0b").or_else(|| rest.strip_prefix("0B")) {
+            (2, rest, true)
+        } else if let Some(rest) = rest.strip_prefix("0o").or_else(|| rest.strip_prefix("0O")) {
+            (8, rest, true)
+        } else if let Some(rest) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            (16, rest, true)
+        } else {
+            (10, rest, false)
+        };
+
+    let digits = if allow_prefix_underscore {
+        digits.strip_prefix('_').unwrap_or(digits)
+    } else {
+        digits
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return Err(ExecError::InvalidIntegerInput {
+            ty,
+            value: text.to_string(),
+        });
+    }
+
+    let normalized: String = digits.chars().filter(|&ch| ch != '_').collect();
+    if normalized.is_empty()
+        || !normalized
+            .chars()
+            .all(|ch| ch.is_digit(base))
+    {
+        return Err(ExecError::InvalidIntegerInput {
+            ty,
+            value: text.to_string(),
+        });
+    }
+
+    let magnitude = i128::from_str_radix(&normalized, base).map_err(|_| ExecError::InvalidIntegerInput {
+        ty,
+        value: text.to_string(),
+    })?;
+    Ok(if negative { -magnitude } else { magnitude })
+}
+
+fn cast_text_to_int2(text: &str) -> Result<Value, ExecError> {
+    let value = parse_pg_integer_text(text, "smallint")?;
+    i16::try_from(value)
+        .map(Value::Int16)
+        .map_err(|_| ExecError::Int2OutOfRange)
+}
+
+fn cast_text_to_int4(text: &str) -> Result<Value, ExecError> {
+    let value = parse_pg_integer_text(text, "integer")?;
+    i32::try_from(value)
+        .map(Value::Int32)
+        .map_err(|_| ExecError::Int4OutOfRange)
+}
+
+fn cast_text_to_int8(text: &str) -> Result<Value, ExecError> {
+    let value = parse_pg_integer_text(text, "bigint")?;
+    i64::try_from(value)
+        .map(Value::Int64)
+        .map_err(|_| ExecError::Int8OutOfRange)
+}
+
 pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
     if ty.is_array {
         return match value {
@@ -299,30 +383,9 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
             coerce_character_string(text, ty, explicit)?,
         ))),
-        SqlTypeKind::Int2 => text
-            .parse::<i16>()
-            .map(Value::Int16)
-            .map_err(|_| ExecError::TypeMismatch {
-                op: "::int2",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Int16(0),
-            }),
-        SqlTypeKind::Int4 => text
-            .parse::<i32>()
-            .map(Value::Int32)
-            .map_err(|_| ExecError::TypeMismatch {
-                op: "::int4",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Int32(0),
-            }),
-        SqlTypeKind::Int8 => text
-            .parse::<i64>()
-            .map(Value::Int64)
-            .map_err(|_| ExecError::TypeMismatch {
-                op: "::int8",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Int64(0),
-            }),
+        SqlTypeKind::Int2 => cast_text_to_int2(text),
+        SqlTypeKind::Int4 => cast_text_to_int4(text),
+        SqlTypeKind::Int8 => cast_text_to_int8(text),
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text)
             .map(|v| {
                 Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {

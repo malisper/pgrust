@@ -19,60 +19,31 @@ pub(crate) fn tuple_from_values(desc: &RelationDesc, values: &[Value]) -> Result
 }
 
 pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleValue, ExecError> {
-    match (&column.ty, value) {
-        (_, Value::Null) => {
-            if !column.storage.nullable {
-                Err(ExecError::MissingRequiredColumn(column.name.clone()))
-            } else {
-                Ok(TupleValue::Null)
-            }
-        }
+    if matches!(value, Value::Null) {
+        return if !column.storage.nullable {
+            Err(ExecError::MissingRequiredColumn(column.name.clone()))
+        } else {
+            Ok(TupleValue::Null)
+        };
+    }
+
+    let coerced = coerce_assignment_value(value, column.sql_type)?;
+    match (&column.ty, coerced) {
         (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((*v as f32).to_le_bytes().to_vec())),
+        (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec())),
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Numeric, v) => {
-            let coerced = coerce_assignment_value(v, column.sql_type)?;
-            match coerced {
-                Value::Numeric(numeric) => Ok(TupleValue::Bytes(numeric.render().into_bytes())),
-                other => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other }),
-            }
+        (ScalarType::Numeric, Value::Numeric(numeric)) => Ok(TupleValue::Bytes(numeric.render().into_bytes())),
+        (ScalarType::Json, Value::Json(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
+        (ScalarType::Jsonb, Value::Jsonb(bytes)) => Ok(TupleValue::Bytes(bytes)),
+        (ScalarType::JsonPath, Value::JsonPath(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
+        (ScalarType::Text, value) => Ok(TupleValue::Bytes(value.as_text().unwrap().as_bytes().to_vec())),
+        (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
+        (ScalarType::Array(_), Value::Array(items)) => {
+            Ok(TupleValue::Bytes(encode_array_bytes(column.sql_type.element_type(), &items)?))
         }
-        (ScalarType::Json, v) => {
-            let coerced = coerce_assignment_value(v, column.sql_type)?;
-            match coerced {
-                Value::Json(text) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
-                other => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other }),
-            }
-        }
-        (ScalarType::Jsonb, v) => {
-            let coerced = coerce_assignment_value(v, column.sql_type)?;
-            match coerced {
-                Value::Jsonb(bytes) => Ok(TupleValue::Bytes(bytes)),
-                other => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other }),
-            }
-        }
-        (ScalarType::JsonPath, v) => {
-            let coerced = coerce_assignment_value(v, column.sql_type)?;
-            match coerced {
-                Value::JsonPath(text) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
-                other => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other }),
-            }
-        }
-        (ScalarType::Text, v) => {
-            let coerced = coerce_assignment_value(v, column.sql_type)?;
-            Ok(TupleValue::Bytes(coerced.as_text().unwrap().as_bytes().to_vec()))
-        }
-        (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(*v)])),
-        (ScalarType::Array(_), v) => {
-            let coerced = coerce_assignment_value(v, column.sql_type)?;
-            match coerced {
-                Value::Array(items) => Ok(TupleValue::Bytes(encode_array_bytes(column.sql_type.element_type(), &items)?)),
-                other => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other }),
-            }
-        }
-        (_, other) => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other.clone() }),
+        (_, other) => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other }),
     }
 }
 
