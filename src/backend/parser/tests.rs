@@ -1046,7 +1046,11 @@ y$tag$"#).unwrap();
             matches!(parse_statement("insert into people (id, name) values (1, 'alice')").unwrap(), Statement::Insert(InsertStatement { table_name, .. }) if table_name == "people")
         );
         assert!(
-            matches!(parse_statement("insert into people (id, name) values (1, 'alice'), (2, 'bob')").unwrap(), Statement::Insert(InsertStatement { table_name, values, .. }) if table_name == "people" && values.len() == 2)
+            matches!(
+                parse_statement("insert into people (id, name) values (1, 'alice'), (2, 'bob')").unwrap(),
+                Statement::Insert(InsertStatement { table_name, source: InsertSource::Values(values), .. })
+                    if table_name == "people" && values.len() == 2
+            )
         );
         assert!(
             matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns, .. }) if table_name == "widgets" && columns.len() == 2)
@@ -1745,11 +1749,57 @@ y$tag$"#).unwrap();
             parse_statement("insert into pgbench_history (mtime) values (current_timestamp)")
                 .unwrap();
         match stmt {
-            Statement::Insert(InsertStatement { values, .. }) => {
+            Statement::Insert(InsertStatement {
+                source: InsertSource::Values(values),
+                ..
+            }) => {
                 assert!(matches!(values[0][0], SqlExpr::CurrentTimestamp));
             }
             other => panic!("expected insert, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_insert_select_default_values_and_table_stmt() {
+        let stmt = parse_statement("insert into people select 1, 'alice'").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Insert(InsertStatement {
+                table_name,
+                source: InsertSource::Select(_),
+                ..
+            }) if table_name == "people"
+        ));
+
+        let stmt = parse_statement("insert into people default values").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Insert(InsertStatement {
+                table_name,
+                source: InsertSource::DefaultValues,
+                ..
+            }) if table_name == "people"
+        ));
+
+        let stmt = parse_statement("table people").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Select(SelectStatement { from: Some(FromItem::Table { name }), .. })
+                if name == "people"
+        ));
+    }
+
+    #[test]
+    fn parse_create_table_column_defaults() {
+        let stmt = parse_statement(
+            "create table bit_defaults (b1 bit(4) default '1001', b2 bit varying(5) default B'0101')",
+        )
+        .unwrap();
+        let Statement::CreateTable(CreateTableStatement { columns, .. }) = stmt else {
+            panic!("expected create table");
+        };
+        assert_eq!(columns[0].default_expr.as_deref(), Some("'1001'"));
+        assert_eq!(columns[1].default_expr.as_deref(), Some("B'0101'"));
     }
 
     #[test]

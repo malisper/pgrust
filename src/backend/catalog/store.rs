@@ -6,6 +6,7 @@ use crate::backend::access::heap::heapam::{heap_flush, heap_insert, heap_scan_be
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::catalog::catalog::{column_desc, Catalog, CatalogEntry, CatalogError};
+use crate::backend::catalog::defaults::{load_default_exprs, persist_default_exprs};
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::value_io::decode_value;
@@ -139,6 +140,7 @@ impl CatalogStore {
                 bootstrap_complete: true,
             },
         )?;
+        persist_default_exprs(&self.base_dir, catalog)?;
         sync_physical_catalogs(&self.base_dir, catalog)
     }
 }
@@ -323,6 +325,7 @@ fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), Cat
 }
 
 fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
+    let default_exprs = load_default_exprs(base_dir)?;
     let rows = load_physical_catalog_rows(base_dir)?;
     let namespace_rows = rows.namespaces;
     let type_rows = rows.types;
@@ -358,7 +361,16 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
                 let sql_type = *type_by_oid
                     .get(&attr.atttypid)
                     .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
-                Ok(column_desc(attr.attname.clone(), SqlType { typmod: attr.atttypmod, ..sql_type }, !attr.attnotnull))
+                let mut desc = column_desc(
+                    attr.attname.clone(),
+                    SqlType {
+                        typmod: attr.atttypmod,
+                        ..sql_type
+                    },
+                    !attr.attnotnull,
+                );
+                desc.default_expr = default_exprs.get(&(row.oid, attr.attnum)).cloned();
+                Ok(desc)
             })
             .collect::<Result<Vec<_>, CatalogError>>()?;
         let namespace_name = namespace_names
@@ -633,6 +645,27 @@ mod tests {
         let reopened_entry = reopened_catalog.get("people").unwrap();
         assert_eq!(reopened_entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert_eq!(reopened_entry.desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn catalog_store_persists_column_defaults() {
+        let base = temp_dir("defaults_roundtrip");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let mut desc = RelationDesc {
+            columns: vec![
+                column_desc("b1", SqlType::with_bit_len(SqlTypeKind::Bit, 4), false),
+                column_desc("b2", SqlType::with_bit_len(SqlTypeKind::VarBit, 5), true),
+            ],
+        };
+        desc.columns[0].default_expr = Some("'1001'".into());
+        desc.columns[1].default_expr = Some("B'0101'".into());
+        store.create_table("bit_defaults", desc).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let relcache = reopened.relcache().unwrap();
+        let entry = relcache.get_by_name("bit_defaults").unwrap();
+        assert_eq!(entry.desc.columns[0].default_expr.as_deref(), Some("'1001'"));
+        assert_eq!(entry.desc.columns[1].default_expr.as_deref(), Some("B'0101'"));
     }
 
     #[test]

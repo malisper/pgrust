@@ -285,7 +285,14 @@ pub struct InsertStatement {
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
     pub columns: Option<Vec<String>>,
-    pub values: Vec<Vec<SqlExpr>>,
+    pub source: InsertSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsertSource {
+    Values(Vec<Vec<SqlExpr>>),
+    DefaultValues,
+    Select(Box<SelectStatement>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +339,7 @@ pub struct VacuumStatement {
 pub struct ColumnDef {
     pub name: String,
     pub ty: SqlType,
+    pub default_expr: Option<String>,
     pub nullable: bool,
 }
 

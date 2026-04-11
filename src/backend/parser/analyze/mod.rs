@@ -83,7 +83,11 @@ pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
         columns: stmt
             .columns
             .iter()
-            .map(|column| column_desc(column.name.clone(), column.ty, column.nullable))
+            .map(|column| {
+                let mut desc = column_desc(column.name.clone(), column.ty, column.nullable);
+                desc.default_expr = column.default_expr.clone();
+                desc
+            })
             .collect(),
     }
 }
@@ -705,7 +709,14 @@ pub struct BoundInsertStatement {
     pub rel: RelFileLocator,
     pub desc: RelationDesc,
     pub target_columns: Vec<usize>,
-    pub values: Vec<Vec<Expr>>,
+    pub source: BoundInsertSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundInsertSource {
+    Values(Vec<Vec<Expr>>),
+    DefaultValues(Vec<Expr>),
+    Select(Box<Plan>),
 }
 
 /// A pre-bound insert plan that can be executed repeatedly with different
@@ -789,30 +800,77 @@ pub fn bind_insert(
         (0..entry.desc.columns.len()).collect()
     };
 
-    for row in &stmt.values {
-        if target_columns.len() != row.len() {
-            return Err(ParseError::InvalidInsertTargetCount {
-                expected: target_columns.len(),
-                actual: row.len(),
-            });
+    let source = match &stmt.source {
+        InsertSource::Values(rows) => {
+            for row in rows {
+                if target_columns.len() != row.len() {
+                    return Err(ParseError::InvalidInsertTargetCount {
+                        expected: target_columns.len(),
+                        actual: row.len(),
+                    });
+                }
+            }
+            BoundInsertSource::Values(
+                rows.iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|expr| {
+                                bind_expr_with_outer_and_ctes(
+                                    expr,
+                                    &scope,
+                                    catalog,
+                                    &[],
+                                    None,
+                                    &local_ctes,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
         }
-    }
+        InsertSource::DefaultValues => BoundInsertSource::DefaultValues(
+            entry.desc
+                .columns
+                .iter()
+                .map(|column| {
+                    column
+                        .default_expr
+                        .as_ref()
+                        .map(|sql| {
+                            let expr = crate::backend::parser::parse_expr(sql)?;
+                            bind_expr_with_outer_and_ctes(
+                                &expr,
+                                &empty_scope(),
+                                catalog,
+                                &[],
+                                None,
+                                &local_ctes,
+                            )
+                        })
+                        .transpose()
+                        .map(|expr| expr.unwrap_or(Expr::Const(Value::Null)))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        InsertSource::Select(select) => {
+            let plan = build_plan_with_outer(select, catalog, &[], None, &local_ctes)?;
+            let actual = plan.columns().len();
+            if target_columns.len() != actual {
+                return Err(ParseError::InvalidInsertTargetCount {
+                    expected: target_columns.len(),
+                    actual,
+                });
+            }
+            BoundInsertSource::Select(Box::new(plan))
+        }
+    };
 
     Ok(BoundInsertStatement {
         rel: entry.rel,
         desc: entry.desc.clone(),
         target_columns,
-        values: stmt
-            .values
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|expr| {
-                        bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        source,
     })
 }
 

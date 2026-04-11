@@ -146,6 +146,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         },
         ty,
         sql_type,
+        default_expr: None,
     }
 }
 

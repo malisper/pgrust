@@ -126,11 +126,15 @@ pub(super) fn coerce_unknown_string_literal_type(
     expr_type: SqlType,
     peer_type: SqlType,
 ) -> SqlType {
-    if is_string_literal_expr(expr) && is_numeric_family(peer_type) {
-        peer_type.element_type()
-    } else {
-        expr_type
+    if is_string_literal_expr(expr) {
+        if is_numeric_family(peer_type) {
+            return peer_type.element_type();
+        }
+        if is_bit_string_type(peer_type) {
+            return SqlType::new(SqlTypeKind::VarBit);
+        }
     }
+    expr_type
 }
 
 pub(super) fn should_use_text_concat(

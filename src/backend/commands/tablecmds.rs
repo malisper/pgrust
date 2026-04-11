@@ -12,7 +12,7 @@ use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::access::transam::xact::CommandId;
 use crate::pgrust::database::TransactionWaiter;
 use crate::backend::parser::{
-    AnalyzeStatement, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement,
+    AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement, BoundUpdateStatement,
     Catalog, CatalogLookup, DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
     TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
 };
@@ -178,18 +178,40 @@ pub fn execute_insert(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
-    let values = stmt
-        .values
-        .iter()
-        .map(|row| {
+    let values = match &stmt.source {
+        BoundInsertSource::Values(rows) => rows
+            .iter()
+            .map(|row| {
+                let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
+                let mut values = vec![Value::Null; stmt.desc.columns.len()];
+                for (column_index, expr) in stmt.target_columns.iter().zip(row.iter()) {
+                    values[*column_index] = eval_expr(expr, &mut slot, ctx)?;
+                }
+                Ok(values)
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?,
+        BoundInsertSource::DefaultValues(defaults) => {
             let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
             let mut values = vec![Value::Null; stmt.desc.columns.len()];
-            for (column_index, expr) in stmt.target_columns.iter().zip(row.iter()) {
+            for (column_index, expr) in stmt.target_columns.iter().zip(defaults.iter()) {
                 values[*column_index] = eval_expr(expr, &mut slot, ctx)?;
             }
-            Ok(values)
-        })
-        .collect::<Result<Vec<_>, ExecError>>()?;
+            vec![values]
+        }
+        BoundInsertSource::Select(plan) => {
+            let mut state = executor_start((**plan).clone());
+            let mut rows = Vec::new();
+            while let Some(slot) = state.exec_proc_node(ctx)? {
+                let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                let mut values = vec![Value::Null; stmt.desc.columns.len()];
+                for (column_index, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
+                    values[*column_index] = value;
+                }
+                rows.push(values);
+            }
+            rows
+        }
+    };
 
     let inserted = execute_insert_values(stmt.rel, &stmt.desc, &values, ctx, xid, cid)?;
     Ok(StatementResult::AffectedRows(inserted))

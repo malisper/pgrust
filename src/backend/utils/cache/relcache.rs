@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
+use crate::backend::catalog::defaults::{DefaultExprMap, load_default_exprs};
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::RelationDesc;
 use crate::backend::storage::smgr::RelFileLocator;
@@ -37,10 +38,18 @@ impl RelCache {
 
     pub fn from_physical(base_dir: &Path) -> Result<Self, CatalogError> {
         let catcache = CatCache::from_physical(base_dir)?;
-        Self::from_catcache(&catcache)
+        let defaults = load_default_exprs(base_dir)?;
+        Self::from_catcache_with_defaults(&catcache, &defaults)
     }
 
     pub fn from_catcache(catcache: &CatCache) -> Result<Self, CatalogError> {
+        Self::from_catcache_with_defaults(catcache, &BTreeMap::new())
+    }
+
+    fn from_catcache_with_defaults(
+        catcache: &CatCache,
+        defaults: &DefaultExprMap,
+    ) -> Result<Self, CatalogError> {
         let mut cache = Self::default();
         for class in catcache.class_rows() {
             let attrs = catcache.attributes_by_relid(class.oid).unwrap_or(&[]);
@@ -51,14 +60,16 @@ impl RelCache {
                         .type_by_oid(attr.atttypid)
                         .map(|ty| ty.sql_type)
                         .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
-                    Ok(column_desc(
+                    let mut desc = column_desc(
                         attr.attname.clone(),
                         SqlType {
                             typmod: attr.atttypmod,
                             ..sql_type
                         },
                         !attr.attnotnull,
-                    ))
+                    );
+                    desc.default_expr = defaults.get(&(class.oid, attr.attnum)).cloned();
+                    Ok(desc)
                 })
                 .collect::<Result<Vec<_>, CatalogError>>()?;
             let entry = RelCacheEntry {
