@@ -1,4 +1,5 @@
 use super::ExecError;
+use super::expr_ops::parse_numeric_text;
 use crate::include::nodes::datum::NumericValue;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +42,135 @@ pub(crate) fn to_char_numeric(value: &NumericValue, format: &str) -> Result<Stri
         return format_scientific_numeric(value, &spec);
     }
     Ok(format_standard_numeric(value, &spec))
+}
+
+pub(crate) fn to_number_numeric(input: &str, format: &str) -> Result<NumericValue, ExecError> {
+    let mut parser = FormatParser::new(format);
+    let spec = parser.parse()?;
+    if spec.roman {
+        return parse_roman_to_number(input, format);
+    }
+
+    let mut negative = false;
+    let mut text = input.trim().to_string();
+    if spec.angle_pr && text.starts_with('<') && text.ends_with('>') && text.len() >= 2 {
+        negative = true;
+        text = text[1..text.len() - 1].to_string();
+    } else if let Some(idx) = text.find('-') {
+        negative = true;
+        text.remove(idx);
+    } else if let Some(idx) = text.find('+') {
+        text.remove(idx);
+    }
+    text = text.replace('$', "");
+
+    let mut chars = text.chars().peekable();
+    let mut digits_before = String::new();
+    let mut digits_after = String::new();
+    let mut in_fraction = false;
+
+    for token in &spec.tokens {
+        match token {
+            Token::Digit9 | Token::Digit0 => {
+                while matches!(chars.peek(), Some(ch) if ch.is_whitespace()) {
+                    chars.next();
+                }
+                match chars.peek().copied() {
+                    Some(ch) if ch.is_ascii_digit() => {
+                        if in_fraction {
+                            digits_after.push(ch);
+                        } else {
+                            digits_before.push(ch);
+                        }
+                        chars.next();
+                    }
+                    _ => {}
+                }
+            }
+            Token::Decimal => {
+                while let Some(ch) = chars.peek().copied() {
+                    if ch == '.' {
+                        chars.next();
+                        break;
+                    }
+                    if ch.is_whitespace() {
+                        chars.next();
+                        continue;
+                    }
+                    break;
+                }
+                in_fraction = true;
+            }
+            Token::Group => {
+                while let Some(ch) = chars.peek().copied() {
+                    if ch == ',' || ch.is_whitespace() {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            Token::Literal(lit) => {
+                if lit == " " {
+                    while matches!(chars.peek(), Some(ch) if ch.is_whitespace()) {
+                        chars.next();
+                    }
+                } else {
+                    for expected in lit.chars() {
+                        if chars.peek().copied() == Some(expected) {
+                            chars.next();
+                        }
+                    }
+                }
+            }
+            Token::Sign(_) => {}
+        }
+    }
+
+    if spec.ordinal {
+        while matches!(chars.peek(), Some(ch) if ch.is_ascii_alphabetic()) {
+            chars.next();
+        }
+    }
+
+    if digits_before.is_empty() {
+        digits_before.push('0');
+    }
+    let rendered = if spec.scale_digits > 0 {
+        let mut all_digits = digits_before;
+        all_digits.push_str(&digits_after);
+        if all_digits.is_empty() {
+            all_digits.push('0');
+        }
+        if spec.scale_digits >= all_digits.len() {
+            format!(
+                "{}0.{}{}",
+                if negative { "-" } else { "" },
+                "0".repeat(spec.scale_digits - all_digits.len()),
+                all_digits
+            )
+        } else {
+            let split = all_digits.len() - spec.scale_digits;
+            format!(
+                "{}{}.{}",
+                if negative { "-" } else { "" },
+                &all_digits[..split],
+                &all_digits[split..]
+            )
+        }
+    } else if digits_after.is_empty() {
+        format!("{}{digits_before}", if negative { "-" } else { "" })
+    } else {
+        format!(
+            "{}{}.{}",
+            if negative { "-" } else { "" },
+            digits_before,
+            digits_after
+        )
+    };
+
+    parse_numeric_text(&rendered)
+        .ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))
 }
 
 #[derive(Debug)]
@@ -856,6 +986,96 @@ fn format_roman_numeric(value: &NumericValue, fill_mode: bool, lower: bool) -> S
     }
 }
 
+fn parse_roman_to_number(input: &str, format: &str) -> Result<NumericValue, ExecError> {
+    let trimmed = input.trim_matches(' ');
+    if input.is_empty() {
+        return Err(ExecError::InvalidNumericInput(" ".to_string()));
+    }
+    let normalized_format = format.trim_matches(' ');
+    if normalized_format.eq_ignore_ascii_case("rn") {
+        let non_space = trimmed.chars().take_while(|ch| ch.is_ascii_alphabetic()).collect::<String>();
+        if non_space.is_empty() {
+            if input.is_empty() {
+                return Err(ExecError::InvalidNumericInput(" ".to_string()));
+            }
+            return Err(ExecError::InvalidStorageValue {
+                column: String::new(),
+                details: "invalid Roman numeral".to_string(),
+            });
+        }
+        let upper = non_space.to_ascii_uppercase();
+        let value = parse_valid_roman(&upper).ok_or_else(|| ExecError::InvalidStorageValue {
+            column: String::new(),
+            details: "invalid Roman numeral".to_string(),
+        })?;
+        return Ok(NumericValue::from_i64(value.into()));
+    }
+    if format.to_ascii_uppercase().contains("RN") {
+        if format.to_ascii_uppercase().matches("RN").count() > 1 {
+            return Err(ExecError::InvalidStorageValue {
+                column: String::new(),
+                details: "cannot use \"RN\" twice".to_string(),
+            });
+        }
+        return Err(ExecError::InvalidStorageValue {
+            column: String::new(),
+            details: "\"RN\" is incompatible with other formats".to_string(),
+        });
+    }
+    Err(ExecError::InvalidStorageValue {
+        column: String::new(),
+        details: "invalid Roman numeral".to_string(),
+    })
+}
+
+fn parse_valid_roman(input: &str) -> Option<i32> {
+    if input.is_empty() {
+        return None;
+    }
+    let bytes = input.as_bytes();
+    fn roman_value(byte: u8) -> Option<i32> {
+        match byte {
+            b'I' => Some(1),
+            b'V' => Some(5),
+            b'X' => Some(10),
+            b'L' => Some(50),
+            b'C' => Some(100),
+            b'D' => Some(500),
+            b'M' => Some(1000),
+            _ => None,
+        }
+    }
+    let mut total = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let cur = roman_value(bytes[i])?;
+        if i + 1 < bytes.len() {
+            let next = roman_value(bytes[i + 1])?;
+            if cur < next {
+                let valid_pair = matches!(
+                    (bytes[i], bytes[i + 1]),
+                    (b'I', b'V' | b'X') | (b'X', b'L' | b'C') | (b'C', b'D' | b'M')
+                );
+                if !valid_pair {
+                    return None;
+                }
+                total += next - cur;
+                i += 2;
+                continue;
+            }
+        }
+        total += cur;
+        i += 1;
+    }
+    if !(1..=3999).contains(&total) {
+        return None;
+    }
+    if format_roman(total.into(), true, false) != input {
+        return None;
+    }
+    Some(total)
+}
+
 fn format_scientific(value: i128, spec: &FormatSpec) -> String {
     let negative = value < 0;
     let abs = value.unsigned_abs();
@@ -935,7 +1155,8 @@ fn ordinal_suffix(value: i128) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{to_char_int, to_char_numeric};
+    use super::{to_char_int, to_char_numeric, to_number_numeric};
+    use crate::backend::executor::ExecError;
     use crate::include::nodes::datum::NumericValue;
 
     #[test]
@@ -980,5 +1201,35 @@ mod tests {
         assert_eq!(to_char_numeric(&NumericValue::from("1234"), "rn").unwrap(), "       mccxxxiv");
         assert_eq!(to_char_numeric(&NumericValue::from("1234.56"), "99999V99").unwrap().trim(), "123456");
         assert_eq!(to_char_numeric(&NumericValue::PosInf, "9.999EEEE").unwrap(), " #.#######");
+    }
+
+    #[test]
+    fn parses_to_number_decimal_formats() {
+        assert_eq!(
+            to_number_numeric("-34,338,492", "99G999G999").unwrap().render(),
+            "-34338492"
+        );
+        assert_eq!(
+            to_number_numeric("<564646.654564>", "999999.999999PR").unwrap().render(),
+            "-564646.654564"
+        );
+        assert_eq!(
+            to_number_numeric("123456", "99999V99").unwrap().render(),
+            "1234.56"
+        );
+        assert_eq!(
+            to_number_numeric("42nd", "99th").unwrap().render(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn parses_to_number_roman_formats() {
+        assert_eq!(to_number_numeric("CvIiI", "rn").unwrap().render(), "108");
+        assert_eq!(to_number_numeric("  XIV", "  RN").unwrap().render(), "14");
+        assert!(matches!(
+            to_number_numeric("viv", "RN"),
+            Err(ExecError::InvalidStorageValue { .. })
+        ));
     }
 }

@@ -137,6 +137,7 @@ pub enum BuiltinScalarFunction {
     ConvertFrom,
     Md5,
     ToChar,
+    ToNumber,
     Abs,
     Log,
     Log10,
