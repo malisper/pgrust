@@ -444,6 +444,7 @@ impl AggFunc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinScalarFunction {
     Random,
+    GetDatabaseEncoding,
     ToJson,
     ToJsonb,
     ArrayToJson,

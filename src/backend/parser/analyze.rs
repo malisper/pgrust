@@ -32,6 +32,7 @@ fn empty_scope() -> BoundScope {
 fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
     match name.to_ascii_lowercase().as_str() {
         "random" => Some(BuiltinScalarFunction::Random),
+        "getdatabaseencoding" => Some(BuiltinScalarFunction::GetDatabaseEncoding),
         "to_json" => Some(BuiltinScalarFunction::ToJson),
         "to_jsonb" => Some(BuiltinScalarFunction::ToJsonb),
         "array_to_json" => Some(BuiltinScalarFunction::ArrayToJson),
@@ -80,6 +81,7 @@ fn validate_scalar_function_arity(
 ) -> Result<(), ParseError> {
     let valid = match func {
         BuiltinScalarFunction::Random => args.is_empty(),
+        BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
         BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
@@ -2351,7 +2353,8 @@ fn infer_sql_expr_type(
             | Some(BuiltinScalarFunction::JsonbBuildObject)
             | Some(BuiltinScalarFunction::JsonbPathQueryArray)
             | Some(BuiltinScalarFunction::JsonbPathQueryFirst) => SqlType::new(SqlTypeKind::Jsonb),
-            Some(BuiltinScalarFunction::JsonTypeof)
+            Some(BuiltinScalarFunction::GetDatabaseEncoding)
+            | Some(BuiltinScalarFunction::JsonTypeof)
             | Some(BuiltinScalarFunction::JsonExtractPathText)
             | Some(BuiltinScalarFunction::JsonbTypeof)
             | Some(BuiltinScalarFunction::JsonbExtractPathText)

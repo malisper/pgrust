@@ -4577,6 +4577,46 @@ mod tests {
     }
 
     #[test]
+    fn getdatabaseencoding_and_jsonpath_unicode_work() {
+        let base = temp_dir("jsonpath_unicode");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select getdatabaseencoding(), '{\"ꯍ\":1,\"😄\":2}'::jsonb @? '$.\"\\uaBcD\"', '{\"ꯍ\":1,\"😄\":2}'::jsonb @? '$.\"\\ud83d\\ude04\"'",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Text("UTF8".into()),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '\"\\u\"'::jsonpath")
+            .unwrap_err();
+        assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "jsonpath"));
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '\"\\ud83dX\"'::jsonpath",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "jsonpath"));
+    }
+
+    #[test]
     fn concat_text_array_and_jsonb_work() {
         let base = temp_dir("concat_ops");
         let txns = TransactionManager::new_durable(&base).unwrap();
