@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::thread;
 
-use crate::backend::executor::{ExecError, QueryColumn, StatementResult, Value};
 use crate::backend::access::heap::heapam::HeapError;
+use crate::backend::catalog::Catalog;
+use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
 };
@@ -14,7 +15,7 @@ use crate::include::access::htup::TupleError;
 use crate::backend::libpq::pqformat::{
     FloatFormatOptions,
     format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
-    send_close_complete, send_command_complete, send_copy_in_response, send_data_row,
+    send_close_complete, send_command_complete, send_copy_in_response,
     send_empty_query, send_error, send_no_data, send_notice, send_parameter_description, send_parameter_status,
     send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
     send_typed_data_row,
@@ -669,25 +670,10 @@ fn execute_portal(
     if try_handle_float_shell_ddl(stream, &portal.sql)? {
         return Ok(());
     }
-    if let Some((_columns, rows, tag)) =
-        execute_special_query(db, session.client_id, &portal.sql, &portal.params)
-    {
-        for row in &rows {
-            send_data_row(
-                stream,
-                row,
-                &mut row_buf,
-                FloatFormatOptions {
-                    extra_float_digits: session.extra_float_digits(),
-                    bytea_output: session.bytea_output(),
-                },
-            )?;
-        }
-        send_command_complete(stream, &tag)?;
-        return Ok(());
-    }
-
-    let sql = rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params)).into_owned();
+    let visible_catalog = db.visible_catalog(session.client_id);
+    let sql =
+        rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &visible_catalog))
+            .into_owned();
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
             for row in &rows {
@@ -832,19 +818,11 @@ fn describe_sql(
     sql: &str,
     params: &[Option<String>],
 ) -> Option<Vec<QueryColumn>> {
-    let normalized = sql.trim().to_ascii_lowercase();
-    if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
-        return Some(vec![QueryColumn::text("relkind")]);
-    }
-
-    if execute_special_query(db, client_id, sql, params).is_some() {
-        return Some(vec![QueryColumn::text("relkind")]);
-    }
-    let sql = rewrite_regression_sql(&substitute_params(sql, params)).into_owned();
+    let visible_catalog = db.visible_catalog(client_id);
+    let sql = rewrite_regression_sql(&substitute_params(sql, params, &visible_catalog)).into_owned();
     match parse_statement(&sql).ok()? {
         Statement::Select(stmt) => {
-            let catalog = db.visible_catalog(client_id);
-            crate::backend::parser::build_plan(&stmt, &catalog)
+            crate::backend::parser::build_plan(&stmt, &visible_catalog)
                 .ok()
                 .map(|plan| plan.columns())
         }
@@ -854,36 +832,16 @@ fn describe_sql(
     }
 }
 
-fn execute_special_query(
-    db: &Database,
-    client_id: ClientId,
-    sql: &str,
-    params: &[Option<String>],
-) -> Option<(Vec<String>, Vec<Vec<Value>>, String)> {
-    let normalized = sql.trim().to_ascii_lowercase();
-    if normalized == "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass" {
-        let table_name = params.first()?.as_ref()?.to_ascii_lowercase();
-        let visible_catalog = db.visible_catalog(client_id);
-        let relcache = RelCache::from_catalog(&visible_catalog);
-        let exists = relcache.get_by_name(&table_name).is_some();
-        let rows = if exists {
-            vec![vec![Value::Text("r".into())]]
-        } else {
-            Vec::new()
-        };
-        return Some((
-            vec!["relkind".to_string()],
-            rows.clone(),
-            format!("SELECT {}", rows.len()),
-        ));
-    }
-    None
-}
-
-fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
+fn substitute_params(sql: &str, params: &[Option<String>], catalog: &Catalog) -> String {
     let mut out = sql.to_string();
     for (i, param) in params.iter().enumerate() {
         let placeholder = format!("${}", i + 1);
+        let regclass_value = match param {
+            None => "null".to_string(),
+            Some(v) => resolve_regclass_param(v, catalog),
+        };
+        out = out.replace(&format!("{placeholder}::pg_catalog.regclass"), &regclass_value);
+        out = out.replace(&format!("{placeholder}::regclass"), &regclass_value);
         let value = match param {
             None => "null".to_string(),
             Some(v) if v.parse::<i64>().is_ok() => v.clone(),
@@ -891,6 +849,47 @@ fn substitute_params(sql: &str, params: &[Option<String>]) -> String {
         };
         out = out.replace(&placeholder, &value);
     }
-    out.replace("::pg_catalog.regclass", "")
-        .replace("::regclass", "")
+    out
+}
+
+fn resolve_regclass_param(value: &str, catalog: &Catalog) -> String {
+    if value.parse::<u32>().is_ok() {
+        return value.to_string();
+    }
+    let relcache = RelCache::from_catalog(catalog);
+    relcache
+        .get_by_name(value)
+        .map(|entry| entry.relation_oid.to_string())
+        .unwrap_or_else(|| "0".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::catalog::column_desc;
+    use crate::backend::executor::RelationDesc;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+
+    #[test]
+    fn substitute_params_resolves_regclass_parameters_to_relation_oids() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let sql = substitute_params(
+            "select relkind from pg_catalog.pg_class where oid=$1::pg_catalog.regclass",
+            &[Some("widgets".into())],
+            &catalog,
+        );
+        assert_eq!(
+            sql,
+            format!("select relkind from pg_catalog.pg_class where oid={}", entry.relation_oid)
+        );
+    }
 }
