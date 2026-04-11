@@ -141,6 +141,7 @@ pub(super) fn infer_sql_expr_type(
             | Some(BuiltinScalarFunction::JsonExtractPathText)
             | Some(BuiltinScalarFunction::JsonbTypeof)
             | Some(BuiltinScalarFunction::JsonbExtractPathText)
+            | Some(BuiltinScalarFunction::Lower)
             | Some(BuiltinScalarFunction::Left)
             | Some(BuiltinScalarFunction::Repeat)
             | Some(BuiltinScalarFunction::ConvertFrom) => SqlType::new(SqlTypeKind::Text),

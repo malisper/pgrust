@@ -249,6 +249,18 @@ pub(super) fn bind_grouped_func_call(
                 ],
             })
         }
+        BuiltinScalarFunction::Lower => {
+            let arg_type =
+                infer_sql_expr_type(&args[0], input_scope, catalog, outer_scopes, grouped_outer);
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    SqlType::new(SqlTypeKind::Text),
+                )],
+            })
+        }
         _ => Ok(Expr::FuncCall {
             func,
             args: bound_args,
