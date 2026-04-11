@@ -14,7 +14,7 @@ const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
 const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
 const DEFAULT_FIRST_USER_OID: u32 = 16_384;
-const CATALOG_FORMAT_VERSION: u32 = 1;
+const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogEntry {
@@ -63,8 +63,8 @@ pub struct DurableCatalog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CatalogControl {
-    format_version: u32,
     next_oid: u32,
+    next_rel_number: u32,
     bootstrap_complete: bool,
 }
 
@@ -141,14 +141,19 @@ impl Catalog {
 
 impl DurableCatalog {
     pub fn load(base_dir: impl Into<PathBuf>) -> Result<Self, CatalogError> {
-        let catalog_dir = base_dir.into().join("catalog");
+        let base_dir = base_dir.into();
+        let catalog_dir = base_dir.join("catalog");
+        let global_dir = base_dir.join("global");
         let schema_path = catalog_dir.join("schema");
-        let control_path = catalog_dir.join("control");
+        let control_path = global_dir.join("pg_control");
         if let Some(parent) = schema_path.parent() {
             fs::create_dir_all(parent).map_err(|e| CatalogError::Io(e.to_string()))?;
         }
+        if let Some(parent) = control_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| CatalogError::Io(e.to_string()))?;
+        }
 
-        let (catalog, control) = if control_path.exists() {
+        let (mut catalog, control) = if control_path.exists() {
             let control = load_control_file(&control_path)?;
             let mut catalog = if schema_path.exists() {
                 load_catalog_file(&schema_path)?
@@ -156,14 +161,13 @@ impl DurableCatalog {
                 Catalog::default()
             };
             catalog.next_oid = catalog.next_oid.max(control.next_oid);
+            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
             (catalog, control)
-        } else if schema_path.exists() {
-            migrate_legacy_catalog(&schema_path)?
         } else {
             let catalog = Catalog::default();
             let control = CatalogControl {
-                format_version: CATALOG_FORMAT_VERSION,
                 next_oid: catalog.next_oid,
+                next_rel_number: catalog.next_rel_number,
                 bootstrap_complete: true,
             };
             persist_control_file(&control_path, &control)?;
@@ -171,11 +175,14 @@ impl DurableCatalog {
             (catalog, control)
         };
 
+        catalog.next_oid = catalog.next_oid.max(control.next_oid);
+        catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
         persist_control_file(
             &control_path,
             &CatalogControl {
+                next_rel_number: catalog.next_rel_number,
                 next_oid: catalog.next_oid.max(control.next_oid),
-                ..control
+                bootstrap_complete: control.bootstrap_complete,
             },
         )?;
 
@@ -198,8 +205,8 @@ impl DurableCatalog {
         persist_control_file(
             &self.control_path,
             &CatalogControl {
-                format_version: CATALOG_FORMAT_VERSION,
                 next_oid: self.catalog.next_oid,
+                next_rel_number: self.catalog.next_rel_number,
                 bootstrap_complete: true,
             },
         )?;
@@ -209,8 +216,6 @@ impl DurableCatalog {
 
 fn persist_catalog_file(path: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(format!("v3\t{}\n", catalog.next_rel_number).as_bytes());
-
     for (name, entry) in &catalog.tables {
         bytes.extend_from_slice(
             format!(
@@ -248,37 +253,19 @@ fn persist_catalog_file(path: &Path, catalog: &Catalog) -> Result<(), CatalogErr
 }
 
 fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), CatalogError> {
-    let text = format!(
-        "v{}\nnext_oid\t{}\nbootstrap_complete\t{}\n",
-        control.format_version,
-        control.next_oid,
-        if control.bootstrap_complete { "true" } else { "false" }
-    );
-    fs::write(path, text).map_err(|e| CatalogError::Io(e.to_string()))
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&CONTROL_FILE_MAGIC.to_le_bytes());
+    bytes.extend_from_slice(&control.next_oid.to_le_bytes());
+    bytes.extend_from_slice(&control.next_rel_number.to_le_bytes());
+    bytes.extend_from_slice(&(u32::from(control.bootstrap_complete)).to_le_bytes());
+    fs::write(path, bytes).map_err(|e| CatalogError::Io(e.to_string()))
 }
 
 fn load_catalog_file(path: &Path) -> Result<Catalog, CatalogError> {
     let text = fs::read_to_string(path).map_err(|e| CatalogError::Io(e.to_string()))?;
-    let mut lines = text.lines();
-    let Some(header) = lines.next() else {
-        return Err(CatalogError::Corrupt("missing catalog header"));
-    };
-    let mut header_parts = header.split('\t');
-    let first_part = header_parts
-        .next()
-        .ok_or(CatalogError::Corrupt("missing next rel number"))?;
-    let next_rel_number_part = match first_part {
-        "v2" | "v3" => header_parts
-            .next()
-            .ok_or(CatalogError::Corrupt("missing next rel number"))?,
-        other => other,
-    };
-    let next_rel_number = next_rel_number_part
-        .parse::<u32>()
-        .map_err(|_| CatalogError::Corrupt("invalid next rel number"))?;
-
     let mut catalog = Catalog::default();
     catalog.tables.clear();
+    let mut lines = text.lines();
     while let Some(line) = lines.next() {
         let mut parts = line.split('\t');
         if parts.next() != Some("table") {
@@ -349,149 +336,31 @@ fn load_catalog_file(path: &Path) -> Result<Catalog, CatalogError> {
             },
         );
     }
-
-    catalog.next_rel_number = catalog.next_rel_number.max(next_rel_number);
     Ok(catalog)
 }
 
 fn load_control_file(path: &Path) -> Result<CatalogControl, CatalogError> {
-    let text = fs::read_to_string(path).map_err(|e| CatalogError::Io(e.to_string()))?;
-    let mut lines = text.lines();
-    let version = lines
-        .next()
-        .and_then(|line| line.strip_prefix('v'))
-        .ok_or(CatalogError::Corrupt("missing control version"))?
-        .parse::<u32>()
-        .map_err(|_| CatalogError::Corrupt("invalid control version"))?;
-
-    let mut next_oid = None;
-    let mut bootstrap_complete = None;
-    for line in lines {
-        let mut parts = line.split('\t');
-        match parts.next() {
-            Some("next_oid") => {
-                next_oid = Some(parse_u32(parts.next(), "invalid next oid")?);
-            }
-            Some("bootstrap_complete") => {
-                bootstrap_complete = Some(match parts.next() {
-                    Some("true") => true,
-                    Some("false") => false,
-                    _ => return Err(CatalogError::Corrupt("invalid bootstrap flag")),
-                });
-            }
-            _ => return Err(CatalogError::Corrupt("invalid control record")),
-        }
+    let bytes = fs::read(path).map_err(|e| CatalogError::Io(e.to_string()))?;
+    if bytes.len() != 16 {
+        return Err(CatalogError::Corrupt("invalid control file size"));
     }
+    let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+    if magic != CONTROL_FILE_MAGIC {
+        return Err(CatalogError::Corrupt("invalid control magic"));
+    }
+    let next_oid = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let next_rel_number = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let bootstrap_complete = match u32::from_le_bytes(bytes[12..16].try_into().unwrap()) {
+        0 => false,
+        1 => true,
+        _ => return Err(CatalogError::Corrupt("invalid bootstrap flag")),
+    };
 
     Ok(CatalogControl {
-        format_version: version,
-        next_oid: next_oid.ok_or(CatalogError::Corrupt("missing next oid"))?,
-        bootstrap_complete: bootstrap_complete
-            .ok_or(CatalogError::Corrupt("missing bootstrap flag"))?,
+        next_oid,
+        next_rel_number,
+        bootstrap_complete,
     })
-}
-
-fn migrate_legacy_catalog(schema_path: &Path) -> Result<(Catalog, CatalogControl), CatalogError> {
-    let text = fs::read_to_string(schema_path).map_err(|e| CatalogError::Io(e.to_string()))?;
-    let header = text.lines().next().unwrap_or_default();
-    let legacy_v2 = header == "v2\t16001" || header.starts_with("v2\t") || !header.starts_with('v');
-    if !legacy_v2 {
-        return Err(CatalogError::Corrupt("unsupported legacy catalog format"));
-    }
-
-    let legacy = load_legacy_catalog_file(schema_path)?;
-    let control = CatalogControl {
-        format_version: CATALOG_FORMAT_VERSION,
-        next_oid: legacy.next_oid,
-        bootstrap_complete: true,
-    };
-    persist_catalog_file(schema_path, &legacy)?;
-    Ok((legacy, control))
-}
-
-fn load_legacy_catalog_file(path: &Path) -> Result<Catalog, CatalogError> {
-    let text = fs::read_to_string(path).map_err(|e| CatalogError::Io(e.to_string()))?;
-    let mut lines = text.lines();
-    let Some(header) = lines.next() else {
-        return Err(CatalogError::Corrupt("missing catalog header"));
-    };
-    let next_rel_number = header
-        .split('\t')
-        .nth(1)
-        .or(Some(header))
-        .ok_or(CatalogError::Corrupt("missing next rel number"))?
-        .parse::<u32>()
-        .map_err(|_| CatalogError::Corrupt("invalid next rel number"))?;
-
-    let mut catalog = Catalog::default();
-    let mut next_oid = DEFAULT_FIRST_USER_OID;
-    while let Some(line) = lines.next() {
-        let mut parts = line.split('\t');
-        if parts.next() != Some("table") {
-            return Err(CatalogError::Corrupt("expected table record"));
-        }
-        let name = parts
-            .next()
-            .ok_or(CatalogError::Corrupt("missing table name"))?
-            .to_string();
-        let spc_oid = parse_u32(parts.next(), "invalid spc oid")?;
-        let db_oid = parse_u32(parts.next(), "invalid db oid")?;
-        let rel_number = parse_u32(parts.next(), "invalid rel number")?;
-        let ncols = parse_u32(parts.next(), "invalid column count")? as usize;
-
-        let mut columns = Vec::with_capacity(ncols);
-        for _ in 0..ncols {
-            let col_line = lines
-                .next()
-                .ok_or(CatalogError::Corrupt("missing column record"))?;
-            let mut col_parts = col_line.split('\t');
-            if col_parts.next() != Some("col") {
-                return Err(CatalogError::Corrupt("expected column record"));
-            }
-            let column_name = col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing column name"))?
-                .to_string();
-            let type_name = col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing column type"))?;
-            let nullable = match col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing nullable flag"))?
-            {
-                "null" => true,
-                "not_null" => false,
-                _ => return Err(CatalogError::Corrupt("invalid nullable flag")),
-            };
-            let typmod = col_parts
-                .next()
-                .ok_or(CatalogError::Corrupt("missing typmod"))?
-                .parse::<i32>()
-                .map_err(|_| CatalogError::Corrupt("invalid typmod"))?;
-            let sql_type = decode_sql_type(type_name, typmod)?;
-            columns.push(column_desc(column_name, sql_type, nullable));
-        }
-
-        catalog.insert(
-            name,
-            CatalogEntry {
-                rel: RelFileLocator {
-                    spc_oid,
-                    db_oid,
-                    rel_number,
-                },
-                relation_oid: next_oid,
-                namespace_oid: bootstrap_namespace_oid(),
-                row_type_oid: next_oid.saturating_add(1),
-                relkind: 'r',
-                desc: RelationDesc { columns },
-            },
-        );
-        next_oid = next_oid.saturating_add(2);
-    }
-    catalog.next_rel_number = catalog.next_rel_number.max(next_rel_number);
-    catalog.next_oid = catalog.next_oid.max(next_oid);
-    Ok(catalog)
 }
 
 fn parse_u32(part: Option<&str>, err: &'static str) -> Result<u32, CatalogError> {
@@ -719,9 +588,10 @@ mod tests {
         assert_eq!(reopened_entry.desc.columns.len(), 3);
         assert!(reopened_entry.desc.columns[2].storage.nullable);
         let persisted = fs::read_to_string(base.join("catalog").join("schema")).unwrap();
-        let control = fs::read_to_string(base.join("catalog").join("control")).unwrap();
-        assert!(persisted.starts_with("v3\t16001\n"));
-        assert!(control.contains("next_oid"));
+        let control = fs::read(base.join("global").join("pg_control")).unwrap();
+        assert!(persisted.contains("table\tpg_class\t"));
+        assert!(persisted.contains("table\tpeople\t"));
+        assert_eq!(control.len(), 16);
     }
 
     #[test]
@@ -873,46 +743,6 @@ mod tests {
     }
 
     #[test]
-    fn durable_catalog_loads_existing_v2_header() {
-        let base = temp_dir("legacy_v2");
-        let schema_dir = base.join("catalog");
-        fs::create_dir_all(&schema_dir).unwrap();
-        fs::write(
-            schema_dir.join("schema"),
-            "v2\t16001\ntable\tpeople\t0\t1\t16000\t2\ncol\tid\tint4\tnot_null\t-1\ncol\tname\ttext\tnull\t-1\n",
-        )
-        .unwrap();
-
-        let reopened = DurableCatalog::load(&base).unwrap();
-        assert!(base.join("catalog").join("control").exists());
-        let entry = reopened.catalog().get("people").unwrap();
-        assert_eq!(
-            entry.desc.columns[0].sql_type,
-            SqlType::new(SqlTypeKind::Int4)
-        );
-        assert_eq!(
-            entry.desc.columns[1].sql_type,
-            SqlType::new(SqlTypeKind::Text)
-        );
-        assert!(entry.relation_oid >= DEFAULT_FIRST_USER_OID);
-    }
-
-    #[test]
-    fn durable_catalog_rejects_legacy_v1_files() {
-        let base = temp_dir("legacy_v1");
-        let schema_dir = base.join("catalog");
-        fs::create_dir_all(&schema_dir).unwrap();
-        fs::write(
-            schema_dir.join("schema"),
-            "v1\t16001\ntable\tpeople\t0\t1\t16000\t2\ncol\tid\tint4\tnot_null\ncol\tname\ttext\tnull\n",
-        )
-        .unwrap();
-
-        let err = DurableCatalog::load(&base).unwrap_err();
-        assert_eq!(err, CatalogError::Corrupt("unsupported legacy catalog format"));
-    }
-
-    #[test]
     fn durable_catalog_bootstraps_core_catalogs_on_first_load() {
         let base = temp_dir("bootstrap");
         let store = DurableCatalog::load(&base).unwrap();
@@ -920,5 +750,25 @@ mod tests {
             assert!(store.catalog().get(name).is_some(), "missing {name}");
         }
         assert_eq!(store.catalog().next_oid(), DEFAULT_FIRST_USER_OID);
+    }
+
+    #[test]
+    fn durable_catalog_reads_pg_control_style_control_file() {
+        let base = temp_dir("control_file");
+        let store = DurableCatalog::load(&base).unwrap();
+        let control = fs::read(base.join("global").join("pg_control")).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(control[0..4].try_into().unwrap()),
+            CONTROL_FILE_MAGIC
+        );
+        assert_eq!(
+            u32::from_le_bytes(control[4..8].try_into().unwrap()),
+            store.catalog().next_oid()
+        );
+        assert_eq!(
+            u32::from_le_bytes(control[8..12].try_into().unwrap()),
+            DEFAULT_FIRST_REL_NUMBER
+        );
+        assert_eq!(u32::from_le_bytes(control[12..16].try_into().unwrap()), 1);
     }
 }
