@@ -1,6 +1,7 @@
 mod agg;
 mod coerce;
 mod expr;
+mod infer;
 mod scope;
 
 use crate::RelFileLocator;
@@ -15,6 +16,7 @@ pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use agg::*;
 use coerce::*;
 use expr::*;
+use infer::*;
 use scope::*;
 
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
@@ -549,5 +551,4 @@ pub fn bind_delete(
             .transpose()?,
     })
 }
-
 
