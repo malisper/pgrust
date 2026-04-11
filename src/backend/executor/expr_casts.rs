@@ -675,7 +675,8 @@ fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
             }
         }
         SqlTypeKind::Int8 => {
-            if rounded < i64::MIN as f64 || rounded > i64::MAX as f64 {
+            const INT8_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+            if rounded < i64::MIN as f64 || rounded >= INT8_UPPER_EXCLUSIVE {
                 Err(ExecError::Int8OutOfRange)
             } else {
                 Ok(Value::Int64(rounded as i64))
@@ -836,8 +837,9 @@ fn has_nonzero_digit(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pg_float;
-    use crate::backend::parser::SqlTypeKind;
+    use super::{cast_float_to_int, parse_pg_float};
+    use crate::backend::executor::{ExecError, Value};
+    use crate::backend::parser::{SqlType, SqlTypeKind};
 
     #[test]
     fn float4_text_input_rounds_at_float4_width() {
@@ -851,5 +853,23 @@ mod tests {
             let parsed = parse_pg_float(text, SqlTypeKind::Float4).unwrap();
             assert_eq!((parsed as f32).to_bits(), expected_bits, "{text}");
         }
+    }
+
+    #[test]
+    fn float_to_int8_rejects_rounded_upper_boundary() {
+        let int8 = SqlType::new(SqlTypeKind::Int8);
+
+        assert!(matches!(
+            cast_float_to_int(-9_223_372_036_854_775_808.0, int8),
+            Ok(Value::Int64(v)) if v == i64::MIN
+        ));
+        assert!(matches!(
+            cast_float_to_int(9_223_372_036_854_775_807.0, int8),
+            Err(ExecError::Int8OutOfRange)
+        ));
+        assert!(matches!(
+            cast_float_to_int(9_223_372_036_854_775_808.0, int8),
+            Err(ExecError::Int8OutOfRange)
+        ));
     }
 }
