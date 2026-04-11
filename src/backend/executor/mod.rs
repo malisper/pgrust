@@ -34,8 +34,9 @@ pub use crate::include::nodes::plannodes::*;
 pub use driver::{
     exec_next, execute_plan, execute_readonly_statement, execute_sql, execute_statement,
 };
-pub use exec_expr::eval_expr;
+pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_casts::parse_bytea_text;
+pub(crate) use expr_casts::cast_value;
 pub use expr_casts::render_internal_char_text;
 pub use startup::executor_start;
 
