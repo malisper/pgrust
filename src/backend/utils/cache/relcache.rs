@@ -95,6 +95,12 @@ impl RelCache {
         self.by_oid.get(&oid)
     }
 
+    pub fn insert(&mut self, name: impl Into<String>, entry: RelCacheEntry) {
+        self.by_name
+            .insert(normalize_catalog_name(&name.into()).to_ascii_lowercase(), entry.clone());
+        self.by_oid.insert(entry.relation_oid, entry);
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = (&str, &RelCacheEntry)> {
         self.by_name.iter().map(|(name, entry)| (name.as_str(), entry))
     }
