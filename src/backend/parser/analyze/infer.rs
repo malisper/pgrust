@@ -274,15 +274,16 @@ pub(super) fn infer_array_literal_type_with_ctes(
 ) -> Option<SqlType> {
     let mut common = None;
     for element in elements {
+        if matches!(element, SqlExpr::Const(Value::Null)) {
+            continue;
+        }
         let ty = infer_sql_expr_type_with_ctes(element, scope, catalog, outer_scopes, grouped_outer, ctes);
         common = Some(match common {
             None => ty.element_type(),
             Some(existing) => resolve_common_scalar_type(existing, ty)?,
         });
     }
-    Some(SqlType::array_of(
-        common.unwrap_or(SqlType::new(SqlTypeKind::Text)),
-    ))
+    common.map(SqlType::array_of)
 }
 
 
