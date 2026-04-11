@@ -2,6 +2,7 @@ use super::ExecError;
 use super::expr_format::to_char_int;
 use super::node_types::Value;
 use crate::pgrust::compact_string::CompactString;
+use encoding_rs::Encoding;
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
@@ -105,4 +106,93 @@ pub(super) fn eval_repeat_function(values: &[Value]) -> Result<Value, ExecError>
         out.push_str(text);
     }
     Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+pub(super) fn eval_position_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(needle_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(haystack_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(needle_value, Value::Null) || matches!(haystack_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let needle = needle_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "position",
+        left: needle_value.clone(),
+        right: haystack_value.clone(),
+    })?;
+    let haystack = haystack_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "position",
+        left: needle_value.clone(),
+        right: haystack_value.clone(),
+    })?;
+    if needle.is_empty() {
+        return Ok(Value::Int32(1));
+    }
+    let position = haystack
+        .find(needle)
+        .map(|idx| haystack[..idx].chars().count() as i32 + 1)
+        .unwrap_or(0);
+    Ok(Value::Int32(position))
+}
+
+pub(super) fn eval_convert_from_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(encoding_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null) || matches!(encoding_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let raw = bytes_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "convert_from",
+        left: bytes_value.clone(),
+        right: encoding_value.clone(),
+    })?;
+    let encoding_name = encoding_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "convert_from",
+        left: bytes_value.clone(),
+        right: encoding_value.clone(),
+    })?;
+    let bytes = decode_hex_text_bytes(raw).ok_or_else(|| ExecError::TypeMismatch {
+        op: "convert_from",
+        left: bytes_value.clone(),
+        right: encoding_value.clone(),
+    })?;
+    let normalized = normalize_encoding_label(encoding_name);
+    let encoding = Encoding::for_label(normalized.as_bytes()).ok_or_else(|| ExecError::TypeMismatch {
+        op: "convert_from",
+        left: bytes_value.clone(),
+        right: encoding_value.clone(),
+    })?;
+    let (decoded, _, had_errors) = encoding.decode(&bytes);
+    if had_errors {
+        return Err(ExecError::TypeMismatch {
+            op: "convert_from",
+            left: bytes_value.clone(),
+            right: encoding_value.clone(),
+        });
+    }
+    Ok(Value::Text(CompactString::from_owned(decoded.into_owned())))
+}
+
+fn decode_hex_text_bytes(raw: &str) -> Option<Vec<u8>> {
+    let bytes = raw.strip_prefix("\\x")?;
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.as_bytes().chunks(2) {
+        let hex = std::str::from_utf8(chunk).ok()?;
+        out.push(u8::from_str_radix(hex, 16).ok()?);
+    }
+    Some(out)
+}
+
+fn normalize_encoding_label(name: &str) -> String {
+    name.trim().to_ascii_lowercase().replace('_', "-")
 }

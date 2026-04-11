@@ -2890,6 +2890,40 @@
     }
 
     #[test]
+    fn position_text_function_uses_character_offsets() {
+        let base = temp_dir("position_text_function_uses_character_offsets");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let result = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select position('각' in '가각나'), position('', '가각나'), position('다' in '가각나')",
+        )
+        .unwrap();
+        assert_query_rows(
+            result,
+            vec![vec![Value::Int32(2), Value::Int32(1), Value::Int32(0)]],
+        );
+    }
+
+    #[test]
+    fn convert_from_decodes_utf8_and_euc_kr_hex_text() {
+        let base = temp_dir("convert_from_decodes_utf8_and_euc_kr_hex_text");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let result = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select convert_from('\\xc2b0', 'UTF8'), convert_from('\\xbcf6c7d0', 'EUC_KR')",
+        )
+        .unwrap();
+        assert_query_rows(
+            result,
+            vec![vec![Value::Text("°".into()), Value::Text("수학".into())]],
+        );
+    }
+
+    #[test]
     fn pg_input_is_valid_reports_varchar_typmod_results() {
         let base = temp_dir("pg_input_is_valid_varchar");
         let txns = TransactionManager::new_durable(&base).unwrap();

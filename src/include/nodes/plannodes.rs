@@ -122,6 +122,8 @@ pub enum BuiltinScalarFunction {
     JsonbPathQueryFirst,
     Left,
     Repeat,
+    Position,
+    ConvertFrom,
     ToChar,
     Abs,
     Gcd,

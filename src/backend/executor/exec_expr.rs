@@ -7,7 +7,10 @@ use super::expr_math::{
     eval_lcm_function, eval_lgamma, eval_ln, eval_power, eval_sqrt, eval_unary_float_function,
     snap_degree, cosd, cotd, sind, tand,
 };
-use super::expr_string::{eval_left_function, eval_repeat_function, eval_to_char_function};
+use super::expr_string::{
+    eval_convert_from_function, eval_left_function, eval_position_function, eval_repeat_function,
+    eval_to_char_function,
+};
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::node_types::*;
 use super::expr_casts::{cast_value, soft_input_error_info};
@@ -333,6 +336,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
+        BuiltinScalarFunction::Position => eval_position_function(&values),
+        BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
     }

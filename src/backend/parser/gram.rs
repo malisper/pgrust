@@ -2,7 +2,9 @@ use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
 
-use super::comments::strip_sql_comments_preserving_layout;
+use super::comments::{
+    normalize_position_syntax_preserving_layout, strip_sql_comments_preserving_layout,
+};
 use super::parsenodes::*;
 use crate::backend::executor::{AggFunc, Value};
 
@@ -11,7 +13,7 @@ use crate::backend::executor::{AggFunc, Value};
 struct SqlParser;
 
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
-    let sql = strip_sql_comments_preserving_layout(sql);
+    let sql = normalize_position_syntax_preserving_layout(&strip_sql_comments_preserving_layout(sql));
     SqlParser::parse(Rule::statement, &sql)
         .map_err(|e| map_pest_error("statement", e))
         .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
@@ -1238,6 +1240,17 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             } else {
                 Ok(SqlExpr::FuncCall { name, args })
             }
+        }
+        Rule::position_expr => {
+            let mut args = pair
+                .into_inner()
+                .filter(|part| part.as_rule() != Rule::kw_in);
+            let needle = build_expr(args.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let haystack = build_expr(args.next().ok_or(ParseError::UnexpectedEof)?)?;
+            Ok(SqlExpr::FuncCall {
+                name: "position".into(),
+                args: vec![needle, haystack],
+            })
         }
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();

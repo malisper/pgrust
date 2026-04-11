@@ -763,6 +763,27 @@ fn bind_scalar_function_call(
                 ],
             })
         }
+        BuiltinScalarFunction::Position | BuiltinScalarFunction::ConvertFrom => {
+            let left_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let right_type =
+                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        left_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        right_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                ],
+            })
+        }
         BuiltinScalarFunction::ToChar => {
             let value_type =
                 infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);

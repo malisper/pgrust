@@ -147,6 +147,29 @@
     }
 
     #[test]
+    fn parse_position_in_syntax_as_builtin_call() {
+        let stmt = parse_select("select position('bc' in 'abcd')").unwrap();
+        assert!(matches!(
+            stmt.targets[0].expr,
+            SqlExpr::FuncCall { ref name, ref args }
+                if name == "position" && args.len() == 2
+        ));
+    }
+
+    #[test]
+    fn parse_multiline_position_convert_from_expression() {
+        let stmt = parse_select(
+            "select position(\n convert_from('\\\\xbcf6c7d0', 'EUC_KR') in\n convert_from('\\\\xb0fac7d02c20bcf6c7d02c20b1e2bcfa2c20bbee', 'EUC_KR'))",
+        )
+        .unwrap();
+        assert!(matches!(
+            stmt.targets[0].expr,
+            SqlExpr::FuncCall { ref name, ref args }
+                if name == "position" && args.len() == 2
+        ));
+    }
+
+    #[test]
     fn parse_select_with_where() {
         let stmt =
             parse_select("select name, note from people where id > 1 and note is null").unwrap();

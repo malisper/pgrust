@@ -142,9 +142,11 @@ pub(super) fn infer_sql_expr_type(
             | Some(BuiltinScalarFunction::JsonbTypeof)
             | Some(BuiltinScalarFunction::JsonbExtractPathText)
             | Some(BuiltinScalarFunction::Left)
-            | Some(BuiltinScalarFunction::Repeat) => SqlType::new(SqlTypeKind::Text),
+            | Some(BuiltinScalarFunction::Repeat)
+            | Some(BuiltinScalarFunction::ConvertFrom) => SqlType::new(SqlTypeKind::Text),
             Some(BuiltinScalarFunction::JsonArrayLength)
             | Some(BuiltinScalarFunction::JsonbArrayLength) => SqlType::new(SqlTypeKind::Int4),
+            Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
             Some(BuiltinScalarFunction::JsonbPathExists)
             | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
             Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
