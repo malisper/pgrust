@@ -1,4 +1,5 @@
-use super::exec_expr::{cast_numeric_value, cast_text_value, parse_numeric_text};
+use super::exec_expr::parse_numeric_text;
+use super::expr_casts::{cast_numeric_value, cast_text_value};
 use super::node_types::*;
 use super::ExecError;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
