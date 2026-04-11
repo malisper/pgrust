@@ -7,20 +7,20 @@ use super::ast::RaiseLevel;
 use super::compile::{CompiledBlock, CompiledExpr, CompiledStmt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlpgsqlNotice {
-    pub(crate) level: RaiseLevel,
-    pub(crate) message: String,
+pub struct PlpgsqlNotice {
+    pub level: RaiseLevel,
+    pub message: String,
 }
 
 thread_local! {
     static NOTICE_QUEUE: std::cell::RefCell<Vec<PlpgsqlNotice>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-pub(crate) fn take_notices() -> Vec<PlpgsqlNotice> {
+pub fn take_notices() -> Vec<PlpgsqlNotice> {
     NOTICE_QUEUE.with(|queue| std::mem::take(&mut *queue.borrow_mut()))
 }
 
-pub(crate) fn clear_notices() {
+pub fn clear_notices() {
     NOTICE_QUEUE.with(|queue| queue.borrow_mut().clear());
 }
 

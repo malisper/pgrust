@@ -81,6 +81,7 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         "CREATE" => "CREATE TABLE".to_string(),
         "DROP" => "DROP TABLE".to_string(),
         "ANALYZE" => "ANALYZE".to_string(),
+        "DO" => "DO".to_string(),
         "VACUUM" => "VACUUM".to_string(),
         "SET" => "SET".to_string(),
         "RESET" => "RESET".to_string(),
@@ -444,13 +445,27 @@ pub(crate) fn send_notice(
     detail: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
+    send_notice_with_severity(w, "NOTICE", "00000", message, detail, position)
+}
+
+pub(crate) fn send_notice_with_severity(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
     let mut body = Vec::new();
     body.push(b'S');
-    body.extend_from_slice(b"NOTICE\0");
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
     body.push(b'V');
-    body.extend_from_slice(b"NOTICE\0");
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
     body.push(b'C');
-    body.extend_from_slice(b"00000\0");
+    body.extend_from_slice(sqlstate.as_bytes());
+    body.push(0);
     body.push(b'M');
     body.extend_from_slice(message.as_bytes());
     body.push(0);

@@ -7,7 +7,7 @@ use crate::backend::executor::{ExecError, StatementResult};
 use crate::backend::parser::{Catalog, DoStatement, ParseError};
 
 pub use ast::*;
-pub(crate) use exec::{PlpgsqlNotice, take_notices};
+pub use exec::{PlpgsqlNotice, clear_notices, take_notices};
 pub use gram::parse_block;
 
 pub fn execute_do(stmt: &DoStatement) -> Result<StatementResult, ExecError> {

@@ -23,7 +23,7 @@ use pgrust::parser::{
     create_relation_desc,
     normalize_create_table_name, parse_statement,
 };
-use pgrust::pl::plpgsql::execute_do;
+use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, execute_do, take_notices};
 use pgrust::{BufferPool, SmgrStorageBackend};
 
 struct RawModeGuard {
@@ -227,6 +227,17 @@ fn print_result(result: StatementResult) {
     }
 }
 
+fn print_plpgsql_notices() {
+    for notice in take_notices() {
+        let level = match notice.level {
+            RaiseLevel::Notice => "NOTICE",
+            RaiseLevel::Warning => "WARNING",
+            RaiseLevel::Exception => "EXCEPTION",
+        };
+        println!("{level}: {}", notice.message);
+    }
+}
+
 fn render_exec_error(err: &ExecError) -> String {
     match err {
         ExecError::Parse(parse) => parse.to_string(),
@@ -424,6 +435,7 @@ fn run_statement(
         })
     })?;
 
+    clear_notices();
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
@@ -637,6 +649,9 @@ fn run_statement(
         }
     };
 
+    if result.is_ok() {
+        print_plpgsql_notices();
+    }
     result
 }
 
