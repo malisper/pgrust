@@ -1,5 +1,6 @@
 use super::*;
-use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
+use crate::backend::utils::cache::relcache::RelCache;
+use crate::backend::storage::smgr::RelFileLocator;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -24,6 +25,12 @@ pub(crate) struct BoundCte {
     pub(crate) name: String,
     pub(crate) plan: Plan,
     pub(crate) desc: RelationDesc,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct BoundRelation {
+    pub(super) rel: RelFileLocator,
+    pub(super) desc: RelationDesc,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -628,11 +635,14 @@ pub(super) fn bind_from_item_with_ctes(
     }
 }
 
-pub(super) fn lookup_relation(catalog: &Catalog, name: &str) -> Result<RelCacheEntry, ParseError> {
+pub(super) fn lookup_relation(catalog: &Catalog, name: &str) -> Result<BoundRelation, ParseError> {
     let relcache = RelCache::from_catalog(catalog);
     relcache
         .get_by_name(name)
-        .cloned()
+        .map(|entry| BoundRelation {
+            rel: entry.rel,
+            desc: entry.desc.clone(),
+        })
         .ok_or_else(|| ParseError::UnknownTable(name.to_string()))
 }
 
