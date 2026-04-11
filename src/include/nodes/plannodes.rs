@@ -123,6 +123,8 @@ pub enum BuiltinScalarFunction {
     Left,
     Repeat,
     Abs,
+    Gcd,
+    Lcm,
     PgInputIsValid,
     PgInputErrorMessage,
     PgInputErrorDetail,

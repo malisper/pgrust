@@ -757,6 +757,30 @@ fn bind_scalar_function_call(
                 ],
             })
         }
+        BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => {
+            let left_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            let right_type =
+                infer_sql_expr_type(&args[1], scope, catalog, outer_scopes, grouped_outer);
+            if !is_integer_family(left_type) || !is_integer_family(right_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "integer arguments",
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(left_type),
+                        sql_type_name(right_type)
+                    ),
+                });
+            }
+            let common = resolve_numeric_binary_type("+", left_type, right_type)?;
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    coerce_bound_expr(bound_args[0].clone(), left_type, common),
+                    coerce_bound_expr(bound_args[1].clone(), right_type, common),
+                ],
+            })
+        }
         BuiltinScalarFunction::PgInputIsValid
         | BuiltinScalarFunction::PgInputErrorMessage
         | BuiltinScalarFunction::PgInputErrorDetail

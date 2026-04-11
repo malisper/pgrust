@@ -263,6 +263,8 @@ fn eval_builtin_function(
             })
         }
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
+        BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
+        BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
@@ -359,6 +361,103 @@ fn eval_abs_function(values: &[Value]) -> Result<Value, ExecError> {
             left: other.clone(),
             right: Value::Null,
         }),
+    }
+}
+
+fn gcd_i128(mut left: i128, mut right: i128) -> u128 {
+    left = left.abs();
+    right = right.abs();
+    let mut left = left as u128;
+    let mut right = right as u128;
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+fn eval_gcd_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [Value::Int16(left), Value::Int16(right)] => {
+            let gcd = gcd_i128(i128::from(*left), i128::from(*right));
+            i16::try_from(gcd)
+                .map(Value::Int16)
+                .map_err(|_| ExecError::Int2OutOfRange)
+        }
+        [Value::Int32(left), Value::Int32(right)] => {
+            let gcd = gcd_i128(i128::from(*left), i128::from(*right));
+            i32::try_from(gcd)
+                .map(Value::Int32)
+                .map_err(|_| ExecError::Int4OutOfRange)
+        }
+        [Value::Int64(left), Value::Int64(right)] => {
+            let gcd = gcd_i128(i128::from(*left), i128::from(*right));
+            i64::try_from(gcd)
+                .map(Value::Int64)
+                .map_err(|_| ExecError::Int8OutOfRange)
+        }
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "gcd",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => Ok(Value::Null),
+    }
+}
+
+fn eval_lcm_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [Value::Int16(left), Value::Int16(right)] => {
+            let gcd = gcd_i128(i128::from(*left), i128::from(*right));
+            let lcm = if *left == 0 || *right == 0 {
+                0
+            } else {
+                (i128::from(*left) / gcd as i128)
+                    .checked_mul(i128::from(*right))
+                    .and_then(|value| value.checked_abs())
+                    .ok_or(ExecError::Int2OutOfRange)?
+            };
+            i16::try_from(lcm)
+                .map(Value::Int16)
+                .map_err(|_| ExecError::Int2OutOfRange)
+        }
+        [Value::Int32(left), Value::Int32(right)] => {
+            let gcd = gcd_i128(i128::from(*left), i128::from(*right));
+            let lcm = if *left == 0 || *right == 0 {
+                0
+            } else {
+                (i128::from(*left) / gcd as i128)
+                    .checked_mul(i128::from(*right))
+                    .and_then(|value| value.checked_abs())
+                    .ok_or(ExecError::Int4OutOfRange)?
+            };
+            i32::try_from(lcm)
+                .map(Value::Int32)
+                .map_err(|_| ExecError::Int4OutOfRange)
+        }
+        [Value::Int64(left), Value::Int64(right)] => {
+            let gcd = gcd_i128(i128::from(*left), i128::from(*right));
+            let lcm = if *left == 0 || *right == 0 {
+                0
+            } else {
+                (i128::from(*left) / gcd as i128)
+                    .checked_mul(i128::from(*right))
+                    .and_then(|value| value.checked_abs())
+                    .ok_or(ExecError::Int8OutOfRange)?
+            };
+            i64::try_from(lcm)
+                .map(Value::Int64)
+                .map_err(|_| ExecError::Int8OutOfRange)
+        }
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "lcm",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => Ok(Value::Null),
     }
 }
 
