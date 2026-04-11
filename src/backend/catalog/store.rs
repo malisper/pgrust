@@ -88,7 +88,7 @@ impl CatalogStore {
     }
 
     pub fn catalog_snapshot(&self) -> Result<Catalog, CatalogError> {
-        load_catalog_from_physical(&self.base_dir)
+        self.catalog_snapshot_with_control()
     }
 
     pub fn relcache(&self) -> Result<RelCache, CatalogError> {
@@ -117,14 +117,14 @@ impl CatalogStore {
         name: impl Into<String>,
         desc: RelationDesc,
     ) -> Result<CatalogEntry, CatalogError> {
-        let mut catalog = self.catalog_snapshot()?;
+        let mut catalog = self.catalog_snapshot_with_control()?;
         let entry = catalog.create_table(name, desc)?;
         self.persist_catalog(&catalog)?;
         Ok(entry)
     }
 
     pub fn drop_table(&mut self, name: &str) -> Result<CatalogEntry, CatalogError> {
-        let mut catalog = self.catalog_snapshot()?;
+        let mut catalog = self.catalog_snapshot_with_control()?;
         let entry = catalog.drop_table(name)?;
         self.persist_catalog(&catalog)?;
         Ok(entry)
@@ -140,6 +140,18 @@ impl CatalogStore {
             },
         )?;
         sync_physical_catalogs(&self.base_dir, catalog)
+    }
+}
+
+impl CatalogStore {
+    fn catalog_snapshot_with_control(&self) -> Result<Catalog, CatalogError> {
+        let mut catalog = load_catalog_from_physical(&self.base_dir)?;
+        if self.control_path.exists() {
+            let control = load_control_file(&self.control_path)?;
+            catalog.next_oid = catalog.next_oid.max(control.next_oid);
+            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+        }
+        Ok(catalog)
     }
 }
 
@@ -678,5 +690,35 @@ mod tests {
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         let entry = reopened_catalog.get("zerocol").unwrap();
         assert!(entry.desc.columns.is_empty());
+    }
+
+    #[test]
+    fn catalog_store_preserves_relation_allocators_across_drop_and_reload() {
+        let base = temp_dir("allocator_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let first = store
+            .create_table(
+                "first",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        store.drop_table("first").unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let mut reopened = reopened;
+        let second = reopened
+            .create_table(
+                "second",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        assert!(second.rel.rel_number > first.rel.rel_number);
+        assert!(second.relation_oid > first.relation_oid);
+        assert!(second.row_type_oid > first.row_type_oid);
     }
 }
