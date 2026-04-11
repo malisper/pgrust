@@ -37,7 +37,6 @@ pub(crate) struct PhysicalCatalogRows {
 pub struct CatalogStore {
     base_dir: PathBuf,
     control_path: PathBuf,
-    catalog: Catalog,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,23 +84,11 @@ impl CatalogStore {
         )?;
         sync_physical_catalogs(&base_dir, &catalog)?;
 
-        Ok(Self {
-            base_dir,
-            control_path,
-            catalog,
-        })
-    }
-
-    pub fn catalog(&self) -> &Catalog {
-        &self.catalog
+        Ok(Self { base_dir, control_path })
     }
 
     pub fn catalog_snapshot(&self) -> Result<Catalog, CatalogError> {
         load_catalog_from_physical(&self.base_dir)
-    }
-
-    pub fn catalog_mut(&mut self) -> &mut Catalog {
-        &mut self.catalog
     }
 
     pub fn relcache(&self) -> Result<RelCache, CatalogError> {
@@ -130,27 +117,29 @@ impl CatalogStore {
         name: impl Into<String>,
         desc: RelationDesc,
     ) -> Result<CatalogEntry, CatalogError> {
-        let entry = self.catalog.create_table(name, desc)?;
-        self.persist()?;
+        let mut catalog = self.catalog_snapshot()?;
+        let entry = catalog.create_table(name, desc)?;
+        self.persist_catalog(&catalog)?;
         Ok(entry)
     }
 
     pub fn drop_table(&mut self, name: &str) -> Result<CatalogEntry, CatalogError> {
-        let entry = self.catalog.drop_table(name)?;
-        self.persist()?;
+        let mut catalog = self.catalog_snapshot()?;
+        let entry = catalog.drop_table(name)?;
+        self.persist_catalog(&catalog)?;
         Ok(entry)
     }
 
-    pub fn persist(&self) -> Result<(), CatalogError> {
+    fn persist_catalog(&self, catalog: &Catalog) -> Result<(), CatalogError> {
         persist_control_file(
             &self.control_path,
             &CatalogControl {
-                next_oid: self.catalog.next_oid,
-                next_rel_number: self.catalog.next_rel_number,
+                next_oid: catalog.next_oid,
+                next_rel_number: catalog.next_rel_number,
                 bootstrap_complete: true,
             },
         )?;
-        sync_physical_catalogs(&self.base_dir, &self.catalog)
+        sync_physical_catalogs(&self.base_dir, catalog)
     }
 }
 
@@ -583,9 +572,8 @@ mod tests {
     fn catalog_store_roundtrips() {
         let base = temp_dir("roundtrip");
         let mut store = CatalogStore::load(&base).unwrap();
-        assert!(store.catalog().get("pg_class").is_some());
+        assert!(store.catalog_snapshot().unwrap().get("pg_class").is_some());
         let entry = store
-            .catalog_mut()
             .create_table(
                 "people",
                 RelationDesc {
@@ -599,10 +587,10 @@ mod tests {
             .unwrap();
         assert_eq!(entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert!(entry.relation_oid >= DEFAULT_FIRST_USER_OID);
-        store.persist().unwrap();
 
         let reopened = CatalogStore::load(&base).unwrap();
-        let reopened_entry = reopened.catalog().get("people").unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        let reopened_entry = reopened_catalog.get("people").unwrap();
         assert_eq!(reopened_entry.rel.rel_number, DEFAULT_FIRST_REL_NUMBER);
         assert_eq!(reopened_entry.desc.columns.len(), 3);
     }
@@ -611,8 +599,9 @@ mod tests {
     fn catalog_store_bootstraps_physical_core_catalog_relfiles() {
         let base = temp_dir("physical_bootstrap");
         let store = CatalogStore::load(&base).unwrap();
+        let catalog = store.catalog_snapshot().unwrap();
         for name in ["pg_namespace", "pg_type", "pg_attribute", "pg_class"] {
-            let entry = store.catalog().get(name).unwrap();
+            let entry = catalog.get(name).unwrap();
             let path = segment_path(&base, entry.rel, ForkNumber::Main, 0);
             let meta = fs::metadata(path).unwrap();
             assert!(meta.len() > 0, "{name} should have heap data");
@@ -624,7 +613,6 @@ mod tests {
         let base = temp_dir("physical_reload");
         let mut store = CatalogStore::load(&base).unwrap();
         store
-            .catalog_mut()
             .create_table(
                 "shipments",
                 RelationDesc {
@@ -636,9 +624,9 @@ mod tests {
                 },
             )
             .unwrap();
-        store.persist().unwrap();
         let reopened = CatalogStore::load(&base).unwrap();
-        let entry = reopened.catalog().get("shipments").unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        let entry = reopened_catalog.get("shipments").unwrap();
         assert_eq!(
             entry.desc.columns[0].sql_type,
             SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
