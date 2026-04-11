@@ -1,4 +1,7 @@
 mod agg;
+mod expr_casts;
+mod expr_compile;
+mod expr_ops;
 mod driver;
 mod expr_json;
 pub mod exec_expr;
@@ -42,7 +45,7 @@ use crate::backend::parser::{
 use crate::include::access::htup::TupleError;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
-use exec_expr::{compare_order_values, parse_numeric_text};
+use expr_ops::{compare_order_values, parse_numeric_text};
 
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,

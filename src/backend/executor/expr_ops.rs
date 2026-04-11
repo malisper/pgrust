@@ -1,0 +1,799 @@
+use std::cmp::Ordering;
+
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_traits::{Signed, Zero};
+
+use super::expr_casts::cast_value;
+use super::node_types::*;
+use super::value_io::format_array_text;
+use super::ExecError;
+use crate::backend::executor::jsonb::{
+    JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
+};
+use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::pgrust::compact_string::CompactString;
+
+pub(crate) fn compare_order_by_keys(
+    items: &[OrderByEntry],
+    left_keys: &[Value],
+    right_keys: &[Value],
+) -> Ordering {
+    for (item, (left_value, right_value)) in
+        items.iter().zip(left_keys.iter().zip(right_keys.iter()))
+    {
+        let ordering =
+            compare_order_values(left_value, right_value, item.nulls_first, item.descending);
+        if ordering != Ordering::Equal {
+            return if item.descending
+                && !matches!(
+                    (left_value, right_value),
+                    (Value::Null, _) | (_, Value::Null)
+                ) {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+        }
+    }
+    Ordering::Equal
+}
+
+pub(crate) fn compare_order_values(
+    left: &Value,
+    right: &Value,
+    nulls_first: Option<bool>,
+    descending: bool,
+) -> Ordering {
+    let nulls_first = nulls_first.unwrap_or(descending);
+    match (left, right) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => {
+            if nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (_, Value::Null) => {
+            if nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
+        (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
+            parsed_numeric_value(a)
+                .and_then(|left| parsed_numeric_value(b).map(|right| left.cmp(&right)))
+                .unwrap_or(Ordering::Equal)
+        }
+        (Value::Jsonb(a), Value::Jsonb(b)) => compare_jsonb(
+            &decode_jsonb(a).unwrap_or(JsonbValue::Null),
+            &decode_jsonb(b).unwrap_or(JsonbValue::Null),
+        ),
+        (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
+            a.as_text().unwrap().cmp(b.as_text().unwrap())
+        }
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Array(a), Value::Array(b)) => format_array_text(a).cmp(&format_array_text(b)),
+        _ => Ordering::Equal,
+    }
+}
+
+pub(crate) fn eval_and(left: Value, right: Value) -> Result<Value, ExecError> {
+    match (left, right) {
+        (Value::Bool(false), _) | (_, Value::Bool(false)) => Ok(Value::Bool(false)),
+        (Value::Bool(true), Value::Bool(true)) => Ok(Value::Bool(true)),
+        (Value::Bool(true), Value::Null)
+        | (Value::Null, Value::Bool(true))
+        | (Value::Null, Value::Null) => Ok(Value::Null),
+        (left, right) => Err(ExecError::TypeMismatch {
+            op: "AND",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn eval_or(left: Value, right: Value) -> Result<Value, ExecError> {
+    match (left, right) {
+        (Value::Bool(true), _) | (_, Value::Bool(true)) => Ok(Value::Bool(true)),
+        (Value::Bool(false), Value::Bool(false)) => Ok(Value::Bool(false)),
+        (Value::Bool(false), Value::Null)
+        | (Value::Null, Value::Bool(false))
+        | (Value::Null, Value::Null) => Ok(Value::Null),
+        (left, right) => Err(ExecError::TypeMismatch {
+            op: "OR",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn compare_values(
+    op: &'static str,
+    left: Value,
+    right: Value,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(l == r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool((*l as i32) == *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            Ok(Value::Bool(
+                parsed_numeric_value(l)
+                    .unwrap()
+                    .cmp(&parsed_numeric_value(r).unwrap())
+                    == Ordering::Equal,
+            ))
+        }
+        (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Bool(
+            compare_jsonb(&decode_jsonb(l)?, &decode_jsonb(r)?) == Ordering::Equal,
+        )),
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
+            Ok(Value::Bool(l.as_text() == r.as_text()))
+        }
+        (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
+        (Value::Array(l), Value::Array(r)) => Ok(Value::Bool(l == r)),
+        _ => Err(ExecError::TypeMismatch { op, left, right }),
+    }
+}
+
+pub(crate) fn not_equal_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match compare_values("=", left.clone(), right.clone())? {
+        Value::Bool(value) => Ok(Value::Bool(!value)),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
+pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Null, Value::Null) => false,
+        (Value::Null, _) | (_, Value::Null) => true,
+        (Value::Int16(l), Value::Int16(r)) => l != r,
+        (Value::Int16(l), Value::Int32(r)) => (*l as i32) != *r,
+        (Value::Int16(l), Value::Int64(r)) => (*l as i64) != *r,
+        (Value::Int32(l), Value::Int32(r)) => l != r,
+        (Value::Int32(l), Value::Int16(r)) => *l != (*r as i32),
+        (Value::Int32(l), Value::Int64(r)) => (*l as i64) != *r,
+        (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
+        (Value::Int64(l), Value::Int32(r)) => *l != (*r as i64),
+        (Value::Int64(l), Value::Int64(r)) => l != r,
+        (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            parsed_numeric_value(l)
+                .unwrap()
+                .cmp(&parsed_numeric_value(r).unwrap())
+                != Ordering::Equal
+        }
+        (Value::Jsonb(l), Value::Jsonb(r)) => decode_jsonb(l)
+            .ok()
+            .zip(decode_jsonb(r).ok())
+            .map(|(l, r)| compare_jsonb(&l, &r) != Ordering::Equal)
+            .unwrap_or(true),
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
+        (Value::Bool(l), Value::Bool(r)) => l != r,
+        (Value::Array(l), Value::Array(r)) => l != r,
+        _ => true,
+    }
+}
+
+pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l + r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) + *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) + *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l + (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l + r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) + *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l + (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l + (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l + r)),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
+        }
+        _ => Err(ExecError::TypeMismatch {
+            op: "+",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l - r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) - *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) - *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l - (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l - r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) - *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l - (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l - (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l - r)),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
+        }
+        _ => Err(ExecError::TypeMismatch {
+            op: "-",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l * r)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32((*l as i32) * *r)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) * *r)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(*l * (*r as i32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l * r)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64((*l as i64) * *r)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(*l * (*r as i64))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(*l * (*r as i64))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l * r)),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            exact_numeric_binary(l, r, |lv, rv| Some(lv.mul(rv)), "*")
+        }
+        _ => Err(ExecError::TypeMismatch {
+            op: "*",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let zero = match &right {
+        Value::Int16(v) => *v == 0,
+        Value::Int32(v) => *v == 0,
+        Value::Int64(v) => *v == 0,
+        Value::Float64(v) => *v == 0.0,
+        Value::Numeric(v) => *v == NumericValue::zero(),
+        _ => false,
+    };
+    if zero {
+        return Err(ExecError::DivisionByZero("/"));
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_div_i16(*l, *r)?)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_div_i32(*l as i32, *r)?)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l as i64, *r)?)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(checked_div_i32(*l, *r as i32)?)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(checked_div_i32(*l, *r)?)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l as i64, *r)?)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l, *r)?)),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            exact_numeric_binary(l, r, |lv, rv| lv.div(rv, 16), "/")
+        }
+        _ => Err(ExecError::TypeMismatch {
+            op: "/",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let zero = match &right {
+        Value::Int16(v) => *v == 0,
+        Value::Int32(v) => *v == 0,
+        Value::Int64(v) => *v == 0,
+        Value::Numeric(v) => *v == NumericValue::zero(),
+        _ => false,
+    };
+    if zero {
+        return Err(ExecError::DivisionByZero("%"));
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(checked_rem_i16(*l, *r)?)),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int32(checked_rem_i32(*l as i32, *r)?)),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Int64(checked_rem_i64(*l as i64, *r)?)),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Int32(checked_rem_i32(*l, *r as i32)?)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(checked_rem_i32(*l, *r)?)),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Int64(checked_rem_i64(*l as i64, *r)?)),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r as i64)?)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_rem_i64(*l, *r)?)),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            exact_numeric_binary(l, r, |lv, rv| lv.rem(rv), "%")
+        }
+        _ => Err(ExecError::TypeMismatch {
+            op: "%",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Jsonb(encode_jsonb(&jsonb_concat(
+            &decode_jsonb(l)?,
+            &decode_jsonb(r)?,
+        )))),
+        (Value::Array(l), Value::Array(r)) => {
+            let mut items = l.clone();
+            items.extend(r.iter().cloned());
+            Ok(Value::Array(items))
+        }
+        (Value::Array(l), _) => {
+            let mut items = l.clone();
+            items.push(right);
+            Ok(Value::Array(items))
+        }
+        (_, Value::Array(r)) => {
+            let mut items = Vec::with_capacity(r.len() + 1);
+            items.push(left);
+            items.extend(r.iter().cloned());
+            Ok(Value::Array(items))
+        }
+        _ => {
+            let text_type = SqlType::new(SqlTypeKind::Text);
+            let left_text = cast_value(left, text_type)?;
+            let right_text = cast_value(right, text_type)?;
+            let mut out = String::new();
+            out.push_str(left_text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "||",
+                left: left_text.clone(),
+                right: right_text.clone(),
+            })?);
+            out.push_str(right_text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "||",
+                left: left_text.clone(),
+                right: right_text.clone(),
+            })?);
+            Ok(Value::Text(CompactString::from_owned(out)))
+        }
+    }
+}
+
+pub(crate) fn negate_value(value: Value) -> Result<Value, ExecError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int16(v) => Ok(Value::Int16(-v)),
+        Value::Int32(v) => Ok(Value::Int32(-v)),
+        Value::Int64(v) => Ok(Value::Int64(-v)),
+        Value::Float64(v) => Ok(Value::Float64(-v)),
+        Value::Numeric(v) => Ok(Value::Numeric(v.negate())),
+        other => Err(ExecError::TypeMismatch {
+            op: "unary -",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+pub(crate) fn order_values(
+    op: &'static str,
+    left: Value,
+    right: Value,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l as i32, *r, op))),
+        (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i32, op))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
+        (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
+            "<" => pg_float_cmp(*l, *r) == Ordering::Less,
+            "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,
+            ">" => pg_float_cmp(*l, *r) == Ordering::Greater,
+            ">=" => pg_float_cmp(*l, *r) != Ordering::Less,
+            _ => unreachable!(),
+        })),
+        (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
+            let ordering = parsed_numeric_value(l)
+                .zip(parsed_numeric_value(r))
+                .map(|(lv, rv)| lv.cmp(&rv))
+                .ok_or_else(|| ExecError::TypeMismatch {
+                    op,
+                    left: left.clone(),
+                    right: right.clone(),
+                })?;
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (Value::Jsonb(l), Value::Jsonb(r)) => {
+            let ordering = compare_jsonb(&decode_jsonb(l)?, &decode_jsonb(r)?);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(match op {
+            "<" => l.as_text().unwrap() < r.as_text().unwrap(),
+            "<=" => l.as_text().unwrap() <= r.as_text().unwrap(),
+            ">" => l.as_text().unwrap() > r.as_text().unwrap(),
+            ">=" => l.as_text().unwrap() >= r.as_text().unwrap(),
+            _ => unreachable!(),
+        })),
+        (Value::Array(l), Value::Array(r)) => {
+            let left = format_array_text(l);
+            let right = format_array_text(r);
+            Ok(Value::Bool(match op {
+                "<" => left < right,
+                "<=" => left <= right,
+                ">" => left > right,
+                ">=" => left >= right,
+                _ => unreachable!(),
+            }))
+        }
+        _ => Err(ExecError::TypeMismatch { op, left, right }),
+    }
+}
+
+fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
+    match op {
+        "<" => left < right,
+        "<=" => left <= right,
+        ">" => left > right,
+        ">=" => left >= right,
+        _ => unreachable!(),
+    }
+}
+
+fn pg_float_eq(left: f64, right: f64) -> bool {
+    if left.is_nan() && right.is_nan() {
+        true
+    } else {
+        left == right
+    }
+}
+
+fn pg_float_cmp(left: f64, right: f64) -> Ordering {
+    match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).unwrap_or(Ordering::Equal),
+    }
+}
+
+impl NumericValue {
+    pub(crate) fn round_to_scale(&self, target_scale: u32) -> Option<Self> {
+        match self {
+            Self::NaN => Some(Self::NaN),
+            Self::Finite { coeff, scale } => {
+                if *scale <= target_scale {
+                    let factor = pow10_bigint(target_scale - *scale);
+                    return Some(
+                        Self::Finite {
+                            coeff: coeff * factor,
+                            scale: target_scale,
+                        }
+                        .normalize(),
+                    );
+                }
+                let diff = *scale - target_scale;
+                let factor = pow10_bigint(diff);
+                let (quotient, remainder) = coeff.div_rem(&factor);
+                let twice = remainder.abs() * 2u8;
+                let rounded = if twice >= factor.abs() {
+                    quotient + coeff.signum()
+                } else {
+                    quotient
+                };
+                Some(
+                    Self::Finite {
+                        coeff: rounded,
+                        scale: target_scale,
+                    }
+                    .normalize(),
+                )
+            }
+        }
+    }
+
+    pub(crate) fn add(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
+                let scale = (*lscale).max(*rscale);
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                Self::Finite {
+                    coeff: left + right,
+                    scale,
+                }
+                .normalize()
+            }
+        }
+    }
+
+    fn sub(&self, other: &Self) -> Self {
+        self.add(&other.negate())
+    }
+
+    fn mul(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => Self::Finite {
+                coeff: lcoeff * rcoeff,
+                scale: lscale.saturating_add(*rscale),
+            }
+            .normalize(),
+        }
+    }
+
+    fn rem(&self, other: &Self) -> Option<Self> {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
+            (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
+                let scale = (*lscale).max(*rscale);
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                Some(
+                    Self::Finite {
+                        coeff: left % right,
+                        scale,
+                    }
+                    .normalize(),
+                )
+            }
+        }
+    }
+
+    pub(crate) fn div(&self, other: &Self, out_scale: u32) -> Option<Self> {
+        match (self, other) {
+            (Self::NaN, _) | (_, Self::NaN) => Some(Self::NaN),
+            (_, Self::Finite { coeff, .. }) if coeff.is_zero() => None,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
+                let exp = out_scale.checked_add(*rscale)?.checked_sub(*lscale)?;
+                let factor = pow10_bigint(exp);
+                let num = lcoeff * factor;
+                let (quotient, remainder) = num.div_rem(rcoeff);
+                let twice = remainder.abs() * 2u8;
+                let rounded = if twice >= rcoeff.abs() {
+                    quotient + (num.signum() * rcoeff.signum())
+                } else {
+                    quotient
+                };
+                Some(
+                    Self::Finite {
+                        coeff: rounded,
+                        scale: out_scale,
+                    }
+                    .normalize(),
+                )
+            }
+        }
+    }
+
+    pub(crate) fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::NaN, Self::NaN) => Ordering::Equal,
+            (Self::NaN, _) => Ordering::Greater,
+            (_, Self::NaN) => Ordering::Less,
+            (
+                Self::Finite {
+                    coeff: lcoeff,
+                    scale: lscale,
+                },
+                Self::Finite {
+                    coeff: rcoeff,
+                    scale: rscale,
+                },
+            ) => {
+                let scale = (*lscale).max(*rscale);
+                let left = align_coeff(lcoeff.clone(), *lscale, scale);
+                let right = align_coeff(rcoeff.clone(), *rscale, scale);
+                left.cmp(&right)
+            }
+        }
+    }
+}
+
+fn checked_div_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    left.checked_div(right).ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_div_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    left.checked_div(right).ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_div_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    left.checked_div(right).ok_or(ExecError::Int8OutOfRange)
+}
+
+fn checked_rem_i16(left: i16, right: i16) -> Result<i16, ExecError> {
+    left.checked_rem(right).ok_or(ExecError::Int2OutOfRange)
+}
+
+fn checked_rem_i32(left: i32, right: i32) -> Result<i32, ExecError> {
+    left.checked_rem(right).ok_or(ExecError::Int4OutOfRange)
+}
+
+fn checked_rem_i64(left: i64, right: i64) -> Result<i64, ExecError> {
+    left.checked_rem(right).ok_or(ExecError::Int8OutOfRange)
+}
+
+fn align_coeff(coeff: BigInt, from_scale: u32, to_scale: u32) -> BigInt {
+    coeff * pow10_bigint(to_scale - from_scale)
+}
+
+fn pow10_bigint(exp: u32) -> BigInt {
+    let mut value = BigInt::from(1u8);
+    for _ in 0..exp {
+        value *= 10u8;
+    }
+    value
+}
+
+pub(crate) fn parse_numeric_text(text: &str) -> Option<NumericValue> {
+    if text.eq_ignore_ascii_case("nan") {
+        return Some(NumericValue::NaN);
+    }
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
+        Some(index) => {
+            let exponent = trimmed[index + 1..].parse::<i32>().ok()?;
+            (&trimmed[..index], exponent)
+        }
+        None => (trimmed, 0),
+    };
+
+    let negative = mantissa.starts_with('-');
+    let unsigned = mantissa.strip_prefix(['+', '-']).unwrap_or(mantissa);
+    let parts: Vec<&str> = unsigned.split('.').collect();
+    if parts.len() > 2 {
+        return None;
+    }
+    let whole = parts[0];
+    let frac = parts.get(1).copied().unwrap_or("");
+    if whole.is_empty() && frac.is_empty() {
+        return None;
+    }
+    if !whole.chars().all(|ch| ch.is_ascii_digit()) || !frac.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    let mut digits = format!("{whole}{frac}");
+    if digits.is_empty() {
+        digits.push('0');
+    }
+    let mut scale = frac.len() as i32 - exponent;
+    if scale < 0 {
+        digits.extend(std::iter::repeat_n('0', (-scale) as usize));
+        scale = 0;
+    }
+    let mut coeff = digits.parse::<BigInt>().ok()?;
+    if negative {
+        coeff = -coeff;
+    }
+    Some(
+        NumericValue::Finite {
+            coeff,
+            scale: scale as u32,
+        }
+        .normalize(),
+    )
+}
+
+fn parsed_numeric_value(value: &Value) -> Option<NumericValue> {
+    match value {
+        Value::Int16(v) => Some(NumericValue::from_i64(*v as i64)),
+        Value::Int32(v) => Some(NumericValue::from_i64(*v as i64)),
+        Value::Int64(v) => Some(NumericValue::from_i64(*v)),
+        Value::Numeric(v) => Some(v.clone()),
+        Value::Float64(_) => None,
+        _ => None,
+    }
+}
+
+fn exact_numeric_binary(
+    left: &Value,
+    right: &Value,
+    op: impl Fn(&NumericValue, &NumericValue) -> Option<NumericValue>,
+    opname: &'static str,
+) -> Result<Value, ExecError> {
+    let left_num = parsed_numeric_value(left).ok_or_else(|| ExecError::TypeMismatch {
+        op: opname,
+        left: left.clone(),
+        right: right.clone(),
+    })?;
+    let right_num = parsed_numeric_value(right).ok_or_else(|| ExecError::TypeMismatch {
+        op: opname,
+        left: left.clone(),
+        right: right.clone(),
+    })?;
+    let result = op(&left_num, &right_num).ok_or_else(|| ExecError::TypeMismatch {
+        op: opname,
+        left: left.clone(),
+        right: right.clone(),
+    })?;
+    Ok(Value::Numeric(result))
+}
