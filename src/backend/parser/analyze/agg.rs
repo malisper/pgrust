@@ -66,6 +66,71 @@ pub(super) fn targets_contain_agg(targets: &[SelectItem]) -> bool {
     targets.iter().any(|t| expr_contains_agg(&t.expr))
 }
 
+pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::Column(_) => true,
+        SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentTimestamp => false,
+        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
+            args.iter().any(expr_references_input_scope)
+        }
+        SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_references_input_scope),
+        SqlExpr::ScalarSubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::InSubquery { .. }
+        | SqlExpr::QuantifiedSubquery { .. } => true,
+        SqlExpr::ArrayOverlap(l, r)
+        | SqlExpr::QuantifiedArray {
+            left: l, array: r, ..
+        }
+        | SqlExpr::JsonGet(l, r)
+        | SqlExpr::JsonGetText(l, r)
+        | SqlExpr::JsonPath(l, r)
+        | SqlExpr::JsonPathText(l, r)
+        | SqlExpr::JsonbContains(l, r)
+        | SqlExpr::JsonbContained(l, r)
+        | SqlExpr::JsonbExists(l, r)
+        | SqlExpr::JsonbExistsAny(l, r)
+        | SqlExpr::JsonbExistsAll(l, r)
+        | SqlExpr::JsonbPathExists(l, r)
+        | SqlExpr::JsonbPathMatch(l, r)
+        | SqlExpr::Add(l, r)
+        | SqlExpr::Sub(l, r)
+        | SqlExpr::BitAnd(l, r)
+        | SqlExpr::BitOr(l, r)
+        | SqlExpr::BitXor(l, r)
+        | SqlExpr::Shl(l, r)
+        | SqlExpr::Shr(l, r)
+        | SqlExpr::Mul(l, r)
+        | SqlExpr::Div(l, r)
+        | SqlExpr::Mod(l, r)
+        | SqlExpr::Concat(l, r)
+        | SqlExpr::Eq(l, r)
+        | SqlExpr::NotEq(l, r)
+        | SqlExpr::Lt(l, r)
+        | SqlExpr::LtEq(l, r)
+        | SqlExpr::Gt(l, r)
+        | SqlExpr::GtEq(l, r)
+        | SqlExpr::RegexMatch(l, r)
+        | SqlExpr::And(l, r)
+        | SqlExpr::Or(l, r)
+        | SqlExpr::IsDistinctFrom(l, r)
+        | SqlExpr::IsNotDistinctFrom(l, r) => {
+            expr_references_input_scope(l) || expr_references_input_scope(r)
+        }
+        SqlExpr::Cast(inner, _)
+        | SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner) => expr_references_input_scope(inner),
+    }
+}
+
 pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>, bool)>) {
     match expr {
         SqlExpr::AggCall {

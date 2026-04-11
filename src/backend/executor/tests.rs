@@ -5454,6 +5454,37 @@
     }
 
     #[test]
+    fn degenerate_having_does_not_scan_where_clause() {
+        let base = temp_dir("degenerate_having_no_scan");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let pool = test_pool(&base);
+        let xid = txns.begin();
+        for row in [
+            tuple(0, "zero", Some("z")),
+            tuple(1, "one", Some("o")),
+        ] {
+            let tid = heap_insert_mvcc(&*pool, 1, rel(), xid, &row).unwrap();
+            heap_flush(&*pool, 1, rel(), tid.block_number).unwrap();
+        }
+        txns.commit(xid).unwrap();
+
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 1 as one from people where 1/id = 1 having 1 < 2",
+            catalog(),
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn nested_outer_correlation_uses_the_correct_row() {
         let base = temp_dir("nested_outer_correlation");
         let mut txns = TransactionManager::new_durable(&base).unwrap();
