@@ -1104,6 +1104,20 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 Ok(SqlExpr::FuncCall { name, args })
             }
         }
+        Rule::typed_string_literal => {
+            let mut inner = pair.into_inner();
+            let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
+            let literal = decode_string_literal(
+                inner
+                    .next()
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str(),
+            )?;
+            Ok(SqlExpr::Cast(
+                Box::new(SqlExpr::Const(Value::Text(literal.into()))),
+                ty,
+            ))
+        }
         Rule::identifier => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),

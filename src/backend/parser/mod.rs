@@ -275,6 +275,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_typed_string_literal_expression() {
+        let stmt = parse_select("select int2 '7', int4 '9', varchar(3) 'abc'").unwrap();
+        assert_eq!(stmt.targets.len(), 3);
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::new(SqlTypeKind::Int2));
+                assert!(matches!(**inner, SqlExpr::Const(Value::Text(ref text)) if text.as_str() == "7"));
+            }
+            other => panic!("expected typed string literal cast, got {other:?}"),
+        }
+        match &stmt.targets[1].expr {
+            SqlExpr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::new(SqlTypeKind::Int4));
+                assert!(matches!(**inner, SqlExpr::Const(Value::Text(ref text)) if text.as_str() == "9"));
+            }
+            other => panic!("expected typed string literal cast, got {other:?}"),
+        }
+        match &stmt.targets[2].expr {
+            SqlExpr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::with_char_len(SqlTypeKind::Varchar, 3));
+                assert!(matches!(**inner, SqlExpr::Const(Value::Text(ref text)) if text.as_str() == "abc"));
+            }
+            other => panic!("expected typed string literal cast, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_escape_and_dollar_quoted_strings() {
         let stmt = parse_select(r#"select E'abc\tdef', $$a'b$$, $tag$x
 y$tag$"#).unwrap();
