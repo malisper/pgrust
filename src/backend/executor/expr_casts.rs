@@ -719,50 +719,93 @@ fn parse_pg_float(text: &str, kind: SqlTypeKind) -> Result<f64, ExecError> {
     }
 
     let normalized = trimmed.to_ascii_lowercase();
-    let parsed = match normalized.as_str() {
-        "nan" | "+nan" | "-nan" => f64::NAN,
-        "inf" | "+inf" | "infinity" | "+infinity" => f64::INFINITY,
-        "-inf" | "-infinity" => f64::NEG_INFINITY,
-        _ => trimmed.parse::<f64>().map_err(|_| ExecError::InvalidFloatInput {
-            ty,
-            value: text.to_string(),
-        })?,
-    };
-
-    if !normalized.contains("inf") && !normalized.contains("nan") {
-        if parsed.is_infinite() {
-            return Err(ExecError::FloatOutOfRange {
-                ty,
-                value: text.to_string(),
+    match normalized.as_str() {
+        "nan" | "+nan" | "-nan" => return Ok(if matches!(kind, SqlTypeKind::Float4) {
+            f32::NAN as f64
+        } else {
+            f64::NAN
+        }),
+        "inf" | "+inf" | "infinity" | "+infinity" => {
+            return Ok(if matches!(kind, SqlTypeKind::Float4) {
+                f32::INFINITY as f64
+            } else {
+                f64::INFINITY
             });
         }
-        if parsed == 0.0 && has_nonzero_digit(trimmed) {
-            return Err(ExecError::FloatOutOfRange {
-                ty,
-                value: text.to_string(),
+        "-inf" | "-infinity" => {
+            return Ok(if matches!(kind, SqlTypeKind::Float4) {
+                f32::NEG_INFINITY as f64
+            } else {
+                f64::NEG_INFINITY
             });
         }
+        _ => {}
     }
 
-    if matches!(kind, SqlTypeKind::Float4) {
-        return narrow_float4_from_input(parsed, text);
+    match kind {
+        SqlTypeKind::Float4 => parse_pg_float4(trimmed, text),
+        SqlTypeKind::Float8 => parse_pg_float8(trimmed, text),
+        _ => unreachable!(),
     }
-
-    Ok(parsed)
 }
 
-fn narrow_float4_from_input(value: f64, raw: &str) -> Result<f64, ExecError> {
-    if !value.is_finite() {
-        return Ok((value as f32) as f64);
-    }
-    let narrowed = value as f32;
-    if narrowed.is_infinite() || (narrowed == 0.0 && value != 0.0) {
+fn parse_pg_float4(trimmed: &str, raw: &str) -> Result<f64, ExecError> {
+    let parsed = match trimmed.parse::<f32>() {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            let parsed64 = trimmed.parse::<f64>().map_err(|_| ExecError::InvalidFloatInput {
+                ty: "real",
+                value: raw.to_string(),
+            })?;
+            if parsed64.is_infinite() {
+                return Err(ExecError::FloatOutOfRange {
+                    ty: "real",
+                    value: raw.to_string(),
+                });
+            }
+            return Err(ExecError::InvalidFloatInput {
+                ty: "real",
+                value: raw.to_string(),
+            });
+        }
+    };
+
+    if parsed.is_infinite() {
         return Err(ExecError::FloatOutOfRange {
             ty: "real",
             value: raw.to_string(),
         });
     }
-    Ok(narrowed as f64)
+    if parsed == 0.0 && has_nonzero_digit(trimmed) {
+        return Err(ExecError::FloatOutOfRange {
+            ty: "real",
+            value: raw.to_string(),
+        });
+    }
+
+    Ok(parsed as f64)
+}
+
+fn parse_pg_float8(trimmed: &str, raw: &str) -> Result<f64, ExecError> {
+    let parsed = trimmed.parse::<f64>().map_err(|_| ExecError::InvalidFloatInput {
+        ty: "double precision",
+        value: raw.to_string(),
+    })?;
+
+    if parsed.is_infinite() {
+        return Err(ExecError::FloatOutOfRange {
+            ty: "double precision",
+            value: raw.to_string(),
+        });
+    }
+    if parsed == 0.0 && has_nonzero_digit(trimmed) {
+        return Err(ExecError::FloatOutOfRange {
+            ty: "double precision",
+            value: raw.to_string(),
+        });
+    }
+
+    Ok(parsed)
 }
 
 fn narrow_float4_runtime(value: f64) -> Result<f64, ExecError> {
@@ -789,4 +832,24 @@ fn float_sql_type_name(kind: SqlTypeKind) -> &'static str {
 
 fn has_nonzero_digit(text: &str) -> bool {
     text.bytes().any(|b| b.is_ascii_digit() && b != b'0')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pg_float;
+    use crate::backend::parser::SqlTypeKind;
+
+    #[test]
+    fn float4_text_input_rounds_at_float4_width() {
+        let cases = [
+            ("1.1754944e-38", 0x0080_0000_u32),
+            ("7038531e-32", 0x15ae_43fd_u32),
+            ("82381273e-35", 0x1282_89d1_u32),
+        ];
+
+        for (text, expected_bits) in cases {
+            let parsed = parse_pg_float(text, SqlTypeKind::Float4).unwrap();
+            assert_eq!((parsed as f32).to_bits(), expected_bits, "{text}");
+        }
+    }
 }
