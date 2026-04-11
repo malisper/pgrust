@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
-use pgrust::backend::catalog::{Catalog, CatalogStore, column_desc};
+use pgrust::backend::catalog::{CatalogStore, column_desc};
 use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
+use pgrust::backend::utils::cache::relcache::RelCache;
 use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_statement,
 };
@@ -364,7 +365,11 @@ fn read_repl_line(prompt: &str, history: &mut ReplHistory) -> Result<Option<Stri
 }
 
 fn ensure_default_people_table(catalog_store: &mut CatalogStore) -> Result<(), String> {
-    if catalog_store.catalog().get("people").is_some() {
+    if catalog_store
+        .relation("people")
+        .map_err(|e| format!("{e:?}"))?
+        .is_some()
+    {
         return Ok(());
     }
     catalog_store
@@ -375,11 +380,11 @@ fn ensure_default_people_table(catalog_store: &mut CatalogStore) -> Result<(), S
 
 fn seed_if_empty(
     pool: &std::sync::Arc<BufferPool<SmgrStorageBackend>>,
-    catalog: &Catalog,
+    relcache: &RelCache,
     txns: &Arc<RwLock<TransactionManager>>,
 ) -> Result<(), ExecError> {
-    let rel = catalog
-        .get("people")
+    let rel = relcache
+        .get_by_name("people")
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable("people".into())))?
         .rel;
 
@@ -685,16 +690,16 @@ fn main() -> Result<(), String> {
 
     let smgr = MdStorageManager::new(&base_dir);
     let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
-    seed_if_empty(&pool, catalog_store.catalog(), &txns).map_err(|e| format!("{e:?}"))?;
+    let relcache = catalog_store.relcache().map_err(|e| format!("{e:?}"))?;
+    seed_if_empty(&pool, &relcache, &txns).map_err(|e| format!("{e:?}"))?;
 
     println!("PGRUST SQL REPL");
     println!("BASE DIRECTORY: {}", base_dir.display());
     println!(
         "TABLES: {}",
         catalog_store
-            .catalog()
-            .table_names()
-            .collect::<Vec<_>>()
+            .visible_table_names()
+            .map_err(|e| format!("{e:?}"))?
             .join(", ")
     );
     println!("COMMANDS: .help, .exit");
