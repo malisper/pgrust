@@ -2372,6 +2372,29 @@ mod tests {
     }
 
     #[test]
+    fn qualified_star_target_expands_relation_columns() {
+        let base = temp_dir("qualified_star_target");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        seed_people_and_pets(&base, &mut txns);
+
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select p.* from people p order by p.id",
+                catalog(),
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Int32(1), Value::Text("alice".into()), Value::Text("a".into())],
+                vec![Value::Int32(2), Value::Text("bob".into()), Value::Text("b".into())],
+                vec![Value::Int32(3), Value::Text("carol".into()), Value::Null],
+            ],
+        );
+    }
+
+    #[test]
     fn comparison_operators_work_for_extended_numeric_types() {
         let base = temp_dir("extended_numeric_comparisons");
         let txns = TransactionManager::new_durable(&base).unwrap();

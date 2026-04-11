@@ -62,7 +62,7 @@ commit_stmt = { (kw_commit | kw_end) }
 rollback_stmt = { kw_rollback }
 
 select_list = { star | select_item ~ ("," ~ select_item)* }
-select_item = { expr ~ alias? }
+select_item = { qualified_star | expr ~ alias? }
 alias = { kw_as ~ identifier }
 values_row = { "(" ~ expr_list ~ ")" }
 expr_list = { expr ~ ("," ~ expr)* }
@@ -137,6 +137,7 @@ typed_string_literal = { type_name ~ quoted_string_literal }
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
 keyword_end = _{ !ident_cont }
 identifier = @{ (ASCII_ALPHA | "_") ~ ident_cont* }
+simple_identifier = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 numeric_literal = @{
     (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ exponent?)
     | ("." ~ ASCII_DIGIT+ ~ exponent?)
@@ -152,6 +153,7 @@ dollar_quote_start = ${ "$" ~ PUSH(identifier?) ~ "$" }
 dollar_quote_end = ${ "$" ~ POP ~ "$" }
 dollar_string_body = { (!( "$" ~ PEEK ~ "$") ~ ANY)* }
 star = { "*" }
+qualified_star = { simple_identifier ~ "." ~ star }
 
 kw_select = _{ kw_select_atom }
 kw_show = _{ kw_show_atom }

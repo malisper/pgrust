@@ -769,6 +769,22 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
 
     let mut items = Vec::new();
     for (index, item_pair) in std::iter::once(first).chain(inner).enumerate() {
+        let mut preview_inner = item_pair.clone().into_inner();
+        if let Some(first_part) = preview_inner.next()
+            && first_part.as_rule() == Rule::qualified_star
+        {
+            let relation = first_part
+                .as_str()
+                .strip_suffix(".*")
+                .ok_or(ParseError::UnexpectedEof)?
+                .to_string();
+            items.push(SelectItem {
+                output_name: "*".into(),
+                expr: SqlExpr::Column(format!("{relation}.*")),
+            });
+            continue;
+        }
+
         let mut item_inner = item_pair.into_inner();
         let expr = build_expr(item_inner.next().ok_or(ParseError::UnexpectedEof)?)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
