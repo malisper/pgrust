@@ -816,9 +816,8 @@ impl Database {
         use crate::backend::parser::build_plan;
 
         let (plan, rels) = {
-            let catalog_guard = self.catalog.read();
-            let catalog = catalog_guard.catalog();
-            let plan = build_plan(select_stmt, catalog)?;
+            let visible_catalog = self.visible_catalog(client_id);
+            let plan = build_plan(select_stmt, &visible_catalog)?;
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
             (plan, rels.into_iter().collect::<Vec<_>>())
@@ -1591,6 +1590,50 @@ mod tests {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn streaming_select_uses_temp_table_shadowing() {
+        let base = temp_dir("streaming_temp_shadowing");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        db.execute(1, "create table items (id int4 not null)")
+            .unwrap();
+        db.execute(1, "insert into items (id) values (1), (2)")
+            .unwrap();
+
+        session
+            .execute(&db, "create temp table items (id int4 not null)")
+            .unwrap();
+        session
+            .execute(&db, "insert into items (id) values (10), (20), (30)")
+            .unwrap();
+
+        let stmt = crate::backend::parser::parse_select("select id from items order by id").unwrap();
+        let mut guard = session.execute_streaming(&db, &stmt).unwrap();
+        let mut rows = Vec::new();
+        while let Some(slot) =
+            crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap()
+        {
+            rows.push(
+                slot.values()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.to_owned_value())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        drop(guard);
+
+        assert_eq!(
+            rows,
+            vec![
+                vec![Value::Int32(10)],
+                vec![Value::Int32(20)],
+                vec![Value::Int32(30)],
+            ]
+        );
     }
 
     #[test]
