@@ -1931,6 +1931,27 @@ mod tests {
             other => panic!("expected query result, got {:?}", other),
         }
     }
+
+    #[test]
+    fn generate_series_supports_int8_ranges() {
+        let base = temp_dir("generate_series_int8");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from generate_series(4567890123456789::int8, 4567890123456793::int8, 2::int8)",
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Int64(4_567_890_123_456_789)],
+                vec![Value::Int64(4_567_890_123_456_791)],
+                vec![Value::Int64(4_567_890_123_456_793)],
+            ],
+        );
+    }
     #[test]
     fn generate_series_negative_step() {
         let base = temp_dir("gen_series_neg");

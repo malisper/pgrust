@@ -231,33 +231,55 @@ pub(super) fn bind_from_item(
                     outer_scopes,
                     grouped_outer,
                 )?;
+                let start_type =
+                    infer_sql_expr_type(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer);
+                let stop_type =
+                    infer_sql_expr_type(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer);
+                let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
+                if !matches!(common.kind, SqlTypeKind::Int4 | SqlTypeKind::Int8) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "generate_series integer arguments",
+                        actual: sql_type_name(common),
+                    });
+                }
                 let step = if args.len() == 3 {
-                    bind_expr_with_outer(
+                    let step_expr = bind_expr_with_outer(
                         &args[2],
                         &empty_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
-                    )?
+                    )?;
+                    let step_type = infer_sql_expr_type(
+                        &args[2],
+                        &empty_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                    );
+                    coerce_bound_expr(step_expr, step_type, common)
                 } else {
-                    Expr::Const(Value::Int32(1))
+                    match common.kind {
+                        SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),
+                        _ => Expr::Const(Value::Int32(1)),
+                    }
                 };
                 let desc = RelationDesc {
                     columns: vec![column_desc(
                         "generate_series",
-                        SqlType::new(SqlTypeKind::Int4),
+                        common,
                         false,
                     )],
                 };
                 let scope = scope_for_relation(Some(name), &desc);
                 Ok((
                     Plan::GenerateSeries {
-                        start,
-                        stop,
+                        start: coerce_bound_expr(start, start_type, common),
+                        stop: coerce_bound_expr(stop, stop_type, common),
                         step,
                         output: QueryColumn {
                             name: "generate_series".to_string(),
-                            sql_type: SqlType::new(SqlTypeKind::Int4),
+                            sql_type: common,
                         },
                     },
                     scope,

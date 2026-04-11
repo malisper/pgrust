@@ -6,6 +6,7 @@ use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::{
     compare_order_by_keys, decode_value, eval_expr, eval_json_table_function,
 };
+use crate::backend::parser::SqlTypeKind;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, GenerateSeriesState, JsonTableFunctionState, LimitState,
@@ -517,7 +518,8 @@ impl PlanNode for GenerateSeriesState {
         if !self.initialized {
             let mut dummy = TupleSlot::empty(0);
             self.current = match eval_expr(&self.start, &mut dummy, ctx)? {
-                Value::Int32(v) => v,
+                Value::Int32(v) => i64::from(v),
+                Value::Int64(v) => v,
                 other => {
                     return Err(ExecError::TypeMismatch {
                         op: "generate_series start",
@@ -527,7 +529,8 @@ impl PlanNode for GenerateSeriesState {
                 }
             };
             self.end = match eval_expr(&self.stop, &mut dummy, ctx)? {
-                Value::Int32(v) => v,
+                Value::Int32(v) => i64::from(v),
+                Value::Int64(v) => v,
                 other => {
                     return Err(ExecError::TypeMismatch {
                         op: "generate_series stop",
@@ -537,7 +540,8 @@ impl PlanNode for GenerateSeriesState {
                 }
             };
             self.step_val = match eval_expr(&self.step, &mut dummy, ctx)? {
-                Value::Int32(v) => v,
+                Value::Int32(v) => i64::from(v),
+                Value::Int64(v) => v,
                 other => {
                     return Err(ExecError::TypeMismatch {
                         op: "generate_series step",
@@ -567,7 +571,10 @@ impl PlanNode for GenerateSeriesState {
 
         self.slot.kind = SlotKind::Virtual;
         self.slot.tts_values.clear();
-        self.slot.tts_values.push(Value::Int32(self.current));
+        self.slot.tts_values.push(match self.output_type.kind {
+            SqlTypeKind::Int8 => Value::Int64(self.current),
+            _ => Value::Int32(self.current as i32),
+        });
         self.slot.tts_nvalid = 1;
         self.current += self.step_val;
         Ok(Some(&mut self.slot))

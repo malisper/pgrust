@@ -150,6 +150,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             start,
             stop,
             step,
+            output_type: output.sql_type,
             current: 0,
             end: 0,
             step_val: 0,
