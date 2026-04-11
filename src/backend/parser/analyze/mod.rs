@@ -1,4 +1,5 @@
 mod agg;
+mod agg_output;
 mod coerce;
 mod expr;
 mod functions;
@@ -15,6 +16,7 @@ use crate::backend::executor::{
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use agg::*;
+use agg_output::*;
 use coerce::*;
 use expr::*;
 use functions::*;
