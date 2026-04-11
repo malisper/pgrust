@@ -1,7 +1,9 @@
 use std::io::{self, Write};
 
 use crate::backend::executor::exec_expr::format_array_text;
+use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::{ExecError, QueryColumn, Value};
+use crate::include::access::htup::TupleError;
 use crate::backend::parser::SqlTypeKind;
 
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
@@ -24,6 +26,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::NumericFieldOverflow => "numeric field overflow".to_string(),
         ExecError::RequestedLengthTooLarge => "requested length too large".to_string(),
         ExecError::DivisionByZero(_) => "division by zero".to_string(),
+        ExecError::Heap(HeapError::Tuple(TupleError::Oversized { size, max_size })) => {
+            format!("row is too big: size {size}, maximum size {max_size}")
+        }
         other => format!("{other:?}"),
     }
 }

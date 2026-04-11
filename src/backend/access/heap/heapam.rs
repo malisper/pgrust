@@ -8,7 +8,7 @@ use crate::include::access::htup::{
     heap_page_init, heap_page_replace_tuple,
 };
 use crate::pgrust::database::TransactionWaiter;
-use crate::backend::storage::page::bufpage::{ItemIdFlags, PageError, page_get_item, page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number};
+use crate::backend::storage::page::bufpage::{ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, page_get_item, page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::backend::storage::buffer::Page;
 use crate::{BufferPool, ClientId, Error, OwnedBufferPin, PinnedBuffer, RequestPageResult, SmgrStorageBackend};
@@ -923,6 +923,12 @@ fn heap_insert_version(
     xmin: TransactionId,
     cid: CommandId,
 ) -> Result<ItemPointerData, HeapError> {
+    if tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {
+        return Err(HeapError::Tuple(TupleError::Oversized {
+            size: tuple.serialized_len(),
+            max_size: MAX_HEAP_TUPLE_SIZE,
+        }));
+    }
 
     loop {
         let target_block = pool.with_storage_mut(|s| -> Result<u32, HeapError> {
@@ -1014,6 +1020,8 @@ mod tests {
     use super::*;
     use crate::SmgrStorageBackend;
     use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+    use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
+    use crate::include::access::htup::{AttributeAlign, AttributeDesc, TupleValue};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1183,6 +1191,36 @@ mod tests {
         let first = heap_scan_next(&pool, 1, &mut scan).unwrap().unwrap();
         assert_eq!(first.1.data, b"first".to_vec());
         assert!(heap_scan_next(&pool, 1, &mut scan).unwrap().is_none());
+    }
+
+    #[test]
+    fn heap_insert_rejects_oversized_tuple() {
+        let base = temp_dir("reject_oversized_tuple");
+        let smgr = crate::backend::storage::smgr::MdStorageManager::new(&base);
+        let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 4);
+        let rel = rel(5010);
+        create_fork(&pool, rel);
+
+        let desc = vec![AttributeDesc {
+            name: "payload".into(),
+            attlen: -1,
+            attalign: AttributeAlign::Int,
+            nullable: false,
+        }];
+        let tuple = HeapTuple::from_values(
+            &desc,
+            &[TupleValue::Bytes(vec![b'x'; MAX_HEAP_TUPLE_SIZE])],
+        )
+        .unwrap();
+
+        assert!(tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE);
+        match heap_insert(&pool, 1, rel, &tuple) {
+            Err(HeapError::Tuple(TupleError::Oversized { size, max_size })) => {
+                assert_eq!(size, tuple.serialized_len());
+                assert_eq!(max_size, MAX_HEAP_TUPLE_SIZE);
+            }
+            other => panic!("expected oversized tuple error, got {other:?}"),
+        }
     }
 
     #[test]

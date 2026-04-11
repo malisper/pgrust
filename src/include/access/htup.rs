@@ -73,6 +73,10 @@ pub enum TupleError {
         attlen: i16,
     },
     AttributeCountTooLarge(usize),
+    Oversized {
+        size: usize,
+        max_size: usize,
+    },
     Page(PageError),
 }
 
