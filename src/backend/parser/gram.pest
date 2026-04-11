@@ -85,7 +85,7 @@ nullability = { not_null | nullable }
 not_null = { kw_not ~ kw_null }
 nullable = { kw_null }
 type_name = { base_type_name ~ array_suffix? }
-base_type_name = { kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | kw_json | kw_jsonb | char_type | varchar_type | character_varying_type }
+base_type_name = { kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | kw_json | kw_jsonb | kw_jsonpath | char_type | varchar_type | character_varying_type }
 array_suffix = { "[" ~ "]" }
 double_precision_type = { kw_double ~ kw_precision }
 numeric_type = { (kw_numeric | kw_decimal) ~ ("(" ~ integer ~ ("," ~ integer)? ~ ")")? }
@@ -114,7 +114,7 @@ is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ select_stmt ~ ")" }
 quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 quantified_comp_op = { "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
-comp_op = { "@>" | "<@" | "?|" | "?&" | "?" | "&&" | "#>>" | "#>" | "->>" | "->" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+comp_op = { "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "#>>" | "#>" | "->>" | "->" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ cast_suffix* }
 cast_suffix = { "::" ~ type_name }
@@ -173,6 +173,7 @@ kw_on_value_atom = @{ ^"on" ~ keyword_end }
 kw_off = { kw_off_atom }
 kw_json = { kw_json_atom }
 kw_jsonb = { kw_jsonb_atom }
+kw_jsonpath = { kw_jsonpath_atom }
 kw_yaml = { kw_yaml_atom }
 kw_xml = { kw_xml_atom }
 kw_order = _{ kw_order_atom }
@@ -284,6 +285,7 @@ kw_format_atom = @{ ^"format" ~ keyword_end }
 kw_off_atom = @{ ^"off" ~ keyword_end }
 kw_json_atom = @{ ^"json" ~ keyword_end }
 kw_jsonb_atom = @{ ^"jsonb" ~ keyword_end }
+kw_jsonpath_atom = @{ ^"jsonpath" ~ keyword_end }
 kw_yaml_atom = @{ ^"yaml" ~ keyword_end }
 kw_xml_atom = @{ ^"xml" ~ keyword_end }
 kw_order_atom = @{ ^"order" ~ keyword_end }

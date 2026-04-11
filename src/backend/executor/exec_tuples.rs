@@ -243,6 +243,10 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
+                            ScalarType::JsonPath => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                             ScalarType::Text => {
                                 values.push(Value::Null);
                                 continue;
@@ -293,6 +297,13 @@ impl CompiledTupleDecoder {
                             ScalarType::Jsonb => {
                                 values.push(Value::Jsonb(bytes_slice.to_vec()));
                             }
+                            ScalarType::JsonPath => {
+                                values.push(Value::JsonPath(
+                                    crate::pgrust::compact_string::CompactString::new(unsafe {
+                                        std::str::from_utf8_unchecked(bytes_slice)
+                                    }),
+                                ));
+                            }
                             ScalarType::Text => {
                                 values.push(Value::TextRef(
                                     bytes_slice.as_ptr(),
@@ -335,6 +346,13 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Jsonb => {
                                 values.push(Value::Jsonb(bytes.to_vec()));
+                            }
+                            ScalarType::JsonPath => {
+                                values.push(Value::JsonPath(
+                                    crate::pgrust::compact_string::CompactString::new(unsafe {
+                                        std::str::from_utf8_unchecked(bytes)
+                                    }),
+                                ));
                             }
                             ScalarType::Text => {
                                 values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
@@ -454,6 +472,11 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
             }),
         )),
         ScalarType::Jsonb => Ok(Value::Jsonb(bytes.to_vec())),
+        ScalarType::JsonPath => Ok(Value::JsonPath(
+            crate::pgrust::compact_string::CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            }),
+        )),
         ScalarType::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {

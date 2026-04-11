@@ -905,7 +905,9 @@ fn collect_rels_from_expr(
         | Expr::JsonbContained(left, right)
         | Expr::JsonbExists(left, right)
         | Expr::JsonbExistsAny(left, right)
-        | Expr::JsonbExistsAll(left, right) => {
+        | Expr::JsonbExistsAll(left, right)
+        | Expr::JsonbPathExists(left, right)
+        | Expr::JsonbPathMatch(left, right) => {
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
         }

@@ -290,6 +290,7 @@ pub enum SqlTypeKind {
     Numeric,
     Json,
     Jsonb,
+    JsonPath,
     Text,
     Bool,
     Timestamp,
@@ -428,6 +429,8 @@ pub enum SqlExpr {
     JsonbExists(Box<SqlExpr>, Box<SqlExpr>),
     JsonbExistsAny(Box<SqlExpr>, Box<SqlExpr>),
     JsonbExistsAll(Box<SqlExpr>, Box<SqlExpr>),
+    JsonbPathExists(Box<SqlExpr>, Box<SqlExpr>),
+    JsonbPathMatch(Box<SqlExpr>, Box<SqlExpr>),
     AggCall {
         func: AggFunc,
         args: Vec<SqlExpr>,

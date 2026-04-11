@@ -130,6 +130,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Numeric => 1231,
             SqlTypeKind::Json => 199,
             SqlTypeKind::Jsonb => 3807,
+            SqlTypeKind::JsonPath => 4073,
             SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => 1009,
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
@@ -145,6 +146,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Numeric => (1700, -1, col.sql_type.typmod),
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
+        SqlTypeKind::JsonPath => (4072, -1, -1),
         SqlTypeKind::Bool => (16, 1, -1),
         SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char => {
@@ -211,6 +213,10 @@ pub(crate) fn send_data_row(
                 let text = crate::backend::executor::jsonb::render_jsonb_bytes(v).unwrap();
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
+            }
+            Value::JsonPath(v) => {
+                buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
+                buf.extend_from_slice(v.as_bytes());
             }
             Value::Text(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());

@@ -158,6 +158,7 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         ),
         Value::Numeric(v) => JsonbValue::Numeric(v.clone()),
         Value::Bool(v) => JsonbValue::Bool(*v),
+        Value::JsonPath(text) => JsonbValue::String(text.to_string()),
         Value::Text(text) => JsonbValue::String(text.to_string()),
         Value::TextRef(_, _) => JsonbValue::String(value.as_text().unwrap().to_string()),
         Value::Json(text) => {
@@ -382,6 +383,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
         Value::Text(text) => Ok(text.to_string()),
         Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
+        Value::JsonPath(text) => Ok(text.to_string()),
         Value::Json(text) => Ok(text.to_string()),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes),
         Value::Array(items) => Ok(format_array_text(items)),

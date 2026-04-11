@@ -25,6 +25,7 @@ pub enum ScalarType {
     Numeric,
     Json,
     Jsonb,
+    JsonPath,
     Text,
     Bool,
     Array(Box<ScalarType>),
@@ -73,6 +74,7 @@ pub enum Value {
     Numeric(NumericValue),
     Json(CompactString),
     Jsonb(Vec<u8>),
+    JsonPath(CompactString),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned
     /// (the slot's `Rc<OwnedBufferPin>` keeps the pin alive). User data on the
@@ -251,6 +253,7 @@ impl Value {
     /// Get text content as `&str`, works for both `Text` and `TextRef`.
     pub fn as_text(&self) -> Option<&str> {
         match self {
+            Value::JsonPath(s) => Some(s.as_str()),
             Value::Text(s) => Some(s.as_str()),
             Value::TextRef(ptr, len) => Some(unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -270,6 +273,7 @@ impl Value {
             Value::Numeric(v) => Value::Numeric(v.clone()),
             Value::Json(s) => Value::Json(s.clone()),
             Value::Jsonb(bytes) => Value::Jsonb(bytes.clone()),
+            Value::JsonPath(s) => Value::JsonPath(s.clone()),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -312,6 +316,7 @@ impl PartialEq for Value {
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Jsonb(a), Value::Jsonb(b)) => a == b,
+            (Value::JsonPath(a), Value::JsonPath(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -355,6 +360,10 @@ impl std::hash::Hash for Value {
             Value::Jsonb(bytes) => {
                 10u8.hash(state);
                 bytes.hash(state);
+            }
+            Value::JsonPath(s) => {
+                11u8.hash(state);
+                s.as_str().hash(state);
             }
             // Text and TextRef hash the same way so equal values get the same hash
             Value::Text(s) => {
@@ -451,6 +460,10 @@ pub enum BuiltinScalarFunction {
     JsonbExtractPathText,
     JsonbBuildArray,
     JsonbBuildObject,
+    JsonbPathExists,
+    JsonbPathMatch,
+    JsonbPathQueryArray,
+    JsonbPathQueryFirst,
     Left,
     Repeat,
 }
@@ -518,6 +531,8 @@ pub enum Expr {
     JsonbExists(Box<Expr>, Box<Expr>),
     JsonbExistsAny(Box<Expr>, Box<Expr>),
     JsonbExistsAll(Box<Expr>, Box<Expr>),
+    JsonbPathExists(Box<Expr>, Box<Expr>),
+    JsonbPathMatch(Box<Expr>, Box<Expr>),
     ScalarSubquery(Box<Plan>),
     ExistsSubquery(Box<Plan>),
     AnySubquery {

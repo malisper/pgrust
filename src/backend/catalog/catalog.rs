@@ -265,7 +265,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Float32 => (4, AttributeAlign::Int),
         ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Numeric => (-1, AttributeAlign::Int),
-        ScalarType::Json | ScalarType::Jsonb => (-1, AttributeAlign::Int),
+        ScalarType::Json | ScalarType::Jsonb | ScalarType::JsonPath => (-1, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Bool => (1, AttributeAlign::Char),
         ScalarType::Array(_) => (-1, AttributeAlign::Int),
@@ -296,6 +296,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Numeric => ScalarType::Numeric,
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
+        SqlTypeKind::JsonPath => ScalarType::JsonPath,
         SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::Varchar => {
             ScalarType::Text
         }
@@ -313,6 +314,7 @@ fn encode_sql_type(sql_type: SqlType) -> String {
         SqlTypeKind::Numeric => "numeric",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
@@ -371,6 +373,11 @@ fn decode_sql_type(name: &str, typmod: i32) -> Result<SqlType, CatalogError> {
         },
         "jsonb" => SqlType {
             kind: SqlTypeKind::Jsonb,
+            typmod,
+            is_array: false,
+        },
+        "jsonpath" => SqlType {
+            kind: SqlTypeKind::JsonPath,
             typmod,
             is_array: false,
         },
