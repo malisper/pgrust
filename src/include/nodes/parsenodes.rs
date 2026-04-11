@@ -304,6 +304,7 @@ pub struct CreateTableStatement {
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
     pub columns: Vec<ColumnDef>,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +315,7 @@ pub struct CreateTableAsStatement {
     pub on_commit: OnCommitAction,
     pub column_names: Vec<String>,
     pub query: SelectStatement,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -37,7 +37,7 @@ show_tables_stmt = { kw_show ~ kw_tables }
 insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ (insert_values_source | insert_default_values_source | select_stmt) }
 insert_values_source = { kw_values ~ values_row ~ ("," ~ values_row)* }
 insert_default_values_source = { kw_default ~ kw_values }
-create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ identifier ~ create_table_tail ~ table_storage_clause? }
+create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ if_not_exists_clause? ~ identifier ~ create_table_tail ~ table_storage_clause? }
 create_index_stmt = { kw_create ~ kw_unique? ~ kw_index ~ identifier ~ kw_on ~ identifier ~ "(" ~ ident_list ~ ")" }
 alter_table_set_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
 reloption = { identifier ~ "=" ~ set_value_atom }
@@ -71,6 +71,7 @@ maintenance_target = { only_clause? ~ identifier ~ maintenance_column_list? }
 maintenance_column_list = { "(" ~ ident_list ~ ")" }
 only_clause = { kw_only }
 if_exists_clause = { kw_if ~ kw_exists }
+if_not_exists_clause = { kw_if ~ kw_not ~ kw_exists }
 update_stmt = { cte_clause? ~ kw_update ~ identifier ~ kw_set ~ assignment ~ ("," ~ assignment)* ~ (kw_where ~ expr)? }
 delete_stmt = { cte_clause? ~ kw_delete ~ kw_from ~ identifier ~ (kw_where ~ expr)? }
 begin_stmt = { (kw_begin ~ kw_transaction?) | (kw_start ~ kw_transaction) }
