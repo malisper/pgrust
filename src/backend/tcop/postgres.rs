@@ -15,6 +15,7 @@ use crate::backend::libpq::pqformat::{
     send_close_complete, send_command_complete, send_copy_in_response, send_data_row,
     send_empty_query, send_error, send_no_data, send_parameter_description, send_parameter_status,
     send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
+    send_typed_data_row,
 };
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -33,6 +34,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::Int2OutOfRange
         | ExecError::Int4OutOfRange
         | ExecError::Int8OutOfRange
+        | ExecError::OidOutOfRange
         | ExecError::NumericFieldOverflow => "22003",
         ExecError::RequestedLengthTooLarge => "54000",
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { .. })) => "54000",
@@ -298,7 +300,7 @@ fn handle_query(
                             }
                             match slot.values() {
                                 Ok(values) => {
-                                    send_data_row(stream, values, &mut row_buf)?;
+                                    send_typed_data_row(stream, values, &columns, &mut row_buf)?;
                                     row_count += 1;
                                 }
                                 Err(e) => {
@@ -588,9 +590,9 @@ fn execute_portal(
 
     let sql = substitute_params(&portal.sql, &portal.params);
     match session.execute(db, &sql) {
-        Ok(StatementResult::Query { rows, .. }) => {
+        Ok(StatementResult::Query { rows, columns, .. }) => {
             for row in &rows {
-                send_data_row(stream, row, &mut row_buf)?;
+                send_typed_data_row(stream, row, &columns, &mut row_buf)?;
             }
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
         }

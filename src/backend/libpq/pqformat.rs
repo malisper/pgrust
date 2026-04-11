@@ -70,7 +70,7 @@ pub(crate) fn send_query_result(
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
     for row in rows {
-        send_data_row(stream, row, &mut row_buf)?;
+        send_typed_data_row(stream, row, columns, &mut row_buf)?;
     }
     send_command_complete(stream, tag)
 }
@@ -172,9 +172,19 @@ pub(crate) fn send_data_row(
     values: &[Value],
     buf: &mut Vec<u8>,
 ) -> io::Result<()> {
+    send_typed_data_row(w, values, &[], buf)
+}
+
+pub(crate) fn send_typed_data_row(
+    w: &mut impl Write,
+    values: &[Value],
+    columns: &[QueryColumn],
+    buf: &mut Vec<u8>,
+) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
-    for val in values {
+    for (idx, val) in values.iter().enumerate() {
+        let sql_type = columns.get(idx).map(|col| col.sql_type);
         match val {
             Value::Null => buf.extend_from_slice(&(-1_i32).to_be_bytes()),
             Value::Int16(v) => {
@@ -207,7 +217,10 @@ pub(crate) fn send_data_row(
             Value::Float64(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
-                let rendered = format_float8_text(*v);
+                let rendered = match sql_type.map(|ty| ty.kind) {
+                    Some(SqlTypeKind::Float4) => format_float4_text(*v),
+                    _ => format_float8_text(*v),
+                };
                 buf.extend_from_slice(rendered.as_bytes());
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
@@ -366,9 +379,27 @@ fn format_float8_text(value: f64) -> String {
     value.to_string()
 }
 
+fn format_float4_text(value: f64) -> String {
+    let value = value as f32;
+    if value.is_nan() || value.is_infinite() {
+        return value.to_string();
+    }
+
+    let abs = value.abs();
+    if abs != 0.0 && (abs >= 1.0e6 || abs < 1.0e-6) {
+        let rendered = format!("{value:.6e}");
+        let (mantissa, exponent) = rendered.split_once('e').unwrap_or((&rendered, "0"));
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        let exponent = exponent.parse::<i32>().unwrap_or(0);
+        return format!("{mantissa}e{exponent:+}");
+    }
+
+    value.to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_float8_text;
+    use super::{format_float4_text, format_float8_text};
 
     #[test]
     fn large_float8_values_render_in_scientific_notation() {
@@ -381,5 +412,14 @@ mod tests {
             "-4.567890123456789e+15"
         );
         assert_eq!(format_float8_text(123.0), "123");
+    }
+
+    #[test]
+    fn large_float4_values_render_in_scientific_notation() {
+        assert_eq!(
+            format_float4_text(4_567_890_123_456_789.0),
+            "4.56789e+15"
+        );
+        assert_eq!(format_float4_text(123.0), "123");
     }
 }
