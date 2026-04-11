@@ -377,34 +377,39 @@ impl Database {
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
-                let result = crate::backend::commands::tablecmds::execute_create_table(
-                    CreateTableStatement {
-                        schema_name: None,
-                        table_name: table_name.clone(),
-                        persistence,
-                        on_commit: create_stmt.on_commit,
-                        columns: create_stmt.columns.clone(),
-                    },
-                    catalog_guard.catalog_mut(),
-                );
-                if result.is_ok() {
-                    let relcache = RelCache::from_catalog(catalog_guard.catalog());
-                    if let Some(entry) = relcache.get_by_name(&table_name) {
-                        let rel = entry.rel;
-                        let _ = self.pool.with_storage_mut(|s| {
-                            use crate::backend::storage::smgr::StorageManager;
-                            let _ = s.smgr.open(rel);
-                            let _ = s.smgr.create(
-                                rel,
-                                crate::backend::storage::smgr::ForkNumber::Main,
-                                false,
-                            );
-                        });
-                    }
-                    let _ = catalog_guard.persist();
+                let result = catalog_guard
+                    .create_table(table_name.clone(), desc.clone())
+                    .map_err(|err| match err {
+                        CatalogError::TableAlreadyExists(name) => {
+                            ExecError::Parse(ParseError::TableAlreadyExists(name))
+                        }
+                        CatalogError::UnknownTable(name) => {
+                            ExecError::Parse(ParseError::TableDoesNotExist(name))
+                        }
+                        CatalogError::UnknownType(name) => {
+                            ExecError::Parse(ParseError::UnsupportedType(name))
+                        }
+                        CatalogError::Io(_) | CatalogError::Corrupt(_) => {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "valid catalog state",
+                                actual: "catalog error".into(),
+                            })
+                        }
+                    });
+                if let Ok(entry) = &result {
+                    let rel = entry.rel;
+                    let _ = self.pool.with_storage_mut(|s| {
+                        use crate::backend::storage::smgr::StorageManager;
+                        let _ = s.smgr.open(rel);
+                        let _ = s.smgr.create(
+                            rel,
+                            crate::backend::storage::smgr::ForkNumber::Main,
+                            false,
+                        );
+                    });
                     self.plan_cache.invalidate_all();
                 }
-                result
+                result.map(|_| StatementResult::AffectedRows(0))
             }
             TablePersistence::Temporary => {
                 let _ =
@@ -510,16 +515,24 @@ impl Database {
                         })
                         .collect(),
                 };
-                crate::backend::commands::tablecmds::execute_create_table(
-                    stmt,
-                    catalog_guard.catalog_mut(),
-                )?;
                 let entry = catalog_guard
-                    .catalog()
-                    .get(&table_name)
-                    .cloned()
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnknownTable(table_name.clone()))
+                    .create_table(table_name.clone(), create_relation_desc(&stmt))
+                    .map_err(|err| match err {
+                        CatalogError::TableAlreadyExists(name) => {
+                            ExecError::Parse(ParseError::TableAlreadyExists(name))
+                        }
+                        CatalogError::UnknownTable(name) => {
+                            ExecError::Parse(ParseError::TableDoesNotExist(name))
+                        }
+                        CatalogError::UnknownType(name) => {
+                            ExecError::Parse(ParseError::UnsupportedType(name))
+                        }
+                        CatalogError::Io(_) | CatalogError::Corrupt(_) => {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "valid catalog state",
+                                actual: "catalog error".into(),
+                            })
+                        }
                     })?;
                 let _ = self.pool.with_storage_mut(|s| {
                     use crate::backend::storage::smgr::StorageManager;
@@ -530,7 +543,6 @@ impl Database {
                         false,
                     );
                 });
-                let _ = catalog_guard.persist();
                 self.plan_cache.invalidate_all();
                 entry.rel
             }
@@ -592,7 +604,7 @@ impl Database {
     pub fn execute(&self, client_id: ClientId, sql: &str) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
-            execute_analyze, execute_delete_with_waiter, execute_drop_table, execute_insert,
+            execute_analyze, execute_delete_with_waiter, execute_insert,
             execute_truncate_table, execute_update_with_waiter, execute_vacuum,
         };
         use crate::backend::executor::execute_readonly_statement;
@@ -782,19 +794,23 @@ impl Database {
                         }
                     } else {
                         let mut catalog_guard = self.catalog.write();
-                        let stmt = crate::backend::parser::DropTableStatement {
-                            if_exists: drop_stmt.if_exists,
-                            table_names: vec![table_name.clone()],
-                        };
-                        match execute_drop_table(stmt, catalog_guard.catalog_mut(), &mut ctx) {
-                            Ok(StatementResult::AffectedRows(n)) => {
-                                dropped += n;
-                                let _ = catalog_guard.persist();
+                        match catalog_guard.drop_table(table_name) {
+                            Ok(entry) => {
+                                let _ = ctx.pool.invalidate_relation(entry.rel);
+                                ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                                dropped += 1;
                                 self.plan_cache.invalidate_all();
                             }
-                            Ok(other) => result = Ok(other),
-                            Err(e) => {
-                                result = Err(e);
+                            Err(CatalogError::UnknownTable(_)) if drop_stmt.if_exists => {}
+                            Err(CatalogError::UnknownTable(name)) => {
+                                result = Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
+                                break;
+                            }
+                            Err(other) => {
+                                result = Err(ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "droppable table",
+                                    actual: format!("{other:?}"),
+                                }));
                                 break;
                             }
                         }

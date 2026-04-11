@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_analyze, execute_delete_with_waiter, execute_drop_table, execute_insert,
+    execute_analyze, execute_delete_with_waiter, execute_insert,
     execute_prepared_insert_row, execute_truncate_table, execute_update_with_waiter,
 };
 use crate::backend::executor::{
@@ -17,6 +17,7 @@ use crate::backend::parser::{
     bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
+use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
@@ -359,17 +360,24 @@ impl Session {
                         dropped += 1;
                     } else {
                         let mut catalog_guard = db.catalog.write();
-                        let stmt = crate::backend::parser::DropTableStatement {
-                            if_exists: drop_stmt.if_exists,
-                            table_names: vec![table_name.clone()],
-                        };
-                        match execute_drop_table(stmt, catalog_guard.catalog_mut(), &mut ctx)? {
-                            StatementResult::AffectedRows(n) => {
-                                dropped += n;
-                                let _ = catalog_guard.persist();
+                        match catalog_guard.drop_table(table_name) {
+                            Ok(entry) => {
+                                let _ = ctx.pool.invalidate_relation(entry.rel);
+                                ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                                dropped += 1;
                                 db.plan_cache.invalidate_all();
                             }
-                            other => return Ok(other),
+                            Err(crate::backend::catalog::CatalogError::UnknownTable(_))
+                                if drop_stmt.if_exists => {}
+                            Err(crate::backend::catalog::CatalogError::UnknownTable(name)) => {
+                                return Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
+                            }
+                            Err(other) => {
+                                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                                    expected: "droppable table",
+                                    actual: format!("{other:?}"),
+                                }));
+                            }
                         }
                     }
                 }

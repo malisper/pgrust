@@ -91,6 +91,22 @@ impl CatalogStore {
         &mut self.catalog
     }
 
+    pub fn create_table(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+    ) -> Result<CatalogEntry, CatalogError> {
+        let entry = self.catalog.create_table(name, desc)?;
+        self.persist()?;
+        Ok(entry)
+    }
+
+    pub fn drop_table(&mut self, name: &str) -> Result<CatalogEntry, CatalogError> {
+        let entry = self.catalog.drop_table(name)?;
+        self.persist()?;
+        Ok(entry)
+    }
+
     pub fn persist(&self) -> Result<(), CatalogError> {
         persist_control_file(
             &self.control_path,
