@@ -26,6 +26,7 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "jsonb_path_query_first" => Some(BuiltinScalarFunction::JsonbPathQueryFirst),
         "left" => Some(BuiltinScalarFunction::Left),
         "repeat" => Some(BuiltinScalarFunction::Repeat),
+        "lower" => Some(BuiltinScalarFunction::Lower),
         "position" => Some(BuiltinScalarFunction::Position),
         "convert_from" => Some(BuiltinScalarFunction::ConvertFrom),
         "to_char" => Some(BuiltinScalarFunction::ToChar),
@@ -112,6 +113,7 @@ pub(super) fn validate_scalar_function_arity(
         BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
         BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
         BuiltinScalarFunction::Abs
+        | BuiltinScalarFunction::Lower
         | BuiltinScalarFunction::Trunc
         | BuiltinScalarFunction::Round
         | BuiltinScalarFunction::Ceil

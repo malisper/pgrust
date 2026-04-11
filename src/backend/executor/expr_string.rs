@@ -108,6 +108,21 @@ pub(super) fn eval_repeat_function(values: &[Value]) -> Result<Value, ExecError>
     Ok(Value::Text(CompactString::from_owned(out)))
 }
 
+pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "lower",
+        left: text_value.clone(),
+        right: Value::Text("".into()),
+    })?;
+    Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
+}
+
 pub(super) fn eval_position_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(needle_value) = values.first() else {
         return Ok(Value::Null);

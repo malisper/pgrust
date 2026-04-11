@@ -8,8 +8,8 @@ use super::expr_math::{
     snap_degree, cosd, cotd, sind, tand,
 };
 use super::expr_string::{
-    eval_convert_from_function, eval_left_function, eval_position_function, eval_repeat_function,
-    eval_to_char_function,
+    eval_convert_from_function, eval_left_function, eval_lower_function,
+    eval_position_function, eval_repeat_function, eval_to_char_function,
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::node_types::*;
@@ -336,6 +336,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
+        BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Position => eval_position_function(&values),
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),

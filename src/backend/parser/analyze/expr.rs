@@ -784,6 +784,18 @@ fn bind_scalar_function_call(
                 ],
             })
         }
+        BuiltinScalarFunction::Lower => {
+            let arg_type =
+                infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    SqlType::new(SqlTypeKind::Text),
+                )],
+            })
+        }
         BuiltinScalarFunction::ToChar => {
             let value_type =
                 infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);

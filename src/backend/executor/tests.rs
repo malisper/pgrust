@@ -4877,6 +4877,34 @@
     }
 
     #[test]
+    fn lower_supports_grouped_queries() {
+        let base = temp_dir("lower_supports_grouped_queries");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'AAAA'), (2, 'bob', 'AAAA'), (3, 'carol', 'bbbb'), (4, 'dave', 'cccc'), (5, 'eve', 'cccc'), (6, 'frank', 'CCCC')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select lower(note), count(note) from people group by lower(note) having count(*) > 2 or min(id) = max(id) order by lower(note)",
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Text("bbbb".into()), Value::Int64(1)],
+                vec![Value::Text("cccc".into()), Value::Int64(3)],
+            ],
+        );
+    }
+
+    #[test]
     fn jsonb_table_functions_and_agg_work() {
         let base = temp_dir("jsonb_table_functions");
         let mut txns = TransactionManager::new_durable(&base).unwrap();
