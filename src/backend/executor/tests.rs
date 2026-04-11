@@ -77,15 +77,20 @@
         }
     }
 
+    fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
+        CatalogEntry {
+            relation_oid: 50_000u32.saturating_add(rel.rel_number),
+            namespace_oid: 11,
+            row_type_oid: 60_000u32.saturating_add(rel.rel_number),
+            relkind: 'r',
+            rel,
+            desc,
+        }
+    }
+
     fn catalog() -> Catalog {
         let mut catalog = Catalog::default();
-        catalog.insert(
-            "people",
-            CatalogEntry {
-                rel: rel(),
-                desc: relation_desc(),
-            },
-        );
+        catalog.insert("people", test_catalog_entry(rel(), relation_desc()));
         catalog
     }
 
@@ -113,13 +118,7 @@
 
     fn catalog_with_pets() -> Catalog {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: pets_rel(),
-                desc: pets_relation_desc(),
-            },
-        );
+        catalog.insert("pets", test_catalog_entry(pets_rel(), pets_relation_desc()));
         catalog
     }
 
@@ -127,13 +126,13 @@
         let mut catalog = Catalog::default();
         catalog.insert(
             name,
-            CatalogEntry {
-                rel: crate::RelFileLocator {
+            test_catalog_entry(
+                crate::RelFileLocator {
                     spc_oid: 0,
                     db_oid: 1,
                     rel_number: 15002,
                 },
-                desc: RelationDesc {
+                RelationDesc {
                     columns: vec![crate::backend::catalog::catalog::column_desc(
                         "name",
                         crate::backend::parser::SqlType::with_char_len(
@@ -143,7 +142,7 @@
                         false,
                     )],
                 },
-            },
+            ),
         );
         catalog
     }
@@ -152,13 +151,13 @@
         let mut catalog = Catalog::default();
         catalog.insert(
             name,
-            CatalogEntry {
-                rel: crate::RelFileLocator {
+            test_catalog_entry(
+                crate::RelFileLocator {
                     spc_oid: 0,
                     db_oid: 1,
                     rel_number: 15003,
                 },
-                desc: RelationDesc {
+                RelationDesc {
                     columns: vec![crate::backend::catalog::catalog::column_desc(
                         "name",
                         crate::backend::parser::SqlType::with_char_len(
@@ -168,7 +167,7 @@
                         false,
                     )],
                 },
-            },
+            ),
         );
         catalog
     }
@@ -177,13 +176,13 @@
         let mut catalog = Catalog::default();
         catalog.insert(
             name,
-            CatalogEntry {
-                rel: crate::RelFileLocator {
+            test_catalog_entry(
+                crate::RelFileLocator {
                     spc_oid: 0,
                     db_oid: 1,
                     rel_number: 15004,
                 },
-                desc: RelationDesc {
+                RelationDesc {
                     columns: vec![crate::backend::catalog::catalog::column_desc(
                         "value",
                         crate::backend::parser::SqlType::new(
@@ -192,7 +191,7 @@
                         false,
                     )],
                 },
-            },
+            ),
         );
         catalog
     }
@@ -201,13 +200,13 @@
         let mut catalog = Catalog::default();
         catalog.insert(
             name,
-            CatalogEntry {
-                rel: crate::RelFileLocator {
+            test_catalog_entry(
+                crate::RelFileLocator {
                     spc_oid: 0,
                     db_oid: 1,
                     rel_number: 15005,
                 },
-                desc: RelationDesc {
+                RelationDesc {
                     columns: vec![crate::backend::catalog::catalog::column_desc(
                         "f1",
                         crate::backend::parser::SqlType::new(
@@ -216,7 +215,7 @@
                         false,
                     )],
                 },
-            },
+            ),
         );
         catalog
     }
@@ -272,10 +271,7 @@
         let mut catalog = Catalog::default();
         catalog.insert(
             "orders",
-            CatalogEntry {
-                rel: records_rel(),
-                desc: records_relation_desc(),
-            },
+            test_catalog_entry(records_rel(), records_relation_desc()),
         );
         catalog
     }
@@ -2603,13 +2599,13 @@
         let mut catalog = Catalog::default();
         catalog.insert(
             "metrics",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
+            test_catalog_entry(
+                crate::RelFileLocator {
                     spc_oid: 0,
                     db_oid: 1,
                     rel_number: 15004,
                 },
-                desc: RelationDesc {
+                RelationDesc {
                     columns: vec![
                         crate::backend::catalog::catalog::column_desc(
                             "a",
@@ -2641,7 +2637,7 @@
                         ),
                     ],
                 },
-            },
+            ),
         );
         run_sql_with_catalog(
             &base,

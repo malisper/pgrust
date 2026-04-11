@@ -77,6 +77,7 @@ pub fn execute_show_tables(catalog: &Catalog) -> Result<StatementResult, ExecErr
     let names = catalog
         .table_names()
         .filter(|name| !name.starts_with("pg_temp."))
+        .filter(|name| !name.starts_with("pg_"))
         .collect::<std::collections::BTreeSet<_>>();
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("table_name")],

@@ -208,6 +208,12 @@ impl Database {
                     db_oid: Self::temp_db_oid(client_id),
                     rel_number,
                 },
+                relation_oid: Self::temp_db_oid(client_id).saturating_add(rel_number),
+                namespace_oid: Self::temp_db_oid(client_id),
+                row_type_oid: Self::temp_db_oid(client_id)
+                    .saturating_add(rel_number)
+                    .saturating_add(1),
+                relkind: 'r',
                 desc,
             };
             namespace.tables.insert(
