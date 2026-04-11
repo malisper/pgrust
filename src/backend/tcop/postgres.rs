@@ -669,9 +669,9 @@ fn execute_portal(
     if try_handle_float_shell_ddl(stream, &portal.sql)? {
         return Ok(());
     }
-    let visible_catalog = db.visible_catalog(session.client_id);
+    let visible_relcache = db.visible_relcache(session.client_id);
     let sql =
-        rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &visible_catalog))
+        rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &visible_relcache))
             .into_owned();
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
@@ -817,11 +817,11 @@ fn describe_sql(
     sql: &str,
     params: &[Option<String>],
 ) -> Option<Vec<QueryColumn>> {
-    let visible_catalog = db.visible_catalog(client_id);
-    let sql = rewrite_regression_sql(&substitute_params(sql, params, &visible_catalog)).into_owned();
+    let visible_relcache = db.visible_relcache(client_id);
+    let sql = rewrite_regression_sql(&substitute_params(sql, params, &visible_relcache)).into_owned();
     match parse_statement(&sql).ok()? {
         Statement::Select(stmt) => {
-            crate::backend::parser::build_plan(&stmt, &visible_catalog)
+            crate::backend::parser::build_plan(&stmt, &visible_relcache)
                 .ok()
                 .map(|plan| plan.columns())
         }
