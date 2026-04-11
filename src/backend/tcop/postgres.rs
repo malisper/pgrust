@@ -171,6 +171,7 @@ struct ConnectionState {
 
 struct CopyInState {
     table_name: String,
+    columns: Option<Vec<String>>,
     pending: Vec<u8>,
 }
 
@@ -367,9 +368,10 @@ fn handle_query(
         return Ok(());
     }
 
-    if let Some(table_name) = parse_copy_from_stdin(&sql) {
+    if let Some((table_name, columns)) = parse_copy_from_stdin(&sql) {
         state.copy_in = Some(CopyInState {
             table_name,
+            columns,
             pending: Vec::new(),
         });
         send_copy_in_response(stream)?;
@@ -814,7 +816,7 @@ fn handle_copy_done(
         .collect::<Vec<_>>();
     state
         .session
-        .copy_from_rows(db, &copy.table_name, &rows)
+        .copy_from_rows_into(db, &copy.table_name, copy.columns.as_deref(), &rows)
         .map_err(|e| io::Error::other(format_exec_error(&e)))?;
 
     send_command_complete(stream, "COPY")?;
@@ -834,7 +836,7 @@ fn handle_copy_fail(
     Ok(())
 }
 
-fn parse_copy_from_stdin(sql: &str) -> Option<String> {
+fn parse_copy_from_stdin(sql: &str) -> Option<(String, Option<Vec<String>>)> {
     let lower = sql.to_ascii_lowercase();
     let prefix = "copy ";
     let suffix = " from stdin";
@@ -842,11 +844,28 @@ fn parse_copy_from_stdin(sql: &str) -> Option<String> {
         return None;
     }
     let end = lower.find(suffix)?;
-    let table = sql[prefix.len()..end].trim();
-    if table.is_empty() {
-        None
+    let target = sql[prefix.len()..end].trim();
+    if target.is_empty() {
+        return None;
+    }
+    if let Some(open_paren) = target.find('(') {
+        let close_paren = target.rfind(')')?;
+        if close_paren < open_paren {
+            return None;
+        }
+        let table = target[..open_paren].trim();
+        let columns = target[open_paren + 1..close_paren]
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>();
+        if table.is_empty() || columns.is_empty() {
+            return None;
+        }
+        Some((table.to_string(), Some(columns)))
     } else {
-        Some(table.to_string())
+        Some((target.to_string(), None))
     }
 }
 

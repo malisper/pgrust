@@ -89,6 +89,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::show_tables_stmt => Ok(Statement::ShowTables),
+        Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
+        Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::create_table_stmt => build_create_table(inner),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
@@ -273,12 +275,12 @@ fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
 fn build_set_value_list(pair: Pair<'_, Rule>) -> String {
     pair.into_inner()
         .filter(|part| part.as_rule() == Rule::set_value_atom)
-        .map(build_set_value_atom)
+        .map(build_simple_set_value_atom)
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn build_set_value_atom(pair: Pair<'_, Rule>) -> String {
+fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {
     let pair = pair.clone().into_inner().next().unwrap_or(pair);
     match pair.as_rule() {
         Rule::signed_set_value => pair.as_str().to_string(),
@@ -757,6 +759,79 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             on_commit,
             columns,
         }))
+    }
+}
+
+fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    let unique = raw.starts_with("create unique index");
+    let mut identifiers = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => identifiers.push(build_identifier(part)),
+            Rule::ident_list => identifiers.extend(part.into_inner().map(build_identifier)),
+            _ => {}
+        }
+    }
+    if identifiers.len() < 3 {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(CreateIndexStatement {
+        unique,
+        index_name: identifiers[0].clone(),
+        table_name: identifiers[1].clone(),
+        columns: identifiers[2..].to_vec(),
+    })
+}
+
+fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement, ParseError> {
+    let mut table_name = None;
+    let mut options = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::reloption => options.push(build_reloption(part)?),
+            _ => {}
+        }
+    }
+    Ok(AlterTableSetStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        options,
+    })
+}
+
+fn build_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
+    let mut name = None;
+    let mut value = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+            Rule::set_value_atom => value = Some(build_set_value_atom(part)?),
+            _ => {}
+        }
+    }
+    Ok(RelOption {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        value: value.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_set_value_atom(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let mut inner = pair.into_inner();
+    let part = inner.next().ok_or(ParseError::UnexpectedEof)?;
+    match part.as_rule() {
+        Rule::signed_set_value => Ok(part.as_str().to_string()),
+        Rule::quoted_string_literal
+        | Rule::string_literal
+        | Rule::escape_string_literal
+        | Rule::dollar_string_literal => decode_string_literal(part.as_str()),
+        Rule::identifier | Rule::numeric_literal | Rule::integer => Ok(part.as_str().to_string()),
+        Rule::kw_default
+        | Rule::kw_true
+        | Rule::kw_false
+        | Rule::kw_on_value
+        | Rule::kw_off => Ok(part.as_str().to_ascii_lowercase()),
+        _ => Ok(part.as_str().to_string()),
     }
 }
 

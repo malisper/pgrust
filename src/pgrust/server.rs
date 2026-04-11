@@ -251,6 +251,44 @@ mod tests {
     }
 
     #[test]
+    fn copy_from_stdin_with_column_list_targets_subset_columns() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+        send_query(
+            &mut stream,
+            "create table width_bucket_test (operand_num numeric, operand_f8 float8)",
+        );
+        let _ = read_until_ready(&mut stream, "create");
+        send_query(&mut stream, "copy width_bucket_test (operand_num) from stdin");
+        let copy_start = read_message(&mut stream, "copy_start");
+        assert_eq!(copy_start.0, b'G');
+        send_copy_data(&mut stream, b"5.5\n");
+        send_copy_done(&mut stream);
+        let copy_finish = read_until_ready(&mut stream, "copy_finish");
+        assert_eq!(
+            copy_finish
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("COPY".to_string())
+        );
+        send_query(
+            &mut stream,
+            "select operand_num, operand_f8 is null from width_bucket_test",
+        );
+        let select = read_until_ready(&mut stream, "select");
+        let rows = select
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, vec![vec![Some("5.5".into()), Some("t".into())]]);
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn row_description_reports_varchar_typmod() {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);

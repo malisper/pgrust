@@ -145,6 +145,32 @@
     }
 
     #[test]
+    fn create_index_and_alter_table_set_are_noops() {
+        let base = temp_dir("numeric_sql_noops");
+        let db = Database::open(&base, 16).unwrap();
+
+        db.execute(1, "create table num_exp_add (id1 int4, id2 int4)")
+            .unwrap();
+
+        assert_eq!(
+            db.execute(
+                1,
+                "create unique index num_exp_add_idx on num_exp_add (id1, id2)",
+            )
+            .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+        assert_eq!(
+            db.execute(
+                1,
+                "alter table num_exp_add set (parallel_workers = 4)",
+            )
+            .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+    }
+
+    #[test]
     fn copy_from_rows_inserts_typed_rows() {
         let base = temp_dir("copy_from_rows");
         let db = Database::open(&base, 16).unwrap();
@@ -655,6 +681,42 @@
                         Value::Float64(2.5),
                     ]]
                 );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn copy_from_rows_into_column_subset_leaves_other_columns_null() {
+        let base = temp_dir("copy_from_rows_subset");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        db.execute(
+            1,
+            "create table width_bucket_test (operand_num numeric, operand_f8 float8)",
+        )
+        .unwrap();
+
+        let inserted = session
+            .copy_from_rows_into(
+                &db,
+                "width_bucket_test",
+                Some(&["operand_num".into()]),
+                &[vec!["5.5".into()]],
+            )
+            .unwrap();
+        assert_eq!(inserted, 1);
+
+        match db
+            .execute(
+                1,
+                "select operand_num, operand_f8 is null from width_bucket_test",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Numeric("5.5".into()), Value::Bool(true)]]);
             }
             other => panic!("expected query result, got {:?}", other),
         }

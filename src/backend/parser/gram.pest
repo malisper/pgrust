@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_index_stmt | alter_table_set_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -38,6 +38,9 @@ insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_li
 insert_values_source = { kw_values ~ values_row ~ ("," ~ values_row)* }
 insert_default_values_source = { kw_default ~ kw_values }
 create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ identifier ~ create_table_tail ~ table_storage_clause? }
+create_index_stmt = { kw_create ~ kw_unique? ~ kw_index ~ identifier ~ kw_on ~ identifier ~ "(" ~ ident_list ~ ")" }
+alter_table_set_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
+reloption = { identifier ~ "=" ~ set_value_atom }
 temp_clause = { kw_temp | kw_temporary }
 create_table_tail = { create_table_column_form | create_table_as_form }
 create_table_column_form = { "(" ~ column_def ~ ("," ~ column_def)* ~ ")" ~ on_commit_clause? | "(" ~ ")" ~ on_commit_clause? }
@@ -70,8 +73,8 @@ only_clause = { kw_only }
 if_exists_clause = { kw_if ~ kw_exists }
 update_stmt = { cte_clause? ~ kw_update ~ identifier ~ kw_set ~ assignment ~ ("," ~ assignment)* ~ (kw_where ~ expr)? }
 delete_stmt = { cte_clause? ~ kw_delete ~ kw_from ~ identifier ~ (kw_where ~ expr)? }
-begin_stmt = { (kw_begin | (kw_start ~ kw_transaction)) }
-commit_stmt = { (kw_commit | kw_end) }
+begin_stmt = { (kw_begin ~ kw_transaction?) | (kw_start ~ kw_transaction) }
+commit_stmt = { ((kw_commit | kw_end) ~ kw_transaction?) }
 rollback_stmt = { kw_rollback }
 
 select_list = { star | select_item ~ ("," ~ select_item)* }
@@ -242,6 +245,9 @@ kw_insert = _{ kw_insert_atom }
 kw_into = _{ kw_into_atom }
 kw_values = _{ kw_values_atom }
 kw_create = _{ kw_create_atom }
+kw_unique = _{ kw_unique_atom }
+kw_index = _{ kw_index_atom }
+kw_alter = _{ kw_alter_atom }
 kw_table = _{ kw_table_atom }
 kw_drop = _{ kw_drop_atom }
 kw_truncate = _{ kw_truncate_atom }
@@ -363,6 +369,9 @@ kw_insert_atom = @{ ^"insert" ~ keyword_end }
 kw_into_atom = @{ ^"into" ~ keyword_end }
 kw_values_atom = @{ ^"values" ~ keyword_end }
 kw_create_atom = @{ ^"create" ~ keyword_end }
+kw_unique_atom = @{ ^"unique" ~ keyword_end }
+kw_index_atom = @{ ^"index" ~ keyword_end }
+kw_alter_atom = @{ ^"alter" ~ keyword_end }
 kw_table_atom = @{ ^"table" ~ keyword_end }
 kw_drop_atom = @{ ^"drop" ~ keyword_end }
 kw_truncate_atom = @{ ^"truncate" ~ keyword_end }
