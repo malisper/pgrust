@@ -294,4 +294,21 @@ mod tests {
         .unwrap();
         assert!(matches!(block.statements[0], Stmt::Block(_)));
     }
+
+    #[test]
+    fn reject_query_style_for_loops_quickly() {
+        let err = parse_block(
+            "
+            begin
+                for objtype in values
+                    ('table'), ('index'), ('sequence'), ('view')
+                loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+    }
 }
