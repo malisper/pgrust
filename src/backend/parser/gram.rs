@@ -82,6 +82,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     match inner.as_rule() {
         Rule::do_stmt => Ok(Statement::Do(build_do(inner)?)),
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
+        Rule::table_stmt => Ok(Statement::Select(build_table_select(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
         Rule::values_stmt => Ok(Statement::Values(build_values_statement(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
@@ -103,6 +104,28 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             actual: inner.as_str().into(),
         }),
     }
+}
+
+fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
+    let name = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(SelectStatement {
+        with: Vec::new(),
+        from: Some(FromItem::Table { name }),
+        targets: vec![SelectItem {
+            expr: SqlExpr::Column("*".into()),
+            output_name: "*".into(),
+        }],
+        where_clause: None,
+        group_by: Vec::new(),
+        having: None,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+    })
 }
 
 fn build_do(pair: Pair<'_, Rule>) -> Result<DoStatement, ParseError> {
@@ -638,7 +661,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut with = Vec::new();
     let mut table_name = None;
     let mut columns = None;
-    let mut values = Vec::new();
+    let mut source = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => with = build_cte_clause(part)?,
@@ -646,7 +669,16 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
             Rule::ident_list => {
                 columns = Some(part.into_inner().map(build_identifier).collect::<Vec<_>>())
             }
-            Rule::values_row => values.push(build_values_row(part)?),
+            Rule::insert_values_source => {
+                source = Some(InsertSource::Values(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::values_row)
+                        .map(build_values_row)
+                        .collect::<Result<Vec<_>, _>>()?,
+                ))
+            }
+            Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
+            Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
             _ => {}
         }
     }
@@ -654,7 +686,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         columns,
-        values,
+        source: source.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -1038,11 +1070,27 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let mut inner = pair.into_inner();
     let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let mut default_expr = None;
     let nullable = match inner.next() {
+        Some(flag) if flag.as_rule() == Rule::column_default => {
+            default_expr = flag
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::expr)
+                .map(|expr| expr.as_str().to_string());
+            match inner.next() {
+                Some(flag) => flag.as_rule() == Rule::nullable,
+                None => true,
+            }
+        }
         Some(flag) => flag.as_rule() == Rule::nullable,
         None => true,
     };
-    Ok(ColumnDef { name, ty, nullable })
+    Ok(ColumnDef {
+        name,
+        ty,
+        default_expr,
+        nullable,
+    })
 }
 
 fn build_type(pair: Pair<'_, Rule>) -> SqlType {

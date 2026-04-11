@@ -562,6 +562,7 @@ impl Database {
                             name: column.name.clone(),
                             ty: column.sql_type,
                             nullable: true,
+                            default_expr: None,
                         })
                         .collect(),
                 };

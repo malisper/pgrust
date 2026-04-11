@@ -3493,6 +3493,90 @@
         )
         .unwrap_err();
         assert!(matches!(err, ExecError::NegativeSubstringLength));
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select overlay(B'0101011100' placing '001' from 2 for 3)",
+            )
+            .unwrap(),
+            vec![vec![Value::Bit(
+                crate::include::nodes::datum::BitString::new(10, vec![0b0001_0111, 0b0000_0000]),
+            )]],
+        );
+    }
+
+    #[test]
+    fn insert_select_default_values_and_table_stmt_work() {
+        let base = temp_dir("bit_insert_defaults");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let mut catalog = Catalog::default();
+        let mut desc = RelationDesc {
+            columns: vec![
+                crate::backend::catalog::catalog::column_desc(
+                    "b1",
+                    crate::backend::parser::SqlType::with_bit_len(
+                        crate::backend::parser::SqlTypeKind::Bit,
+                        4,
+                    ),
+                    false,
+                ),
+                crate::backend::catalog::catalog::column_desc(
+                    "b2",
+                    crate::backend::parser::SqlType::with_bit_len(
+                        crate::backend::parser::SqlTypeKind::VarBit,
+                        5,
+                    ),
+                    true,
+                ),
+            ],
+        };
+        desc.columns[0].default_expr = Some("'1001'".into());
+        desc.columns[1].default_expr = Some("B'0101'".into());
+        catalog.insert(
+            "bit_defaults",
+            test_catalog_entry(
+                crate::RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15006,
+                },
+                desc,
+            ),
+        );
+
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults default values",
+            catalog.clone(),
+        )
+        .unwrap();
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults select B'1111', B'1'",
+            catalog.clone(),
+        )
+        .unwrap();
+        assert_query_rows(
+            run_sql_with_catalog(&base, &txns, INVALID_TRANSACTION_ID, "table bit_defaults", catalog)
+                .unwrap(),
+            vec![
+                vec![
+                    Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1001_0000])),
+                    Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b0101_0000])),
+                ],
+                vec![
+                    Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1111_0000])),
+                    Value::Bit(crate::include::nodes::datum::BitString::new(1, vec![0b1000_0000])),
+                ],
+            ],
+        );
     }
 
     #[test]

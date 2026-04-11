@@ -27,6 +27,7 @@ pub struct ColumnDesc {
     pub storage: AttributeDesc,
     pub ty: ScalarType,
     pub sql_type: SqlType,
+    pub default_expr: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

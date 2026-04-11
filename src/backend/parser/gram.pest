@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -34,7 +34,9 @@ set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_va
 signed_set_value = { ("+" | "-") ~ (numeric_literal | integer | identifier) }
 
 show_tables_stmt = { kw_show ~ kw_tables }
-insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ kw_values ~ values_row ~ ("," ~ values_row)* }
+insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ (insert_values_source | insert_default_values_source | select_stmt) }
+insert_values_source = { kw_values ~ values_row ~ ("," ~ values_row)* }
+insert_default_values_source = { kw_default ~ kw_values }
 create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ identifier ~ create_table_tail ~ table_storage_clause? }
 temp_clause = { kw_temp | kw_temporary }
 create_table_tail = { create_table_column_form | create_table_as_form }
@@ -93,7 +95,8 @@ parenthesized_from_item = { "(" ~ from_list ~ ")" }
 relation_alias = { kw_as ~ identifier ~ ("(" ~ ident_list ~ ")")? | bare_relation_alias ~ ("(" ~ ident_list ~ ")")? }
 bare_relation_alias = { !kw_as ~ !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw_having ~ !kw_order ~ !kw_limit ~ !kw_offset ~ identifier }
 
-column_def = { identifier ~ type_name ~ nullability? }
+column_def = { identifier ~ type_name ~ column_default? ~ nullability? }
+column_default = { kw_default ~ expr }
 nullability = { not_null | nullable }
 not_null = { kw_not ~ kw_null }
 nullable = { kw_null }
@@ -440,3 +443,4 @@ kw_preserve_atom = @{ ^"preserve" ~ keyword_end }
 kw_rows_atom = @{ ^"rows" ~ keyword_end }
 kw_end_atom = @{ ^"end" ~ keyword_end }
 kw_rollback_atom = @{ ^"rollback" ~ keyword_end }
+table_stmt = { kw_table ~ identifier }

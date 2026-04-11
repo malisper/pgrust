@@ -1009,7 +1009,7 @@ fn bind_scalar_function_call(
             Ok(Expr::FuncCall { func, args: coerced })
         }
         BuiltinScalarFunction::Overlay => {
-            let value_type = infer_sql_expr_type_with_ctes(
+            let raw_value_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,
                 catalog,
@@ -1017,7 +1017,7 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            let place_type = infer_sql_expr_type_with_ctes(
+            let raw_place_type = infer_sql_expr_type_with_ctes(
                 &args[1],
                 scope,
                 catalog,
@@ -1025,6 +1025,8 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
+            let value_type = coerce_unknown_string_literal_type(&args[0], raw_value_type, raw_place_type);
+            let place_type = coerce_unknown_string_literal_type(&args[1], raw_place_type, value_type);
             let start_type = infer_sql_expr_type_with_ctes(
                 &args[2],
                 scope,
@@ -1050,8 +1052,8 @@ fn bind_scalar_function_call(
             let common = resolve_common_scalar_type(value_type, place_type)
                 .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
             let mut coerced = vec![
-                coerce_bound_expr(bound_args[0].clone(), value_type, common),
-                coerce_bound_expr(bound_args[1].clone(), place_type, common),
+                coerce_bound_expr(bound_args[0].clone(), raw_value_type, common),
+                coerce_bound_expr(bound_args[1].clone(), raw_place_type, common),
                 coerce_bound_expr(bound_args[2].clone(), start_type, SqlType::new(SqlTypeKind::Int4)),
             ];
             if let Some(len_arg) = args.get(3) {
