@@ -8,6 +8,7 @@ use super::expr_math::{
     snap_degree, cosd, cotd, sind, tand,
 };
 use super::expr_string::{eval_left_function, eval_repeat_function, eval_to_char_function};
+use super::expr_bool::{eval_booleq, eval_boolne};
 use super::node_types::*;
 use super::expr_casts::{cast_value, soft_input_error_info};
 pub(crate) use super::expr_compile::{
@@ -324,6 +325,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Lgamma => {
             eval_unary_float_function("lgamma", &values, eval_lgamma)
         }
+        BuiltinScalarFunction::BoolEq => eval_booleq(&values),
+        BuiltinScalarFunction::BoolNe => eval_boolne(&values),
         BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),

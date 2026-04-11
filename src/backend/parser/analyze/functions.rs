@@ -61,6 +61,8 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "erfc" => Some(BuiltinScalarFunction::Erfc),
         "gamma" => Some(BuiltinScalarFunction::Gamma),
         "lgamma" => Some(BuiltinScalarFunction::Lgamma),
+        "booleq" => Some(BuiltinScalarFunction::BoolEq),
+        "boolne" => Some(BuiltinScalarFunction::BoolNe),
         "bitcast_integer_to_float4" => Some(BuiltinScalarFunction::BitcastIntegerToFloat4),
         "bitcast_bigint_to_float8" => Some(BuiltinScalarFunction::BitcastBigintToFloat8),
         "pg_input_is_valid" => Some(BuiltinScalarFunction::PgInputIsValid),
@@ -139,7 +141,10 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Lgamma
         | BuiltinScalarFunction::BitcastIntegerToFloat4
         | BuiltinScalarFunction::BitcastBigintToFloat8 => args.len() == 1,
-        BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => args.len() == 2,
+        BuiltinScalarFunction::Power
+        | BuiltinScalarFunction::Atan2d
+        | BuiltinScalarFunction::BoolEq
+        | BuiltinScalarFunction::BoolNe => args.len() == 2,
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
         BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,

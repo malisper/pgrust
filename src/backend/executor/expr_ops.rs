@@ -5,6 +5,7 @@ use num_integer::Integer;
 use num_traits::{Signed, Zero};
 
 use super::expr_casts::cast_value;
+use super::expr_bool::order_bool_values;
 use super::node_types::*;
 use super::value_io::format_array_text;
 use super::ExecError;
@@ -530,6 +531,7 @@ pub(crate) fn order_values(
             ">=" => pg_float_cmp(*l, *r) != Ordering::Less,
             _ => unreachable!(),
         })),
+        (Value::Bool(_), Value::Bool(_)) => order_bool_values(op, &left, &right),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             let ordering = parsed_numeric_value(l)
                 .zip(parsed_numeric_value(r))
