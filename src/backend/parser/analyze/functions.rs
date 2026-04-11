@@ -61,6 +61,8 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         "erfc" => Some(BuiltinScalarFunction::Erfc),
         "gamma" => Some(BuiltinScalarFunction::Gamma),
         "lgamma" => Some(BuiltinScalarFunction::Lgamma),
+        "bitcast_integer_to_float4" => Some(BuiltinScalarFunction::BitcastIntegerToFloat4),
+        "bitcast_bigint_to_float8" => Some(BuiltinScalarFunction::BitcastBigintToFloat8),
         "pg_input_is_valid" => Some(BuiltinScalarFunction::PgInputIsValid),
         _ => None,
     }
@@ -134,7 +136,9 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Erf
         | BuiltinScalarFunction::Erfc
         | BuiltinScalarFunction::Gamma
-        | BuiltinScalarFunction::Lgamma => args.len() == 1,
+        | BuiltinScalarFunction::Lgamma
+        | BuiltinScalarFunction::BitcastIntegerToFloat4
+        | BuiltinScalarFunction::BitcastBigintToFloat8 => args.len() == 1,
         BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => args.len() == 2,
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
         BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),

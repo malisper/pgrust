@@ -259,7 +259,19 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r)?)),
-        (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l * r)),
+        (Value::Float64(l), Value::Float64(r)) => {
+            let product = l * r;
+            if l.is_finite()
+                && r.is_finite()
+                && *l != 0.0
+                && *r != 0.0
+                && product.is_infinite()
+            {
+                Err(ExecError::FloatOverflow)
+            } else {
+                Ok(Value::Float64(product))
+            }
+        }
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.mul(rv)), "*")
         }

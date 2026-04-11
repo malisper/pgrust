@@ -183,6 +183,8 @@ pub(super) fn infer_sql_expr_type(
                 | BuiltinScalarFunction::Gamma
                 | BuiltinScalarFunction::Lgamma,
             ) => SqlType::new(SqlTypeKind::Float8),
+            Some(BuiltinScalarFunction::BitcastIntegerToFloat4) => SqlType::new(SqlTypeKind::Float4),
+            Some(BuiltinScalarFunction::BitcastBigintToFloat8) => SqlType::new(SqlTypeKind::Float8),
             Some(BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send) => {
                 SqlType::new(SqlTypeKind::Text)
             }
