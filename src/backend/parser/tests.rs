@@ -995,6 +995,20 @@ y$tag$"#).unwrap();
             matches!(parse_statement("create temp table tempy ()").unwrap(), Statement::CreateTable(CreateTableStatement { persistence: TablePersistence::Temporary, table_name, columns, .. }) if table_name == "tempy" && columns.is_empty())
         );
         assert!(
+            matches!(parse_statement("create temp table withoutoid() without oids").unwrap(), Statement::CreateTable(CreateTableStatement { persistence: TablePersistence::Temporary, table_name, columns, .. }) if table_name == "withoutoid" && columns.is_empty())
+        );
+        assert!(
+            matches!(parse_statement("create temp table withoutoid() with (oids = false)").unwrap(), Statement::CreateTable(CreateTableStatement { persistence: TablePersistence::Temporary, table_name, columns, .. }) if table_name == "withoutoid" && columns.is_empty())
+        );
+        assert!(matches!(
+            parse_statement("create table withoid() with (oids)"),
+            Err(ParseError::TablesDeclaredWithOidsNotSupported)
+        ));
+        assert!(matches!(
+            parse_statement("create table withoid() with (oids = true)"),
+            Err(ParseError::TablesDeclaredWithOidsNotSupported)
+        ));
+        assert!(
             matches!(parse_statement("create table pg_temp.tempy (id int4)").unwrap(), Statement::CreateTable(CreateTableStatement { schema_name: Some(schema), table_name, persistence: TablePersistence::Permanent, .. }) if schema == "pg_temp" && table_name == "tempy")
         );
         assert!(matches!(

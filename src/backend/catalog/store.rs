@@ -339,9 +339,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
         next_oid: DEFAULT_FIRST_USER_OID,
     };
     for row in class_rows {
-        let attrs = attrs_by_relid
-            .get(&row.oid)
-            .ok_or(CatalogError::Corrupt("missing pg_attribute rows for relation"))?;
+        let attrs = attrs_by_relid.get(&row.oid).map(Vec::as_slice).unwrap_or(&[]);
         let columns = attrs
             .iter()
             .map(|attr| {
@@ -661,5 +659,24 @@ mod tests {
             entry.desc.columns[0].sql_type,
             SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
         );
+    }
+
+    #[test]
+    fn catalog_store_roundtrips_zero_column_tables() {
+        let base = temp_dir("zero_columns");
+        let mut store = CatalogStore::load(&base).unwrap();
+        store
+            .create_table(
+                "zerocol",
+                RelationDesc {
+                    columns: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        let entry = reopened_catalog.get("zerocol").unwrap();
+        assert!(entry.desc.columns.is_empty());
     }
 }
