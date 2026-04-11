@@ -4,7 +4,7 @@ use super::functions::resolve_scalar_function;
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> SqlType {
@@ -14,7 +14,7 @@ pub(super) fn infer_sql_expr_type(
 pub(super) fn infer_sql_expr_type_with_ctes(
     expr: &SqlExpr,
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
@@ -267,7 +267,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
 pub(super) fn infer_array_literal_type_with_ctes(
     elements: &[SqlExpr],
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
@@ -290,7 +290,7 @@ pub(super) fn infer_array_literal_type_with_ctes(
 pub(super) fn infer_array_literal_type(
     elements: &[SqlExpr],
     scope: &BoundScope,
-    catalog: &Catalog,
+    catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<SqlType, ParseError> {
