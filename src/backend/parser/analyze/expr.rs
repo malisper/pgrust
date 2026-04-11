@@ -1281,6 +1281,119 @@ fn bind_scalar_function_call(
                 ],
             })
         }
+        BuiltinScalarFunction::NumericInc
+        | BuiltinScalarFunction::Factorial
+        | BuiltinScalarFunction::PgLsn => {
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let arg_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_arg_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            if !is_numeric_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    SqlType::new(SqlTypeKind::Numeric),
+                )],
+            })
+        }
+        BuiltinScalarFunction::Log10 | BuiltinScalarFunction::Log if args.len() == 1 => {
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let arg_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_arg_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            if !is_numeric_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            let target = if matches!(arg_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+                SqlType::new(SqlTypeKind::Float8)
+            } else {
+                SqlType::new(SqlTypeKind::Numeric)
+            };
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)],
+            })
+        }
+        BuiltinScalarFunction::Log => {
+            let raw_left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let raw_right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let left_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_left_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            let right_type = coerce_unknown_string_literal_type(
+                &args[1],
+                raw_right_type,
+                left_type,
+            );
+            if !is_numeric_family(left_type) || !is_numeric_family(right_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric arguments",
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(left_type),
+                        sql_type_name(right_type)
+                    ),
+                });
+            }
+            let target = if matches!(left_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+                || matches!(right_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+            {
+                SqlType::new(SqlTypeKind::Float8)
+            } else {
+                SqlType::new(SqlTypeKind::Numeric)
+            };
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    coerce_bound_expr(bound_args[0].clone(), left_type, target),
+                    coerce_bound_expr(bound_args[1].clone(), right_type, target),
+                ],
+            })
+        }
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => {
             let left_type = infer_sql_expr_type_with_ctes(
                 &args[0],
@@ -1536,6 +1649,41 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => {
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let arg_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_arg_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            if !is_numeric_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            let target = if matches!(arg_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+                SqlType::new(SqlTypeKind::Float8)
+            } else {
+                SqlType::new(SqlTypeKind::Numeric)
+            };
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)],
+            })
+        }
+        BuiltinScalarFunction::Ceil
+        | BuiltinScalarFunction::Ceiling
+        | BuiltinScalarFunction::Floor
+        | BuiltinScalarFunction::Sign
+            if args.len() == 1 =>
+        {
             let raw_arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,

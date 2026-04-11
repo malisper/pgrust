@@ -4109,6 +4109,38 @@
     }
 
     #[test]
+    fn numeric_math_misc_helpers_cover_log_factorial_and_pg_lsn() {
+        let base = temp_dir("numeric_misc_helpers");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select numeric_inc(4.2::numeric), log(10::numeric), log10(10::numeric), log(2::numeric, 4.2::numeric), factorial(4::numeric), pg_lsn(23783416::numeric), ceil(-7.777::numeric), floor(-7.777::numeric), sign('-Infinity'::numeric)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("5.2".into()),
+                        Value::Numeric("1".into()),
+                        Value::Numeric("1".into()),
+                        Value::Numeric("2.0703893278913981".into()),
+                        Value::Numeric("24".into()),
+                        Value::Text("0/16AE7F8".into()),
+                        Value::Numeric("-7".into()),
+                        Value::Numeric("-8".into()),
+                        Value::Numeric("-1".into()),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn float_nan_comparisons_follow_postgres_ordering() {
         let base = temp_dir("float_nan_comparisons");
         let txns = TransactionManager::new_durable(&base).unwrap();
