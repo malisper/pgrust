@@ -4,10 +4,15 @@ use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID,
-    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_TYPE_OID,
-    JSONPATH_TYPE_OID, JSON_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PgAttributeRow, PgClassRow,
-    PgNamespaceRow, PgTypeRow, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, VARCHAR_TYPE_OID,
+    BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
+    BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
+    INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
+    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
+    JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
+    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
+    PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_namespace_rows, builtin_type_rows,
 };
 
@@ -167,27 +172,41 @@ fn catalog_object_name(name: &str) -> &str {
 }
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {
-    if sql_type.is_array {
-        return 0;
-    }
-    match sql_type.kind {
-        SqlTypeKind::Bool => BOOL_TYPE_OID,
-        SqlTypeKind::Bytea => BYTEA_TYPE_OID,
-        SqlTypeKind::InternalChar => INTERNAL_CHAR_TYPE_OID,
-        SqlTypeKind::Int8 => INT8_TYPE_OID,
-        SqlTypeKind::Int2 => INT2_TYPE_OID,
-        SqlTypeKind::Int4 => INT4_TYPE_OID,
-        SqlTypeKind::Text => TEXT_TYPE_OID,
-        SqlTypeKind::Oid => OID_TYPE_OID,
-        SqlTypeKind::Float4 => FLOAT4_TYPE_OID,
-        SqlTypeKind::Float8 => FLOAT8_TYPE_OID,
-        SqlTypeKind::Varchar => VARCHAR_TYPE_OID,
-        SqlTypeKind::Char => BPCHAR_TYPE_OID,
-        SqlTypeKind::Timestamp => TIMESTAMP_TYPE_OID,
-        SqlTypeKind::Numeric => NUMERIC_TYPE_OID,
-        SqlTypeKind::Json => JSON_TYPE_OID,
-        SqlTypeKind::Jsonb => JSONB_TYPE_OID,
-        SqlTypeKind::JsonPath => JSONPATH_TYPE_OID,
+    match (sql_type.kind, sql_type.is_array) {
+        (SqlTypeKind::Bool, false) => BOOL_TYPE_OID,
+        (SqlTypeKind::Bool, true) => BOOL_ARRAY_TYPE_OID,
+        (SqlTypeKind::Bytea, false) => BYTEA_TYPE_OID,
+        (SqlTypeKind::Bytea, true) => BYTEA_ARRAY_TYPE_OID,
+        (SqlTypeKind::InternalChar, false) => INTERNAL_CHAR_TYPE_OID,
+        (SqlTypeKind::InternalChar, true) => INTERNAL_CHAR_ARRAY_TYPE_OID,
+        (SqlTypeKind::Int8, false) => INT8_TYPE_OID,
+        (SqlTypeKind::Int8, true) => INT8_ARRAY_TYPE_OID,
+        (SqlTypeKind::Int2, false) => INT2_TYPE_OID,
+        (SqlTypeKind::Int2, true) => INT2_ARRAY_TYPE_OID,
+        (SqlTypeKind::Int4, false) => INT4_TYPE_OID,
+        (SqlTypeKind::Int4, true) => INT4_ARRAY_TYPE_OID,
+        (SqlTypeKind::Text, false) => TEXT_TYPE_OID,
+        (SqlTypeKind::Text, true) => TEXT_ARRAY_TYPE_OID,
+        (SqlTypeKind::Oid, false) => OID_TYPE_OID,
+        (SqlTypeKind::Oid, true) => OID_ARRAY_TYPE_OID,
+        (SqlTypeKind::Float4, false) => FLOAT4_TYPE_OID,
+        (SqlTypeKind::Float4, true) => FLOAT4_ARRAY_TYPE_OID,
+        (SqlTypeKind::Float8, false) => FLOAT8_TYPE_OID,
+        (SqlTypeKind::Float8, true) => FLOAT8_ARRAY_TYPE_OID,
+        (SqlTypeKind::Varchar, false) => VARCHAR_TYPE_OID,
+        (SqlTypeKind::Varchar, true) => VARCHAR_ARRAY_TYPE_OID,
+        (SqlTypeKind::Char, false) => BPCHAR_TYPE_OID,
+        (SqlTypeKind::Char, true) => BPCHAR_ARRAY_TYPE_OID,
+        (SqlTypeKind::Timestamp, false) => TIMESTAMP_TYPE_OID,
+        (SqlTypeKind::Timestamp, true) => TIMESTAMP_ARRAY_TYPE_OID,
+        (SqlTypeKind::Numeric, false) => NUMERIC_TYPE_OID,
+        (SqlTypeKind::Numeric, true) => NUMERIC_ARRAY_TYPE_OID,
+        (SqlTypeKind::Json, false) => JSON_TYPE_OID,
+        (SqlTypeKind::Json, true) => JSON_ARRAY_TYPE_OID,
+        (SqlTypeKind::Jsonb, false) => JSONB_TYPE_OID,
+        (SqlTypeKind::Jsonb, true) => JSONB_ARRAY_TYPE_OID,
+        (SqlTypeKind::JsonPath, false) => JSONPATH_TYPE_OID,
+        (SqlTypeKind::JsonPath, true) => JSONPATH_ARRAY_TYPE_OID,
     }
 }
 
