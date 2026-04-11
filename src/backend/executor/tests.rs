@@ -6330,6 +6330,32 @@
     }
 
     #[test]
+    fn gcd_and_lcm_support_numeric_arguments() {
+        let base = temp_dir("gcd_lcm_numeric");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select gcd(12.0, 8.0), lcm(12.0, 8.0), gcd(0.0, 5.0)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("4".into()),
+                        Value::Numeric("24".into()),
+                        Value::Numeric("5".into()),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn generate_series_supports_numeric_arguments() {
         let base = temp_dir("generate_series_numeric");
         let txns = TransactionManager::new_durable(&base).unwrap();
