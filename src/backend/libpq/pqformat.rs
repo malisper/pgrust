@@ -13,6 +13,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::InvalidIntegerInput { ty, value } => {
             format!("invalid input syntax for type {ty}: \"{value}\"")
         }
+        ExecError::IntegerOutOfRange { ty, value } => {
+            format!("value \"{value}\" is out of range for type {ty}")
+        }
         ExecError::InvalidNumericInput(value) => {
             format!("invalid input syntax for type numeric: \"{value}\"")
         }
