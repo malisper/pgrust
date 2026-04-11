@@ -51,6 +51,15 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
             db_oid: 1,
             rel_number: kind.relation_oid(),
         },
+        relation_oid: kind.relation_oid(),
+        namespace_oid: bootstrap_namespace_oid(),
+        row_type_oid: match kind {
+            BootstrapCatalogKind::PgType => 71,
+            BootstrapCatalogKind::PgAttribute => 75,
+            BootstrapCatalogKind::PgClass => 83,
+            BootstrapCatalogKind::PgNamespace => 0,
+        },
+        relkind: 'r',
         desc: bootstrap_relation_desc(kind),
     }
 }

@@ -12,19 +12,36 @@
         }
     }
 
+    fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number,
+            },
+            relation_oid: 50_000u32.saturating_add(rel_number),
+            namespace_oid: 11,
+            row_type_oid: 60_000u32.saturating_add(rel_number),
+            relkind: 'r',
+            desc,
+        }
+    }
+
+    fn pets_entry() -> CatalogEntry {
+        test_catalog_entry(
+            15001,
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        )
+    }
+
     fn catalog() -> Catalog {
         let mut catalog = Catalog::default();
-        catalog.insert(
-            "people",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15000,
-                },
-                desc: desc(),
-            },
-        );
+        catalog.insert("people", test_catalog_entry(15000, desc()));
         catalog
     }
 
@@ -806,22 +823,7 @@ y$tag$"#).unwrap();
     #[test]
     fn build_join_plan_resolves_qualified_columns() {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15001,
-                },
-                desc: RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
-                    ],
-                },
-            },
-        );
+        catalog.insert("pets", pets_entry());
         let stmt = parse_select(
             "select people.name, pets.id from people join pets on people.id = pets.owner_id",
         )
@@ -1527,22 +1529,7 @@ y$tag$"#).unwrap();
     #[test]
     fn build_plan_join_alias_hides_inner_relation_names() {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15001,
-                },
-                desc: RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
-                    ],
-                },
-            },
-        );
+        catalog.insert("pets", pets_entry());
         let stmt =
             parse_select("select p.id from (people p join pets q on p.id = q.owner_id) j").unwrap();
         assert!(matches!(
@@ -1681,22 +1668,7 @@ y$tag$"#).unwrap();
     #[test]
     fn build_plan_allows_correlated_scalar_subquery_in_target_list() {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15001,
-                },
-                desc: RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
-                    ],
-                },
-            },
-        );
+        catalog.insert("pets", pets_entry());
         let stmt = parse_select(
             "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p",
         )
@@ -1707,22 +1679,7 @@ y$tag$"#).unwrap();
     #[test]
     fn build_plan_allows_correlated_exists_in_where() {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15001,
-                },
-                desc: RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
-                    ],
-                },
-            },
-        );
+        catalog.insert("pets", pets_entry());
         let stmt = parse_select(
             "select p.name from people p where exists (select 1 from pets q where q.owner_id = p.id)",
         )
@@ -1733,22 +1690,7 @@ y$tag$"#).unwrap();
     #[test]
     fn build_plan_allows_nested_outer_correlation() {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15001,
-                },
-                desc: RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
-                    ],
-                },
-            },
-        );
+        catalog.insert("pets", pets_entry());
         let stmt = parse_select(
             "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id))",
         )
@@ -1767,22 +1709,7 @@ y$tag$"#).unwrap();
     #[test]
     fn build_plan_allows_grouped_outer_column_inside_subquery() {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15001,
-                },
-                desc: RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
-                    ],
-                },
-            },
-        );
+        catalog.insert("pets", pets_entry());
         let stmt = parse_select(
             "select p.id, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.id)",
         )
@@ -1793,22 +1720,7 @@ y$tag$"#).unwrap();
     #[test]
     fn build_plan_rejects_ungrouped_outer_column_inside_subquery() {
         let mut catalog = catalog();
-        catalog.insert(
-            "pets",
-            CatalogEntry {
-                rel: crate::RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: 1,
-                    rel_number: 15001,
-                },
-                desc: RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
-                    ],
-                },
-            },
-        );
+        catalog.insert("pets", pets_entry());
         let stmt = parse_select(
             "select p.name, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.name)",
         )
