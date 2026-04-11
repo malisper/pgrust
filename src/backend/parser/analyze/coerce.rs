@@ -2,10 +2,26 @@ use super::*;
 
 pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
     if from.element_type() == to.element_type() {
-        expr
-    } else {
-        Expr::Cast(Box::new(expr), to)
+        return expr;
     }
+    if let Some(expr) = lower_special_cast(&expr, from, to) {
+        return expr;
+    }
+    Expr::Cast(Box::new(expr), to)
+}
+
+fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
+    if matches!(from.element_type().kind, SqlTypeKind::Char)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::FuncCall {
+            func: BuiltinScalarFunction::BpcharToText,
+            args: vec![expr.clone()],
+        });
+    }
+    None
 }
 
 pub(super) fn resolve_numeric_binary_type(

@@ -148,6 +148,31 @@
         catalog
     }
 
+    fn char_catalog(name: &str, len: i32) -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.insert(
+            name,
+            CatalogEntry {
+                rel: crate::RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15003,
+                },
+                desc: RelationDesc {
+                    columns: vec![crate::backend::catalog::catalog::column_desc(
+                        "name",
+                        crate::backend::parser::SqlType::with_char_len(
+                            crate::backend::parser::SqlTypeKind::Char,
+                            len,
+                        ),
+                        false,
+                    )],
+                },
+            },
+        );
+        catalog
+    }
+
     fn numeric_catalog(name: &str) -> Catalog {
         let mut catalog = Catalog::default();
         catalog.insert(
@@ -5093,6 +5118,68 @@
             err,
             ExecError::StringDataRightTruncation { ref ty } if ty == "character varying(2)"
         ));
+    }
+
+    #[test]
+    fn insert_sql_char_pads_to_declared_length() {
+        let base = temp_dir("insert_char_padding");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t (name) values ('bbbb')",
+            char_catalog("t", 8),
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select name from t",
+            char_catalog("t", 8),
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("bbbb    ".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn char_to_text_cast_trims_trailing_spaces() {
+        let base = temp_dir("char_to_text_trim");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t (name) values ('BBBB')",
+            char_catalog("t", 8),
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        match run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select lower(name) from t",
+            char_catalog("t", 8),
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("bbbb".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
     }
 
     #[test]

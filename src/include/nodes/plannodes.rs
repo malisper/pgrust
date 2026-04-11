@@ -123,6 +123,7 @@ pub enum BuiltinScalarFunction {
     Left,
     Repeat,
     Lower,
+    BpcharToText,
     Position,
     ConvertFrom,
     ToChar,

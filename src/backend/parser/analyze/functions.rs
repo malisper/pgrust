@@ -144,7 +144,8 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::Gamma
         | BuiltinScalarFunction::Lgamma
         | BuiltinScalarFunction::BitcastIntegerToFloat4
-        | BuiltinScalarFunction::BitcastBigintToFloat8 => args.len() == 1,
+        | BuiltinScalarFunction::BitcastBigintToFloat8
+        | BuiltinScalarFunction::BpcharToText => args.len() == 1,
         BuiltinScalarFunction::Power
         | BuiltinScalarFunction::Atan2d
         | BuiltinScalarFunction::BoolEq
