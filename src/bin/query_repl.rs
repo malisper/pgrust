@@ -23,6 +23,7 @@ use pgrust::parser::{
     create_relation_desc,
     normalize_create_table_name, parse_statement,
 };
+use pgrust::pl::plpgsql::execute_do;
 use pgrust::{BufferPool, SmgrStorageBackend};
 
 struct RawModeGuard {
@@ -424,6 +425,7 @@ fn run_statement(
     })?;
 
     let result = match stmt {
+        Statement::Do(stmt) => execute_do(&stmt),
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {

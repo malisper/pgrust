@@ -6,6 +6,7 @@ use super::{
     executor_start, parse_statement,
 };
 use crate::backend::parser::CatalogLookup;
+use crate::pl::plpgsql::execute_do;
 
 pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementResult, ExecError> {
     let columns = plan.columns();
@@ -43,6 +44,7 @@ pub fn execute_statement(
     let cid = ctx.next_command_id;
     ctx.snapshot = ctx.txns.read().snapshot_for_command(xid, cid)?;
     let result = match stmt {
+        Statement::Do(stmt) => execute_do(&stmt),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
         Statement::Values(stmt) => execute_plan(build_values_plan(&stmt, catalog)?, ctx),
@@ -77,6 +79,7 @@ pub fn execute_readonly_statement(
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     match stmt {
+        Statement::Do(stmt) => execute_do(&stmt),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
         Statement::Values(stmt) => execute_plan(build_values_plan(&stmt, catalog)?, ctx),

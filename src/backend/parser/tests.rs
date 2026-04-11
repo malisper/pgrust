@@ -82,6 +82,36 @@
     }
 
     #[test]
+    fn parse_do_statement_defaults_to_plpgsql() {
+        let stmt = parse_statement("do $$ begin null; end $$").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Do(DoStatement {
+                language: None,
+                code: " begin null; end ".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_do_statement_with_explicit_language() {
+        let stmt = parse_statement("do language plpgsql $$ begin null; end $$").unwrap();
+        assert_eq!(
+            stmt,
+            Statement::Do(DoStatement {
+                language: Some("plpgsql".into()),
+                code: " begin null; end ".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_expression_entrypoint_reuses_sql_expression_grammar() {
+        let expr = parse_expr("1 + 2 * 3").unwrap();
+        assert!(matches!(expr, SqlExpr::Add(_, _)));
+    }
+
+    #[test]
     fn parse_set_local_statement() {
         let stmt = parse_statement("set local client_min_messages to 'warning'").unwrap();
         assert_eq!(

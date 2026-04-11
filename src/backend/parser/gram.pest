@@ -1,7 +1,11 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ explain_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+
+do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
+do_body = { quoted_string_literal }
+do_language_clause = { kw_language ~ identifier }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }
 explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ select_stmt }
@@ -177,6 +181,8 @@ star = { "*" }
 qualified_star = { simple_identifier ~ "." ~ star }
 
 kw_select = _{ kw_select_atom }
+kw_do = _{ kw_do_atom }
+kw_language = _{ kw_language_atom }
 kw_show = _{ kw_show_atom }
 kw_reset = _{ kw_reset_atom }
 kw_session = _{ kw_session_atom }
@@ -297,6 +303,8 @@ kw_rollback = _{ kw_rollback_atom }
 kw_select_atom = @{ ^"select" ~ keyword_end }
 kw_show_atom = @{ ^"show" ~ keyword_end }
 kw_reset_atom = @{ ^"reset" ~ keyword_end }
+kw_do_atom = @{ ^"do" ~ keyword_end }
+kw_language_atom = @{ ^"language" ~ keyword_end }
 kw_session_atom = @{ ^"session" ~ keyword_end }
 kw_local_atom = @{ ^"local" ~ keyword_end }
 kw_temp_atom = @{ ^"temp" ~ keyword_end }

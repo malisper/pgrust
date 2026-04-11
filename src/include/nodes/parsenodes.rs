@@ -117,6 +117,7 @@ impl fmt::Display for ParseError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
+    Do(DoStatement),
     Explain(ExplainStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
@@ -135,6 +136,12 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoStatement {
+    pub language: Option<String>,
+    pub code: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

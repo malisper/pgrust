@@ -30,6 +30,7 @@ use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
 };
+use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 #[derive(Debug)]
@@ -661,6 +662,7 @@ impl Database {
         let stmt = self.plan_cache.get_statement(sql)?;
 
         match stmt {
+            Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Analyze(ref analyze_stmt) => {
                 let visible_relcache = self.visible_relcache(client_id);
                 execute_analyze(analyze_stmt.clone(), &visible_relcache)

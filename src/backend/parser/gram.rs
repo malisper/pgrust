@@ -19,6 +19,22 @@ pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
         .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
 }
 
+pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
+    let sql = strip_sql_comments_preserving_layout(sql);
+    SqlParser::parse(Rule::expr, &sql)
+        .map_err(|e| map_pest_error("expression", e))
+        .and_then(|mut pairs| {
+            let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
+            if pairs.next().is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "expression",
+                    actual: sql.clone(),
+                });
+            }
+            build_expr(pair)
+        })
+}
+
 pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
     SqlParser::parse(Rule::type_name, &sql)
@@ -63,6 +79,7 @@ fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> Pars
 fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
+        Rule::do_stmt => Ok(Statement::Do(build_do(inner)?)),
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
         Rule::values_stmt => Ok(Statement::Values(build_values_statement(inner)?)),
@@ -85,6 +102,28 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             actual: inner.as_str().into(),
         }),
     }
+}
+
+fn build_do(pair: Pair<'_, Rule>) -> Result<DoStatement, ParseError> {
+    let mut language = None;
+    let mut code = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::do_body => code = Some(decode_string_literal(part.as_str())?),
+            Rule::do_language_clause => {
+                let ident = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                language = Some(build_identifier(ident));
+            }
+            _ => {}
+        }
+    }
+    Ok(DoStatement {
+        language,
+        code: code.ok_or(ParseError::UnexpectedEof)?,
+    })
 }
 
 fn build_analyze(pair: Pair<'_, Rule>) -> Result<AnalyzeStatement, ParseError> {
