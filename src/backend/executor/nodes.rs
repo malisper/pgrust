@@ -1,0 +1,766 @@
+use super::{AccumState, AggGroup, ExecError, ExecutorContext};
+use crate::backend::access::heap::heapam::{
+    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+};
+use crate::backend::commands::explain::format_explain_lines;
+use crate::backend::executor::exec_expr::{
+    compare_order_by_keys, decode_value, eval_expr, eval_json_table_function,
+};
+use crate::include::nodes::datum::Value;
+use crate::include::nodes::execnodes::{
+    AggregateState, FilterState, GenerateSeriesState, JsonTableFunctionState, LimitState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState, ResultState,
+    SeqScanState, SlotKind, TupleSlot, UnnestState,
+};
+
+use std::time::Instant;
+
+impl PlanNode for ResultState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        _ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.emitted {
+            Ok(None)
+        } else {
+            self.emitted = true;
+            self.slot.kind = SlotKind::Virtual;
+            self.slot.tts_values.clear();
+            self.slot.tts_nvalid = 0;
+            Ok(Some(&mut self.slot))
+        }
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &[]
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Result".into()
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for SeqScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.scan.is_none() {
+            self.scan = Some(heap_scan_begin_visible(
+                &ctx.pool,
+                ctx.client_id,
+                self.rel,
+                ctx.snapshot.clone(),
+            )?);
+        }
+
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        loop {
+            let scan = self.scan.as_mut().unwrap();
+            if scan.has_page_tuples() {
+                let buffer_id = scan.pinned_buffer_id().expect("buffer must be pinned");
+                let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
+                    .expect("pinned buffer must be valid");
+
+                if let Some((_tid, tuple_bytes)) = heap_scan_page_next_tuple(page, scan) {
+                    let raw_ptr = tuple_bytes.as_ptr();
+                    let raw_len = tuple_bytes.len();
+                    let pin = scan.pinned_buffer_rc().expect("buffer must be pinned");
+
+                    self.slot.kind = SlotKind::BufferHeapTuple {
+                        tuple_ptr: raw_ptr,
+                        tuple_len: raw_len,
+                        pin,
+                    };
+                    self.slot.tts_nvalid = 0;
+                    self.slot.tts_values.clear();
+                    self.slot.decode_offset = 0;
+
+                    if let Some(qual) = &self.qual {
+                        if !qual(&mut self.slot, ctx)? {
+                            continue;
+                        }
+                    }
+
+                    if let Some(s) = start {
+                        self.stats.loops += 1;
+                        self.stats.total_time += s.elapsed();
+                        self.stats.rows += 1;
+                    }
+                    return Ok(Some(&mut self.slot));
+                }
+            }
+
+            let next: Result<Option<usize>, ExecError> =
+                heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, scan);
+            if next?.is_none() {
+                heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, scan)?;
+                if let Some(s) = start {
+                    self.stats.loops += 1;
+                    self.stats.total_time += s.elapsed();
+                }
+                return Ok(None);
+            }
+        }
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        format!("Seq Scan on rel {}", self.rel.rel_number)
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for FilterState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        loop {
+            let slot = match self.input.exec_proc_node(ctx)? {
+                Some(s) => s,
+                None => {
+                    if let Some(s) = start {
+                        self.stats.loops += 1;
+                        self.stats.total_time += s.elapsed();
+                    }
+                    return Ok(None);
+                }
+            };
+
+            if (self.compiled_predicate)(slot, ctx)? {
+                if let Some(s) = start {
+                    self.stats.loops += 1;
+                    self.stats.total_time += s.elapsed();
+                    self.stats.rows += 1;
+                }
+                return Ok(self.input.current_slot());
+            }
+        }
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Filter".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for NestedLoopJoinState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.right_rows.is_none() {
+            let mut rows = Vec::new();
+            while let Some(slot) = self.right.exec_proc_node(ctx)? {
+                let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                rows.push(TupleSlot::virtual_row(values));
+            }
+            self.right_rows = Some(rows);
+        }
+
+        loop {
+            if self.current_left.is_none() {
+                match self.left.exec_proc_node(ctx)? {
+                    Some(slot) => {
+                        let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                        self.current_left = Some(TupleSlot::virtual_row(values));
+                        self.right_index = 0;
+                    }
+                    None => return Ok(None),
+                }
+            }
+
+            let right_rows = self.right_rows.as_ref().unwrap();
+
+            while self.right_index < right_rows.len() {
+                let ri = self.right_index;
+                self.right_index += 1;
+
+                let left = self.current_left.as_ref().unwrap();
+                let right = &right_rows[ri];
+                let mut combined_values: Vec<Value> = left.tts_values.clone();
+                combined_values.extend(right.tts_values.iter().cloned());
+                let nvalid = combined_values.len();
+                self.slot.tts_values = combined_values;
+                self.slot.tts_nvalid = nvalid;
+                self.slot.kind = SlotKind::Virtual;
+                self.slot.decode_offset = 0;
+
+                match eval_expr(&self.on, &mut self.slot, ctx)? {
+                    Value::Bool(true) => return Ok(Some(&mut self.slot)),
+                    Value::Bool(false) | Value::Null => {}
+                    other => return Err(ExecError::NonBoolQual(other)),
+                }
+            }
+
+            self.current_left = None;
+        }
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.combined_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Nested Loop".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.left, indent, analyze, lines);
+        format_explain_lines(&*self.right, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for OrderByState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.rows.is_none() {
+            let mut rows = Vec::new();
+            while let Some(slot) = self.input.exec_proc_node(ctx)? {
+                let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                rows.push(TupleSlot::virtual_row(values));
+            }
+
+            let mut keyed_rows = Vec::with_capacity(rows.len());
+            for mut row in rows {
+                let mut keys = Vec::with_capacity(self.items.len());
+                for item in &self.items {
+                    keys.push(eval_expr(&item.expr, &mut row, ctx)?);
+                }
+                keyed_rows.push((keys, row));
+            }
+
+            keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
+                compare_order_by_keys(&self.items, left_keys, right_keys)
+            });
+            self.rows = Some(keyed_rows.into_iter().map(|(_, row)| row).collect());
+        }
+
+        let rows = self.rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Sort".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for LimitState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if let Some(limit) = self.limit {
+            if self.returned >= limit {
+                return Ok(None);
+            }
+        }
+
+        while self.skipped < self.offset {
+            if self.input.exec_proc_node(ctx)?.is_none() {
+                return Ok(None);
+            }
+            self.skipped += 1;
+        }
+
+        let slot = self.input.exec_proc_node(ctx)?;
+        if slot.is_some() {
+            self.returned += 1;
+        }
+        Ok(slot)
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Limit".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for ProjectionState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let input_slot = match self.input.exec_proc_node(ctx)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let mut values = Vec::with_capacity(self.targets.len());
+        for target in &self.targets {
+            values.push(eval_expr(&target.expr, input_slot, ctx)?.to_owned_value());
+        }
+
+        let nvalid = values.len();
+        self.slot.tts_values = values;
+        self.slot.tts_nvalid = nvalid;
+        self.slot.kind = SlotKind::Virtual;
+        self.slot.decode_offset = 0;
+        Ok(Some(&mut self.slot))
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Projection".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for AggregateState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.result_rows.is_none() {
+            let mut groups: Vec<AggGroup> = Vec::new();
+
+            while let Some(slot) = self.input.exec_proc_node(ctx)? {
+                self.key_buffer.clear();
+                for expr in &self.group_by {
+                    self.key_buffer.push(eval_expr(expr, slot, ctx)?);
+                }
+
+                let group_idx = groups
+                    .iter()
+                    .position(|g| g.key_values == self.key_buffer)
+                    .unwrap_or_else(|| {
+                        let accum_states = self
+                            .accumulators
+                            .iter()
+                            .map(|a| AccumState::new(a.func, a.distinct, a.sql_type))
+                            .collect();
+                        groups.push(AggGroup {
+                            key_values: self.key_buffer.clone(),
+                            accum_states,
+                        });
+                        groups.len() - 1
+                    });
+
+                let group = &mut groups[group_idx];
+                for (i, accum) in self.accumulators.iter().enumerate() {
+                    let values = accum
+                        .args
+                        .iter()
+                        .map(|arg| eval_expr(arg, slot, ctx))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (self.trans_fns[i])(&mut group.accum_states[i], &values);
+                }
+            }
+
+            if groups.is_empty() && self.group_by.is_empty() {
+                let accum_states = self
+                    .accumulators
+                    .iter()
+                    .map(|a| AccumState::new(a.func, a.distinct, a.sql_type))
+                    .collect();
+                groups.push(AggGroup {
+                    key_values: Vec::new(),
+                    accum_states,
+                });
+            }
+
+            let mut result_rows = Vec::new();
+            for group in &groups {
+                let mut row_values = group.key_values.clone();
+                for accum_state in &group.accum_states {
+                    row_values.push(accum_state.finalize());
+                }
+
+                if let Some(having) = &self.having {
+                    let mut having_slot = TupleSlot::virtual_row(row_values.clone());
+                    match eval_expr(having, &mut having_slot, ctx)? {
+                        Value::Bool(true) => {}
+                        Value::Bool(false) | Value::Null => continue,
+                        other => return Err(ExecError::NonBoolQual(other)),
+                    }
+                }
+
+                result_rows.push(TupleSlot::virtual_row(row_values));
+            }
+
+            self.result_rows = Some(result_rows);
+        }
+
+        let rows = self.result_rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.result_rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Aggregate".into()
+    }
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent, analyze, lines);
+    }
+}
+
+impl PlanNode for GenerateSeriesState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if !self.initialized {
+            let mut dummy = TupleSlot::empty(0);
+            self.current = match eval_expr(&self.start, &mut dummy, ctx)? {
+                Value::Int32(v) => v,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "generate_series start",
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
+            };
+            self.end = match eval_expr(&self.stop, &mut dummy, ctx)? {
+                Value::Int32(v) => v,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "generate_series stop",
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
+            };
+            self.step_val = match eval_expr(&self.step, &mut dummy, ctx)? {
+                Value::Int32(v) => v,
+                other => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "generate_series step",
+                        left: other,
+                        right: Value::Null,
+                    });
+                }
+            };
+            self.initialized = true;
+        }
+
+        let done = if self.step_val > 0 {
+            self.current > self.end
+        } else if self.step_val < 0 {
+            self.current < self.end
+        } else {
+            return Err(ExecError::TypeMismatch {
+                op: "generate_series step must be non-zero",
+                left: Value::Int32(0),
+                right: Value::Null,
+            });
+        };
+
+        if done {
+            return Ok(None);
+        }
+
+        self.slot.kind = SlotKind::Virtual;
+        self.slot.tts_values.clear();
+        self.slot.tts_values.push(Value::Int32(self.current));
+        self.slot.tts_nvalid = 1;
+        self.current += self.step_val;
+        Ok(Some(&mut self.slot))
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Function Scan on generate_series".into()
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for UnnestState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.rows.is_none() {
+            let mut dummy = TupleSlot::empty(0);
+            let mut arrays = Vec::with_capacity(self.args.len());
+            let mut max_len = 0usize;
+            for arg in &self.args {
+                match eval_expr(arg, &mut dummy, ctx)? {
+                    Value::Null => arrays.push(None),
+                    Value::Array(values) => {
+                        max_len = max_len.max(values.len());
+                        arrays.push(Some(values));
+                    }
+                    other => {
+                        return Err(ExecError::TypeMismatch {
+                            op: "unnest",
+                            left: other,
+                            right: Value::Null,
+                        });
+                    }
+                }
+            }
+
+            let mut rows = Vec::with_capacity(max_len);
+            for idx in 0..max_len {
+                let mut row = Vec::with_capacity(arrays.len());
+                for array in &arrays {
+                    match array {
+                        Some(values) => row.push(values.get(idx).cloned().unwrap_or(Value::Null)),
+                        None => row.push(Value::Null),
+                    }
+                }
+                rows.push(TupleSlot::virtual_row(row));
+            }
+            self.rows = Some(rows);
+        }
+
+        let rows = self.rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Function Scan on unnest".into()
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for JsonTableFunctionState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.rows.is_none() {
+            let mut dummy = TupleSlot::empty(0);
+            self.rows = Some(eval_json_table_function(self.kind, &self.arg, &mut dummy, ctx)?);
+        }
+
+        let rows = self.rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Function Scan on json".into()
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl TupleSlot {
+    pub fn values(&mut self) -> Result<&[Value], ExecError> {
+        let ncols = self.ncols();
+        self.slot_getsomeattrs(ncols)
+    }
+
+    pub fn slot_getsomeattrs(&mut self, natts: usize) -> Result<&[Value], ExecError> {
+        if self.tts_nvalid >= natts {
+            return Ok(&self.tts_values[..natts]);
+        }
+        match &self.kind {
+            SlotKind::Virtual => Ok(&self.tts_values[..natts]),
+            SlotKind::BufferHeapTuple {
+                tuple_ptr,
+                tuple_len,
+                ..
+            } => {
+                let (ptr, len) = (*tuple_ptr, *tuple_len);
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                let decoder = self
+                    .decoder
+                    .as_ref()
+                    .expect("BufferHeapTuple requires decoder");
+                decoder.decode_range(
+                    bytes,
+                    &mut self.tts_values,
+                    self.tts_nvalid,
+                    natts,
+                    &mut self.decode_offset,
+                )?;
+                self.tts_nvalid = natts;
+                Ok(&self.tts_values[..natts])
+            }
+            SlotKind::HeapTuple {
+                desc,
+                attr_descs,
+                tuple,
+                ..
+            } => {
+                let raw = tuple.deform(attr_descs)?;
+                self.tts_values.clear();
+                for (column, datum) in desc.columns.iter().zip(raw.into_iter()) {
+                    self.tts_values.push(decode_value(column, datum)?);
+                }
+                self.tts_nvalid = self.tts_values.len();
+                Ok(&self.tts_values[..natts])
+            }
+            SlotKind::Empty => {
+                panic!("cannot get attrs from empty slot")
+            }
+        }
+    }
+
+    pub fn get_attr(&mut self, index: usize) -> Result<&Value, ExecError> {
+        self.slot_getsomeattrs(index + 1)?;
+        Ok(&self.tts_values[index])
+    }
+
+    pub fn into_values(mut self) -> Result<Vec<Value>, ExecError> {
+        self.values()?;
+        Value::materialize_all(&mut self.tts_values);
+        Ok(self.tts_values)
+    }
+}
