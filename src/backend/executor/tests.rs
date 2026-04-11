@@ -1953,7 +1953,7 @@
     }
 
     #[test]
-    fn synthetic_pg_class_exposes_oid_column() {
+    fn pg_class_exposes_oid_column_through_normal_catalog_plan() {
         let base = temp_dir("pg_class_oid");
         let txns = TransactionManager::new_durable(&base).unwrap();
 
@@ -1966,6 +1966,30 @@
             )
             .unwrap(),
             vec![vec![Value::Int64(1259)]],
+        );
+    }
+
+    #[test]
+    fn pg_attribute_exposes_bootstrap_columns() {
+        let base = temp_dir("pg_attribute_bootstrap");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select attname from pg_attribute where attrelid = 1259 order by attnum",
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Text("oid".into())],
+                vec![Value::Text("relname".into())],
+                vec![Value::Text("relnamespace".into())],
+                vec![Value::Text("reltype".into())],
+                vec![Value::Text("relfilenode".into())],
+                vec![Value::Text("relkind".into())],
+            ],
         );
     }
 

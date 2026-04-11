@@ -7,6 +7,24 @@ pub const PG_PROC_RELATION_OID: u32 = 1255;
 pub const PG_CLASS_RELATION_OID: u32 = 1259;
 pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
 
+pub const BOOL_TYPE_OID: u32 = 16;
+pub const BYTEA_TYPE_OID: u32 = 17;
+pub const INTERNAL_CHAR_TYPE_OID: u32 = 18;
+pub const INT8_TYPE_OID: u32 = 20;
+pub const INT2_TYPE_OID: u32 = 21;
+pub const INT4_TYPE_OID: u32 = 23;
+pub const TEXT_TYPE_OID: u32 = 25;
+pub const OID_TYPE_OID: u32 = 26;
+pub const FLOAT4_TYPE_OID: u32 = 700;
+pub const FLOAT8_TYPE_OID: u32 = 701;
+pub const VARCHAR_TYPE_OID: u32 = 1043;
+pub const BPCHAR_TYPE_OID: u32 = 1042;
+pub const TIMESTAMP_TYPE_OID: u32 = 1114;
+pub const NUMERIC_TYPE_OID: u32 = 1700;
+pub const JSON_TYPE_OID: u32 = 114;
+pub const JSONB_TYPE_OID: u32 = 3802;
+pub const JSONPATH_TYPE_OID: u32 = 4072;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootstrapCatalogRelation {
     pub oid: u32,

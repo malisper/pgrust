@@ -1,4 +1,6 @@
 use super::*;
+use crate::backend::catalog::system_catalogs::build_system_catalog_plan;
+use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCache;
 
 #[derive(Debug, Clone)]
@@ -275,29 +277,10 @@ pub(super) fn bind_from_item_with_ctes(
                     scope_for_relation(Some(name), &cte.desc),
                 ));
             }
-            if name.eq_ignore_ascii_case("pg_class") {
-                let output_columns = vec![
-                    QueryColumn {
-                        name: "oid".into(),
-                        sql_type: SqlType::new(SqlTypeKind::Oid),
-                    },
-                    QueryColumn::text("relname"),
-                ];
-                let desc = RelationDesc {
-                    columns: output_columns
-                        .iter()
-                        .map(|col| column_desc(col.name.clone(), col.sql_type, false))
-                        .collect(),
-                };
+            if let Some((plan, desc)) = build_system_catalog_plan(name, catalog) {
                 return Ok((
-                    Plan::Values {
-                        rows: vec![vec![
-                            Expr::Const(Value::Int64(1259)),
-                            Expr::Const(Value::Text("pg_class".into())),
-                        ]],
-                        output_columns: output_columns.clone(),
-                    },
-                    scope_for_relation(Some(name), &desc),
+                    plan,
+                    scope_for_relation(Some(normalize_catalog_name(name)), &desc),
                 ));
             }
             let relcache = RelCache::from_catalog(catalog);
