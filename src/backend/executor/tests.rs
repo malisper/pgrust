@@ -2873,6 +2873,23 @@
     }
 
     #[test]
+    fn pg_input_is_valid_reports_varchar_typmod_results() {
+        let base = temp_dir("pg_input_is_valid_varchar");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select pg_input_is_valid('abcd  ', 'varchar(4)'), pg_input_is_valid('abcde', 'varchar(4)')",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(true), Value::Bool(false)]],
+        );
+    }
+
+    #[test]
     fn pg_input_error_info_returns_one_row_with_structured_fields() {
         let base = temp_dir("pg_input_error_info_int2");
         let txns = TransactionManager::new_durable(&base).unwrap();
@@ -2923,6 +2940,28 @@
                 Value::Null,
                 Value::Null,
                 Value::Text("22003".into()),
+            ]],
+        );
+    }
+
+    #[test]
+    fn pg_input_error_info_reports_varchar_typmod_truncation() {
+        let base = temp_dir("pg_input_error_info_varchar");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select * from pg_input_error_info('abcde', 'varchar(4)')",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("value too long for type character varying(4)".into()),
+                Value::Null,
+                Value::Null,
+                Value::Text("22001".into()),
             ]],
         );
     }
