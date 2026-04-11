@@ -36,6 +36,9 @@ pub(super) fn infer_sql_expr_type(
         SqlExpr::NumericLiteral(_) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
         | SqlExpr::Shl(left, right)
         | SqlExpr::Shr(left, right)
         | SqlExpr::Mul(left, right)
@@ -54,6 +57,9 @@ pub(super) fn infer_sql_expr_type(
             infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer)
         }
         SqlExpr::Negate(inner) => {
+            infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer)
+        }
+        SqlExpr::BitNot(inner) => {
             infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer)
         }
         SqlExpr::Cast(_, ty) => *ty,

@@ -33,6 +33,9 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
+        | SqlExpr::BitAnd(l, r)
+        | SqlExpr::BitOr(l, r)
+        | SqlExpr::BitXor(l, r)
         | SqlExpr::Shl(l, r)
         | SqlExpr::Shr(l, r)
         | SqlExpr::Mul(l, r)
@@ -52,6 +55,7 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
         | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
@@ -115,6 +119,9 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>
         SqlExpr::Cast(inner, _) => collect_aggs(inner, aggs),
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
+        | SqlExpr::BitAnd(l, r)
+        | SqlExpr::BitOr(l, r)
+        | SqlExpr::BitXor(l, r)
         | SqlExpr::Shl(l, r)
         | SqlExpr::Shr(l, r)
         | SqlExpr::Mul(l, r)
@@ -137,6 +144,7 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>
         }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
         | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
