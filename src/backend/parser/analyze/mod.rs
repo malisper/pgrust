@@ -88,6 +88,32 @@ pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
     }
 }
 
+pub(crate) fn bind_scalar_expr_in_scope(
+    expr: &SqlExpr,
+    columns: &[(String, SqlType)],
+    catalog: &dyn CatalogLookup,
+) -> Result<(Expr, SqlType), ParseError> {
+    let scope = BoundScope {
+        desc: RelationDesc {
+            columns: columns
+                .iter()
+                .map(|(name, sql_type)| column_desc(name.clone(), *sql_type, true))
+                .collect(),
+        },
+        columns: columns
+            .iter()
+            .map(|(name, _)| ScopeColumn {
+                output_name: name.clone(),
+                relation_name: None,
+            })
+            .collect(),
+    };
+    let empty_outer = Vec::new();
+    let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
+    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
+    Ok((bound, sql_type))
+}
+
 fn normalize_create_table_name_parts(
     schema_name: Option<&str>,
     table_name: &str,

@@ -2,7 +2,8 @@ use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
 
-use crate::backend::parser::{ParseError, parse_type_name};
+use crate::backend::parser::{ParseError, SqlExpr, parse_expr, parse_type_name};
+use crate::backend::executor::Value;
 
 use super::ast::{Block, RaiseLevel, Stmt, VarDecl};
 
@@ -213,7 +214,19 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                     RaiseLevel::Exception
                 };
             }
-            Rule::sql_string => message = Some(part.as_str().to_string()),
+            Rule::sql_string => {
+                let expr = parse_expr(part.as_str())?;
+                let text = match expr {
+                    SqlExpr::Const(Value::Text(text)) => text.to_string(),
+                    other => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "RAISE format string literal",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                message = Some(text);
+            }
             Rule::expr_until_comma_or_semi => params.push(part.as_str().trim().to_string()),
             _ => {}
         }

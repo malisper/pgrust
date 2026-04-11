@@ -34,7 +34,7 @@ use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
     jsonb_from_value,
 };
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::pgrust::compact_string::CompactString;
 
 extern crate rand;
@@ -229,6 +229,232 @@ pub fn eval_expr(
         Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(
             render_current_timestamp(),
         ))),
+    }
+}
+
+pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
+    match expr {
+        Expr::Column(index) => Ok(slot.get_attr(*index)?.clone()),
+        Expr::Const(value) => Ok(value.clone()),
+        Expr::Add(left, right) => {
+            add_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Sub(left, right) => {
+            sub_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::BitAnd(left, right) => {
+            bitwise_and_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::BitOr(left, right) => {
+            bitwise_or_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::BitXor(left, right) => {
+            bitwise_xor_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Shl(left, right) => {
+            shift_left_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Shr(left, right) => {
+            shift_right_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Mul(left, right) => {
+            mul_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Div(left, right) => {
+            div_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Mod(left, right) => {
+            mod_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Concat(left, right) => {
+            concat_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::UnaryPlus(inner) => eval_plpgsql_expr(inner, slot),
+        Expr::Negate(inner) => negate_value(eval_plpgsql_expr(inner, slot)?),
+        Expr::BitNot(inner) => bitwise_not_value(eval_plpgsql_expr(inner, slot)?),
+        Expr::Cast(inner, ty) => cast_value(eval_plpgsql_expr(inner, slot)?, *ty),
+        Expr::Eq(left, right) => compare_values(
+            "=",
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::NotEq(left, right) => {
+            not_equal_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Lt(left, right) => order_values(
+            "<",
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::LtEq(left, right) => order_values(
+            "<=",
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Gt(left, right) => order_values(
+            ">",
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::GtEq(left, right) => order_values(
+            ">=",
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::RegexMatch(left, right) => {
+            let text = eval_plpgsql_expr(left, slot)?;
+            let pattern = eval_plpgsql_expr(right, slot)?;
+            if matches!(text, Value::Null) || matches!(pattern, Value::Null) {
+                return Ok(Value::Null);
+            }
+            let text_str = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "~",
+                left: text.clone(),
+                right: pattern.clone(),
+            })?;
+            let pat_str = pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "~",
+                left: text.clone(),
+                right: pattern.clone(),
+            })?;
+            let re =
+                regex::Regex::new(pat_str).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
+            Ok(Value::Bool(re.is_match(text_str)))
+        }
+        Expr::And(left, right) => {
+            eval_and(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Or(left, right) => {
+            eval_or(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
+        }
+        Expr::Not(inner) => match eval_plpgsql_expr(inner, slot)? {
+            Value::Bool(value) => Ok(Value::Bool(!value)),
+            Value::Null => Ok(Value::Null),
+            other => Err(ExecError::NonBoolQual(other)),
+        },
+        Expr::IsNull(inner) => Ok(Value::Bool(matches!(
+            eval_plpgsql_expr(inner, slot)?,
+            Value::Null
+        ))),
+        Expr::IsNotNull(inner) => Ok(Value::Bool(!matches!(
+            eval_plpgsql_expr(inner, slot)?,
+            Value::Null
+        ))),
+        Expr::IsDistinctFrom(left, right) => Ok(Value::Bool(values_are_distinct(
+            &eval_plpgsql_expr(left, slot)?,
+            &eval_plpgsql_expr(right, slot)?,
+        ))),
+        Expr::IsNotDistinctFrom(left, right) => Ok(Value::Bool(!values_are_distinct(
+            &eval_plpgsql_expr(left, slot)?,
+            &eval_plpgsql_expr(right, slot)?,
+        ))),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => {
+            let element_type = array_type.element_type();
+            let mut values = Vec::with_capacity(elements.len());
+            for expr in elements {
+                values.push(cast_value(eval_plpgsql_expr(expr, slot)?, element_type)?);
+            }
+            Ok(Value::Array(values))
+        }
+        Expr::FuncCall { func, args } => eval_plpgsql_builtin_function(*func, args, slot),
+        Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(
+            render_current_timestamp(),
+        ))),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "plpgsql expression without subqueries or SQL statements",
+            actual: format!("{expr:?}"),
+        })),
+    }
+}
+
+fn eval_plpgsql_builtin_function(
+    func: BuiltinScalarFunction,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+) -> Result<Value, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_plpgsql_expr(arg, slot))
+        .collect::<Result<Vec<_>, _>>()?;
+    match func {
+        BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Left => eval_left_function(&values),
+        BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
+        BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
+        BuiltinScalarFunction::Position => eval_position_function(&values),
+        BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
+        BuiltinScalarFunction::Md5 => eval_md5_function(&values),
+        BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
+        BuiltinScalarFunction::Abs => eval_abs_function(&values),
+        BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
+        BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::BoolEq => eval_booleq(&values),
+        BuiltinScalarFunction::BoolNe => eval_boolne(&values),
+        BuiltinScalarFunction::BitcastIntegerToFloat4 => {
+            eval_bitcast_integer_to_float4(&values)
+        }
+        BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
+        BuiltinScalarFunction::Random
+        | BuiltinScalarFunction::GetDatabaseEncoding
+        | BuiltinScalarFunction::ToJson
+        | BuiltinScalarFunction::ToJsonb
+        | BuiltinScalarFunction::ArrayToJson
+        | BuiltinScalarFunction::JsonBuildArray
+        | BuiltinScalarFunction::JsonBuildObject
+        | BuiltinScalarFunction::JsonObject
+        | BuiltinScalarFunction::JsonTypeof
+        | BuiltinScalarFunction::JsonArrayLength
+        | BuiltinScalarFunction::JsonExtractPath
+        | BuiltinScalarFunction::JsonExtractPathText
+        | BuiltinScalarFunction::JsonbTypeof
+        | BuiltinScalarFunction::JsonbArrayLength
+        | BuiltinScalarFunction::JsonbExtractPath
+        | BuiltinScalarFunction::JsonbExtractPathText
+        | BuiltinScalarFunction::JsonbBuildArray
+        | BuiltinScalarFunction::JsonbBuildObject
+        | BuiltinScalarFunction::JsonbPathExists
+        | BuiltinScalarFunction::JsonbPathMatch
+        | BuiltinScalarFunction::Trunc
+        | BuiltinScalarFunction::Round
+        | BuiltinScalarFunction::Ceil
+        | BuiltinScalarFunction::Ceiling
+        | BuiltinScalarFunction::Floor
+        | BuiltinScalarFunction::Sign
+        | BuiltinScalarFunction::Sqrt
+        | BuiltinScalarFunction::Cbrt
+        | BuiltinScalarFunction::Power
+        | BuiltinScalarFunction::Exp
+        | BuiltinScalarFunction::Ln
+        | BuiltinScalarFunction::Sinh
+        | BuiltinScalarFunction::Cosh
+        | BuiltinScalarFunction::Tanh
+        | BuiltinScalarFunction::Asinh
+        | BuiltinScalarFunction::Acosh
+        | BuiltinScalarFunction::Atanh
+        | BuiltinScalarFunction::Sind
+        | BuiltinScalarFunction::Cosd
+        | BuiltinScalarFunction::Tand
+        | BuiltinScalarFunction::Cotd
+        | BuiltinScalarFunction::Asind
+        | BuiltinScalarFunction::Acosd
+        | BuiltinScalarFunction::Atand
+        | BuiltinScalarFunction::Atan2d
+        | BuiltinScalarFunction::Erf
+        | BuiltinScalarFunction::Erfc
+        | BuiltinScalarFunction::Gamma
+        | BuiltinScalarFunction::Lgamma
+        | BuiltinScalarFunction::Float4Send
+        | BuiltinScalarFunction::Float8Send => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "plpgsql builtin function supported by the standalone evaluator",
+            actual: format!("{func:?}"),
+        })),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "plpgsql builtin function supported by the standalone evaluator",
+            actual: format!("{func:?}"),
+        })),
     }
 }
 
