@@ -14,7 +14,10 @@ use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_statement,
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::parser::{ParseError, SqlType, SqlTypeKind, Statement, parse_statement};
+use pgrust::parser::{
+    ParseError, SqlType, SqlTypeKind, Statement, create_relation_desc,
+    normalize_create_table_name, parse_statement,
+};
 use pgrust::{BufferPool, SmgrStorageBackend};
 
 struct RawModeGuard {
@@ -365,10 +368,9 @@ fn ensure_default_people_table(catalog_store: &mut CatalogStore) -> Result<(), S
         return Ok(());
     }
     catalog_store
-        .catalog_mut()
         .create_table("people", desc())
         .map_err(|e| format!("{e:?}"))?;
-    catalog_store.persist().map_err(|e| format!("{e:?}"))
+    Ok(())
 }
 
 fn seed_if_empty(
@@ -405,7 +407,6 @@ fn run_statement(
     catalog_store: &mut CatalogStore,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
-    let needs_catalog_persist = matches!(stmt, Statement::CreateTable(_) | Statement::DropTable(_));
 
     let result = match stmt {
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
@@ -495,42 +496,47 @@ fn run_statement(
             )
         }
         Statement::CreateTable(stmt) => {
-            let mut ctx = ExecutorContext {
-                pool: std::sync::Arc::clone(pool),
-                txns: txns.clone(),
-                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
-                client_id: 21,
-                next_command_id: 0,
-                outer_rows: Vec::new(),
-                timed: false,
-            };
-            execute_statement(
-                Statement::CreateTable(stmt),
-                catalog_store.catalog_mut(),
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            let (table_name, _) = normalize_create_table_name(&stmt)?;
+            let entry = catalog_store
+                .create_table(table_name, create_relation_desc(&stmt))
+                .map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "catalog table creation",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
+            let _ = pool.with_storage_mut(|s| {
+                let _ = s.smgr.open(entry.rel);
+                let _ = s.smgr.create(entry.rel, ForkNumber::Main, false);
+            });
+            Ok(StatementResult::AffectedRows(0))
         }
         Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE TABLE AS through Database/session path",
             actual: "CREATE TABLE AS".into(),
         })),
         Statement::DropTable(stmt) => {
-            let mut ctx = ExecutorContext {
-                pool: std::sync::Arc::clone(pool),
-                txns: txns.clone(),
-                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
-                client_id: 21,
-                next_command_id: 0,
-                outer_rows: Vec::new(),
-                timed: false,
-            };
-            execute_statement(
-                Statement::DropTable(stmt),
-                catalog_store.catalog_mut(),
-                &mut ctx,
-                INVALID_TRANSACTION_ID,
-            )
+            let mut dropped = 0;
+            for table_name in stmt.table_names {
+                match catalog_store.drop_table(&table_name) {
+                    Ok(entry) => {
+                        let _ = pool.invalidate_relation(entry.rel);
+                        pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                        dropped += 1;
+                    }
+                    Err(pgrust::backend::catalog::CatalogError::UnknownTable(_)) if stmt.if_exists => {}
+                    Err(pgrust::backend::catalog::CatalogError::UnknownTable(name)) => {
+                        return Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
+                    }
+                    Err(other) => {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "droppable table",
+                            actual: format!("{other:?}"),
+                        }));
+                    }
+                }
+            }
+            Ok(StatementResult::AffectedRows(dropped))
         }
         Statement::TruncateTable(stmt) => {
             let mut ctx = ExecutorContext {
@@ -659,18 +665,9 @@ fn run_statement(
         Statement::Begin | Statement::Commit | Statement::Rollback => {
             Ok(StatementResult::AffectedRows(0))
         }
-    }?;
+    };
 
-    if needs_catalog_persist {
-        catalog_store.persist().map_err(|err| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "catalog persistence",
-                actual: format!("{err:?}"),
-            })
-        })?;
-    }
-
-    Ok(result)
+    result
 }
 
 fn main() -> Result<(), String> {
