@@ -157,6 +157,8 @@ pub enum BuiltinScalarFunction {
     Erfc,
     Gamma,
     Lgamma,
+    BoolEq,
+    BoolNe,
     BitcastIntegerToFloat4,
     BitcastBigintToFloat8,
     PgInputIsValid,

@@ -1,4 +1,5 @@
 use super::ExecError;
+use crate::include::nodes::datum::Value;
 
 pub(super) fn parse_pg_bool_text(raw: &str) -> Result<bool, ExecError> {
     let trimmed = raw.trim_matches(|ch: char| ch.is_ascii_whitespace());
@@ -30,9 +31,55 @@ pub(super) fn parse_pg_bool_text(raw: &str) -> Result<bool, ExecError> {
     })
 }
 
+pub(super) fn order_bool_values(
+    op: &'static str,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, ExecError> {
+    let (Value::Bool(left), Value::Bool(right)) = (left, right) else {
+        return Err(ExecError::TypeMismatch {
+            op,
+            left: left.clone(),
+            right: right.clone(),
+        });
+    };
+    Ok(Value::Bool(match op {
+        "<" => !left && *right,
+        "<=" => !left || *right,
+        ">" => *left && !right,
+        ">=" => *left || !right,
+        _ => unreachable!(),
+    }))
+}
+
+pub(super) fn eval_booleq(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Bool(left), Value::Bool(right)] => Ok(Value::Bool(left == right)),
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "booleq",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+pub(super) fn eval_boolne(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Bool(left), Value::Bool(right)] => Ok(Value::Bool(left != right)),
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "boolne",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => unreachable!(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_pg_bool_text;
+    use super::{order_bool_values, parse_pg_bool_text};
+    use crate::include::nodes::datum::Value;
 
     #[test]
     fn parse_pg_bool_text_accepts_postgres_spellings() {
@@ -60,5 +107,17 @@ mod tests {
         for input in ["test", "foo", "yeah", "nay", "o", "on_", "off_", "11", "000", ""] {
             assert!(parse_pg_bool_text(input).is_err(), "{input}");
         }
+    }
+
+    #[test]
+    fn bool_ordering_matches_postgres_order() {
+        assert_eq!(
+            order_bool_values("<", &Value::Bool(false), &Value::Bool(true)).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            order_bool_values(">=", &Value::Bool(true), &Value::Bool(false)).unwrap(),
+            Value::Bool(true)
+        );
     }
 }

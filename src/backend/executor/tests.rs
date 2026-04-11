@@ -3018,6 +3018,45 @@
     }
 
     #[test]
+    fn boolean_ordering_operators_match_postgres() {
+        let base = temp_dir("boolean_ordering");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select bool 't' > bool 'f', bool 't' >= bool 'f', bool 'f' < bool 't', bool 'f' <= bool 't'",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ]],
+        );
+    }
+
+    #[test]
+    fn booleq_and_boolne_execute() {
+        let base = temp_dir("boolean_builtins");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select booleq(bool 'false', bool 'true'), boolne(bool 'false', bool 'true')",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(false), Value::Bool(true)]],
+        );
+    }
+
+    #[test]
     fn pg_input_error_info_reports_varchar_typmod_truncation() {
         let base = temp_dir("pg_input_error_info_varchar");
         let txns = TransactionManager::new_durable(&base).unwrap();

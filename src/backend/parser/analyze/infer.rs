@@ -188,6 +188,9 @@ pub(super) fn infer_sql_expr_type(
             Some(BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send) => {
                 SqlType::new(SqlTypeKind::Text)
             }
+            Some(BuiltinScalarFunction::BoolEq | BuiltinScalarFunction::BoolNe) => {
+                SqlType::new(SqlTypeKind::Bool)
+            }
             Some(BuiltinScalarFunction::Gcd) | Some(BuiltinScalarFunction::Lcm) => args.first().zip(args.get(1)).map_or(
                 SqlType::new(SqlTypeKind::Text),
                 |(left, right)| {
