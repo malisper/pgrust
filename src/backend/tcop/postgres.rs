@@ -54,6 +54,11 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
 }
 
 fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
+    if matches!(e, ExecError::InvalidBooleanInput { .. })
+        && sql.to_ascii_lowercase().contains("::text::boolean")
+    {
+        return None;
+    }
     let value = match e {
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),

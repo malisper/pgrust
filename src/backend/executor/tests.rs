@@ -3057,6 +3057,23 @@
     }
 
     #[test]
+    fn integer_to_boolean_casts_match_postgres() {
+        let base = temp_dir("integer_to_boolean_casts");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select 0::boolean, 1::boolean, 2::boolean",
+            )
+            .unwrap(),
+            vec![vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]],
+        );
+    }
+
+    #[test]
     fn pg_input_error_info_reports_varchar_typmod_truncation() {
         let base = temp_dir("pg_input_error_info_varchar");
         let txns = TransactionManager::new_durable(&base).unwrap();
