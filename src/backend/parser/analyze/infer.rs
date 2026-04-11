@@ -179,7 +179,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             | Some(BuiltinScalarFunction::ConvertFrom) => SqlType::new(SqlTypeKind::Text),
             Some(BuiltinScalarFunction::Length)
             | Some(BuiltinScalarFunction::JsonArrayLength)
-            | Some(BuiltinScalarFunction::JsonbArrayLength) => SqlType::new(SqlTypeKind::Int4),
+            | Some(BuiltinScalarFunction::JsonbArrayLength)
+            | Some(BuiltinScalarFunction::Scale)
+            | Some(BuiltinScalarFunction::MinScale)
+            | Some(BuiltinScalarFunction::WidthBucket) => SqlType::new(SqlTypeKind::Int4),
             Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
             Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => args
                 .first()
@@ -202,10 +205,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
                 },
             ),
+            Some(BuiltinScalarFunction::Div)
+            | Some(BuiltinScalarFunction::TrimScale) => SqlType::new(SqlTypeKind::Numeric),
             Some(
-                BuiltinScalarFunction::Trunc
-                | BuiltinScalarFunction::Round
-                | BuiltinScalarFunction::Ceil
+                BuiltinScalarFunction::Ceil
                 | BuiltinScalarFunction::Ceiling
                 | BuiltinScalarFunction::Floor
                 | BuiltinScalarFunction::Sign
@@ -233,6 +236,23 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | BuiltinScalarFunction::Gamma
                 | BuiltinScalarFunction::Lgamma,
             ) => SqlType::new(SqlTypeKind::Float8),
+            Some(BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round) => args
+                .first()
+                .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    match ty.element_type().kind {
+                        SqlTypeKind::Float4 | SqlTypeKind::Float8 => SqlType::new(SqlTypeKind::Float8),
+                        _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
+                        _ => SqlType::new(SqlTypeKind::Float8),
+                    }
+                }),
             Some(BuiltinScalarFunction::BitcastIntegerToFloat4) => SqlType::new(SqlTypeKind::Float4),
             Some(BuiltinScalarFunction::BitcastBigintToFloat8) => SqlType::new(SqlTypeKind::Float8),
             Some(BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send) => {

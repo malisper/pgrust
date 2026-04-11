@@ -4037,6 +4037,78 @@
     }
 
     #[test]
+    fn numeric_scalar_helpers_follow_postgres_basics() {
+        let base = temp_dir("numeric_scalar_helpers");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select round(42.4382::numeric, 2), trunc(42.4382::numeric, 2), div(4.2::numeric, 1::numeric), scale(0.00::numeric), min_scale(1.1000::numeric), trim_scale(1.120::numeric)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("42.44".into()),
+                        Value::Numeric("42.43".into()),
+                        Value::Numeric("4".into()),
+                        Value::Int32(2),
+                        Value::Int32(1),
+                        Value::Numeric("1.12".into()),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn width_bucket_supports_numeric_and_float_special_cases() {
+        let base = temp_dir("width_bucket_numeric_float");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select width_bucket('Infinity'::numeric, 1::numeric, 10::numeric, 10), width_bucket('-Infinity'::numeric, 1::numeric, 10::numeric, 10), width_bucket(5.0::float8, 3.0::float8, 4.0::float8, 10), width_bucket(5.0::numeric, 3.0::numeric, 4.0::numeric, 10)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Int32(11),
+                        Value::Int32(0),
+                        Value::Int32(11),
+                        Value::Int32(11),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn width_bucket_rejects_invalid_numeric_domains() {
+        let base = temp_dir("width_bucket_numeric_errors");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        for sql in [
+            "select width_bucket(5.0::numeric, 3.0::numeric, 4.0::numeric, 0)",
+            "select width_bucket('NaN'::numeric, 3.0::numeric, 4.0::numeric, 10)",
+            "select width_bucket(0.0::numeric, 'Infinity'::numeric, 4.0::numeric, 10)",
+        ] {
+            assert!(matches!(
+                run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap_err(),
+                ExecError::InvalidStorageValue { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn float_nan_comparisons_follow_postgres_ordering() {
         let base = temp_dir("float_nan_comparisons");
         let txns = TransactionManager::new_durable(&base).unwrap();

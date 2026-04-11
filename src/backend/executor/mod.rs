@@ -5,6 +5,7 @@ mod expr_bool;
 mod expr_compile;
 mod expr_format;
 mod expr_math;
+mod expr_numeric;
 mod expr_ops;
 mod expr_string;
 mod driver;
