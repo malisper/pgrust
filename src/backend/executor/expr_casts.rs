@@ -121,6 +121,8 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
         "int4" | "int" | "integer" => Some(SqlType::new(SqlTypeKind::Int4)),
         "int8" | "bigint" => Some(SqlType::new(SqlTypeKind::Int8)),
         "oid" => Some(SqlType::new(SqlTypeKind::Oid)),
+        "float4" | "real" => Some(SqlType::new(SqlTypeKind::Float4)),
+        "float8" | "double precision" => Some(SqlType::new(SqlTypeKind::Float8)),
         "text" => Some(SqlType::new(SqlTypeKind::Text)),
         "bool" | "boolean" => Some(SqlType::new(SqlTypeKind::Bool)),
         "numeric" | "decimal" => Some(SqlType::new(SqlTypeKind::Numeric)),
@@ -150,6 +152,14 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::InvalidNumericInput(_) => {
             format!("invalid input syntax for type numeric: \"{text}\"")
         }
+        ExecError::InvalidFloatInput { ty, .. } => {
+            format!("invalid input syntax for type {ty}: \"{text}\"")
+        }
+        ExecError::FloatOutOfRange { ty, .. } => {
+            format!("\"{text}\" is out of range for type {ty}")
+        }
+        ExecError::FloatOverflow => "value out of range: overflow".to_string(),
+        ExecError::FloatUnderflow => "value out of range: underflow".to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -161,9 +171,13 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::Int2OutOfRange
         | ExecError::Int4OutOfRange
         | ExecError::Int8OutOfRange
-        | ExecError::OidOutOfRange => {
+        | ExecError::OidOutOfRange
+        | ExecError::FloatOutOfRange { .. }
+        | ExecError::FloatOverflow
+        | ExecError::FloatUnderflow => {
             "22003"
         }
+        ExecError::InvalidFloatInput { .. } => "22P02",
         _ => "XX000",
     }
 }
@@ -450,7 +464,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::Float4 | SqlTypeKind::Float8,
                 ..
             } => Ok(Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
-                (v as f32) as f64
+                narrow_float4_runtime(v)?
             } else {
                 v
             })),
@@ -518,15 +532,14 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         SqlTypeKind::Int4 => cast_text_to_int4(text),
         SqlTypeKind::Int8 => cast_text_to_int8(text),
         SqlTypeKind::Oid => cast_text_to_oid(text),
-        SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text)
+        SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text, ty.kind)
             .map(|v| {
                 Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
                     (v as f32) as f64
                 } else {
                     v
                 })
-            })
-            .map_err(|_| ExecError::InvalidFloatInput(text.to_string())),
+            }),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(
             parse_numeric_text(text)
                 .ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))?,
@@ -570,14 +583,12 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::Char | SqlTypeKind::Varchar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Float4 => {
             let rendered = value.render();
-            let v = parse_pg_float(&rendered)
-                .map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
-            Ok(Value::Float64((v as f32) as f64))
+            let v = parse_pg_float(&rendered, SqlTypeKind::Float4)?;
+            Ok(Value::Float64(v as f32 as f64))
         }
         SqlTypeKind::Float8 => {
             let rendered = value.render();
-            let v = parse_pg_float(&rendered)
-                .map_err(|_| ExecError::InvalidFloatInput(rendered.clone()))?;
+            let v = parse_pg_float(&rendered, SqlTypeKind::Float8)?;
             Ok(Value::Float64(v))
         }
         SqlTypeKind::Int2 => value
@@ -642,7 +653,10 @@ fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<St
 
 fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
     if !value.is_finite() {
-        return Err(ExecError::InvalidFloatInput(value.to_string()));
+        return Err(ExecError::InvalidFloatInput {
+            ty: "double precision",
+            value: value.to_string(),
+        });
     }
     let rounded = value.round_ties_even();
     match ty.kind {
@@ -694,12 +708,85 @@ fn coerce_numeric_value(parsed: NumericValue, ty: SqlType) -> Result<NumericValu
     Ok(rounded)
 }
 
-fn parse_pg_float(text: &str) -> Result<f64, ()> {
-    if text.eq_ignore_ascii_case("infinity") || text.eq_ignore_ascii_case("+infinity") {
-        Ok(f64::INFINITY)
-    } else if text.eq_ignore_ascii_case("-infinity") {
-        Ok(f64::NEG_INFINITY)
-    } else {
-        text.parse::<f64>().map_err(|_| ())
+fn parse_pg_float(text: &str, kind: SqlTypeKind) -> Result<f64, ExecError> {
+    let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    let ty = float_sql_type_name(kind);
+    if trimmed.is_empty() {
+        return Err(ExecError::InvalidFloatInput {
+            ty,
+            value: text.to_string(),
+        });
     }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let parsed = match normalized.as_str() {
+        "nan" | "+nan" | "-nan" => f64::NAN,
+        "inf" | "+inf" | "infinity" | "+infinity" => f64::INFINITY,
+        "-inf" | "-infinity" => f64::NEG_INFINITY,
+        _ => trimmed.parse::<f64>().map_err(|_| ExecError::InvalidFloatInput {
+            ty,
+            value: text.to_string(),
+        })?,
+    };
+
+    if !normalized.contains("inf") && !normalized.contains("nan") {
+        if parsed.is_infinite() {
+            return Err(ExecError::FloatOutOfRange {
+                ty,
+                value: text.to_string(),
+            });
+        }
+        if parsed == 0.0 && has_nonzero_digit(trimmed) {
+            return Err(ExecError::FloatOutOfRange {
+                ty,
+                value: text.to_string(),
+            });
+        }
+    }
+
+    if matches!(kind, SqlTypeKind::Float4) {
+        return narrow_float4_from_input(parsed, text);
+    }
+
+    Ok(parsed)
+}
+
+fn narrow_float4_from_input(value: f64, raw: &str) -> Result<f64, ExecError> {
+    if !value.is_finite() {
+        return Ok((value as f32) as f64);
+    }
+    let narrowed = value as f32;
+    if narrowed.is_infinite() || (narrowed == 0.0 && value != 0.0) {
+        return Err(ExecError::FloatOutOfRange {
+            ty: "real",
+            value: raw.to_string(),
+        });
+    }
+    Ok(narrowed as f64)
+}
+
+fn narrow_float4_runtime(value: f64) -> Result<f64, ExecError> {
+    if !value.is_finite() {
+        return Ok((value as f32) as f64);
+    }
+    let narrowed = value as f32;
+    if narrowed.is_infinite() {
+        return Err(ExecError::FloatOverflow);
+    }
+    if narrowed == 0.0 && value != 0.0 {
+        return Err(ExecError::FloatUnderflow);
+    }
+    Ok(narrowed as f64)
+}
+
+fn float_sql_type_name(kind: SqlTypeKind) -> &'static str {
+    match kind {
+        SqlTypeKind::Float4 => "real",
+        SqlTypeKind::Float8 => "double precision",
+        _ => unreachable!(),
+    }
+}
+
+fn has_nonzero_digit(text: &str) -> bool {
+    text.bytes().any(|b| b.is_ascii_digit() && b != b'0')
 }

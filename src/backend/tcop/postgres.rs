@@ -24,7 +24,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
         | ExecError::InvalidIntegerInput { .. }
         | ExecError::InvalidNumericInput(_)
-        | ExecError::InvalidFloatInput(_) => "22P02",
+        | ExecError::InvalidFloatInput { .. } => "22P02",
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
         ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
             "42704"
@@ -35,7 +35,10 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::Int4OutOfRange
         | ExecError::Int8OutOfRange
         | ExecError::OidOutOfRange
-        | ExecError::NumericFieldOverflow => "22003",
+        | ExecError::NumericFieldOverflow
+        | ExecError::FloatOutOfRange { .. }
+        | ExecError::FloatOverflow
+        | ExecError::FloatUnderflow => "22003",
         ExecError::RequestedLengthTooLarge => "54000",
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { .. })) => "54000",
         ExecError::DivisionByZero(_) => "22012",
@@ -51,7 +54,8 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidNumericInput(value) => value.as_str(),
-        ExecError::InvalidFloatInput(value) => value.as_str(),
+        ExecError::InvalidFloatInput { value, .. } => value.as_str(),
+        ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         _ => return None,
     };
     let needle = format!("'{}'", value.replace('\'', "''"));
