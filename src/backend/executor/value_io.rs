@@ -1,5 +1,5 @@
 use super::exec_expr::parse_numeric_text;
-use super::expr_casts::{cast_numeric_value, cast_text_value, cast_value};
+use super::expr_casts::{cast_numeric_value, cast_text_value, cast_value, render_internal_char_text};
 use super::node_types::*;
 use super::ExecError;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
@@ -43,6 +43,9 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::Json, Value::Json(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
         (ScalarType::Jsonb, Value::Jsonb(bytes)) => Ok(TupleValue::Bytes(bytes)),
         (ScalarType::JsonPath, Value::JsonPath(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
+        (ScalarType::Text, Value::InternalChar(v)) => {
+            Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
+        }
         (ScalarType::Text, value) => Ok(TupleValue::Bytes(value.as_text().unwrap().as_bytes().to_vec())),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
         (ScalarType::Array(_), Value::Array(items)) => {

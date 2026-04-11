@@ -14,7 +14,7 @@ pub(crate) mod jsonb;
 pub(crate) mod jsonpath;
 mod nodes;
 mod startup;
-mod value_io;
+pub(crate) mod value_io;
 pub(crate) mod expr {
     pub(crate) use super::exec_expr::*;
 }
