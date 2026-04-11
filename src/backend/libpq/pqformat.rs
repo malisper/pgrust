@@ -203,8 +203,8 @@ pub(crate) fn send_data_row(
             Value::Float64(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
-                use std::io::Write as _;
-                write!(buf, "{v}").unwrap();
+                let rendered = format_float8_text(*v);
+                buf.extend_from_slice(rendered.as_bytes());
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }
@@ -343,4 +343,39 @@ pub(crate) fn send_error(
     w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
     w.write_all(&body)?;
     Ok(())
+}
+
+fn format_float8_text(value: f64) -> String {
+    if value.is_nan() || value.is_infinite() {
+        return value.to_string();
+    }
+
+    let abs = value.abs();
+    if abs != 0.0 && (abs >= 1.0e15 || abs < 1.0e-6) {
+        let rendered = format!("{value:.15e}");
+        let (mantissa, exponent) = rendered.split_once('e').unwrap_or((&rendered, "0"));
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        let exponent = exponent.parse::<i32>().unwrap_or(0);
+        return format!("{mantissa}e{exponent:+}");
+    }
+
+    value.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_float8_text;
+
+    #[test]
+    fn large_float8_values_render_in_scientific_notation() {
+        assert_eq!(
+            format_float8_text(4_567_890_123_456_789.0),
+            "4.567890123456789e+15"
+        );
+        assert_eq!(
+            format_float8_text(-4_567_890_123_456_789.0),
+            "-4.567890123456789e+15"
+        );
+        assert_eq!(format_float8_text(123.0), "123");
+    }
 }

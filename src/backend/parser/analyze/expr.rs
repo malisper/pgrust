@@ -709,11 +709,34 @@ pub(crate) fn bind_expr_with_outer(
             )?),
         ),
         SqlExpr::FuncCall { name, args } => {
-            let func =
-                resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "supported builtin function",
-                    actual: name.clone(),
-                })?;
+            if let Some(target_type) = resolve_function_cast_type(name) {
+                if args.len() != 1 {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "single-argument cast function",
+                        actual: format!("{name}({} args)", args.len()),
+                    });
+                }
+                let arg_type =
+                    infer_sql_expr_type(&args[0], scope, catalog, outer_scopes, grouped_outer);
+                return Ok(Expr::Cast(
+                    Box::new(bind_expr_with_outer(
+                        &args[0],
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                    )?),
+                    if arg_type == target_type {
+                        arg_type
+                    } else {
+                        target_type
+                    },
+                ));
+            }
+            let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "supported builtin function",
+                actual: name.clone(),
+            })?;
             validate_scalar_function_arity(func, args)?;
             bind_scalar_function_call(func, args, scope, catalog, outer_scopes, grouped_outer)?
         }
