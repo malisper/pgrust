@@ -75,6 +75,13 @@ impl Session {
         }
     }
 
+    pub fn extra_float_digits(&self) -> i32 {
+        self.gucs
+            .get("extra_float_digits")
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(1)
+    }
+
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let stmt = db.plan_cache.get_statement(sql)?;
 
