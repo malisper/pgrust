@@ -2435,6 +2435,22 @@ mod tests {
     }
 
     #[test]
+    fn power_zero_to_negative_infinity_errors() {
+        let base = temp_dir("power_zero_negative_infinity");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select power(0.0::float8, '-inf'::float8)",
+            )
+            .unwrap_err(),
+            ExecError::InvalidStorageValue { .. }
+        ));
+    }
+
+    #[test]
     fn narrowing_integer_casts_raise_out_of_range_errors() {
         let base = temp_dir("narrowing_integer_casts");
         let txns = TransactionManager::new_durable(&base).unwrap();
