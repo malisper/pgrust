@@ -1,11 +1,13 @@
 mod agg;
 mod driver;
+mod expr_json;
 pub mod exec_expr;
 pub(crate) mod exec_tuples;
 pub(crate) mod jsonb;
 pub(crate) mod jsonpath;
 mod nodes;
 mod startup;
+mod value_io;
 pub(crate) mod expr {
     pub(crate) use super::exec_expr::*;
 }
