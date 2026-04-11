@@ -1,6 +1,7 @@
 use super::ExecError;
-use super::expr_format::to_char_int;
+use super::expr_format::{to_char_int, to_char_numeric};
 use super::node_types::Value;
+use super::expr_ops::parse_numeric_text;
 use crate::pgrust::compact_string::CompactString;
 use encoding_rs::Encoding;
 use md5::{Digest, Md5};
@@ -12,10 +13,24 @@ pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError
     let Some(format) = values.get(1) else {
         return Ok(Value::Null);
     };
-    let number = match value {
-        Value::Int16(v) => *v as i128,
-        Value::Int32(v) => *v as i128,
-        Value::Int64(v) => *v as i128,
+    let fmt = format.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "to_char",
+        left: format.clone(),
+        right: Value::Text("".into()),
+    })?;
+    let rendered = match value {
+        Value::Int16(v) => to_char_int(*v as i128, fmt)?,
+        Value::Int32(v) => to_char_int(*v as i128, fmt)?,
+        Value::Int64(v) => to_char_int(*v as i128, fmt)?,
+        Value::Numeric(v) => to_char_numeric(v, fmt)?,
+        Value::Float64(v) => {
+            let numeric = parse_numeric_text(&v.to_string()).ok_or_else(|| ExecError::TypeMismatch {
+                op: "to_char",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            })?;
+            to_char_numeric(&numeric, fmt)?
+        }
         _ => {
             return Err(ExecError::TypeMismatch {
                 op: "to_char",
@@ -24,12 +39,7 @@ pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError
             });
         }
     };
-    let fmt = format.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "to_char",
-        left: format.clone(),
-        right: Value::Text("".into()),
-    })?;
-    Ok(Value::Text(to_char_int(number, fmt)?.into()))
+    Ok(Value::Text(rendered.into()))
 }
 
 pub(super) fn eval_left_function(values: &[Value]) -> Result<Value, ExecError> {
