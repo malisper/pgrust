@@ -233,8 +233,9 @@ impl Session {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
+                db.sync_visible_catalog_heaps(client_id);
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let visible_catalog = db.visible_catalog(client_id);
+                let visible_relcache = db.visible_relcache(client_id);
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
@@ -244,7 +245,7 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_readonly_statement(stmt, &visible_catalog, &mut ctx)
+                execute_readonly_statement(stmt, &visible_relcache, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
                 let visible_relcache = db.visible_relcache(client_id);
