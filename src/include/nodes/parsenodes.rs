@@ -42,6 +42,8 @@ pub enum ParseError {
     AggInWhere,
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
+    UnrecognizedParameter(String),
+    TablesDeclaredWithOidsNotSupported,
     ActiveSqlTransaction(&'static str),
     OnCommitOnlyForTempTables,
     TempTableInNonTempSchema(String),
@@ -91,6 +93,12 @@ impl fmt::Display for ParseError {
             }
             ParseError::UnknownConfigurationParameter(name) => {
                 write!(f, "unrecognized configuration parameter \"{name}\"")
+            }
+            ParseError::UnrecognizedParameter(name) => {
+                write!(f, "unrecognized parameter \"{name}\"")
+            }
+            ParseError::TablesDeclaredWithOidsNotSupported => {
+                write!(f, "tables declared WITH OIDS are not supported")
             }
             ParseError::ActiveSqlTransaction(stmt) => {
                 write!(f, "{stmt} cannot run inside a transaction block")

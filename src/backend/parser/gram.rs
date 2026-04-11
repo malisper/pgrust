@@ -702,6 +702,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                     }
                 }
             }
+            Rule::table_storage_clause => validate_table_storage_clause(part)?,
             _ => {}
         }
     }
@@ -723,6 +724,35 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             on_commit,
             columns,
         }))
+    }
+}
+
+fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError> {
+    let part = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match part.as_rule() {
+        Rule::without_oids_clause => Ok(()),
+        Rule::table_with_clause => {
+            for item in part.into_inner().filter(|inner| inner.as_rule() == Rule::table_with_item) {
+                let mut item_parts = item.into_inner();
+                let name = build_identifier(item_parts.next().ok_or(ParseError::UnexpectedEof)?);
+                let value = item_parts.next().map(|value| value.as_str().to_ascii_lowercase());
+                if name != name.to_ascii_lowercase() {
+                    return Err(ParseError::UnrecognizedParameter(name));
+                }
+                if name.eq_ignore_ascii_case("oids")
+                    && value
+                        .as_deref()
+                        .map_or(true, |value| matches!(value, "true" | "on" | "1"))
+                {
+                    return Err(ParseError::TablesDeclaredWithOidsNotSupported);
+                }
+            }
+            Ok(())
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "table storage clause",
+            actual: part.as_str().to_string(),
+        }),
     }
 }
 

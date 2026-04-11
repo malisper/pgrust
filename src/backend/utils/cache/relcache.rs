@@ -43,9 +43,7 @@ impl RelCache {
     pub fn from_catcache(catcache: &CatCache) -> Result<Self, CatalogError> {
         let mut cache = Self::default();
         for class in catcache.class_rows() {
-            let attrs = catcache
-                .attributes_by_relid(class.oid)
-                .ok_or(CatalogError::Corrupt("missing pg_attribute rows for relation"))?;
+            let attrs = catcache.attributes_by_relid(class.oid).unwrap_or(&[]);
             let columns = attrs
                 .iter()
                 .map(|attr| {
@@ -183,5 +181,26 @@ mod tests {
             cache.get_by_oid(entry.relation_oid).map(|rel| rel.desc.columns.len()),
             Some(1)
         );
+    }
+
+    #[test]
+    fn relcache_loads_zero_column_relations_from_physical_catalogs() {
+        let base = temp_dir("relcache_zero_column");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "zerocol",
+                RelationDesc {
+                    columns: Vec::new(),
+                },
+            )
+            .unwrap();
+
+        let cache = RelCache::from_physical(&base).unwrap();
+        assert_eq!(
+            cache.get_by_oid(entry.relation_oid).map(|rel| rel.desc.columns.len()),
+            Some(0)
+        );
+        assert!(cache.get_by_name("zerocol").is_some());
     }
 }
