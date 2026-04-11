@@ -10,7 +10,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, GenerateSeriesState, JsonTableFunctionState, LimitState,
     NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState, ResultState,
-    SeqScanState, SlotKind, TupleSlot, UnnestState,
+    SeqScanState, SlotKind, TupleSlot, UnnestState, ValuesState,
 };
 
 use std::time::Instant;
@@ -586,6 +586,56 @@ impl PlanNode for GenerateSeriesState {
     }
     fn node_label(&self) -> String {
         "Function Scan on generate_series".into()
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for ValuesState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.result_rows.is_none() {
+            let mut dummy = TupleSlot::empty(0);
+            let rows = self
+                .rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|expr| eval_expr(expr, &mut dummy, ctx))
+                        .collect::<Result<Vec<_>, ExecError>>()
+                        .map(TupleSlot::virtual_row)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            self.result_rows = Some(rows);
+        }
+
+        let rows = self.result_rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
+            return Ok(None);
+        }
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        let rows = self.result_rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_columns
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        "Values Scan".into()
     }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }

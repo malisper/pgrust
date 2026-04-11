@@ -1193,6 +1193,19 @@ y$tag$"#).unwrap();
     }
 
     #[test]
+    fn parse_values_from_item() {
+        let stmt = parse_select("select * from (values (1), (2)) as t(x)").unwrap();
+        match stmt.from {
+            Some(FromItem::Alias { source, alias, column_aliases }) => {
+                assert_eq!(alias, "t");
+                assert_eq!(column_aliases, vec!["x"]);
+                assert!(matches!(*source, FromItem::Values { ref rows } if rows.len() == 2 && rows[0].len() == 1));
+            }
+            other => panic!("expected aliased values source, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn build_plan_partial_derived_table_column_aliases_preserve_suffix() {
         let stmt =
             parse_select("select p.x, p.name from (select id, name from people) p(x)").unwrap();
@@ -1225,6 +1238,19 @@ y$tag$"#).unwrap();
             Err(ParseError::UnexpectedToken { actual, .. })
                 if actual == "table \"p\" has 3 columns available but 4 columns specified"
         ));
+    }
+
+    #[test]
+    fn build_plan_values_alias_exposes_column_aliases() {
+        let stmt = parse_select("select t.x from (values (1), (2)) as t(x)").unwrap();
+        let plan = build_plan(&stmt, &catalog()).unwrap();
+        match plan {
+            Plan::Projection { targets, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].name, "x");
+            }
+            other => panic!("expected projection, got {:?}", other),
+        }
     }
 
     #[test]

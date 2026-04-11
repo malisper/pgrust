@@ -416,6 +416,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::table_from_item
+                    | Rule::values_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
                     | Rule::derived_from_item
@@ -447,6 +448,13 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     .find(|part| part.as_rule() == Rule::identifier)
                     .ok_or(ParseError::UnexpectedEof)?,
             ),
+        }),
+        Rule::values_from_item => Ok(FromItem::Values {
+            rows: pair
+                .into_inner()
+                .filter(|part| part.as_rule() == Rule::values_row)
+                .map(build_values_row)
+                .collect::<Result<Vec<_>, _>>()?,
         }),
         Rule::srf_from_item => {
             let mut name = None;
