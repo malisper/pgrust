@@ -34,6 +34,20 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
     }
 }
 
+pub(super) fn resolve_function_cast_type(name: &str) -> Option<SqlType> {
+    match name.to_ascii_lowercase().as_str() {
+        "int2" | "smallint" => Some(SqlType::new(SqlTypeKind::Int2)),
+        "int4" | "int" | "integer" => Some(SqlType::new(SqlTypeKind::Int4)),
+        "int8" | "bigint" => Some(SqlType::new(SqlTypeKind::Int8)),
+        "float4" | "real" => Some(SqlType::new(SqlTypeKind::Float4)),
+        "float8" => Some(SqlType::new(SqlTypeKind::Float8)),
+        "numeric" | "decimal" => Some(SqlType::new(SqlTypeKind::Numeric)),
+        "text" => Some(SqlType::new(SqlTypeKind::Text)),
+        "bool" | "boolean" => Some(SqlType::new(SqlTypeKind::Bool)),
+        _ => None,
+    }
+}
+
 pub(super) fn resolve_json_table_function(name: &str) -> Option<JsonTableFunction> {
     match name.to_ascii_lowercase().as_str() {
         "json_object_keys" => Some(JsonTableFunction::ObjectKeys),

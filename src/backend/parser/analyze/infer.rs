@@ -162,7 +162,7 @@ pub(super) fn infer_sql_expr_type(
             | Some(BuiltinScalarFunction::PgInputErrorDetail)
             | Some(BuiltinScalarFunction::PgInputErrorHint)
             | Some(BuiltinScalarFunction::PgInputErrorSqlState) => SqlType::new(SqlTypeKind::Text),
-            None => SqlType::new(SqlTypeKind::Text),
+            None => resolve_function_cast_type(name).unwrap_or(SqlType::new(SqlTypeKind::Text)),
         },
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
     }

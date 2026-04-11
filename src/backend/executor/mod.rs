@@ -2406,6 +2406,23 @@ mod tests {
     }
 
     #[test]
+    fn function_style_type_casts_lower_to_regular_casts() {
+        let base = temp_dir("function_style_type_casts");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select float8((42)::int8), int8((42)::int2)",
+            )
+            .unwrap(),
+            vec![vec![Value::Float64(42.0), Value::Int64(42)]],
+        );
+    }
+
+    #[test]
     fn int2_text_input_accepts_prefixed_and_underscored_literals() {
         let base = temp_dir("int2_text_input_literals");
         let txns = TransactionManager::new_durable(&base).unwrap();
