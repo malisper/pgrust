@@ -121,7 +121,7 @@ postfix_expr = { unary_expr ~ cast_suffix* }
 cast_suffix = { "::" ~ type_name }
 positive_expr = { "+" ~ unary_expr }
 negated_expr = { "-" ~ unary_expr }
-primary_expr = { kw_null | kw_true | kw_false | kw_current_timestamp | exists_expr | scalar_subquery_expr | array_expr | agg_call | func_call | quoted_string_literal | identifier | numeric_literal | integer | "(" ~ expr ~ ")" }
+primary_expr = { kw_null | kw_true | kw_false | kw_current_timestamp | exists_expr | scalar_subquery_expr | array_expr | agg_call | typed_string_literal | func_call | quoted_string_literal | identifier | numeric_literal | integer | "(" ~ expr ~ ")" }
 scalar_subquery_expr = { "(" ~ select_stmt ~ ")" }
 exists_expr = { kw_exists ~ "(" ~ select_stmt ~ ")" }
 array_expr = { kw_array ~ "[" ~ expr_list? ~ "]" }
@@ -129,6 +129,7 @@ agg_call = { agg_func ~ "(" ~ (agg_distinct ~ expr_list | star | expr_list) ~ ")
 agg_distinct = { kw_distinct_atom }
 agg_func = { kw_count | kw_sum | kw_avg | kw_min | kw_max | kw_json_agg | kw_jsonb_agg | kw_json_object_agg | kw_jsonb_object_agg }
 func_call = { identifier ~ "(" ~ expr_list? ~ ")" }
+typed_string_literal = { type_name ~ quoted_string_literal }
 
 ident_cont = _{ ASCII_ALPHANUMERIC | "_" | "." }
 keyword_end = _{ !ident_cont }
