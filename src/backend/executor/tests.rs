@@ -5517,6 +5517,104 @@
     }
 
     #[test]
+    fn insert_values_can_reference_statement_ctes() {
+        let base = temp_dir("insert_values_ctes");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "with q(v) as (values (7)) insert into people (id, name, note) values ((select v from q), 'alice', 'a')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select id, name from people",
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(7), Value::Text("alice".into())]],
+        );
+    }
+
+    #[test]
+    fn update_can_reference_statement_ctes() {
+        let base = temp_dir("update_ctes");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'old')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "with q(v) as (values ('new')) update people set note = (select v from q) where id = 1",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select note from people",
+            )
+            .unwrap(),
+            vec![vec![Value::Text("new".into())]],
+        );
+    }
+
+    #[test]
+    fn delete_can_reference_statement_ctes() {
+        let base = temp_dir("delete_ctes");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        let xid = txns.begin();
+        run_sql(
+            &base,
+            &txns,
+            xid,
+            "with q(v) as (values (2)) delete from people where id in (select v from q)",
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select id from people",
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(1)]],
+        );
+    }
+
+    #[test]
     fn scalar_subquery_zero_rows_yields_null() {
         let base = temp_dir("scalar_subquery_zero_rows");
         let mut txns = TransactionManager::new_durable(&base).unwrap();
