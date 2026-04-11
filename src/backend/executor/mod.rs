@@ -2089,6 +2089,33 @@ mod tests {
     }
 
     #[test]
+    fn narrowing_integer_casts_raise_out_of_range_errors() {
+        let base = temp_dir("narrowing_integer_casts");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select cast(4567890123456789::int8 as int4)",
+            )
+            .unwrap_err(),
+            ExecError::Int4OutOfRange
+        ));
+        assert!(matches!(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select cast(4567890123456789::int8 as int2)",
+            )
+            .unwrap_err(),
+            ExecError::Int2OutOfRange
+        ));
+    }
+
+    #[test]
     fn extended_numeric_columns_round_trip_through_storage() {
         let base = temp_dir("extended_numeric_storage");
         let txns = TransactionManager::new_durable(&base).unwrap();

@@ -262,11 +262,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 ..
             } => i16::try_from(v)
                 .map(Value::Int16)
-                .map_err(|_| ExecError::TypeMismatch {
-                    op: "::int2",
-                    left: Value::Int32(v),
-                    right: Value::Int16(0),
-                }),
+                .map_err(|_| ExecError::Int2OutOfRange),
             SqlType {
                 kind: SqlTypeKind::Int4,
                 ..
@@ -368,21 +364,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 ..
             } => i16::try_from(v)
                 .map(Value::Int16)
-                .map_err(|_| ExecError::TypeMismatch {
-                    op: "::int2",
-                    left: Value::Int64(v),
-                    right: Value::Int16(0),
-                }),
+                .map_err(|_| ExecError::Int2OutOfRange),
             SqlType {
                 kind: SqlTypeKind::Int4,
                 ..
             } => i32::try_from(v)
                 .map(Value::Int32)
-                .map_err(|_| ExecError::TypeMismatch {
-                    op: "::int4",
-                    left: Value::Int64(v),
-                    right: Value::Int32(0),
-                }),
+                .map_err(|_| ExecError::Int4OutOfRange),
             SqlType {
                 kind: SqlTypeKind::Int8,
                 ..
