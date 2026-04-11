@@ -1,5 +1,6 @@
 mod agg;
 mod expr_casts;
+mod expr_bool;
 mod expr_compile;
 mod expr_format;
 mod expr_math;
@@ -103,6 +104,9 @@ pub enum ExecError {
         value: String,
     },
     InvalidNumericInput(String),
+    InvalidBooleanInput {
+        value: String,
+    },
     InvalidFloatInput {
         ty: &'static str,
         value: String,

@@ -1,4 +1,5 @@
 use super::exec_expr::parse_numeric_text;
+use super::expr_bool::parse_pg_bool_text;
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::node_types::*;
 use super::ExecError;
@@ -156,6 +157,9 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::InvalidNumericInput(_) => {
             format!("invalid input syntax for type numeric: \"{text}\"")
         }
+        ExecError::InvalidBooleanInput { .. } => {
+            format!("invalid input syntax for type boolean: \"{text}\"")
+        }
         ExecError::InvalidFloatInput { ty, .. } => {
             format!("invalid input syntax for type {ty}: \"{text}\"")
         }
@@ -173,7 +177,9 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
 
 fn input_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
-        ExecError::InvalidIntegerInput { .. } | ExecError::InvalidNumericInput(_) => "22P02",
+        ExecError::InvalidIntegerInput { .. }
+        | ExecError::InvalidNumericInput(_)
+        | ExecError::InvalidBooleanInput { .. } => "22P02",
         ExecError::IntegerOutOfRange { .. }
         | ExecError::Int2OutOfRange
         | ExecError::Int4OutOfRange
@@ -553,15 +559,7 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
                 .ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))?,
             ty,
         )?)),
-        SqlTypeKind::Bool => match text.to_ascii_lowercase().as_str() {
-            "true" | "t" => Ok(Value::Bool(true)),
-            "false" | "f" => Ok(Value::Bool(false)),
-            _ => Err(ExecError::TypeMismatch {
-                op: "::bool",
-                left: Value::Text(CompactString::new(text)),
-                right: Value::Bool(false),
-            }),
-        },
+        SqlTypeKind::Bool => parse_pg_bool_text(text).map(Value::Bool),
     }
 }
 

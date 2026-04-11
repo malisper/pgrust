@@ -35,6 +35,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::InvalidNumericInput(value) => {
             format!("invalid input syntax for type numeric: \"{value}\"")
         }
+        ExecError::InvalidBooleanInput { value } => {
+            format!("invalid input syntax for type boolean: \"{value}\"")
+        }
         ExecError::InvalidFloatInput { ty, value } => {
             format!("invalid input syntax for type {ty}: \"{value}\"")
         }
