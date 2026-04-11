@@ -302,6 +302,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_shift_expression_precedence() {
+        let stmt = parse_select("select (-1::int2<<15)::text").unwrap();
+        match &stmt.targets[0].expr {
+            SqlExpr::Cast(inner, ty) => {
+                assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
+                match inner.as_ref() {
+                    SqlExpr::Shl(left, right) => {
+                        assert!(matches!(right.as_ref(), SqlExpr::IntegerLiteral(value) if value == "15"));
+                        match left.as_ref() {
+                            SqlExpr::Cast(inner, ty) => {
+                                assert_eq!(*ty, SqlType::new(SqlTypeKind::Int2));
+                                assert!(matches!(inner.as_ref(), SqlExpr::Negate(_)));
+                            }
+                            other => panic!("expected int2 cast on left side, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected shift expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected outer cast expression, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_escape_and_dollar_quoted_strings() {
         let stmt = parse_select(r#"select E'abc\tdef', $$a'b$$, $tag$x
 y$tag$"#).unwrap();

@@ -882,6 +882,8 @@ fn collect_rels_from_expr(
         | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
         Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::Shl(left, right)
+        | Expr::Shr(left, right)
         | Expr::Mul(left, right)
         | Expr::Div(left, right)
         | Expr::Mod(left, right)

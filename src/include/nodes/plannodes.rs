@@ -156,6 +156,8 @@ pub enum Expr {
     Const(Value),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
+    Shl(Box<Expr>, Box<Expr>),
+    Shr(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
     Div(Box<Expr>, Box<Expr>),
     Mod(Box<Expr>, Box<Expr>),

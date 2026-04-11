@@ -88,6 +88,26 @@ pub(crate) fn bind_expr_with_outer(
             outer_scopes,
             grouped_outer,
         )?,
+        SqlExpr::Shl(left, right) => bind_shift_expr(
+            "<<",
+            Expr::Shl,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )?,
+        SqlExpr::Shr(left, right) => bind_shift_expr(
+            ">>",
+            Expr::Shr,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )?,
         SqlExpr::Mul(left, right) => bind_arithmetic_expr(
             "*",
             Expr::Mul,
@@ -762,6 +782,35 @@ fn bind_comparison_expr(
     } else {
         (left_bound, right_bound)
     };
+    Ok(make(Box::new(left), Box::new(right)))
+}
+
+fn bind_shift_expr(
+    op: &'static str,
+    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    if !is_integer_family(left_type) || !is_integer_family(right_type) {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+
+    let left = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
+    let right = coerce_bound_expr(
+        bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
+        right_type,
+        SqlType::new(SqlTypeKind::Int4),
+    );
     Ok(make(Box::new(left), Box::new(right)))
 }
 
