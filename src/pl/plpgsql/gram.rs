@@ -1,445 +1,236 @@
+use pest::Parser as _;
+use pest::iterators::Pair;
+use pest_derive::Parser;
+
 use crate::backend::parser::{ParseError, parse_type_name};
 
 use super::ast::{Block, RaiseLevel, Stmt, VarDecl};
 
+#[derive(Parser)]
+#[grammar = "pl/plpgsql/gram.pest"]
+struct PlpgsqlParser;
+
 pub fn parse_block(sql: &str) -> Result<Block, ParseError> {
-    let mut parser = Parser::new(sql);
-    let block = parser.parse_block()?;
-    parser.skip_ws();
-    if !parser.is_eof() {
-        return Err(ParseError::UnexpectedToken {
-            expected: "end of plpgsql block",
-            actual: parser.remaining().into(),
-        });
-    }
-    Ok(block)
+    PlpgsqlParser::parse(Rule::pl_block, sql)
+        .map_err(|e| map_pest_error("plpgsql block", e))
+        .and_then(|mut pairs| build_pl_block(pairs.next().ok_or(ParseError::UnexpectedEof)?))
 }
 
-struct Parser<'a> {
-    input: &'a str,
-    pos: usize,
+fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
+    use pest::error::ErrorVariant;
+
+    match err.variant {
+        ErrorVariant::ParsingError { .. } => ParseError::UnexpectedToken {
+            expected,
+            actual: err.to_string(),
+        },
+        ErrorVariant::CustomError { message } => ParseError::UnexpectedToken {
+            expected,
+            actual: message,
+        },
+    }
 }
 
-impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
-    }
+fn build_pl_block(pair: Pair<'_, Rule>) -> Result<Block, ParseError> {
+    let block = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::block)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_block(block)
+}
 
-    fn remaining(&self) -> &'a str {
-        &self.input[self.pos..]
+fn build_block(pair: Pair<'_, Rule>) -> Result<Block, ParseError> {
+    let mut declarations = Vec::new();
+    let mut statements = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::declare_section => declarations = build_declare_section(part)?,
+            Rule::stmt => statements.push(build_stmt(part)?),
+            _ => {}
+        }
     }
+    Ok(Block {
+        declarations,
+        statements,
+    })
+}
 
-    fn is_eof(&self) -> bool {
-        self.pos >= self.input.len()
+fn build_declare_section(pair: Pair<'_, Rule>) -> Result<Vec<VarDecl>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::var_decl)
+        .map(build_var_decl)
+        .collect()
+}
+
+fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
+    let mut name = None;
+    let mut ty = None;
+    let mut default_expr = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident => name = Some(build_ident(part)),
+            Rule::type_name_text => ty = Some(parse_type_name(part.as_str().trim())?),
+            Rule::default_clause => {
+                default_expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr_until_semi)
+                    .map(|expr| expr.as_str().trim().to_string());
+            }
+            _ => {}
+        }
     }
+    Ok(VarDecl {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        ty: ty.ok_or(ParseError::UnexpectedEof)?,
+        default_expr,
+    })
+}
 
-    fn parse_block(&mut self) -> Result<Block, ParseError> {
-        let mut declarations = Vec::new();
-        if self.consume_keyword("declare") {
-            loop {
-                self.skip_ws();
-                if self.peek_keyword("begin") {
-                    break;
+fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::nested_block_stmt => {
+            let block = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::block)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(Stmt::Block(build_block(block)?))
+        }
+        Rule::null_stmt => Ok(Stmt::Null),
+        Rule::assign_stmt => build_assign_stmt(inner),
+        Rule::if_stmt => build_if_stmt(inner),
+        Rule::for_int_stmt => build_for_stmt(inner),
+        Rule::raise_stmt => build_raise_stmt(inner),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "plpgsql statement",
+            actual: inner.as_str().into(),
+        }),
+    }
+}
+
+fn build_assign_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut name = None;
+    let mut expr = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident => name = Some(build_ident(part)),
+            Rule::expr_until_semi => expr = Some(part.as_str().trim().to_string()),
+            _ => {}
+        }
+    }
+    Ok(Stmt::Assign {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        expr: expr.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_if_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut branches = Vec::new();
+    let mut else_branch = Vec::new();
+    let mut current_condition: Option<String> = None;
+    let mut current_body: Vec<Stmt> = Vec::new();
+    let mut in_else = false;
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr_until_then => {
+                if in_else {
+                    continue;
                 }
-                declarations.push(self.parse_decl()?);
+                if let Some(condition) = current_condition.take() {
+                    branches.push((condition, std::mem::take(&mut current_body)));
+                }
+                current_condition = Some(part.as_str().trim().to_string());
             }
-        }
-        self.expect_keyword("begin")?;
-        let statements = self.parse_statements_until(&["end"])?;
-        self.expect_keyword("end")?;
-        Ok(Block {
-            declarations,
-            statements,
-        })
-    }
-
-    fn parse_decl(&mut self) -> Result<VarDecl, ParseError> {
-        let name = self.parse_identifier()?;
-        let ty_text = self.read_until_any(&[";"], &[":="])?;
-        let default_expr = if self.consume_symbol(":=") {
-            Some(self.read_until_any(&[";"], &[])?)
-        } else {
-            None
-        };
-        self.expect_symbol(";")?;
-        Ok(VarDecl {
-            name,
-            ty: parse_type_name(ty_text.trim())?,
-            default_expr: default_expr.map(|expr| expr.trim().to_string()),
-        })
-    }
-
-    fn parse_statements_until(&mut self, end_keywords: &[&str]) -> Result<Vec<Stmt>, ParseError> {
-        let mut statements = Vec::new();
-        loop {
-            self.skip_ws();
-            if self.is_eof() || end_keywords.iter().any(|kw| self.peek_keyword(kw)) {
-                break;
-            }
-            statements.push(self.parse_stmt()?);
-        }
-        Ok(statements)
-    }
-
-    fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
-        if self.peek_keyword("declare") || self.peek_keyword("begin") {
-            let block = self.parse_block()?;
-            self.expect_symbol(";")?;
-            return Ok(Stmt::Block(block));
-        }
-        if self.consume_keyword("null") {
-            self.expect_symbol(";")?;
-            return Ok(Stmt::Null);
-        }
-        if self.consume_keyword("if") {
-            return self.parse_if();
-        }
-        if self.consume_keyword("for") {
-            return self.parse_for_int();
-        }
-        if self.consume_keyword("raise") {
-            return self.parse_raise();
-        }
-        self.parse_assignment()
-    }
-
-    fn parse_assignment(&mut self) -> Result<Stmt, ParseError> {
-        let name = self.parse_identifier()?;
-        self.expect_symbol(":=")?;
-        let expr = self.read_until_any(&[";"], &[])?;
-        self.expect_symbol(";")?;
-        Ok(Stmt::Assign {
-            name,
-            expr: expr.trim().to_string(),
-        })
-    }
-
-    fn parse_if(&mut self) -> Result<Stmt, ParseError> {
-        let mut branches = Vec::new();
-        let condition = self.read_until_keyword("then")?;
-        self.expect_keyword("then")?;
-        let body = self.parse_statements_until(&["elsif", "else", "end"])?;
-        branches.push((condition.trim().to_string(), body));
-
-        while self.consume_keyword("elsif") {
-            let condition = self.read_until_keyword("then")?;
-            self.expect_keyword("then")?;
-            let body = self.parse_statements_until(&["elsif", "else", "end"])?;
-            branches.push((condition.trim().to_string(), body));
-        }
-
-        let else_branch = if self.consume_keyword("else") {
-            self.parse_statements_until(&["end"])?
-        } else {
-            Vec::new()
-        };
-
-        self.expect_keyword("end")?;
-        self.expect_keyword("if")?;
-        self.expect_symbol(";")?;
-        Ok(Stmt::If {
-            branches,
-            else_branch,
-        })
-    }
-
-    fn parse_for_int(&mut self) -> Result<Stmt, ParseError> {
-        let var_name = self.parse_identifier()?;
-        self.expect_keyword("in")?;
-        let start_expr = self.read_until_any(&[], &[".."])?;
-        self.expect_symbol("..")?;
-        let end_expr = self.read_until_keyword("loop")?;
-        self.expect_keyword("loop")?;
-        let body = self.parse_statements_until(&["end"])?;
-        self.expect_keyword("end")?;
-        self.expect_keyword("loop")?;
-        self.expect_symbol(";")?;
-        Ok(Stmt::ForInt {
-            var_name,
-            start_expr: start_expr.trim().to_string(),
-            end_expr: end_expr.trim().to_string(),
-            body,
-        })
-    }
-
-    fn parse_raise(&mut self) -> Result<Stmt, ParseError> {
-        let level = if self.consume_keyword("notice") {
-            RaiseLevel::Notice
-        } else if self.consume_keyword("warning") {
-            RaiseLevel::Warning
-        } else if self.consume_keyword("exception") {
-            RaiseLevel::Exception
-        } else {
-            RaiseLevel::Exception
-        };
-        self.skip_ws();
-        let message = self.parse_sql_literal()?;
-        let mut params = Vec::new();
-        while self.consume_symbol(",") {
-            let expr = self.read_until_any(&[";", ","], &[])?;
-            params.push(expr.trim().to_string());
-            if self.peek_symbol(";") {
-                break;
-            }
-        }
-        self.expect_symbol(";")?;
-        Ok(Stmt::Raise {
-            level,
-            message,
-            params,
-        })
-    }
-
-    fn parse_sql_literal(&mut self) -> Result<String, ParseError> {
-        self.skip_ws();
-        let start = self.pos;
-        if self.remaining().starts_with('\'')
-            || self.remaining().starts_with("E'")
-            || self.remaining().starts_with("e'")
-            || self.remaining().starts_with('$')
-        {
-            self.skip_sql_token();
-            return Ok(self.input[start..self.pos].to_string());
-        }
-        Err(ParseError::UnexpectedToken {
-            expected: "SQL string literal",
-            actual: self.remaining().into(),
-        })
-    }
-
-    fn parse_identifier(&mut self) -> Result<String, ParseError> {
-        self.skip_ws();
-        let bytes = self.input.as_bytes();
-        let start = self.pos;
-        if self.pos >= bytes.len() {
-            return Err(ParseError::UnexpectedEof);
-        }
-        if bytes[self.pos] == b'"' {
-            self.pos += 1;
-            while self.pos < bytes.len() {
-                if bytes[self.pos] == b'"' {
-                    if self.pos + 1 < bytes.len() && bytes[self.pos + 1] == b'"' {
-                        self.pos += 2;
-                    } else {
-                        self.pos += 1;
-                        break;
-                    }
+            Rule::stmt => {
+                let stmt = build_stmt(part)?;
+                if in_else {
+                    else_branch.push(stmt);
                 } else {
-                    self.pos += 1;
+                    current_body.push(stmt);
                 }
             }
-            return Ok(self.input[start + 1..self.pos - 1].replace("\"\"", "\""));
-        }
-        let ch = bytes[self.pos] as char;
-        if !(ch.is_ascii_alphabetic() || ch == '_') {
-            return Err(ParseError::UnexpectedToken {
-                expected: "identifier",
-                actual: self.remaining().into(),
-            });
-        }
-        self.pos += 1;
-        while self.pos < bytes.len() {
-            let ch = bytes[self.pos] as char;
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-        Ok(self.input[start..self.pos].to_ascii_lowercase())
-    }
-
-    fn read_until_keyword(&mut self, keyword: &str) -> Result<String, ParseError> {
-        self.read_until_any(&[keyword], &[])
-    }
-
-    fn read_until_any(
-        &mut self,
-        keywords: &[&str],
-        symbols: &[&str],
-    ) -> Result<String, ParseError> {
-        self.skip_ws();
-        let start = self.pos;
-        let mut paren_depth = 0i32;
-        let mut bracket_depth = 0i32;
-        while !self.is_eof() {
-            if paren_depth == 0 && bracket_depth == 0 {
-                if keywords.iter().any(|kw| self.peek_keyword(kw)) || symbols.iter().any(|sym| self.peek_symbol(sym)) {
-                    return Ok(self.input[start..self.pos].to_string());
+            Rule::else_clause => {
+                if let Some(condition) = current_condition.take() {
+                    branches.push((condition, std::mem::take(&mut current_body)));
                 }
-            }
-            match self.current_char() {
-                Some('(') => {
-                    paren_depth += 1;
-                    self.pos += 1;
+                in_else = true;
+                for inner in part.into_inner() {
+                    if inner.as_rule() == Rule::stmt {
+                        else_branch.push(build_stmt(inner)?);
+                    }
                 }
-                Some(')') => {
-                    paren_depth -= 1;
-                    self.pos += 1;
-                }
-                Some('[') => {
-                    bracket_depth += 1;
-                    self.pos += 1;
-                }
-                Some(']') => {
-                    bracket_depth -= 1;
-                    self.pos += 1;
-                }
-                Some('\'') => self.skip_single_quoted_string(),
-                Some('"') => self.skip_double_quoted_identifier(),
-                Some('$') if self.is_dollar_quote_start() => self.skip_dollar_quoted_string(),
-                Some(_) => self.pos += 1,
-                None => break,
-            }
-        }
-        Err(ParseError::UnexpectedToken {
-            expected: "statement delimiter",
-            actual: self.input[start..].into(),
-        })
-    }
-
-    fn skip_ws(&mut self) {
-        while let Some(ch) = self.current_char() {
-            if ch.is_ascii_whitespace() {
-                self.pos += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn current_char(&self) -> Option<char> {
-        self.remaining().chars().next()
-    }
-
-    fn expect_keyword(&mut self, keyword: &str) -> Result<(), ParseError> {
-        if self.consume_keyword(keyword) {
-            Ok(())
-        } else {
-            Err(ParseError::UnexpectedToken {
-                expected: "keyword",
-                actual: self.remaining().into(),
-            })
-        }
-    }
-
-    fn consume_keyword(&mut self, keyword: &str) -> bool {
-        self.skip_ws();
-        if !self.peek_keyword(keyword) {
-            return false;
-        }
-        self.pos += keyword.len();
-        true
-    }
-
-    fn peek_keyword(&self, keyword: &str) -> bool {
-        let rem = self.remaining();
-        if rem.len() < keyword.len() || !rem[..keyword.len()].eq_ignore_ascii_case(keyword) {
-            return false;
-        }
-        rem[keyword.len()..]
-            .chars()
-            .next()
-            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
-    }
-
-    fn expect_symbol(&mut self, symbol: &str) -> Result<(), ParseError> {
-        if self.consume_symbol(symbol) {
-            Ok(())
-        } else {
-            Err(ParseError::UnexpectedToken {
-                expected: "symbol",
-                actual: self.remaining().into(),
-            })
-        }
-    }
-
-    fn consume_symbol(&mut self, symbol: &str) -> bool {
-        self.skip_ws();
-        if self.peek_symbol(symbol) {
-            self.pos += symbol.len();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn peek_symbol(&self, symbol: &str) -> bool {
-        self.remaining().starts_with(symbol)
-    }
-
-    fn skip_sql_token(&mut self) {
-        match self.current_char() {
-            Some('\'') => self.skip_single_quoted_string(),
-            Some('$') if self.is_dollar_quote_start() => self.skip_dollar_quoted_string(),
-            Some('E') | Some('e') if self.remaining().len() >= 2 && self.remaining().as_bytes()[1] == b'\'' => {
-                self.pos += 1;
-                self.skip_single_quoted_string();
             }
             _ => {}
         }
     }
 
-    fn skip_single_quoted_string(&mut self) {
-        let bytes = self.input.as_bytes();
-        self.pos += 1;
-        while self.pos < bytes.len() {
-            if bytes[self.pos] == b'\'' {
-                if self.pos + 1 < bytes.len() && bytes[self.pos + 1] == b'\'' {
-                    self.pos += 2;
+    if let Some(condition) = current_condition {
+        branches.push((condition, current_body));
+    }
+
+    Ok(Stmt::If {
+        branches,
+        else_branch,
+    })
+}
+
+fn build_for_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut var_name = None;
+    let mut start_expr = None;
+    let mut end_expr = None;
+    let mut body = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident if var_name.is_none() => var_name = Some(build_ident(part)),
+            Rule::expr_until_range => start_expr = Some(part.as_str().trim().to_string()),
+            Rule::expr_until_loop => end_expr = Some(part.as_str().trim().to_string()),
+            Rule::stmt => body.push(build_stmt(part)?),
+            _ => {}
+        }
+    }
+    Ok(Stmt::ForInt {
+        var_name: var_name.ok_or(ParseError::UnexpectedEof)?,
+        start_expr: start_expr.ok_or(ParseError::UnexpectedEof)?,
+        end_expr: end_expr.ok_or(ParseError::UnexpectedEof)?,
+        body,
+    })
+}
+
+fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut level = RaiseLevel::Exception;
+    let mut message = None;
+    let mut params = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::raise_level => {
+                let token = part.as_str();
+                level = if token.eq_ignore_ascii_case("notice") {
+                    RaiseLevel::Notice
+                } else if token.eq_ignore_ascii_case("warning") {
+                    RaiseLevel::Warning
                 } else {
-                    self.pos += 1;
-                    break;
-                }
-            } else {
-                self.pos += 1;
+                    RaiseLevel::Exception
+                };
             }
+            Rule::sql_string => message = Some(part.as_str().to_string()),
+            Rule::expr_until_comma_or_semi => params.push(part.as_str().trim().to_string()),
+            _ => {}
         }
     }
+    Ok(Stmt::Raise {
+        level,
+        message: message.ok_or(ParseError::UnexpectedEof)?,
+        params,
+    })
+}
 
-    fn skip_double_quoted_identifier(&mut self) {
-        let bytes = self.input.as_bytes();
-        self.pos += 1;
-        while self.pos < bytes.len() {
-            if bytes[self.pos] == b'"' {
-                if self.pos + 1 < bytes.len() && bytes[self.pos + 1] == b'"' {
-                    self.pos += 2;
-                } else {
-                    self.pos += 1;
-                    break;
-                }
-            } else {
-                self.pos += 1;
-            }
-        }
-    }
-
-    fn is_dollar_quote_start(&self) -> bool {
-        let rem = self.remaining().as_bytes();
-        if rem.is_empty() || rem[0] != b'$' {
-            return false;
-        }
-        let mut idx = 1usize;
-        while idx < rem.len() && (rem[idx].is_ascii_alphanumeric() || rem[idx] == b'_') {
-            idx += 1;
-        }
-        idx < rem.len() && rem[idx] == b'$'
-    }
-
-    fn skip_dollar_quoted_string(&mut self) {
-        let rem = self.remaining();
-        let end = rem[1..]
-            .find('$')
-            .map(|offset| offset + 1)
-            .expect("valid dollar quote");
-        let tag = &rem[..=end];
-        self.pos += tag.len();
-        let rest = &self.input[self.pos..];
-        if let Some(close) = rest.find(tag) {
-            self.pos += close + tag.len();
-        } else {
-            self.pos = self.input.len();
-        }
+fn build_ident(pair: Pair<'_, Rule>) -> String {
+    let raw = pair.as_str();
+    if raw.starts_with('"') && raw.ends_with('"') {
+        raw[1..raw.len() - 1].replace("\"\"", "\"")
+    } else {
+        raw.to_ascii_lowercase()
     }
 }
 
