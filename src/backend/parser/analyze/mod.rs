@@ -698,6 +698,7 @@ pub fn bind_insert(
     stmt: &InsertStatement,
     catalog: &Catalog,
 ) -> Result<BoundInsertStatement, ParseError> {
+    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
@@ -730,7 +731,9 @@ pub fn bind_insert(
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|expr| bind_expr_with_outer(expr, &scope, catalog, &[], None))
+                    .map(|expr| {
+                        bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -741,6 +744,7 @@ pub fn bind_update(
     stmt: &UpdateStatement,
     catalog: &Catalog,
 ) -> Result<BoundUpdateStatement, ParseError> {
+    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
@@ -755,14 +759,21 @@ pub fn bind_update(
             .map(|assignment| {
                 Ok(BoundAssignment {
                     column_index: resolve_column(&scope, &assignment.column)?,
-                    expr: bind_expr_with_outer(&assignment.expr, &scope, catalog, &[], None)?,
+                    expr: bind_expr_with_outer_and_ctes(
+                        &assignment.expr,
+                        &scope,
+                        catalog,
+                        &[],
+                        None,
+                        &local_ctes,
+                    )?,
                 })
             })
             .collect::<Result<Vec<_>, ParseError>>()?,
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr_with_outer(expr, &scope, catalog, &[], None))
+            .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
             .transpose()?,
     })
 }
@@ -771,6 +782,7 @@ pub fn bind_delete(
     stmt: &DeleteStatement,
     catalog: &Catalog,
 ) -> Result<BoundDeleteStatement, ParseError> {
+    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = catalog
         .get(&stmt.table_name)
         .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
@@ -782,7 +794,7 @@ pub fn bind_delete(
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr_with_outer(expr, &scope, catalog, &[], None))
+            .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
             .transpose()?,
     })
 }
