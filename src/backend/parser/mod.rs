@@ -1046,6 +1046,21 @@ y$tag$"#).unwrap();
     }
 
     #[test]
+    fn parse_parenthesized_table_keyword_from_item() {
+        let stmt = parse_select("select * from (table people) p").unwrap();
+        assert_eq!(
+            stmt.from,
+            Some(FromItem::Alias {
+                source: Box::new(FromItem::Table {
+                    name: "people".into()
+                }),
+                alias: "p".into(),
+                column_aliases: vec![],
+            })
+        );
+    }
+
+    #[test]
     fn parse_join_with_derived_table() {
         let stmt = parse_select(
             "select * from people p join (select owner_id from pets) q on p.id = q.owner_id",
@@ -1170,7 +1185,18 @@ y$tag$"#).unwrap();
         let stmt = parse_select("select * from (select id from people) p(x, y)").unwrap();
         assert!(matches!(
             build_plan(&stmt, &catalog()),
-            Err(ParseError::UnexpectedToken { .. })
+            Err(ParseError::UnexpectedToken { actual, .. })
+                if actual == "table \"p\" has 1 columns available but 2 columns specified"
+        ));
+    }
+
+    #[test]
+    fn build_plan_rejects_too_many_parenthesized_table_keyword_aliases() {
+        let stmt = parse_select("select * from (table people) as p(x, y, z, w)").unwrap();
+        assert!(matches!(
+            build_plan(&stmt, &catalog()),
+            Err(ParseError::UnexpectedToken { actual, .. })
+                if actual == "table \"p\" has 3 columns available but 4 columns specified"
         ));
     }
 
