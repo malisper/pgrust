@@ -412,6 +412,12 @@ fn run_statement(
     catalog_store: &mut CatalogStore,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
+    let mut catalog_snapshot = catalog_store.catalog_snapshot().map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "physical catalog snapshot",
+            actual: format!("{err:?}"),
+        })
+    })?;
 
     let result = match stmt {
         Statement::Set(_) | Statement::Reset(_) => Ok(StatementResult::AffectedRows(0)),
@@ -427,7 +433,7 @@ fn run_statement(
             };
             execute_statement(
                 Statement::Explain(stmt),
-                catalog_store.catalog_mut(),
+                &mut catalog_snapshot,
                 &mut ctx,
                 INVALID_TRANSACTION_ID,
             )
@@ -444,7 +450,7 @@ fn run_statement(
             };
             execute_statement(
                 Statement::Select(stmt),
-                catalog_store.catalog_mut(),
+                &mut catalog_snapshot,
                 &mut ctx,
                 INVALID_TRANSACTION_ID,
             )
@@ -461,7 +467,7 @@ fn run_statement(
             };
             execute_statement(
                 Statement::Values(stmt),
-                catalog_store.catalog_mut(),
+                &mut catalog_snapshot,
                 &mut ctx,
                 INVALID_TRANSACTION_ID,
             )
@@ -478,7 +484,7 @@ fn run_statement(
             };
             execute_statement(
                 Statement::ShowTables,
-                catalog_store.catalog_mut(),
+                &mut catalog_snapshot,
                 &mut ctx,
                 INVALID_TRANSACTION_ID,
             )
@@ -495,7 +501,7 @@ fn run_statement(
             };
             execute_statement(
                 Statement::Analyze(stmt),
-                catalog_store.catalog_mut(),
+                &mut catalog_snapshot,
                 &mut ctx,
                 INVALID_TRANSACTION_ID,
             )
@@ -555,7 +561,7 @@ fn run_statement(
             };
             execute_statement(
                 Statement::TruncateTable(stmt),
-                catalog_store.catalog_mut(),
+                &mut catalog_snapshot,
                 &mut ctx,
                 INVALID_TRANSACTION_ID,
             )
@@ -572,7 +578,7 @@ fn run_statement(
             };
             execute_statement(
                 Statement::Vacuum(stmt),
-                catalog_store.catalog_mut(),
+                &mut catalog_snapshot,
                 &mut ctx,
                 INVALID_TRANSACTION_ID,
             )
@@ -591,7 +597,7 @@ fn run_statement(
                 };
                 execute_statement(
                     Statement::Insert(stmt),
-                    catalog_store.catalog_mut(),
+                    &mut catalog_snapshot,
                     &mut ctx,
                     xid,
                 )
@@ -621,7 +627,7 @@ fn run_statement(
                 };
                 execute_statement(
                     Statement::Update(stmt),
-                    catalog_store.catalog_mut(),
+                    &mut catalog_snapshot,
                     &mut ctx,
                     xid,
                 )
@@ -651,7 +657,7 @@ fn run_statement(
                 };
                 execute_statement(
                     Statement::Delete(stmt),
-                    catalog_store.catalog_mut(),
+                    &mut catalog_snapshot,
                     &mut ctx,
                     xid,
                 )
