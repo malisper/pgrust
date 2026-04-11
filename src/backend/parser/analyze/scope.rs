@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::utils::cache::relcache::RelCache;
+use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -275,10 +275,7 @@ pub(super) fn bind_from_item_with_ctes(
                     scope_for_relation(Some(name), &cte.desc),
                 ));
             }
-            let relcache = RelCache::from_catalog(catalog);
-            let entry = relcache
-                .get_by_name(name)
-                .ok_or_else(|| ParseError::UnknownTable(name.clone()))?;
+            let entry = lookup_relation(catalog, name)?;
             let desc = entry.desc.clone();
             Ok((
                 Plan::SeqScan {
@@ -629,6 +626,14 @@ pub(super) fn bind_from_item_with_ctes(
             apply_relation_alias(plan, scope, alias, column_aliases)
         }
     }
+}
+
+pub(super) fn lookup_relation(catalog: &Catalog, name: &str) -> Result<RelCacheEntry, ParseError> {
+    let relcache = RelCache::from_catalog(catalog);
+    relcache
+        .get_by_name(name)
+        .cloned()
+        .ok_or_else(|| ParseError::UnknownTable(name.to_string()))
 }
 
 pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDesc) -> BoundScope {
