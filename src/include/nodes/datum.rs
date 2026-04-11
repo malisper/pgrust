@@ -88,6 +88,16 @@ impl NumericValue {
         }
     }
 
+    pub fn abs(&self) -> Self {
+        match self {
+            Self::NaN => Self::NaN,
+            Self::Finite { coeff, scale } => Self::Finite {
+                coeff: coeff.abs(),
+                scale: *scale,
+            },
+        }
+    }
+
     pub fn render(&self) -> String {
         match self {
             Self::NaN => "NaN".to_string(),

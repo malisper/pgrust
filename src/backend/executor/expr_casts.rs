@@ -428,30 +428,24 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
-                kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Bool,
+                kind: SqlTypeKind::Int2,
+                ..
+            } => cast_float_to_int(v, ty),
+            SqlType {
+                kind: SqlTypeKind::Int4,
+                ..
+            } => cast_float_to_int(v, ty),
+            SqlType {
+                kind: SqlTypeKind::Int8,
+                ..
+            } => cast_float_to_int(v, ty),
+            SqlType {
+                kind: SqlTypeKind::Bool,
                 ..
             } => Err(ExecError::TypeMismatch {
                 op: "::",
                 left: Value::Float64(v),
-                right: match ty {
-                    SqlType {
-                        kind: SqlTypeKind::Int2,
-                        ..
-                    } => Value::Int16(0),
-                    SqlType {
-                        kind: SqlTypeKind::Int4,
-                        ..
-                    } => Value::Int32(0),
-                    SqlType {
-                        kind: SqlTypeKind::Int8,
-                        ..
-                    } => Value::Int64(0),
-                    SqlType {
-                        kind: SqlTypeKind::Bool,
-                        ..
-                    } => Value::Bool(false),
-                    _ => Value::Text(CompactString::new("")),
-                },
+                right: Value::Bool(false),
             }),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
@@ -537,20 +531,20 @@ pub(super) fn cast_numeric_value(
             Ok(Value::Float64(v))
         }
         SqlTypeKind::Int2 => value
-            .render()
-            .parse::<i16>()
+            .round_to_scale(0)
+            .and_then(|rounded| rounded.render().parse::<i16>().ok())
             .map(Value::Int16)
-            .map_err(|_| ExecError::Int2OutOfRange),
+            .ok_or(ExecError::Int2OutOfRange),
         SqlTypeKind::Int4 => value
-            .render()
-            .parse::<i32>()
+            .round_to_scale(0)
+            .and_then(|rounded| rounded.render().parse::<i32>().ok())
             .map(Value::Int32)
-            .map_err(|_| ExecError::Int4OutOfRange),
+            .ok_or(ExecError::Int4OutOfRange),
         SqlTypeKind::Int8 => value
-            .render()
-            .parse::<i64>()
+            .round_to_scale(0)
+            .and_then(|rounded| rounded.render().parse::<i64>().ok())
             .map(Value::Int64)
-            .map_err(|_| ExecError::Int8OutOfRange),
+            .ok_or(ExecError::Int8OutOfRange),
         SqlTypeKind::Bool => Err(ExecError::TypeMismatch {
             op: "::bool",
             left: Value::Numeric(value),
@@ -582,6 +576,37 @@ fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<St
         Err(ExecError::StringDataRightTruncation {
             ty: format!("character varying({max_chars})"),
         })
+    }
+}
+
+fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
+    if !value.is_finite() {
+        return Err(ExecError::InvalidFloatInput(value.to_string()));
+    }
+    let rounded = value.round_ties_even();
+    match ty.kind {
+        SqlTypeKind::Int2 => {
+            if rounded < i16::MIN as f64 || rounded > i16::MAX as f64 {
+                Err(ExecError::Int2OutOfRange)
+            } else {
+                Ok(Value::Int16(rounded as i16))
+            }
+        }
+        SqlTypeKind::Int4 => {
+            if rounded < i32::MIN as f64 || rounded > i32::MAX as f64 {
+                Err(ExecError::Int4OutOfRange)
+            } else {
+                Ok(Value::Int32(rounded as i32))
+            }
+        }
+        SqlTypeKind::Int8 => {
+            if rounded < i64::MIN as f64 || rounded > i64::MAX as f64 {
+                Err(ExecError::Int8OutOfRange)
+            } else {
+                Ok(Value::Int64(rounded as i64))
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
