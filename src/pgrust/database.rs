@@ -213,7 +213,12 @@ impl Database {
         let catalog_guard = self.catalog.read();
         let mut relcache = catalog_guard
             .relcache()
-            .unwrap_or_else(|_| RelCache::from_catalog(catalog_guard.catalog()));
+            .unwrap_or_else(|_| {
+                catalog_guard
+                    .catalog_snapshot()
+                    .map(|catalog| RelCache::from_catalog(&catalog))
+                    .unwrap_or_default()
+            });
         drop(catalog_guard);
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {
@@ -239,7 +244,7 @@ impl Database {
         let base_dir = catalog_guard.base_dir().to_path_buf();
         let mut catalog = catalog_guard
             .catalog_snapshot()
-            .unwrap_or_else(|_| catalog_guard.catalog().clone());
+            .unwrap_or_default();
         drop(catalog_guard);
         let permanent_entries = catalog
             .entries()
