@@ -412,11 +412,11 @@ fn apply_relation_alias(
 ) -> Result<(Plan, BoundScope), ParseError> {
     if column_aliases.len() > scope.columns.len() {
         return Err(ParseError::UnexpectedToken {
-            expected: "column alias count to be less than or equal to source column count",
+            expected: "table alias column count to match source columns",
             actual: format!(
-                "{} aliases for {} columns",
+                "table \"{alias}\" has {} columns available but {} columns specified",
+                scope.columns.len(),
                 column_aliases.len(),
-                scope.columns.len()
             ),
         });
     }
