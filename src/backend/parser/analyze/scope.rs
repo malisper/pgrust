@@ -29,6 +29,7 @@ pub(crate) struct BoundCte {
 #[derive(Debug, Clone)]
 pub struct BoundRelation {
     pub rel: RelFileLocator,
+    pub relation_oid: u32,
     pub desc: RelationDesc,
 }
 
