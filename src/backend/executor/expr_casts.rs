@@ -123,6 +123,54 @@ fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
     Ok(Value::Int64(oid as i64))
 }
 
+fn parse_oid_token_prefix(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    if matches!(bytes[0], b'+' | b'-') {
+        idx += 1;
+    }
+    let start_digits = idx;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    (idx > start_digits).then_some(idx)
+}
+
+fn soft_parse_oidvector_input(text: &str) -> Result<Option<InputErrorInfo>, ExecError> {
+    let mut remaining = text;
+    loop {
+        remaining = remaining.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+        if remaining.is_empty() {
+            return Ok(None);
+        }
+        let Some(prefix_len) = parse_oid_token_prefix(remaining) else {
+            let err = ExecError::InvalidIntegerInput {
+                ty: "oid",
+                value: remaining.to_string(),
+            };
+            return Ok(Some(InputErrorInfo {
+                message: input_error_message(&err, remaining),
+                detail: None,
+                hint: None,
+                sqlstate: input_error_sqlstate(&err),
+            }));
+        };
+        let token = &remaining[..prefix_len];
+        if let Err(err) = cast_text_to_oid(token) {
+            return Ok(Some(InputErrorInfo {
+                message: input_error_message(&err, token),
+                detail: None,
+                hint: None,
+                sqlstate: input_error_sqlstate(&err),
+            }));
+        }
+        remaining = &remaining[prefix_len..];
+    }
+}
+
 fn parse_internal_char_text(text: &str) -> u8 {
     let bytes = text.as_bytes();
     if bytes.is_empty() {
@@ -247,6 +295,9 @@ pub(crate) fn soft_input_error_info(
             }
         }
         return Ok(None);
+    }
+    if type_name.trim().eq_ignore_ascii_case("oidvector") {
+        return soft_parse_oidvector_input(text);
     }
 
     let ty = parse_input_type_name(type_name)?.ok_or_else(|| ExecError::InvalidStorageValue {
