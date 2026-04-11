@@ -405,6 +405,8 @@ pub enum SqlExpr {
     NumericLiteral(String),
     Add(Box<SqlExpr>, Box<SqlExpr>),
     Sub(Box<SqlExpr>, Box<SqlExpr>),
+    Shl(Box<SqlExpr>, Box<SqlExpr>),
+    Shr(Box<SqlExpr>, Box<SqlExpr>),
     Mul(Box<SqlExpr>, Box<SqlExpr>),
     Div(Box<SqlExpr>, Box<SqlExpr>),
     Mod(Box<SqlExpr>, Box<SqlExpr>),

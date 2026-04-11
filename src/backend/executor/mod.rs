@@ -4235,6 +4235,27 @@ mod tests {
     }
 
     #[test]
+    fn integer_shift_operators_preserve_left_type() {
+        let base = temp_dir("integer_shift_operators");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select (-1::int2<<15)::text, ((-1::int2<<15)+1::int2)::text, (8::int4>>2)::text, (8::int8>>2)::text",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Text("-32768".into()),
+                Value::Text("-32767".into()),
+                Value::Text("2".into()),
+                Value::Text("2".into()),
+            ]],
+        );
+    }
+
+    #[test]
     fn scalar_subquery_zero_rows_yields_null() {
         let base = temp_dir("scalar_subquery_zero_rows");
         let mut txns = TransactionManager::new_durable(&base).unwrap();

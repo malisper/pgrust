@@ -33,6 +33,8 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
+        | SqlExpr::Shl(l, r)
+        | SqlExpr::Shr(l, r)
         | SqlExpr::Mul(l, r)
         | SqlExpr::Div(l, r)
         | SqlExpr::Mod(l, r)
@@ -113,6 +115,8 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>
         SqlExpr::Cast(inner, _) => collect_aggs(inner, aggs),
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
+        | SqlExpr::Shl(l, r)
+        | SqlExpr::Shr(l, r)
         | SqlExpr::Mul(l, r)
         | SqlExpr::Div(l, r)
         | SqlExpr::Mod(l, r)

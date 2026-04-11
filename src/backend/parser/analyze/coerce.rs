@@ -74,6 +74,13 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
     )
 }
 
+pub(super) fn is_integer_family(ty: SqlType) -> bool {
+    matches!(
+        ty.element_type().kind,
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+    )
+}
+
 fn is_text_like_type(ty: SqlType) -> bool {
     matches!(
         ty.element_type().kind,
@@ -191,6 +198,7 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
     match expr {
         SqlExpr::Div(_, _) | SqlExpr::Mod(_, _) => SqlType::new(widest_int),
         SqlExpr::Add(_, _) | SqlExpr::Sub(_, _) | SqlExpr::Mul(_, _) => SqlType::new(widest_int),
+        SqlExpr::Shl(_, _) | SqlExpr::Shr(_, _) => left,
         _ => SqlType::new(Int4),
     }
 }

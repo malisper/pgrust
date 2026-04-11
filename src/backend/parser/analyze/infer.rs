@@ -36,6 +36,8 @@ pub(super) fn infer_sql_expr_type(
         SqlExpr::NumericLiteral(_) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Add(left, right)
         | SqlExpr::Sub(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
         | SqlExpr::Mul(left, right)
         | SqlExpr::Div(left, right)
         | SqlExpr::Mod(left, right) => infer_arithmetic_sql_type(

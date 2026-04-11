@@ -268,6 +268,38 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
     }
 }
 
+pub(crate) fn shift_left_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int16(l.wrapping_shl(*r as u32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l.wrapping_shl(*r as u32))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(l.wrapping_shl(*r as u32))),
+        _ => Err(ExecError::TypeMismatch {
+            op: "<<",
+            left,
+            right,
+        }),
+    }
+}
+
+pub(crate) fn shift_right_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match (&left, &right) {
+        (Value::Int16(l), Value::Int32(r)) => Ok(Value::Int16(l.wrapping_shr(*r as u32))),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l.wrapping_shr(*r as u32))),
+        (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(l.wrapping_shr(*r as u32))),
+        _ => Err(ExecError::TypeMismatch {
+            op: ">>",
+            left,
+            right,
+        }),
+    }
+}
+
 pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);

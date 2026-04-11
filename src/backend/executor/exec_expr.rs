@@ -11,7 +11,8 @@ use super::expr_json::{
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_ops::{
     add_values, compare_values, concat_values, div_values, eval_and, eval_or, mod_values,
-    mul_values, negate_value, not_equal_values, order_values, sub_values, values_are_distinct,
+    mul_values, negate_value, not_equal_values, order_values, shift_left_values,
+    shift_right_values, sub_values, values_are_distinct,
 };
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
 pub(crate) use super::expr_json::eval_json_table_function;
@@ -50,6 +51,12 @@ pub fn eval_expr(
         }
         Expr::Sub(left, right) => {
             sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::Shl(left, right) => {
+            shift_left_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::Shr(left, right) => {
+            shift_right_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
         Expr::Mul(left, right) => {
             mul_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
