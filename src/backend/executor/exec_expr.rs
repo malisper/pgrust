@@ -580,6 +580,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Log => eval_log_function(&values),
         BuiltinScalarFunction::Log10 => eval_log10_function(&values),
         BuiltinScalarFunction::Div => eval_div_function(&values),
+        BuiltinScalarFunction::Mod => mod_values(values[0].clone(), values[1].clone()),
         BuiltinScalarFunction::Scale => eval_scale_function(&values),
         BuiltinScalarFunction::MinScale => eval_min_scale_function(&values),
         BuiltinScalarFunction::TrimScale => eval_trim_scale_function(&values),

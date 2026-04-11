@@ -6330,6 +6330,31 @@
     }
 
     #[test]
+    fn mod_function_works_for_numeric_values() {
+        let base = temp_dir("mod_function_numeric");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select mod(10.0, 3.0), mod(12.5, 4.0)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Numeric("1.0".into()),
+                        Value::Numeric("0.5".into()),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn numeric_division_works_with_large_scale_operands() {
         let base = temp_dir("numeric_div_large_scale");
         let txns = TransactionManager::new_durable(&base).unwrap();
