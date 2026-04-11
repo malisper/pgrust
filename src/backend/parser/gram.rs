@@ -1332,6 +1332,36 @@ fn build_null_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
     if raw == "is not null" {
         return Ok(SqlExpr::IsNotNull(Box::new(left)));
     }
+    if raw == "is true" {
+        return Ok(SqlExpr::IsNotDistinctFrom(
+            Box::new(left),
+            Box::new(SqlExpr::Const(Value::Bool(true))),
+        ));
+    }
+    if raw == "is not true" {
+        return Ok(SqlExpr::IsDistinctFrom(
+            Box::new(left),
+            Box::new(SqlExpr::Const(Value::Bool(true))),
+        ));
+    }
+    if raw == "is false" {
+        return Ok(SqlExpr::IsNotDistinctFrom(
+            Box::new(left),
+            Box::new(SqlExpr::Const(Value::Bool(false))),
+        ));
+    }
+    if raw == "is not false" {
+        return Ok(SqlExpr::IsDistinctFrom(
+            Box::new(left),
+            Box::new(SqlExpr::Const(Value::Bool(false))),
+        ));
+    }
+    if raw == "is unknown" {
+        return Ok(SqlExpr::IsNull(Box::new(left)));
+    }
+    if raw == "is not unknown" {
+        return Ok(SqlExpr::IsNotNull(Box::new(left)));
+    }
 
     let mut right = None;
     let mut saw_not = false;
