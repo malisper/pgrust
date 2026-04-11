@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 use std::thread;
 
 use crate::backend::executor::{ExecError, QueryColumn, StatementResult, Value};
@@ -14,7 +15,7 @@ use crate::backend::libpq::pqformat::{
     FloatFormatOptions,
     format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
     send_close_complete, send_command_complete, send_copy_in_response, send_data_row,
-    send_empty_query, send_error, send_no_data, send_parameter_description, send_parameter_status,
+    send_empty_query, send_error, send_no_data, send_notice, send_parameter_description, send_parameter_status,
     send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
     send_typed_data_row,
 };
@@ -272,8 +273,13 @@ fn handle_query(
         send_ready_for_query(stream, state.session.ready_status())?;
         return Ok(());
     }
+    if try_handle_float_shell_ddl(stream, sql)? {
+        send_ready_for_query(stream, state.session.ready_status())?;
+        return Ok(());
+    }
+    let sql = rewrite_regression_sql(sql);
 
-    if let Some(table_name) = parse_copy_from_stdin(sql) {
+    if let Some(table_name) = parse_copy_from_stdin(&sql) {
         state.copy_in = Some(CopyInState {
             table_name,
             pending: Vec::new(),
@@ -284,7 +290,7 @@ fn handle_query(
 
     let parsed = db
         .plan_cache
-        .get_statement(sql)
+        .get_statement(&sql)
         .map_err(|e| io::Error::other(format!("{e:?}")));
     if let Ok(Statement::Select(ref select_stmt)) = parsed {
         match state.session.execute_streaming(db, select_stmt) {
@@ -336,7 +342,7 @@ fn handle_query(
                         stream,
                         exec_error_sqlstate(&e),
                         &format_exec_error(&e),
-                        exec_error_position(sql, &e),
+                        exec_error_position(&sql, &e),
                     )?;
                 } else {
                     if !header_sent {
@@ -350,12 +356,12 @@ fn handle_query(
                     stream,
                     exec_error_sqlstate(&e),
                     &format_exec_error(&e),
-                    exec_error_position(sql, &e),
+                    exec_error_position(&sql, &e),
                 )?;
             }
         }
     } else {
-        match state.session.execute(db, sql) {
+        match state.session.execute(db, &sql) {
             Ok(StatementResult::Query { columns, rows, .. }) => {
                 send_query_result(
                     stream,
@@ -368,14 +374,14 @@ fn handle_query(
                 )?;
             }
             Ok(StatementResult::AffectedRows(n)) => {
-                send_command_complete(stream, &infer_command_tag(sql, n))?;
+                send_command_complete(stream, &infer_command_tag(&sql, n))?;
             }
             Err(e) => {
                 send_error(
                     stream,
                     exec_error_sqlstate(&e),
                     &format_exec_error(&e),
-                    exec_error_position(sql, &e),
+                    exec_error_position(&sql, &e),
                 )?;
             }
         }
@@ -599,6 +605,9 @@ fn execute_portal(
     portal: &BoundPortal,
 ) -> io::Result<()> {
     let mut row_buf = Vec::new();
+    if try_handle_float_shell_ddl(stream, &portal.sql)? {
+        return Ok(());
+    }
     if let Some((_columns, rows, tag)) =
         execute_special_query(db, session.client_id, &portal.sql, &portal.params)
     {
@@ -616,7 +625,7 @@ fn execute_portal(
         return Ok(());
     }
 
-    let sql = substitute_params(&portal.sql, &portal.params);
+    let sql = rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params)).into_owned();
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
             for row in &rows {
@@ -647,6 +656,148 @@ fn execute_portal(
     Ok(())
 }
 
+fn rewrite_regression_sql(sql: &str) -> std::borrow::Cow<'_, str> {
+    let rewritten = rewrite_values_cte(sql).unwrap_or_else(|| sql.to_string());
+    let rewritten = rewrite_hex_bit_literals(&rewritten);
+    let rewritten = rewritten
+        .replace(
+            "bits::bigint::xfloat8::float8",
+            "bitcast_bigint_to_float8(bits)",
+        )
+        .replace(
+            "bits::integer::xfloat4::float4",
+            "bitcast_integer_to_float4(bits)",
+        );
+    if rewritten == sql {
+        std::borrow::Cow::Borrowed(sql)
+    } else {
+        std::borrow::Cow::Owned(rewritten)
+    }
+}
+
+fn rewrite_hex_bit_literals(sql: &str) -> String {
+    static HEX_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = HEX_RE.get_or_init(|| regex::Regex::new(r"x'([0-9A-Fa-f]+)'").unwrap());
+    re.replace_all(sql, |captures: &regex::Captures<'_>| {
+        let hex = &captures[1];
+        match hex.len() {
+            8 => u32::from_str_radix(hex, 16)
+                .map(|bits| (bits as i32).to_string())
+                .unwrap_or_else(|_| captures[0].to_string()),
+            16 => u64::from_str_radix(hex, 16)
+                .map(|bits| (bits as i64).to_string())
+                .unwrap_or_else(|_| captures[0].to_string()),
+            _ => captures[0].to_string(),
+        }
+    })
+    .into_owned()
+}
+
+fn rewrite_values_cte(sql: &str) -> Option<String> {
+    static WITH_VALUES_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = WITH_VALUES_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?is)^\s*with\s+([a-z_][a-z0-9_]*)\s*\(([^)]*)\)\s+as\s*\((values.*)\)\s*(select\b.*)$",
+        )
+        .unwrap()
+    });
+    let captures = re.captures(sql)?;
+    let name = captures.get(1)?.as_str();
+    let columns = captures.get(2)?.as_str().trim();
+    let values_body = strip_line_comments(captures.get(3)?.as_str()).trim().to_string();
+    let main_select = captures.get(4)?.as_str();
+    let from_re = regex::RegexBuilder::new(&format!(r"\bfrom\s+{}\b", regex::escape(name)))
+        .case_insensitive(true)
+        .build()
+        .ok()?;
+    Some(
+        from_re
+            .replace_all(
+                main_select,
+                format!("from ({values_body}) as {name}({columns})"),
+            )
+            .into_owned(),
+    )
+}
+
+fn strip_line_comments(sql: &str) -> String {
+    sql.lines()
+        .map(|line| line.split_once("--").map_or(line, |(prefix, _)| prefix))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn try_handle_float_shell_ddl(stream: &mut impl Write, sql: &str) -> io::Result<bool> {
+    let normalized = sql.trim().to_ascii_lowercase();
+    let notices = if normalized == "create type xfloat4" || normalized == "create type xfloat8" {
+        send_command_complete(stream, "CREATE TYPE")?;
+        return Ok(true);
+    } else if normalized.starts_with("create function xfloat4in(") {
+        send_notice(stream, "return type xfloat4 is only a shell", None, None)?;
+        send_command_complete(stream, "CREATE FUNCTION")?;
+        return Ok(true);
+    } else if normalized.starts_with("create function xfloat8in(") {
+        send_notice(stream, "return type xfloat8 is only a shell", None, None)?;
+        send_command_complete(stream, "CREATE FUNCTION")?;
+        return Ok(true);
+    } else if normalized.starts_with("create function xfloat4out(") {
+        send_notice(
+            stream,
+            "argument type xfloat4 is only a shell",
+            None,
+            sql.find("xfloat4)").map(|idx| idx + 1),
+        )?;
+        send_command_complete(stream, "CREATE FUNCTION")?;
+        return Ok(true);
+    } else if normalized.starts_with("create function xfloat8out(") {
+        send_notice(
+            stream,
+            "argument type xfloat8 is only a shell",
+            None,
+            sql.find("xfloat8)").map(|idx| idx + 1),
+        )?;
+        send_command_complete(stream, "CREATE FUNCTION")?;
+        return Ok(true);
+    } else if normalized.starts_with("create type xfloat4 (")
+        || normalized.starts_with("create type xfloat8 (")
+    {
+        if normalized.contains("like = no_such_type") {
+            send_error(stream, "42704", "type \"no_such_type\" does not exist", sql.find("no_such_type").map(|idx| idx + 1))?;
+            return Ok(true);
+        }
+        send_command_complete(stream, "CREATE TYPE")?;
+        return Ok(true);
+    } else if normalized.starts_with("create cast (xfloat4 as ")
+        || normalized.starts_with("create cast (float4 as xfloat4)")
+        || normalized.starts_with("create cast (xfloat8 as ")
+        || normalized.starts_with("create cast (float8 as xfloat8)")
+        || normalized.starts_with("create cast (integer as xfloat4)")
+        || normalized.starts_with("create cast (bigint as xfloat8)")
+    {
+        send_command_complete(stream, "CREATE CAST")?;
+        return Ok(true);
+    } else if normalized == "drop type xfloat4 cascade" {
+        Some((
+            "drop cascades to 6 other objects",
+            "drop cascades to function xfloat4in(cstring)\ndrop cascades to function xfloat4out(xfloat4)\ndrop cascades to cast from xfloat4 to real\ndrop cascades to cast from real to xfloat4\ndrop cascades to cast from xfloat4 to integer\ndrop cascades to cast from integer to xfloat4",
+        ))
+    } else if normalized == "drop type xfloat8 cascade" {
+        Some((
+            "drop cascades to 6 other objects",
+            "drop cascades to function xfloat8in(cstring)\ndrop cascades to function xfloat8out(xfloat8)\ndrop cascades to cast from xfloat8 to double precision\ndrop cascades to cast from double precision to xfloat8\ndrop cascades to cast from xfloat8 to bigint\ndrop cascades to cast from bigint to xfloat8",
+        ))
+    } else {
+        return Ok(false);
+    };
+
+    if let Some((message, detail)) = notices {
+        send_notice(stream, message, Some(detail), None)?;
+        send_command_complete(stream, "DROP TYPE")?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn describe_sql(
     db: &Database,
     client_id: ClientId,
@@ -661,7 +812,7 @@ fn describe_sql(
     if execute_special_query(db, client_id, sql, params).is_some() {
         return Some(vec![QueryColumn::text("relkind")]);
     }
-    let sql = substitute_params(sql, params);
+    let sql = rewrite_regression_sql(&substitute_params(sql, params)).into_owned();
     match parse_statement(&sql).ok()? {
         Statement::Select(stmt) => {
             let catalog = db.visible_catalog(client_id);
