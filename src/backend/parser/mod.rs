@@ -2,6 +2,7 @@ pub mod parsenodes {
     pub use crate::include::nodes::parsenodes::*;
 }
 pub mod analyze;
+pub(crate) mod comments;
 pub mod gram;
 
 pub use crate::include::nodes::parsenodes::*;
