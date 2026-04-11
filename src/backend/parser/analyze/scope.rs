@@ -150,7 +150,7 @@ pub(super) fn bind_from_item(
                 return Ok((
                     Plan::Values {
                         rows: vec![vec![
-                            Expr::Const(Value::Int32(1259)),
+                            Expr::Const(Value::Int64(1259)),
                             Expr::Const(Value::Text("pg_class".into())),
                         ]],
                         output_columns: output_columns.clone(),

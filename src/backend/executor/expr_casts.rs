@@ -110,10 +110,17 @@ fn cast_text_to_int8(text: &str) -> Result<Value, ExecError> {
 
 fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
     let value = parse_pg_integer_text(text, "oid")?;
-    if !(0..=i32::MAX as i128).contains(&value) {
-        return Err(ExecError::OidOutOfRange);
-    }
-    Ok(Value::Int32(value as i32))
+    let oid = if (0..=u32::MAX as i128).contains(&value) {
+        value as u32
+    } else if (i32::MIN as i128..=-1).contains(&value) {
+        (value as i32) as u32
+    } else {
+        return Err(ExecError::IntegerOutOfRange {
+            ty: "oid",
+            value: text.to_string(),
+        });
+    };
+    Ok(Value::Int64(oid as i64))
 }
 
 fn parse_internal_char_text(text: &str) -> u8 {
@@ -178,7 +185,7 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::Int8OutOfRange => {
             format!("value \"{text}\" is out of range for type bigint")
         }
-        ExecError::OidOutOfRange => "OID out of range".to_string(),
+        ExecError::OidOutOfRange => format!("value \"{text}\" is out of range for type oid"),
         ExecError::InvalidNumericInput(_) => {
             format!("invalid input syntax for type numeric: \"{text}\"")
         }
@@ -299,7 +306,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 if v < 0 {
                     Err(ExecError::OidOutOfRange)
                 } else {
-                    Ok(Value::Int32(v as i32))
+                    Ok(Value::Int64(v as u32 as i64))
                 }
             }
             SqlType {
@@ -349,7 +356,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 if v < 0 {
                     Err(ExecError::OidOutOfRange)
                 } else {
-                    Ok(Value::Int32(v))
+                    Ok(Value::Int64(v as u32 as i64))
                 }
             }
             SqlType {
@@ -489,7 +496,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 if !(0..=i32::MAX as i64).contains(&v) {
                     Err(ExecError::OidOutOfRange)
                 } else {
-                    Ok(Value::Int32(v as i32))
+                    Ok(Value::Int64(v as u32 as i64))
                 }
             }
             SqlType {
@@ -661,13 +668,9 @@ pub(super) fn cast_numeric_value(
             .ok_or(ExecError::Int8OutOfRange),
         SqlTypeKind::Oid => value
             .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<i64>().ok())
+            .and_then(|rounded| rounded.render().parse::<u32>().ok())
             .and_then(|rounded| {
-                if (0..=i32::MAX as i64).contains(&rounded) {
-                    Some(Value::Int32(rounded as i32))
-                } else {
-                    None
-                }
+                Some(Value::Int64(rounded as i64))
             })
             .ok_or(ExecError::OidOutOfRange),
         SqlTypeKind::Bool => Err(ExecError::TypeMismatch {
@@ -761,10 +764,10 @@ fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
             }
         }
         SqlTypeKind::Oid => {
-            if rounded < 0.0 || rounded > i32::MAX as f64 {
+            if rounded < 0.0 || rounded > u32::MAX as f64 {
                 Err(ExecError::OidOutOfRange)
             } else {
-                Ok(Value::Int32(rounded as i32))
+                Ok(Value::Int64(rounded as u32 as i64))
             }
         }
         _ => unreachable!(),

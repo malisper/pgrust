@@ -197,6 +197,30 @@
         catalog
     }
 
+    fn oid_catalog(name: &str) -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog.insert(
+            name,
+            CatalogEntry {
+                rel: crate::RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15005,
+                },
+                desc: RelationDesc {
+                    columns: vec![crate::backend::catalog::catalog::column_desc(
+                        "f1",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Oid,
+                        ),
+                        false,
+                    )],
+                },
+            },
+        );
+        catalog
+    }
+
     fn shipments_rel() -> RelFileLocator {
         RelFileLocator {
             spc_oid: 0,
@@ -1855,6 +1879,60 @@
         )
         .unwrap_err();
         assert!(matches!(err, ExecError::OidOutOfRange));
+    }
+
+    #[test]
+    fn oid_text_input_wraps_negative_values_and_orders_unsigned() {
+        let wrapped = expr_casts::cast_value(
+            Value::Text("-1040".into()),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Oid),
+        )
+        .unwrap();
+        let small = expr_casts::cast_value(
+            Value::Text("1234".into()),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Oid),
+        )
+        .unwrap();
+
+        assert_eq!(wrapped, Value::Int64(4_294_966_256));
+        assert_eq!(small, Value::Int64(1234));
+        assert_eq!(
+            crate::backend::executor::expr_ops::compare_order_values(&small, &wrapped, None, false),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
+    fn oid_comparisons_bind_and_execute_with_unsigned_semantics() {
+        let base = temp_dir("oid_comparisons_unsigned");
+        let mut txns = TransactionManager::new_durable(&base).unwrap();
+        let xid = txns.begin();
+
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into oid_tbl (f1) values ('1234'), ('-1040'), ('1235')",
+            oid_catalog("oid_tbl"),
+        )
+        .unwrap();
+        txns.commit(xid).unwrap();
+
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select f1 from oid_tbl where f1 >= 1234 order by f1",
+                oid_catalog("oid_tbl"),
+            )
+            .unwrap(),
+            vec![
+                vec![Value::Int64(1234)],
+                vec![Value::Int64(1235)],
+                vec![Value::Int64(4_294_966_256)],
+            ],
+        );
     }
 
     #[test]

@@ -60,7 +60,11 @@ pub(super) fn bind_comparison_expr(
     let left_bound = bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?;
     let right_bound = bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?;
     let (left, right) = if is_numeric_family(left_type) && is_numeric_family(right_type) {
-        let common = resolve_numeric_binary_type("=", left_type, right_type)?;
+        let common = if is_oid_integer_comparison(left_type, right_type) {
+            SqlType::new(SqlTypeKind::Oid)
+        } else {
+            resolve_numeric_binary_type("=", left_type, right_type)?
+        };
         (
             coerce_bound_expr(left_bound, raw_left_type, common),
             coerce_bound_expr(right_bound, raw_right_type, common),
@@ -69,6 +73,14 @@ pub(super) fn bind_comparison_expr(
         (left_bound, right_bound)
     };
     Ok(make(Box::new(left), Box::new(right)))
+}
+
+fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
+    !left.is_array
+        && !right.is_array
+        && matches!(left.kind, SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8)
+        && matches!(right.kind, SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8)
+        && (matches!(left.kind, SqlTypeKind::Oid) || matches!(right.kind, SqlTypeKind::Oid))
 }
 
 pub(super) fn bind_shift_expr(

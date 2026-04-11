@@ -31,6 +31,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
     match (&column.ty, coerced) {
         (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Int32, Value::Int64(v)) if matches!(column.sql_type.kind, SqlTypeKind::Oid) => {
+            let oid = u32::try_from(v).map_err(|_| ExecError::OidOutOfRange)?;
+            Ok(TupleValue::Bytes(oid.to_le_bytes().to_vec()))
+        }
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec())),
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
@@ -113,10 +117,15 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
             if column.storage.attlen != 4 || bytes.len() != 4 {
                 return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
             }
-            Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
+            let raw = i32::from_le_bytes(bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
                 column: column.name.clone(),
                 details: "int4 must be exactly 4 bytes".into(),
-            })?)))
+            })?);
+            if matches!(column.sql_type.kind, SqlTypeKind::Oid) {
+                Ok(Value::Int64(raw as u32 as i64))
+            } else {
+                Ok(Value::Int32(raw))
+            }
         }
         ScalarType::Int64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {

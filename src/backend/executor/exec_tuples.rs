@@ -27,6 +27,7 @@ enum DecodeStep {
         attlen: i16,
         align: crate::include::access::htup::AttributeAlign,
         ty: ScalarType,
+        is_oid: bool,
     },
 }
 
@@ -47,7 +48,7 @@ impl CompiledTupleDecoder {
         for (column, attr) in desc.columns.iter().zip(attr_descs.iter()) {
             if let Some(off) = fixed_offset {
                 let aligned = attr.attalign.align_offset(off);
-                if attr.attlen > 0 && !attr.nullable {
+                if attr.attlen > 0 && !attr.nullable && !matches!(column.sql_type.kind, crate::backend::parser::SqlTypeKind::Oid) {
                     // Fixed-width NOT NULL — we know the exact byte offset.
                     let step = match (&column.ty, attr.attlen) {
                         (ScalarType::Int32, 4) => DecodeStep::FixedInt32 {
@@ -60,6 +61,7 @@ impl CompiledTupleDecoder {
                             attlen: attr.attlen,
                             align: attr.attalign,
                             ty: column.ty.clone(),
+                            is_oid: matches!(column.sql_type.kind, crate::backend::parser::SqlTypeKind::Oid),
                         },
                     };
                     steps.push(step);
@@ -74,6 +76,7 @@ impl CompiledTupleDecoder {
                             attlen: attr.attlen,
                             align: attr.attalign,
                             ty: column.ty.clone(),
+                            is_oid: matches!(column.sql_type.kind, crate::backend::parser::SqlTypeKind::Oid),
                         },
                     };
                     steps.push(step);
@@ -87,6 +90,7 @@ impl CompiledTupleDecoder {
                 attlen: attr.attlen,
                 align: attr.attalign,
                 ty: column.ty.clone(),
+                is_oid: matches!(column.sql_type.kind, crate::backend::parser::SqlTypeKind::Oid),
             });
             if attr.attlen <= 0 || attr.nullable {
                 fixed_offset = None;
@@ -205,7 +209,7 @@ impl CompiledTupleDecoder {
                         off = end;
                     }
                 }
-                DecodeStep::Generic { attlen, align, ty } => match *attlen {
+                DecodeStep::Generic { attlen, align, ty, is_oid } => match *attlen {
                     len if len > 0 => {
                         off = align.align_offset(off);
                         let end = off + len as usize;
@@ -215,9 +219,16 @@ impl CompiledTupleDecoder {
                             ScalarType::Int16 => {
                                 Value::Int16(i16::from_le_bytes([bytes[0], bytes[1]]))
                             }
-                            ScalarType::Int32 => Value::Int32(i32::from_le_bytes([
-                                bytes[0], bytes[1], bytes[2], bytes[3],
-                            ])),
+                            ScalarType::Int32 => {
+                                let raw = i32::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3],
+                                ]);
+                                if *is_oid {
+                                    Value::Int64(raw as u32 as i64)
+                                } else {
+                                    Value::Int32(raw)
+                                }
+                            }
                             ScalarType::Int64 => Value::Int64(i64::from_le_bytes([
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
