@@ -152,6 +152,33 @@ pub(super) fn infer_sql_expr_type(
                 SqlType::new(SqlTypeKind::Text),
                 |arg| infer_sql_expr_type(arg, scope, catalog, outer_scopes, grouped_outer),
             ),
+            Some(
+                BuiltinScalarFunction::Trunc
+                | BuiltinScalarFunction::Round
+                | BuiltinScalarFunction::Ceil
+                | BuiltinScalarFunction::Ceiling
+                | BuiltinScalarFunction::Floor
+                | BuiltinScalarFunction::Sign
+                | BuiltinScalarFunction::Sqrt
+                | BuiltinScalarFunction::Cbrt
+                | BuiltinScalarFunction::Power
+                | BuiltinScalarFunction::Exp
+                | BuiltinScalarFunction::Ln
+                | BuiltinScalarFunction::Sinh
+                | BuiltinScalarFunction::Cosh
+                | BuiltinScalarFunction::Tanh
+                | BuiltinScalarFunction::Asinh
+                | BuiltinScalarFunction::Acosh
+                | BuiltinScalarFunction::Atanh
+                | BuiltinScalarFunction::Sind
+                | BuiltinScalarFunction::Cosd
+                | BuiltinScalarFunction::Tand
+                | BuiltinScalarFunction::Cotd
+                | BuiltinScalarFunction::Asind
+                | BuiltinScalarFunction::Acosd
+                | BuiltinScalarFunction::Atand
+                | BuiltinScalarFunction::Atan2d,
+            ) => SqlType::new(SqlTypeKind::Float8),
             Some(BuiltinScalarFunction::Gcd) | Some(BuiltinScalarFunction::Lcm) => args.first().zip(args.get(1)).map_or(
                 SqlType::new(SqlTypeKind::Text),
                 |(left, right)| {
