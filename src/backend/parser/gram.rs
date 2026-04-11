@@ -1675,6 +1675,8 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::kw_count => AggFunc::Count,
                     Rule::kw_sum => AggFunc::Sum,
                     Rule::kw_avg => AggFunc::Avg,
+                    Rule::kw_variance => AggFunc::Variance,
+                    Rule::kw_stddev => AggFunc::Stddev,
                     Rule::kw_min => AggFunc::Min,
                     Rule::kw_max => AggFunc::Max,
                     Rule::kw_json_agg => AggFunc::JsonAgg,

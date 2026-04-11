@@ -258,6 +258,12 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             Some(kind) => SqlType::new(kind),
             None => SqlType::new(Numeric),
         },
+        AggFunc::Variance | AggFunc::Stddev => match arg_type.map(|t| t.element_type().kind) {
+            Some(Int2 | Int4 | Int8 | Numeric) => SqlType::new(Numeric),
+            Some(Float4 | Float8) => SqlType::new(Float8),
+            Some(kind) => SqlType::new(kind),
+            None => SqlType::new(Numeric),
+        },
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::JsonAgg | AggFunc::JsonObjectAgg => SqlType::new(Json),
         AggFunc::JsonbAgg | AggFunc::JsonbObjectAgg => SqlType::new(Jsonb),

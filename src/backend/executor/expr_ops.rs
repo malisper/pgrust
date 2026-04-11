@@ -702,11 +702,11 @@ impl NumericValue {
         }
     }
 
-    fn sub(&self, other: &Self) -> Self {
+    pub(crate) fn sub(&self, other: &Self) -> Self {
         self.add(&other.negate())
     }
 
-    fn mul(&self, other: &Self) -> Self {
+    pub(crate) fn mul(&self, other: &Self) -> Self {
         match (self, other) {
             (Self::NaN, _) | (_, Self::NaN) => Self::NaN,
             (Self::PosInf | Self::NegInf, Self::Finite { coeff, .. })
