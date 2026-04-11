@@ -876,12 +876,16 @@ fn collect_rels_from_expr(
         | Expr::CurrentTimestamp => {}
         Expr::UnaryPlus(inner)
         | Expr::Negate(inner)
+        | Expr::BitNot(inner)
         | Expr::Cast(inner, _)
         | Expr::Not(inner)
         | Expr::IsNull(inner)
         | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
         Expr::Add(left, right)
         | Expr::Sub(left, right)
+        | Expr::BitAnd(left, right)
+        | Expr::BitOr(left, right)
+        | Expr::BitXor(left, right)
         | Expr::Shl(left, right)
         | Expr::Shr(left, right)
         | Expr::Mul(left, right)

@@ -300,6 +300,58 @@ pub(crate) fn shift_right_values(left: Value, right: Value) -> Result<Value, Exe
     }
 }
 
+pub(crate) fn bitwise_and_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    match (left, right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l & r)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l & r)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l & r)),
+        (l, r) => Err(ExecError::TypeMismatch {
+            op: "&",
+            left: l,
+            right: r,
+        }),
+    }
+}
+
+pub(crate) fn bitwise_or_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    match (left, right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l | r)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l | r)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l | r)),
+        (l, r) => Err(ExecError::TypeMismatch {
+            op: "|",
+            left: l,
+            right: r,
+        }),
+    }
+}
+
+pub(crate) fn bitwise_xor_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    match (left, right) {
+        (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l ^ r)),
+        (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l ^ r)),
+        (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l ^ r)),
+        (l, r) => Err(ExecError::TypeMismatch {
+            op: "#",
+            left: l,
+            right: r,
+        }),
+    }
+}
+
+pub(crate) fn bitwise_not_value(value: Value) -> Result<Value, ExecError> {
+    match value {
+        Value::Int16(v) => Ok(Value::Int16(!v)),
+        Value::Int32(v) => Ok(Value::Int32(!v)),
+        Value::Int64(v) => Ok(Value::Int64(!v)),
+        other => Err(ExecError::TypeMismatch {
+            op: "~",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
 pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);

@@ -118,6 +118,36 @@ pub(crate) fn bind_expr_with_outer(
             outer_scopes,
             grouped_outer,
         )?,
+        SqlExpr::BitAnd(left, right) => bind_bitwise_expr(
+            "&",
+            Expr::BitAnd,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )?,
+        SqlExpr::BitOr(left, right) => bind_bitwise_expr(
+            "|",
+            Expr::BitOr,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )?,
+        SqlExpr::BitXor(left, right) => bind_bitwise_expr(
+            "#",
+            Expr::BitXor,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        )?,
         SqlExpr::Shl(left, right) => bind_shift_expr(
             "<<",
             Expr::Shl,
@@ -190,6 +220,23 @@ pub(crate) fn bind_expr_with_outer(
             outer_scopes,
             grouped_outer,
         )?)),
+        SqlExpr::BitNot(inner) => {
+            let inner_type = infer_sql_expr_type(inner, scope, catalog, outer_scopes, grouped_outer);
+            if !is_integer_family(inner_type) {
+                return Err(ParseError::UndefinedOperator {
+                    op: "~",
+                    left_type: sql_type_name(inner_type),
+                    right_type: "unknown".to_string(),
+                });
+            }
+            Expr::BitNot(Box::new(bind_expr_with_outer(
+                inner,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )?))
+        }
         SqlExpr::Cast(inner, ty) => {
             let bound_inner = if let SqlExpr::ArrayLiteral(elements) = inner.as_ref() {
                 Expr::ArrayLiteral {
@@ -903,6 +950,39 @@ fn bind_shift_expr(
         bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
         right_type,
         SqlType::new(SqlTypeKind::Int4),
+    );
+    Ok(make(Box::new(left), Box::new(right)))
+}
+
+fn bind_bitwise_expr(
+    op: &'static str,
+    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &Catalog,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+) -> Result<Expr, ParseError> {
+    let left_type = infer_sql_expr_type(left, scope, catalog, outer_scopes, grouped_outer);
+    let right_type = infer_sql_expr_type(right, scope, catalog, outer_scopes, grouped_outer);
+    if !is_integer_family(left_type) || !is_integer_family(right_type) {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    let common = resolve_numeric_binary_type(op, left_type, right_type)?;
+    let left = coerce_bound_expr(
+        bind_expr_with_outer(left, scope, catalog, outer_scopes, grouped_outer)?,
+        left_type,
+        common,
+    );
+    let right = coerce_bound_expr(
+        bind_expr_with_outer(right, scope, catalog, outer_scopes, grouped_outer)?,
+        right_type,
+        common,
     );
     Ok(make(Box::new(left), Box::new(right)))
 }

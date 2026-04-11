@@ -951,6 +951,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         | Rule::and_expr
         | Rule::concat_expr
         | Rule::add_expr
+        | Rule::bit_expr
         | Rule::shift_expr
         | Rule::mul_expr => {
             let mut inner = pair.into_inner();
@@ -977,9 +978,15 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::positive_expr => Ok(SqlExpr::UnaryPlus(Box::new(build_expr(
             pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
         )?))),
-        Rule::negated_expr => Ok(SqlExpr::Negate(Box::new(build_expr(
-            pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
-        )?))),
+        Rule::negated_expr => {
+            let raw = pair.as_str().trim_start();
+            let expr = build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)?;
+            if raw.starts_with('~') {
+                Ok(SqlExpr::BitNot(Box::new(expr)))
+            } else {
+                Ok(SqlExpr::Negate(Box::new(expr)))
+            }
+        }
         Rule::not_expr => {
             let mut inner = pair.into_inner();
             let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
@@ -1297,6 +1304,12 @@ fn fold_infix(
             Rule::add_op => match op.as_str() {
                 "+" => SqlExpr::Add(Box::new(expr), Box::new(rhs)),
                 "-" => SqlExpr::Sub(Box::new(expr), Box::new(rhs)),
+                _ => unreachable!(),
+            },
+            Rule::bit_op => match op.as_str() {
+                "&" => SqlExpr::BitAnd(Box::new(expr), Box::new(rhs)),
+                "|" => SqlExpr::BitOr(Box::new(expr), Box::new(rhs)),
+                "#" => SqlExpr::BitXor(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
             },
             Rule::shift_op => match op.as_str() {

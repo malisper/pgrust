@@ -10,9 +10,10 @@ use super::expr_json::{
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_ops::{
-    add_values, compare_values, concat_values, div_values, eval_and, eval_or, mod_values,
-    mul_values, negate_value, not_equal_values, order_values, shift_left_values,
-    shift_right_values, sub_values, values_are_distinct,
+    add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
+    compare_values, concat_values, div_values, eval_and, eval_or, mod_values, mul_values,
+    negate_value, not_equal_values, order_values, shift_left_values, shift_right_values,
+    sub_values, values_are_distinct,
 };
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
 pub(crate) use super::expr_json::eval_json_table_function;
@@ -52,6 +53,15 @@ pub fn eval_expr(
         Expr::Sub(left, right) => {
             sub_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
+        Expr::BitAnd(left, right) => {
+            bitwise_and_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::BitOr(left, right) => {
+            bitwise_or_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
+        Expr::BitXor(left, right) => {
+            bitwise_xor_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+        }
         Expr::Shl(left, right) => {
             shift_left_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
@@ -72,6 +82,7 @@ pub fn eval_expr(
         }
         Expr::UnaryPlus(inner) => eval_expr(inner, slot, ctx),
         Expr::Negate(inner) => negate_value(eval_expr(inner, slot, ctx)?),
+        Expr::BitNot(inner) => bitwise_not_value(eval_expr(inner, slot, ctx)?),
         Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot, ctx)?, *ty),
         Expr::Eq(left, right) => compare_values(
             "=",

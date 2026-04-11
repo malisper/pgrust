@@ -1952,6 +1952,28 @@ mod tests {
             ],
         );
     }
+
+    #[test]
+    fn int8_bitwise_operators_execute() {
+        let base = temp_dir("int8_bitwise");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        assert_query_rows(
+            run_sql(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "select (123::int8 & 456::int8), (123::int8 | 456::int8), (123::int8 # 456::int8), (~123::int8)",
+            )
+            .unwrap(),
+            vec![vec![
+                Value::Int64(72),
+                Value::Int64(507),
+                Value::Int64(435),
+                Value::Int64(-124),
+            ]],
+        );
+    }
     #[test]
     fn generate_series_negative_step() {
         let base = temp_dir("gen_series_neg");
