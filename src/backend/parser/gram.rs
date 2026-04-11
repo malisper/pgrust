@@ -2,6 +2,7 @@ use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;
 
+use super::comments::strip_sql_comments_preserving_layout;
 use super::parsenodes::*;
 use crate::backend::executor::{AggFunc, Value};
 
@@ -10,20 +11,22 @@ use crate::backend::executor::{AggFunc, Value};
 struct SqlParser;
 
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
-    SqlParser::parse(Rule::statement, sql)
+    let sql = strip_sql_comments_preserving_layout(sql);
+    SqlParser::parse(Rule::statement, &sql)
         .map_err(|e| map_pest_error("statement", e))
         .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
 }
 
 pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
-    SqlParser::parse(Rule::type_name, sql)
+    let sql = strip_sql_comments_preserving_layout(sql);
+    SqlParser::parse(Rule::type_name, &sql)
         .map_err(|e| map_pest_error("type name", e))
         .and_then(|mut pairs| {
             let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
             if pairs.next().is_some() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "type name",
-                    actual: sql.to_string(),
+                    actual: sql.clone(),
                 });
             }
             Ok(build_type(pair))

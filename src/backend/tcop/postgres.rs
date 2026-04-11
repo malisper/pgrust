@@ -19,6 +19,7 @@ use crate::backend::libpq::pqformat::{
     send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
     send_typed_data_row,
 };
+use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
@@ -267,6 +268,11 @@ fn handle_query(
     state: &mut ConnectionState,
     sql: &str,
 ) -> io::Result<()> {
+    if sql_is_effectively_empty_after_comments(sql) {
+        send_empty_query(stream)?;
+        send_ready_for_query(stream, state.session.ready_status())?;
+        return Ok(());
+    }
     let sql = sql.trim().trim_end_matches(';').trim();
     if sql.is_empty() {
         send_empty_query(stream)?;

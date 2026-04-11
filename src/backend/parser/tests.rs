@@ -102,6 +102,30 @@
     }
 
     #[test]
+    fn parse_statement_ignores_embedded_and_leading_comments() {
+        let stmt = parse_statement("/* leading */ select /* embedded */ 'x' as value").unwrap();
+        match stmt {
+            Statement::Select(stmt) => {
+                assert_eq!(stmt.targets.len(), 1);
+                assert_eq!(stmt.targets[0].output_name, "value");
+            }
+            other => panic!("expected select statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_statement_ignores_deeply_nested_comments() {
+        let stmt = parse_statement(
+            "select /* one /* two 'still comment' /* three */ back two */ back one */ 'ok' as v",
+        )
+        .unwrap();
+        match stmt {
+            Statement::Select(stmt) => assert_eq!(stmt.targets[0].output_name, "v"),
+            other => panic!("expected select statement, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_select_with_where() {
         let stmt =
             parse_select("select name, note from people where id > 1 and note is null").unwrap();
