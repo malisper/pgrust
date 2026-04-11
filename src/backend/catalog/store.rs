@@ -143,19 +143,14 @@ impl CatalogStore {
     }
 }
 
-pub(crate) fn sync_catalog_heaps(
-    base_dir: &Path,
-    catalog: &Catalog,
-) -> Result<(), CatalogError> {
-    sync_physical_catalogs(base_dir, catalog)
-}
-
 #[cfg(test)]
 pub(crate) fn sync_catalog_heaps_for_tests(
     base_dir: &Path,
     catalog: &Catalog,
 ) -> Result<(), CatalogError> {
-    sync_catalog_heaps(base_dir, catalog)
+    let catcache = CatCache::from_catalog(catalog);
+    let rows = physical_catalog_rows_from_catcache(&catcache);
+    sync_catalog_rows(base_dir, &rows, 1)
 }
 
 impl CatalogStore {
@@ -165,12 +160,23 @@ impl CatalogStore {
 }
 
 fn sync_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
+    let catcache = CatCache::from_catalog(catalog);
+    let rows = physical_catalog_rows_from_catcache(&catcache);
+    sync_catalog_rows(base_dir, &rows, 1)
+}
+
+pub(crate) fn sync_catalog_rows(
+    base_dir: &Path,
+    rows: &PhysicalCatalogRows,
+    db_oid: u32,
+) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     for kind in bootstrap_catalog_kinds() {
-        let rel = catalog
-            .get(kind.relation_name())
-            .ok_or(CatalogError::Corrupt("missing bootstrap catalog entry"))?
-            .rel;
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: kind.relation_oid(),
+        };
         smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
         smgr.unlink(rel, Some(ForkNumber::Main), false);
         smgr.create(rel, ForkNumber::Main, false)
@@ -178,59 +184,83 @@ fn sync_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), Cata
     }
 
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
-    let catcache = CatCache::from_catalog(catalog);
     insert_catalog_rows(
         &pool,
-        catalog
-            .get("pg_namespace")
-            .ok_or(CatalogError::Corrupt("missing pg_namespace"))?,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgNamespace.relation_oid(),
+        },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
-        catcache.namespace_rows().into_iter().map(namespace_row_values).collect(),
+        rows.namespaces
+            .iter()
+            .cloned()
+            .map(namespace_row_values)
+            .collect(),
     )?;
     insert_catalog_rows(
         &pool,
-        catalog
-            .get("pg_class")
-            .ok_or(CatalogError::Corrupt("missing pg_class"))?,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgClass.relation_oid(),
+        },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
-        catcache.class_rows().into_iter().map(pg_class_row_values).collect(),
+        rows.classes.iter().cloned().map(pg_class_row_values).collect(),
     )?;
     insert_catalog_rows(
         &pool,
-        catalog
-            .get("pg_type")
-            .ok_or(CatalogError::Corrupt("missing pg_type"))?,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgType.relation_oid(),
+        },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
-        catcache.type_rows().into_iter().map(pg_type_row_values).collect(),
+        rows.types.iter().cloned().map(pg_type_row_values).collect(),
     )?;
     insert_catalog_rows(
         &pool,
-        catalog
-            .get("pg_attribute")
-            .ok_or(CatalogError::Corrupt("missing pg_attribute"))?,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgAttribute.relation_oid(),
+        },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
-        catcache.attribute_rows().into_iter().map(pg_attribute_row_values).collect(),
+        rows.attributes
+            .iter()
+            .cloned()
+            .map(pg_attribute_row_values)
+            .collect(),
     )?;
     Ok(())
 }
 
+fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRows {
+    PhysicalCatalogRows {
+        namespaces: catcache.namespace_rows(),
+        classes: catcache.class_rows(),
+        attributes: catcache.attribute_rows(),
+        types: catcache.type_rows(),
+    }
+}
+
 fn insert_catalog_rows(
     pool: &BufferPool<SmgrStorageBackend>,
-    entry: &CatalogEntry,
+    rel: RelFileLocator,
     desc: &RelationDesc,
     rows: Vec<Vec<Value>>,
 ) -> Result<(), CatalogError> {
     for values in rows {
         let tuple = tuple_from_values(desc, &values)
             .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
-        heap_insert(pool, 0, entry.rel, &tuple)
+        heap_insert(pool, 0, rel, &tuple)
             .map_err(|e| CatalogError::Io(format!("catalog tuple insert failed: {e:?}")))?;
     }
     let nblocks = pool
-        .with_storage_mut(|s| s.smgr.nblocks(entry.rel, ForkNumber::Main))
+        .with_storage_mut(|s| s.smgr.nblocks(rel, ForkNumber::Main))
         .map_err(|e| CatalogError::Io(e.to_string()))?;
     for block in 0..nblocks {
-        heap_flush(pool, 0, entry.rel, block)
+        heap_flush(pool, 0, rel, block)
             .map_err(|e| CatalogError::Io(format!("catalog flush failed: {e:?}")))?;
     }
     Ok(())

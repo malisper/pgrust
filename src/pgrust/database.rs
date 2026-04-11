@@ -8,10 +8,10 @@ use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
-use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::catalog::store::sync_catalog_heaps;
-use crate::backend::catalog::{Catalog, CatalogEntry, CatalogError, CatalogStore};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
+use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows};
+use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
 };
@@ -28,7 +28,7 @@ use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageMan
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID,
+    BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
 };
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
@@ -186,29 +186,6 @@ impl Database {
         }
     }
 
-    fn catalog_entry_from_relcache_entry(entry: &RelCacheEntry) -> CatalogEntry {
-        CatalogEntry {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            namespace_oid: entry.namespace_oid,
-            row_type_oid: entry.row_type_oid,
-            relkind: entry.relkind,
-            desc: entry.desc.clone(),
-        }
-    }
-
-    fn temp_catalog_row(client_id: ClientId, kind: BootstrapCatalogKind) -> CatalogEntry {
-        let mut entry = Self::catalog_entry_from_relcache_entry(&Self::temp_catalog_entry(
-            client_id, kind,
-        ));
-        entry.rel = RelFileLocator {
-            spc_oid: 0,
-            db_oid: Self::temp_db_oid(client_id),
-            rel_number: kind.relation_oid(),
-        };
-        entry
-    }
-
     pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
         let catalog_guard = self.catalog.read();
         let mut relcache = catalog_guard
@@ -239,55 +216,60 @@ impl Database {
         relcache
     }
 
-    pub(crate) fn visible_catalog(&self, client_id: ClientId) -> Catalog {
-        let catalog_guard = self.catalog.read();
-        let base_dir = catalog_guard.base_dir().to_path_buf();
-        let mut catalog = catalog_guard
-            .catalog_snapshot()
-            .unwrap_or_default();
-        drop(catalog_guard);
-        let permanent_entries = catalog
-            .entries()
-            .map(|(name, entry)| (name.to_string(), entry.clone()))
-            .collect::<Vec<_>>();
-        for (name, entry) in permanent_entries {
-            if name.contains('.') {
-                continue;
-            }
-            match entry.namespace_oid {
-                PUBLIC_NAMESPACE_OID => {
-                    catalog.insert(format!("public.{name}"), entry);
-                }
-                PG_CATALOG_NAMESPACE_OID => {
-                    catalog.insert(format!("pg_catalog.{name}"), entry);
-                }
-                _ => {}
-            }
-        }
-        if let Some(namespace) = self.temp_relations.read().get(&client_id) {
-            for (name, temp) in &namespace.tables {
-                let entry = Self::catalog_entry_from_relcache_entry(&temp.entry);
-                catalog.insert(name.clone(), entry.clone());
-                catalog.insert(format!("pg_temp.{name}"), entry);
-            }
-            for kind in [
-                BootstrapCatalogKind::PgNamespace,
-                BootstrapCatalogKind::PgClass,
-                BootstrapCatalogKind::PgAttribute,
-                BootstrapCatalogKind::PgType,
-            ] {
-                let entry = Self::temp_catalog_row(client_id, kind);
-                catalog.insert(kind.relation_name(), entry.clone());
-                catalog.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
-            }
-            let _ = sync_catalog_heaps(&base_dir, &catalog);
-        }
-        catalog
-    }
-
     pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
         if self.temp_relations.read().contains_key(&client_id) {
-            let _ = self.visible_catalog(client_id);
+            let catalog_guard = self.catalog.read();
+            let base_dir = catalog_guard.base_dir().to_path_buf();
+            drop(catalog_guard);
+            if let Ok(mut rows) = load_physical_catalog_rows(&base_dir) {
+                let temp_namespace_oid = Self::temp_db_oid(client_id);
+                rows.namespaces.push(PgNamespaceRow {
+                    oid: temp_namespace_oid,
+                    nspname: "pg_temp".into(),
+                });
+
+                if let Some(namespace) = self.temp_relations.read().get(&client_id) {
+                    for (name, temp) in &namespace.tables {
+                        rows.classes.push(PgClassRow {
+                            oid: temp.entry.relation_oid,
+                            relname: name.clone(),
+                            relnamespace: temp.entry.namespace_oid,
+                            reltype: temp.entry.row_type_oid,
+                            relfilenode: temp.entry.rel.rel_number,
+                            relkind: temp.entry.relkind,
+                        });
+                        rows.types.push(PgTypeRow {
+                            oid: temp.entry.row_type_oid,
+                            typname: name.clone(),
+                            typnamespace: temp.entry.namespace_oid,
+                            typrelid: temp.entry.relation_oid,
+                            sql_type: crate::backend::parser::SqlType::new(
+                                crate::backend::parser::SqlTypeKind::Text,
+                            ),
+                        });
+                        rows.attributes.extend(
+                            temp.entry
+                                .desc
+                                .columns
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, column)| PgAttributeRow {
+                                    attrelid: temp.entry.relation_oid,
+                                    attname: column.name.clone(),
+                                    atttypid: crate::backend::utils::cache::catcache::sql_type_oid(
+                                        column.sql_type,
+                                    ),
+                                    attnum: idx.saturating_add(1) as i16,
+                                    attnotnull: !column.storage.nullable,
+                                    atttypmod: column.sql_type.typmod,
+                                    sql_type: column.sql_type,
+                                }),
+                        );
+                    }
+                }
+
+                let _ = sync_catalog_rows(&base_dir, &rows, temp_namespace_oid);
+            }
         }
     }
 

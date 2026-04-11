@@ -357,8 +357,7 @@
         session_a
             .execute(&db, "create temp table items (id int4 not null)")
             .unwrap();
-        let visible_catalog = db.visible_catalog(1);
-        let relcache = RelCache::from_catalog(&visible_catalog);
+        let relcache = db.visible_relcache(1);
         let unqualified = relcache.get_by_name("items").unwrap();
         let qualified = relcache.get_by_name("public.items").unwrap();
         assert_ne!(unqualified.rel, qualified.rel);
