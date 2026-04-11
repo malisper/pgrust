@@ -1936,6 +1936,27 @@
     }
 
     #[test]
+    fn pg_input_error_info_supports_oidvector_tokens() {
+        let valid = expr_casts::soft_input_error_info(" 1 2  4 ", "oidvector").unwrap();
+        assert!(valid.is_none());
+
+        let invalid = expr_casts::soft_input_error_info("01 01XYZ", "oidvector")
+            .unwrap()
+            .expect("expected invalid oidvector input");
+        assert_eq!(invalid.message, "invalid input syntax for type oid: \"XYZ\"");
+        assert_eq!(invalid.sqlstate, "22P02");
+
+        let out_of_range = expr_casts::soft_input_error_info("01 9999999999", "oidvector")
+            .unwrap()
+            .expect("expected out of range oidvector input");
+        assert_eq!(
+            out_of_range.message,
+            "value \"9999999999\" is out of range for type oid"
+        );
+        assert_eq!(out_of_range.sqlstate, "22003");
+    }
+
+    #[test]
     fn synthetic_pg_class_exposes_oid_column() {
         let base = temp_dir("pg_class_oid");
         let txns = TransactionManager::new_durable(&base).unwrap();
