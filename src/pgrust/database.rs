@@ -190,12 +190,7 @@ impl Database {
         let catalog_guard = self.catalog.read();
         let mut relcache = catalog_guard
             .relcache()
-            .unwrap_or_else(|_| {
-                catalog_guard
-                    .catalog_snapshot()
-                    .map(|catalog| RelCache::from_catalog(&catalog))
-                    .unwrap_or_default()
-            });
+            .unwrap_or_default();
         drop(catalog_guard);
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {

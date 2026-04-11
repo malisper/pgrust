@@ -9,11 +9,12 @@ use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use pgrust::backend::catalog::catalog::column_desc;
 use pgrust::backend::storage::smgr::MdStorageManager;
+use pgrust::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use pgrust::executor::{
-    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_sql,
+    ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
-use pgrust::parser::{Catalog, CatalogEntry, SqlType, SqlTypeKind};
+use pgrust::parser::{SqlType, SqlTypeKind, parse_statement};
 use pgrust::{BufferPool, RelFileLocator, SmgrStorageBackend};
 use std::fs;
 use std::path::PathBuf;
@@ -117,10 +118,10 @@ fn main() -> Result<(), ExecError> {
     }
     txns.write().commit(xid).unwrap();
 
-    let mut catalog = Catalog::default();
-    catalog.insert(
+    let mut relcache = RelCache::default();
+    relcache.insert(
         "people",
-        CatalogEntry {
+        RelCacheEntry {
             rel: rel(),
             relation_oid: 16_384,
             namespace_oid: 11,
@@ -140,7 +141,8 @@ fn main() -> Result<(), ExecError> {
         timed: false,
     };
 
-    match execute_sql(&sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)? {
+    let stmt = parse_statement(&sql)?;
+    match execute_readonly_statement(stmt, &relcache, &mut ctx)? {
         StatementResult::Query {
             column_names, rows, ..
         } => {
