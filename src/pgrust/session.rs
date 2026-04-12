@@ -19,9 +19,11 @@ use crate::backend::parser::{
     bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
+use crate::backend::utils::cache::inval::CatalogInvalidation;
+use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
-use crate::pgrust::database::{CatalogInvalidation, Database, TempMutationEffect};
+use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
 
@@ -133,7 +135,7 @@ impl Session {
         )
     }
 
-    pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> crate::pgrust::database::LazyCatalogLookup<'a> {
+    pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> LazyCatalogLookup<'a> {
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(
             self.client_id,
@@ -149,7 +151,7 @@ impl Session {
         db: &'a Database,
         xid: TransactionId,
         cid: u32,
-    ) -> crate::pgrust::database::LazyCatalogLookup<'a> {
+    ) -> LazyCatalogLookup<'a> {
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(
             self.client_id,
