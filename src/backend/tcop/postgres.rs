@@ -1291,10 +1291,11 @@ fn describe_sql(
     params: &[Option<String>],
 ) -> Option<Vec<QueryColumn>> {
     let visible_relcache = session.visible_relcache(db);
+    let visible_catalog = session.visible_catalog(db);
     let sql =
         rewrite_regression_sql(&substitute_params(sql, params, &visible_relcache)).into_owned();
     match parse_statement(&sql).ok()? {
-        Statement::Select(stmt) => crate::backend::parser::build_plan(&stmt, &visible_relcache)
+        Statement::Select(stmt) => crate::backend::parser::build_plan(&stmt, &visible_catalog)
             .ok()
             .map(|plan| plan.columns()),
         Statement::ShowTables => Some(vec![QueryColumn::text("table_name")]),
