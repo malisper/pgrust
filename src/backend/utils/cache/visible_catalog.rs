@@ -1,9 +1,10 @@
+use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::include::catalog::{
-    PG_CATALOG_NAMESPACE_OID, PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    PG_CATALOG_NAMESPACE_OID, PgCastRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgTypeRow,
+    bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,25 @@ pub struct VisibleCatalog {
 impl VisibleCatalog {
     pub fn new(relcache: RelCache, catcache: Option<CatCache>) -> Self {
         Self { relcache, catcache }
+    }
+
+    pub fn relcache(&self) -> &RelCache {
+        &self.relcache
+    }
+
+    pub fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
+        if let Some(catcache) = &self.catcache {
+            return catcache.constraint_rows_for_relation(relation_oid);
+        }
+        let Some((name, entry)) = self
+            .relcache
+            .entries()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+        else {
+            return Vec::new();
+        };
+        let relname = name.rsplit('.').next().unwrap_or(name);
+        derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
     }
 }
 

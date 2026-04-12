@@ -21,6 +21,7 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::include::access::htup::TupleError;
 use crate::include::nodes::datum::Value;
@@ -502,8 +503,8 @@ fn try_handle_psql_describe_query(
     state: &mut ConnectionState,
     sql: &str,
 ) -> io::Result<bool> {
-    let visible_relcache = state.session.visible_relcache(db);
-    let Some((columns, rows)) = execute_psql_describe_query(&visible_relcache, sql) else {
+    let visible_catalog = state.session.visible_catalog(db);
+    let Some((columns, rows)) = execute_psql_describe_query(&visible_catalog, sql) else {
         return Ok(false);
     };
     send_query_result(
@@ -520,7 +521,7 @@ fn try_handle_psql_describe_query(
 }
 
 fn execute_psql_describe_query(
-    relcache: &RelCache,
+    catalog: &VisibleCatalog,
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     // :HACK: psql's `\d bit_defaults` emits a long chain of catalog-heavy
@@ -534,26 +535,26 @@ fn execute_psql_describe_query(
         && lower.contains("operator(pg_catalog.~)")
         && lower.contains("pg_catalog.pg_table_is_visible(c.oid)")
     {
-        return Some(psql_describe_lookup_query(relcache, sql));
+        return Some(psql_describe_lookup_query(catalog.relcache(), sql));
     }
     if lower.starts_with("select c.relchecks, c.relkind, c.relhasindex")
         && lower.contains("from pg_catalog.pg_class c")
         && lower.contains("where c.oid = '")
     {
-        return psql_describe_tableinfo_query(relcache, sql);
+        return psql_describe_tableinfo_query(catalog.relcache(), sql);
     }
     if lower.starts_with("select a.attname")
         && lower.contains("pg_catalog.format_type(a.atttypid, a.atttypmod)")
         && lower.contains("from pg_catalog.pg_attribute a")
         && lower.contains("where a.attrelid = '")
     {
-        return psql_describe_columns_query(relcache, sql);
+        return psql_describe_columns_query(catalog.relcache(), sql);
     }
     if lower.contains("conrelid::pg_catalog.regclass as ontable")
         && lower.contains("from pg_catalog.pg_constraint")
         && lower.contains("pg_catalog.pg_get_constraintdef")
     {
-        return psql_describe_constraints_query(relcache, sql);
+        return psql_describe_constraints_query(catalog, sql);
     }
     if lower.contains("from pg_catalog.pg_policy pol") && lower.contains("pol.polroles") {
         return Some((vec![QueryColumn::text("Policies")], Vec::new()));
@@ -764,28 +765,29 @@ fn psql_describe_columns_query(
 }
 
 fn psql_describe_constraints_query(
-    relcache: &RelCache,
+    catalog: &VisibleCatalog,
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let oid = extract_constraint_relid(sql)?;
-    let entry = relcache.get_by_oid(oid)?;
+    let relcache = catalog.relcache();
+    relcache.get_by_oid(oid)?;
     let relname = relcache
         .entries()
         .find_map(|(name, candidate)| {
             (candidate.relation_oid == oid && !name.contains('.')).then(|| name.to_string())
         })
         .unwrap_or_else(|| oid.to_string());
-    let rows = entry
-        .desc
-        .columns
-        .iter()
-        .filter(|column| !column.storage.nullable)
-        .map(|column| {
-            vec![
-                Value::Text(format!("{relname}_{}_not_null", column.name).into()),
-                Value::Text(relname.clone().into()),
-                Value::Text("NOT NULL".into()),
-            ]
+    let rows = catalog
+        .constraint_rows_for_relation(oid)
+        .into_iter()
+        .filter_map(|row| {
+            (row.contype == crate::include::catalog::CONSTRAINT_NOTNULL).then(|| {
+                vec![
+                    Value::Text(row.conname.into()),
+                    Value::Text(relname.clone().into()),
+                    Value::Text("NOT NULL".into()),
+                ]
+            })
         })
         .collect::<Vec<_>>();
     Some((
@@ -1341,6 +1343,8 @@ fn resolve_regclass_param(value: &str, catalog: &dyn CatalogLookup) -> String {
 mod tests {
     use super::*;
     use crate::backend::catalog::Catalog;
+    use crate::backend::utils::cache::catcache::CatCache;
+    use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -1386,7 +1390,10 @@ mod tests {
                 },
             )
             .unwrap();
-        let relcache = RelCache::from_catalog(&catalog);
+        let visible = VisibleCatalog::new(
+            RelCache::from_catalog(&catalog),
+            Some(CatCache::from_catalog(&catalog)),
+        );
 
         let sql = format!(
             "select conname, conrelid::pg_catalog.regclass as ontable, \
@@ -1395,7 +1402,7 @@ mod tests {
                  where c.conrelid = '{}'",
             entry.relation_oid
         );
-        let (_, rows) = psql_describe_constraints_query(&relcache, &sql).unwrap();
+        let (_, rows) = psql_describe_constraints_query(&visible, &sql).unwrap();
         assert_eq!(
             rows,
             vec![vec![
@@ -1404,5 +1411,57 @@ mod tests {
                 Value::Text("NOT NULL".into()),
             ]]
         );
+    }
+
+    #[test]
+    fn psql_describe_constraint_query_uses_visible_catalog_rows() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+        let relcache = RelCache::from_catalog(&catalog);
+        let base = CatCache::from_catalog(&catalog);
+        let filtered = CatCache::from_rows(
+            base.namespace_rows(),
+            base.class_rows(),
+            base.attribute_rows(),
+            base.attrdef_rows(),
+            base.depend_rows(),
+            base.index_rows(),
+            base.am_rows(),
+            base.authid_rows(),
+            base.auth_members_rows(),
+            base.language_rows(),
+            base.constraint_rows()
+                .into_iter()
+                .filter(|row| row.conrelid != entry.relation_oid)
+                .collect(),
+            base.operator_rows(),
+            base.proc_rows(),
+            base.cast_rows(),
+            base.collation_rows(),
+            base.database_rows(),
+            base.tablespace_rows(),
+            base.type_rows(),
+        );
+        let visible = VisibleCatalog::new(relcache, Some(filtered));
+
+        let sql = format!(
+            "select conname, conrelid::pg_catalog.regclass as ontable, \
+                 pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}'",
+            entry.relation_oid
+        );
+        let (_, rows) = psql_describe_constraints_query(&visible, &sql).unwrap();
+        assert!(rows.is_empty());
     }
 }
