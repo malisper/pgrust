@@ -13,7 +13,10 @@ use crate::backend::executor::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, Plan, QueryColumn,
     RelationDesc, TargetEntry, Value,
 };
-use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+};
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
@@ -24,11 +27,55 @@ use coerce::*;
 use expr::*;
 use functions::*;
 use infer::*;
+pub use scope::BoundRelation;
 use scope::*;
 
 pub trait CatalogLookup {
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation>;
     fn visible_table_names(&self) -> Vec<String>;
+
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        bootstrap_pg_proc_rows()
+            .into_iter()
+            .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
+            .collect()
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        bootstrap_pg_operator_rows().into_iter().find(|row| {
+            row.oprname.eq_ignore_ascii_case(normalized)
+                && row.oprleft == left_type_oid
+                && row.oprright == right_type_oid
+        })
+    }
+
+    fn cast_by_source_target(&self, source_type_oid: u32, target_type_oid: u32) -> Option<PgCastRow> {
+        bootstrap_pg_cast_rows()
+            .into_iter()
+            .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        builtin_type_rows()
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
+        self.type_rows().into_iter().find(|row| row.oid == oid)
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        self.type_rows().into_iter().find_map(|row| {
+            (row.sql_type.kind == sql_type.kind && row.sql_type.is_array == sql_type.is_array)
+                .then_some(row.oid)
+        })
+    }
 }
 
 impl CatalogLookup for Catalog {
@@ -82,6 +129,10 @@ impl CatalogLookup for RelCache {
         names.dedup();
         names
     }
+}
+
+fn normalize_catalog_lookup_name(name: &str) -> &str {
+    name.strip_prefix("pg_catalog.").unwrap_or(name)
 }
 
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {

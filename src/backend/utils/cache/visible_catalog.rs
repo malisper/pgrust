@@ -1,0 +1,151 @@
+use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::cache::relcache::RelCache;
+use crate::include::catalog::{
+    PG_CATALOG_NAMESPACE_OID, PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+};
+
+#[derive(Debug, Clone)]
+pub struct VisibleCatalog {
+    relcache: RelCache,
+    catcache: Option<CatCache>,
+}
+
+impl VisibleCatalog {
+    pub fn new(relcache: RelCache, catcache: Option<CatCache>) -> Self {
+        Self { relcache, catcache }
+    }
+}
+
+impl CatalogLookup for VisibleCatalog {
+    fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.relcache.get_by_name(name).and_then(|entry| {
+            (entry.relkind == 'r').then(|| BoundRelation {
+                rel: entry.rel,
+                relation_oid: entry.relation_oid,
+                desc: entry.desc.clone(),
+            })
+        })
+    }
+
+    fn visible_table_names(&self) -> Vec<String> {
+        let mut names = self
+            .relcache
+            .entries()
+            .filter(|(_, entry)| entry.relkind == 'r')
+            .filter(|(_, entry)| entry.namespace_oid != PG_CATALOG_NAMESPACE_OID)
+            .map(|(name, _)| name)
+            .filter(|name| !name.contains('.'))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| {
+                catcache
+                    .proc_rows_by_name(name)
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                let normalized = normalize_name(name);
+                bootstrap_pg_proc_rows()
+                    .into_iter()
+                    .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
+                    .collect()
+            })
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| {
+                catcache
+                    .operator_by_name_left_right(name, left_type_oid, right_type_oid)
+                    .cloned()
+            })
+            .or_else(|| {
+                let normalized = normalize_name(name);
+                bootstrap_pg_operator_rows().into_iter().find(|row| {
+                    row.oprname.eq_ignore_ascii_case(normalized)
+                        && row.oprleft == left_type_oid
+                        && row.oprright == right_type_oid
+                })
+            })
+    }
+
+    fn cast_by_source_target(&self, source_type_oid: u32, target_type_oid: u32) -> Option<PgCastRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| {
+                catcache
+                    .cast_by_source_target(source_type_oid, target_type_oid)
+                    .cloned()
+            })
+            .or_else(|| {
+                bootstrap_pg_cast_rows()
+                    .into_iter()
+                    .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
+            })
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::type_rows)
+            .unwrap_or_else(builtin_type_rows)
+    }
+}
+
+fn normalize_name(name: &str) -> &str {
+    name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::Catalog;
+
+    #[test]
+    fn visible_catalog_prefers_supplied_catcache_metadata() {
+        let base = CatCache::from_catalog(&Catalog::default());
+        let filtered = CatCache::from_rows(
+            base.namespace_rows(),
+            base.class_rows(),
+            base.attribute_rows(),
+            base.attrdef_rows(),
+            base.depend_rows(),
+            base.index_rows(),
+            base.am_rows(),
+            base.authid_rows(),
+            base.auth_members_rows(),
+            base.language_rows(),
+            base.constraint_rows(),
+            base.operator_rows(),
+            base.proc_rows()
+                .into_iter()
+                .filter(|row| row.proname != "lower")
+                .collect(),
+            base.cast_rows(),
+            base.collation_rows(),
+            base.database_rows(),
+            base.tablespace_rows(),
+            base.type_rows(),
+        );
+        let visible = VisibleCatalog::new(RelCache::default(), Some(filtered));
+
+        assert!(visible.proc_rows_by_name("lower").is_empty());
+    }
+}

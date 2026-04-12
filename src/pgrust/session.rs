@@ -19,6 +19,7 @@ use crate::backend::parser::{
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::cache::relcache::RelCache;
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
@@ -126,6 +127,11 @@ impl Session {
     pub(crate) fn visible_relcache(&self, db: &Database) -> RelCache {
         let search_path = self.configured_search_path();
         db.visible_relcache_with_search_path(self.client_id, search_path.as_deref())
+    }
+
+    pub(crate) fn visible_catalog(&self, db: &Database) -> VisibleCatalog {
+        let search_path = self.configured_search_path();
+        db.visible_catalog_with_search_path(self.client_id, search_path.as_deref())
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
@@ -295,7 +301,7 @@ impl Session {
             | Statement::ShowTables => {
                 db.sync_visible_catalog_heaps(client_id);
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let visible_relcache = self.visible_relcache(db);
+                let visible_catalog = self.visible_catalog(db);
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
@@ -305,7 +311,7 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_readonly_statement(stmt, &visible_relcache, &mut ctx)
+                execute_readonly_statement(stmt, &visible_catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
                 let visible_relcache = self.visible_relcache(db);

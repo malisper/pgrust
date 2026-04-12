@@ -120,6 +120,10 @@ impl CatalogStore {
         RelCache::from_physical(&self.base_dir)
     }
 
+    pub fn catcache(&self) -> Result<CatCache, CatalogError> {
+        CatCache::from_physical(&self.base_dir)
+    }
+
     pub fn relation(&self, name: &str) -> Result<Option<RelCacheEntry>, CatalogError> {
         Ok(self.relcache()?.get_by_name(name).cloned())
     }
