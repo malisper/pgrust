@@ -549,6 +549,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
                     | SqlTypeKind::VarBit
@@ -609,6 +610,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
                     | SqlTypeKind::VarBit
@@ -641,6 +643,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
                     | SqlTypeKind::VarBit
@@ -772,6 +775,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
                     | SqlTypeKind::VarBit
@@ -815,6 +819,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
                     | SqlTypeKind::VarBit
@@ -878,7 +883,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
     match ty.kind {
-        SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::new(text))),
+        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::PgNodeTree => {
+            Ok(Value::Text(CompactString::new(text)))
+        }
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(
             parse_bit_text(text)?,
@@ -922,7 +929,7 @@ pub(super) fn cast_numeric_value(
 ) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
-        SqlTypeKind::Text | SqlTypeKind::Timestamp => {
+        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::PgNodeTree => {
             Ok(Value::Text(CompactString::from_owned(value.render())))
         }
         SqlTypeKind::Json => {

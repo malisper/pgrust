@@ -76,6 +76,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "\"char\"",
         SqlTypeKind::Char => "character",
         SqlTypeKind::Varchar => "character varying",

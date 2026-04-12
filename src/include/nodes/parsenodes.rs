@@ -419,6 +419,7 @@ pub enum SqlTypeKind {
     Text,
     Bool,
     Timestamp,
+    PgNodeTree,
     InternalChar,
     Char,
     Varchar,

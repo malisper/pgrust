@@ -49,8 +49,8 @@ pub fn pg_index_desc() -> RelationDesc {
             column_desc("indcollation", SqlType::new(SqlTypeKind::Text), false),
             column_desc("indclass", SqlType::new(SqlTypeKind::Text), false),
             column_desc("indoption", SqlType::new(SqlTypeKind::Text), false),
-            column_desc("indexprs", SqlType::new(SqlTypeKind::Text), true),
-            column_desc("indpred", SqlType::new(SqlTypeKind::Text), true),
+            column_desc("indexprs", SqlType::new(SqlTypeKind::PgNodeTree), true),
+            column_desc("indpred", SqlType::new(SqlTypeKind::PgNodeTree), true),
         ],
     }
 }

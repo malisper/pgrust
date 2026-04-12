@@ -659,6 +659,10 @@ fn parse_standalone_type_names() {
         parse_type_name("varbit").unwrap(),
         SqlType::new(SqlTypeKind::VarBit)
     );
+    assert_eq!(
+        parse_type_name("pg_node_tree").unwrap(),
+        SqlType::new(SqlTypeKind::PgNodeTree)
+    );
 }
 
 #[test]
