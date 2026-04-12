@@ -902,6 +902,60 @@ fn temp_tables_are_session_local_and_mask_permanent_tables() {
 }
 
 #[test]
+fn drop_table_supports_qualified_public_name_under_temp_shadowing() {
+    let base = temp_dir("drop_table_public_under_temp_shadow");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "insert into items (id) values (1)").unwrap();
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items (id) values (2)")
+        .unwrap();
+
+    session.execute(&db, "drop table public.items").unwrap();
+
+    match session.execute(&db, "select id from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = session.execute(&db, "select id from public.items").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnknownTable(name)) if name == "public.items"
+    ));
+}
+
+#[test]
+fn drop_table_if_exists_accepts_qualified_public_name_under_temp_shadowing() {
+    let base = temp_dir("drop_table_if_exists_public_under_temp_shadow");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null)").unwrap();
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    session.execute(&db, "drop table public.items").unwrap();
+    session
+        .execute(&db, "drop table if exists public.items")
+        .unwrap();
+
+    match session.execute(&db, "select count(*) from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn temp_catalog_rows_appear_with_pg_temp_namespace() {
     let base = temp_dir("temp_catalog_rows");
     let db = Database::open(&base, 16).unwrap();
