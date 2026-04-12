@@ -129,6 +129,8 @@ fn normalize_name(name: &str) -> &str {
 mod tests {
     use super::*;
     use crate::backend::catalog::Catalog;
+    use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
+    use crate::include::catalog::TEXT_TYPE_OID;
 
     #[test]
     fn visible_catalog_prefers_supplied_catcache_metadata() {
@@ -159,5 +161,18 @@ mod tests {
         let visible = VisibleCatalog::new(RelCache::default(), Some(filtered));
 
         assert!(visible.proc_rows_by_name("lower").is_empty());
+    }
+
+    #[test]
+    fn visible_catalog_type_oid_prefers_builtin_scalar_types_over_composites() {
+        let visible = VisibleCatalog::new(
+            RelCache::default(),
+            Some(CatCache::from_catalog(&Catalog::default())),
+        );
+
+        assert_eq!(
+            visible.type_oid_for_sql_type(SqlType::new(SqlTypeKind::Text)),
+            Some(TEXT_TYPE_OID)
+        );
     }
 }

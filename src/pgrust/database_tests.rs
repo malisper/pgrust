@@ -967,6 +967,19 @@ fn temp_catalog_rows_appear_with_pg_temp_namespace() {
         .unwrap();
 
     match session_a
+        .execute(
+            &db,
+            "select count(*) from pg_class where relname = 'temp_items'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session_a
             .execute(
                 &db,
                 "select n.nspname, c.relname, c.relpersistence from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'temp_items'",
@@ -998,6 +1011,44 @@ fn temp_catalog_rows_appear_with_pg_temp_namespace() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn temp_catalog_sync_only_materializes_touched_catalog_relfiles() {
+    let base = temp_dir("temp_catalog_selective_sync");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_items (id int4 not null)")
+        .unwrap();
+    session.execute(&db, "show tables").unwrap();
+
+    let temp_entry = db.temp_entry(1, "temp_items").unwrap();
+    let temp_db_oid = temp_entry.rel.db_oid;
+    let class_path = crate::backend::storage::smgr::segment_path(
+        &base,
+        crate::backend::storage::smgr::RelFileLocator {
+            spc_oid: 0,
+            db_oid: temp_db_oid,
+            rel_number: crate::include::catalog::BootstrapCatalogKind::PgClass.relation_oid(),
+        },
+        crate::backend::storage::smgr::ForkNumber::Main,
+        0,
+    );
+    let proc_path = crate::backend::storage::smgr::segment_path(
+        &base,
+        crate::backend::storage::smgr::RelFileLocator {
+            spc_oid: 0,
+            db_oid: temp_db_oid,
+            rel_number: crate::include::catalog::BootstrapCatalogKind::PgProc.relation_oid(),
+        },
+        crate::backend::storage::smgr::ForkNumber::Main,
+        0,
+    );
+
+    assert!(class_path.exists(), "temp pg_class relfile should exist");
+    assert!(!proc_path.exists(), "temp pg_proc relfile should stay absent");
 }
 
 #[test]
