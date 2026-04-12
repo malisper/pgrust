@@ -1,5 +1,5 @@
 use super::*;
-use crate::include::catalog::bootstrap_pg_proc_rows;
+use crate::include::catalog::{bootstrap_pg_proc_rows, builtin_type_rows};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -10,21 +10,9 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
 }
 
 pub(super) fn resolve_function_cast_type(name: &str) -> Option<SqlType> {
-    match name.to_ascii_lowercase().as_str() {
-        "int2" | "smallint" => Some(SqlType::new(SqlTypeKind::Int2)),
-        "int4" | "int" | "integer" => Some(SqlType::new(SqlTypeKind::Int4)),
-        "int8" | "bigint" => Some(SqlType::new(SqlTypeKind::Int8)),
-        "oid" => Some(SqlType::new(SqlTypeKind::Oid)),
-        "bit" => Some(SqlType::with_bit_len(SqlTypeKind::Bit, 1)),
-        "varbit" | "bit varying" => Some(SqlType::new(SqlTypeKind::VarBit)),
-        "bytea" => Some(SqlType::new(SqlTypeKind::Bytea)),
-        "float4" | "real" => Some(SqlType::new(SqlTypeKind::Float4)),
-        "float8" => Some(SqlType::new(SqlTypeKind::Float8)),
-        "numeric" | "decimal" => Some(SqlType::new(SqlTypeKind::Numeric)),
-        "text" => Some(SqlType::new(SqlTypeKind::Text)),
-        "bool" | "boolean" => Some(SqlType::new(SqlTypeKind::Bool)),
-        _ => None,
-    }
+    function_cast_types_by_name()
+        .get(&name.to_ascii_lowercase())
+        .copied()
 }
 
 pub(super) fn resolve_json_table_function(name: &str) -> Option<JsonTableFunction> {
@@ -342,6 +330,44 @@ fn legacy_json_table_function_entries() -> &'static [(&'static str, JsonTableFun
     ]
 }
 
+fn function_cast_types_by_name() -> &'static BTreeMap<String, SqlType> {
+    static TYPES: OnceLock<BTreeMap<String, SqlType>> = OnceLock::new();
+    TYPES.get_or_init(|| {
+        let mut by_name = BTreeMap::new();
+        for row in builtin_type_rows() {
+            let sql_type = match row.typname.as_str() {
+                "int2" | "int4" | "int8" | "oid" | "bytea" | "float4" | "float8"
+                | "numeric" | "text" | "bool" => Some(row.sql_type),
+                "bit" => Some(SqlType::with_bit_len(SqlTypeKind::Bit, 1)),
+                "varbit" => Some(SqlType::new(SqlTypeKind::VarBit)),
+                _ => None,
+            };
+            if let Some(sql_type) = sql_type {
+                by_name.insert(row.typname.to_ascii_lowercase(), sql_type);
+            }
+        }
+        for (alias, canonical) in function_cast_type_aliases() {
+            if let Some(sql_type) = by_name.get(*canonical).copied() {
+                by_name.insert((*alias).into(), sql_type);
+            }
+        }
+        by_name
+    })
+}
+
+fn function_cast_type_aliases() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("smallint", "int2"),
+        ("int", "int4"),
+        ("integer", "int4"),
+        ("bigint", "int8"),
+        ("bit varying", "varbit"),
+        ("real", "float4"),
+        ("decimal", "numeric"),
+        ("boolean", "bool"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +406,26 @@ mod tests {
             Some(JsonTableFunction::Each)
         );
         assert_eq!(resolve_json_table_function("random"), None);
+    }
+
+    #[test]
+    fn resolve_function_cast_type_uses_pg_type_catalog_and_aliases() {
+        assert_eq!(
+            resolve_function_cast_type("int4"),
+            Some(SqlType::new(SqlTypeKind::Int4))
+        );
+        assert_eq!(
+            resolve_function_cast_type("smallint"),
+            Some(SqlType::new(SqlTypeKind::Int2))
+        );
+        assert_eq!(
+            resolve_function_cast_type("bit"),
+            Some(SqlType::with_bit_len(SqlTypeKind::Bit, 1))
+        );
+        assert_eq!(
+            resolve_function_cast_type("boolean"),
+            Some(SqlType::new(SqlTypeKind::Bool))
+        );
+        assert_eq!(resolve_function_cast_type("varchar"), None);
     }
 }
