@@ -13,6 +13,7 @@ use crate::backend::executor::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, Plan, QueryColumn,
     RelationDesc, TargetEntry, Value,
 };
+use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
@@ -46,10 +47,9 @@ impl CatalogLookup for Catalog {
         let mut names = self
             .entries()
             .filter(|(_, entry)| entry.relkind == 'r')
+            .filter(|(_, entry)| entry.namespace_oid != PG_CATALOG_NAMESPACE_OID)
             .map(|(name, _)| name)
             .filter(|name| !name.contains('.'))
-            .filter(|name| !name.starts_with("pg_temp."))
-            .filter(|name| !name.starts_with("pg_"))
             .map(str::to_string)
             .collect::<Vec<_>>();
         names.sort();
@@ -73,10 +73,9 @@ impl CatalogLookup for RelCache {
         let mut names = self
             .entries()
             .filter(|(_, entry)| entry.relkind == 'r')
+            .filter(|(_, entry)| entry.namespace_oid != PG_CATALOG_NAMESPACE_OID)
             .map(|(name, _)| name)
             .filter(|name| !name.contains('.'))
-            .filter(|name| !name.starts_with("pg_temp."))
-            .filter(|name| !name.starts_with("pg_"))
             .map(str::to_string)
             .collect::<Vec<_>>();
         names.sort();
@@ -133,6 +132,12 @@ fn normalize_create_table_name_parts(
 ) -> Result<(String, TablePersistence), ParseError> {
     let effective_persistence = match schema_name.map(|s| s.to_ascii_lowercase()) {
         Some(schema) if schema == "pg_temp" => TablePersistence::Temporary,
+        Some(schema) if schema == "public" => {
+            if persistence == TablePersistence::Temporary {
+                return Err(ParseError::TempTableInNonTempSchema(schema));
+            }
+            persistence
+        }
         Some(schema) => {
             if persistence == TablePersistence::Temporary {
                 return Err(ParseError::TempTableInNonTempSchema(schema));
@@ -246,8 +251,13 @@ fn bind_ctes(
         visible.extend_from_slice(outer_ctes);
         let (plan, desc) = match &cte.body {
             CteBody::Select(select) => {
-                let plan =
-                    build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.clone(), &visible)?;
+                let plan = build_plan_with_outer(
+                    select,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.clone(),
+                    &visible,
+                )?;
                 let desc = relation_desc_from_plan(&plan);
                 apply_cte_column_names(plan, desc, &cte.column_names)?
             }
@@ -306,7 +316,10 @@ pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result
     build_plan_with_outer(stmt, catalog, &[], None, &[])
 }
 
-pub fn build_values_plan(stmt: &ValuesStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
+pub fn build_values_plan(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<Plan, ParseError> {
     build_values_plan_with_outer(stmt, catalog, &[], None, &[])
 }
 
@@ -317,12 +330,23 @@ fn build_values_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
 ) -> Result<Plan, ParseError> {
-    let local_ctes =
-        bind_ctes(&stmt.with, catalog, outer_scopes, grouped_outer.clone(), outer_ctes)?;
+    let local_ctes = bind_ctes(
+        &stmt.with,
+        catalog,
+        outer_scopes,
+        grouped_outer.clone(),
+        outer_ctes,
+    )?;
     let mut visible_ctes = local_ctes;
     visible_ctes.extend_from_slice(outer_ctes);
-    let (mut plan, scope) =
-        bind_values_rows(&stmt.rows, None, catalog, outer_scopes, grouped_outer.as_ref(), &visible_ctes)?;
+    let (mut plan, scope) = bind_values_rows(
+        &stmt.rows,
+        None,
+        catalog,
+        outer_scopes,
+        grouped_outer.as_ref(),
+        &visible_ctes,
+    )?;
     let output_columns = match &plan {
         Plan::Values { output_columns, .. } => output_columns.clone(),
         other => {
@@ -376,7 +400,13 @@ fn build_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
 ) -> Result<Plan, ParseError> {
-    let local_ctes = bind_ctes(&stmt.with, catalog, outer_scopes, grouped_outer.clone(), outer_ctes)?;
+    let local_ctes = bind_ctes(
+        &stmt.with,
+        catalog,
+        outer_scopes,
+        grouped_outer.clone(),
+        outer_ctes,
+    )?;
     let mut visible_ctes = local_ctes;
     visible_ctes.extend_from_slice(outer_ctes);
 
@@ -385,7 +415,13 @@ fn build_plan_with_outer(
     }
 
     let (base, scope) = if let Some(from) = &stmt.from {
-        bind_from_item_with_ctes(from, catalog, outer_scopes, grouped_outer.as_ref(), &visible_ctes)?
+        bind_from_item_with_ctes(
+            from,
+            catalog,
+            outer_scopes,
+            grouped_outer.as_ref(),
+            &visible_ctes,
+        )?
     } else {
         (Plan::Result, empty_scope())
     };
@@ -418,10 +454,9 @@ fn build_plan_with_outer(
     let can_skip_scan_for_degenerate_having = needs_agg
         && stmt.group_by.is_empty()
         && !targets_contain_agg(&stmt.targets)
-        && stmt
-            .having
-            .as_ref()
-            .is_some_and(|having| !expr_contains_agg(having) && !expr_references_input_scope(having))
+        && stmt.having.as_ref().is_some_and(|having| {
+            !expr_contains_agg(having) && !expr_references_input_scope(having)
+        })
         && stmt
             .targets
             .iter()
@@ -597,23 +632,19 @@ fn build_plan_with_outer(
         if !stmt.order_by.is_empty() {
             plan = Plan::OrderBy {
                 input: Box::new(plan),
-                items: bind_order_by_items(
-                    &stmt.order_by,
-                    &targets,
-                    |expr| {
-                        bind_agg_output_expr_in_clause(
-                            expr,
-                            UngroupedColumnClause::SelectTarget,
-                            &stmt.group_by,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &aggs,
-                            n_keys,
-                        )
-                    },
-                )?,
+                items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                    bind_agg_output_expr_in_clause(
+                        expr,
+                        UngroupedColumnClause::SelectTarget,
+                        &stmt.group_by,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &aggs,
+                        n_keys,
+                    )
+                })?,
             };
         }
 
@@ -686,7 +717,8 @@ fn bind_order_by_items(
     targets: &[TargetEntry],
     bind_expr: impl Fn(&SqlExpr) -> Result<Expr, ParseError>,
 ) -> Result<Vec<crate::backend::executor::OrderByEntry>, ParseError> {
-    items.iter()
+    items
+        .iter()
         .map(|item| {
             let expr = match &item.expr {
                 SqlExpr::IntegerLiteral(value) => {
@@ -958,7 +990,9 @@ pub fn bind_update(
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
+            .map(|expr| {
+                bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
+            })
             .transpose()?,
     })
 }
@@ -977,7 +1011,9 @@ pub fn bind_delete(
         predicate: stmt
             .where_clause
             .as_ref()
-            .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
+            .map(|expr| {
+                bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
+            })
             .transpose()?,
     })
 }

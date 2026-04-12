@@ -967,6 +967,34 @@ fn show_tables_does_not_duplicate_catalog_aliases_under_temp_shadowing() {
 }
 
 #[test]
+fn public_schema_tables_remain_visible_even_with_pg_prefix() {
+    let base = temp_dir("show_tables_public_pg_prefix");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table public.pg_visible (id int4 not null)")
+        .unwrap();
+
+    match session.execute(&db, "show tables").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("pg_visible".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session
+        .execute(&db, "insert into public.pg_visible (id) values (1)")
+        .unwrap();
+    match session.execute(&db, "select id from pg_visible").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn temp_table_on_commit_actions_apply_at_commit() {
     let base = temp_dir("temp_table_on_commit");
     let db = Database::open(&base, 16).unwrap();
