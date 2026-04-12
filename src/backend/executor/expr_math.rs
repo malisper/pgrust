@@ -15,9 +15,15 @@ unsafe extern "C" {
 pub(super) fn eval_abs_function(values: &[Value]) -> Result<Value, ExecError> {
     match &values[0] {
         Value::Null => Ok(Value::Null),
-        Value::Int16(v) => Ok(Value::Int16(v.checked_abs().ok_or(ExecError::Int2OutOfRange)?)),
-        Value::Int32(v) => Ok(Value::Int32(v.checked_abs().ok_or(ExecError::Int4OutOfRange)?)),
-        Value::Int64(v) => Ok(Value::Int64(v.checked_abs().ok_or(ExecError::Int8OutOfRange)?)),
+        Value::Int16(v) => Ok(Value::Int16(
+            v.checked_abs().ok_or(ExecError::Int2OutOfRange)?,
+        )),
+        Value::Int32(v) => Ok(Value::Int32(
+            v.checked_abs().ok_or(ExecError::Int4OutOfRange)?,
+        )),
+        Value::Int64(v) => Ok(Value::Int64(
+            v.checked_abs().ok_or(ExecError::Int8OutOfRange)?,
+        )),
         Value::Float64(v) => Ok(Value::Float64(v.abs())),
         Value::Numeric(v) => Ok(Value::Numeric(v.abs())),
         other => Err(ExecError::TypeMismatch {
@@ -90,7 +96,10 @@ pub(super) fn eval_float_send_function(
         Value::Null => Ok(Value::Null),
         Value::Float64(v) => {
             let bytes = if narrow {
-                (f64::from(*v as f32) as f32).to_bits().to_be_bytes().to_vec()
+                (f64::from(*v as f32) as f32)
+                    .to_bits()
+                    .to_be_bytes()
+                    .to_vec()
             } else {
                 v.to_bits().to_be_bytes().to_vec()
             };
@@ -212,11 +221,7 @@ pub(super) fn eval_power(base: f64, exp: f64) -> Result<f64, ExecError> {
         ));
     }
     if exp.is_nan() {
-        return if base == 1.0 {
-            Ok(1.0)
-        } else {
-            Ok(f64::NAN)
-        };
+        return if base == 1.0 { Ok(1.0) } else { Ok(f64::NAN) };
     }
     if exp.is_infinite() {
         if base == 1.0 || base == -1.0 {
@@ -233,7 +238,11 @@ pub(super) fn eval_power(base: f64, exp: f64) -> Result<f64, ExecError> {
             return Ok(1.0);
         }
         if base.is_sign_positive() {
-            return Ok(if exp.is_sign_positive() { f64::INFINITY } else { 0.0 });
+            return Ok(if exp.is_sign_positive() {
+                f64::INFINITY
+            } else {
+                0.0
+            });
         }
         if exp.fract() != 0.0 {
             return Err(float_domain_error(
@@ -342,7 +351,10 @@ fn snap_degree_unit(value: f64) -> f64 {
 }
 
 pub(super) fn snap_degree(value: f64) -> f64 {
-    for landmark in [-180.0, -135.0, -90.0, -60.0, -45.0, -30.0, 0.0, 30.0, 45.0, 60.0, 90.0, 120.0, 135.0, 180.0] {
+    for landmark in [
+        -180.0, -135.0, -90.0, -60.0, -45.0, -30.0, 0.0, 30.0, 45.0, 60.0, 90.0, 120.0, 135.0,
+        180.0,
+    ] {
         if approx_eq(value, landmark) {
             return landmark;
         }

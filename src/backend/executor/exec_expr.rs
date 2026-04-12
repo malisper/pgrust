@@ -1,50 +1,49 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::expr_math::{
-    eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
-    eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
-    eval_erf, eval_erfc, eval_exp, eval_float_send_function, eval_gamma, eval_gcd_function,
-    eval_lcm_function, eval_lgamma, eval_ln, eval_power, eval_sqrt, eval_unary_float_function,
-    snap_degree, cosd, cotd, sind, tand,
-};
-use super::expr_numeric::{
-    eval_ceil_function, eval_div_function, eval_factorial_function, eval_floor_function,
-    eval_log10_function, eval_log_function, eval_min_scale_function, eval_numeric_inc_function,
-    eval_pg_lsn_function, eval_round_function, eval_scale_function, eval_sign_function,
-    eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
-};
 use super::expr_bit::{
     bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
-    overlay as eval_bit_overlay, position as eval_bit_position, substring as eval_bit_substring,
-    set_bit as eval_set_bit,
-};
-use super::expr_string::{
-    eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
-    eval_length_function, eval_lower_function, eval_md5_function, eval_position_function,
-    eval_repeat_function, eval_to_char_function, eval_to_number_function,
+    overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
+    substring as eval_bit_substring,
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
-use super::node_types::*;
 use super::expr_casts::{cast_value, soft_input_error_info};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
+pub(crate) use super::expr_json::eval_json_table_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
 };
-pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
+use super::expr_math::{
+    cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
+    eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
+    eval_erf, eval_erfc, eval_exp, eval_float_send_function, eval_gamma, eval_gcd_function,
+    eval_lcm_function, eval_lgamma, eval_ln, eval_power, eval_sqrt, eval_unary_float_function,
+    sind, snap_degree, tand,
+};
+use super::expr_numeric::{
+    eval_ceil_function, eval_div_function, eval_factorial_function, eval_floor_function,
+    eval_log_function, eval_log10_function, eval_min_scale_function, eval_numeric_inc_function,
+    eval_pg_lsn_function, eval_round_function, eval_scale_function, eval_sign_function,
+    eval_trim_scale_function, eval_trunc_function, eval_width_bucket_function,
+};
 use super::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
     compare_values, concat_values, div_values, eval_and, eval_or, mod_values, mul_values,
     negate_value, not_equal_values, order_values, shift_left_values, shift_right_values,
     sub_values, values_are_distinct,
 };
-use super::{ExecError, ExecutorContext, exec_next, executor_start};
-pub(crate) use super::expr_json::eval_json_table_function;
+pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
+use super::expr_string::{
+    eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
+    eval_length_function, eval_lower_function, eval_md5_function, eval_position_function,
+    eval_repeat_function, eval_to_char_function, eval_to_number_function,
+};
+use super::node_types::*;
 pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
+use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
-    JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any,
-    jsonb_from_value,
+    JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::pgrust::compact_string::CompactString;
@@ -248,39 +247,50 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
     match expr {
         Expr::Column(index) => Ok(slot.get_attr(*index)?.clone()),
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Add(left, right) => {
-            add_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Sub(left, right) => {
-            sub_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::BitAnd(left, right) => {
-            bitwise_and_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::BitOr(left, right) => {
-            bitwise_or_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::BitXor(left, right) => {
-            bitwise_xor_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Shl(left, right) => {
-            shift_left_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Shr(left, right) => {
-            shift_right_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Mul(left, right) => {
-            mul_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Div(left, right) => {
-            div_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Mod(left, right) => {
-            mod_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Concat(left, right) => {
-            concat_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
+        Expr::Add(left, right) => add_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Sub(left, right) => sub_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::BitAnd(left, right) => bitwise_and_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::BitOr(left, right) => bitwise_or_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::BitXor(left, right) => bitwise_xor_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Shl(left, right) => shift_left_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Shr(left, right) => shift_right_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Mul(left, right) => mul_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Div(left, right) => div_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Mod(left, right) => mod_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Concat(left, right) => concat_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
         Expr::UnaryPlus(inner) => eval_plpgsql_expr(inner, slot),
         Expr::Negate(inner) => negate_value(eval_plpgsql_expr(inner, slot)?),
         Expr::BitNot(inner) => bitwise_not_value(eval_plpgsql_expr(inner, slot)?),
@@ -290,9 +300,10 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             eval_plpgsql_expr(left, slot)?,
             eval_plpgsql_expr(right, slot)?,
         ),
-        Expr::NotEq(left, right) => {
-            not_equal_values(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
+        Expr::NotEq(left, right) => not_equal_values(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
         Expr::Lt(left, right) => order_values(
             "<",
             eval_plpgsql_expr(left, slot)?,
@@ -333,12 +344,14 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 regex::Regex::new(pat_str).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
             Ok(Value::Bool(re.is_match(text_str)))
         }
-        Expr::And(left, right) => {
-            eval_and(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
-        Expr::Or(left, right) => {
-            eval_or(eval_plpgsql_expr(left, slot)?, eval_plpgsql_expr(right, slot)?)
-        }
+        Expr::And(left, right) => eval_and(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
+        Expr::Or(left, right) => eval_or(
+            eval_plpgsql_expr(left, slot)?,
+            eval_plpgsql_expr(right, slot)?,
+        ),
         Expr::Not(inner) => match eval_plpgsql_expr(inner, slot)? {
             Value::Bool(value) => Ok(Value::Bool(!value)),
             Value::Null => Ok(Value::Null),
@@ -401,11 +414,15 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::Position => match values.as_slice() {
-            [Value::Bit(needle), Value::Bit(haystack)] => Ok(Value::Int32(eval_bit_position(needle, haystack))),
+            [Value::Bit(needle), Value::Bit(haystack)] => {
+                Ok(Value::Int32(eval_bit_position(needle, haystack)))
+            }
             _ => eval_position_function(&values),
         },
         BuiltinScalarFunction::Substring => match values.as_slice() {
-            [Value::Bit(bits), Value::Int32(start)] => Ok(Value::Bit(eval_bit_substring(bits, *start, None)?)),
+            [Value::Bit(bits), Value::Int32(start)] => {
+                Ok(Value::Bit(eval_bit_substring(bits, *start, None)?))
+            }
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
@@ -418,25 +435,37 @@ fn eval_plpgsql_builtin_function(
             [Value::Bit(bits), Value::Bit(place), Value::Int32(start)] => {
                 Ok(Value::Bit(eval_bit_overlay(bits, place, *start, None)?))
             }
-            [Value::Bit(bits), Value::Bit(place), Value::Int32(start), Value::Int32(len)] => {
-                Ok(Value::Bit(eval_bit_overlay(bits, place, *start, Some(*len))?))
-            }
+            [
+                Value::Bit(bits),
+                Value::Bit(place),
+                Value::Int32(start),
+                Value::Int32(len),
+            ] => Ok(Value::Bit(eval_bit_overlay(
+                bits,
+                place,
+                *start,
+                Some(*len),
+            )?)),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
             })),
         },
         BuiltinScalarFunction::GetBit => match values.as_slice() {
-            [Value::Bit(bits), Value::Int32(index)] => Ok(Value::Int32(eval_get_bit(bits, *index)?)),
+            [Value::Bit(bits), Value::Int32(index)] => {
+                Ok(Value::Int32(eval_get_bit(bits, *index)?))
+            }
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
             })),
         },
         BuiltinScalarFunction::SetBit => match values.as_slice() {
-            [Value::Bit(bits), Value::Int32(index), Value::Int32(new_value)] => {
-                Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?))
-            }
+            [
+                Value::Bit(bits),
+                Value::Int32(index),
+                Value::Int32(new_value),
+            ] => Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?)),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -458,9 +487,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
-        BuiltinScalarFunction::BitcastIntegerToFloat4 => {
-            eval_bitcast_integer_to_float4(&values)
-        }
+        BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
         | BuiltinScalarFunction::GetDatabaseEncoding
@@ -569,10 +596,22 @@ fn eval_builtin_function(
             let info = soft_input_error_info(input, ty)?;
             Ok(match (func, info) {
                 (_, None) => Value::Null,
-                (BuiltinScalarFunction::PgInputErrorMessage, Some(info)) => Value::Text(info.message.into()),
-                (BuiltinScalarFunction::PgInputErrorDetail, Some(info)) => info.detail.map(Into::into).map(Value::Text).unwrap_or(Value::Null),
-                (BuiltinScalarFunction::PgInputErrorHint, Some(info)) => info.hint.map(Into::into).map(Value::Text).unwrap_or(Value::Null),
-                (BuiltinScalarFunction::PgInputErrorSqlState, Some(info)) => Value::Text(info.sqlstate.into()),
+                (BuiltinScalarFunction::PgInputErrorMessage, Some(info)) => {
+                    Value::Text(info.message.into())
+                }
+                (BuiltinScalarFunction::PgInputErrorDetail, Some(info)) => info
+                    .detail
+                    .map(Into::into)
+                    .map(Value::Text)
+                    .unwrap_or(Value::Null),
+                (BuiltinScalarFunction::PgInputErrorHint, Some(info)) => info
+                    .hint
+                    .map(Into::into)
+                    .map(Value::Text)
+                    .unwrap_or(Value::Null),
+                (BuiltinScalarFunction::PgInputErrorSqlState, Some(info)) => {
+                    Value::Text(info.sqlstate.into())
+                }
                 _ => Value::Null,
             })
         }
@@ -590,9 +629,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
         BuiltinScalarFunction::Round => eval_round_function(&values),
         BuiltinScalarFunction::WidthBucket => eval_width_bucket_function(&values),
-        BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => {
-            eval_ceil_function(&values)
-        }
+        BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
         BuiltinScalarFunction::Floor => eval_floor_function(&values),
         BuiltinScalarFunction::Sign => eval_sign_function(&values),
         BuiltinScalarFunction::Sqrt => eval_unary_float_function("sqrt", &values, eval_sqrt),
@@ -603,7 +640,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Sinh => eval_unary_float_function("sinh", &values, |v| Ok(v.sinh())),
         BuiltinScalarFunction::Cosh => eval_unary_float_function("cosh", &values, |v| Ok(v.cosh())),
         BuiltinScalarFunction::Tanh => eval_unary_float_function("tanh", &values, |v| Ok(v.tanh())),
-        BuiltinScalarFunction::Asinh => eval_unary_float_function("asinh", &values, |v| Ok(v.asinh())),
+        BuiltinScalarFunction::Asinh => {
+            eval_unary_float_function("asinh", &values, |v| Ok(v.asinh()))
+        }
         BuiltinScalarFunction::Acosh => eval_unary_float_function("acosh", &values, eval_acosh),
         BuiltinScalarFunction::Atanh => eval_unary_float_function("atanh", &values, eval_atanh),
         BuiltinScalarFunction::Sind => eval_unary_float_function("sind", &values, |v| Ok(sind(v))),
@@ -619,15 +658,11 @@ fn eval_builtin_function(
             Ok(snap_degree(y.atan2(x).to_degrees()))
         }),
         BuiltinScalarFunction::Float4Send => eval_float_send_function("float4send", &values, true),
-        BuiltinScalarFunction::Float8Send => {
-            eval_float_send_function("float8send", &values, false)
-        }
+        BuiltinScalarFunction::Float8Send => eval_float_send_function("float8send", &values, false),
         BuiltinScalarFunction::Erf => eval_unary_float_function("erf", &values, eval_erf),
         BuiltinScalarFunction::Erfc => eval_unary_float_function("erfc", &values, eval_erfc),
         BuiltinScalarFunction::Gamma => eval_unary_float_function("gamma", &values, eval_gamma),
-        BuiltinScalarFunction::Lgamma => {
-            eval_unary_float_function("lgamma", &values, eval_lgamma)
-        }
+        BuiltinScalarFunction::Lgamma => eval_unary_float_function("lgamma", &values, eval_lgamma),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
         BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
@@ -644,11 +679,15 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::Position => match values.as_slice() {
-            [Value::Bit(needle), Value::Bit(haystack)] => Ok(Value::Int32(eval_bit_position(needle, haystack))),
+            [Value::Bit(needle), Value::Bit(haystack)] => {
+                Ok(Value::Int32(eval_bit_position(needle, haystack)))
+            }
             _ => eval_position_function(&values),
         },
         BuiltinScalarFunction::Substring => match values.as_slice() {
-            [Value::Bit(bits), Value::Int32(start)] => Ok(Value::Bit(eval_bit_substring(bits, *start, None)?)),
+            [Value::Bit(bits), Value::Int32(start)] => {
+                Ok(Value::Bit(eval_bit_substring(bits, *start, None)?))
+            }
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
@@ -658,19 +697,31 @@ fn eval_builtin_function(
             [Value::Bit(bits), Value::Bit(place), Value::Int32(start)] => {
                 Ok(Value::Bit(eval_bit_overlay(bits, place, *start, None)?))
             }
-            [Value::Bit(bits), Value::Bit(place), Value::Int32(start), Value::Int32(len)] => {
-                Ok(Value::Bit(eval_bit_overlay(bits, place, *start, Some(*len))?))
-            }
+            [
+                Value::Bit(bits),
+                Value::Bit(place),
+                Value::Int32(start),
+                Value::Int32(len),
+            ] => Ok(Value::Bit(eval_bit_overlay(
+                bits,
+                place,
+                *start,
+                Some(*len),
+            )?)),
             _ => unreachable!("validated bit overlay arguments"),
         },
         BuiltinScalarFunction::GetBit => match values.as_slice() {
-            [Value::Bit(bits), Value::Int32(index)] => Ok(Value::Int32(eval_get_bit(bits, *index)?)),
+            [Value::Bit(bits), Value::Int32(index)] => {
+                Ok(Value::Int32(eval_get_bit(bits, *index)?))
+            }
             _ => unreachable!("validated get_bit arguments"),
         },
         BuiltinScalarFunction::SetBit => match values.as_slice() {
-            [Value::Bit(bits), Value::Int32(index), Value::Int32(new_value)] => {
-                Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?))
-            }
+            [
+                Value::Bit(bits),
+                Value::Int32(index),
+                Value::Int32(new_value),
+            ] => Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?)),
             _ => unreachable!("validated set_bit arguments"),
         },
         BuiltinScalarFunction::BitCount => match values.as_slice() {
