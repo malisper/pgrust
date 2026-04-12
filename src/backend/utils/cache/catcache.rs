@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
+use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_USER_OID, load_physical_catalog_rows};
 use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::catalog::CatalogError;
@@ -17,7 +18,7 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgNamespaceRow, PgTypeRow,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgTypeRow,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_namespace_rows, builtin_type_rows,
@@ -32,6 +33,7 @@ pub struct CatCache {
     attributes_by_relid: BTreeMap<u32, Vec<PgAttributeRow>>,
     attrdefs_by_key: BTreeMap<(u32, i16), PgAttrdefRow>,
     depend_rows: Vec<PgDependRow>,
+    index_rows: Vec<PgIndexRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
@@ -144,16 +146,26 @@ impl CatCache {
             }
 
             if entry.relation_oid >= DEFAULT_FIRST_USER_OID {
-                cache.depend_rows.extend(derived_pg_depend_rows(
-                    entry.relation_oid,
-                    entry.namespace_oid,
-                    entry.row_type_oid,
-                    &entry.desc,
-                ));
+                cache.depend_rows.extend(derived_pg_depend_rows(entry));
+            }
+
+            if let Some(index_meta) = &entry.index_meta {
+                cache.index_rows.push(PgIndexRow {
+                    indexrelid: entry.relation_oid,
+                    indrelid: index_meta.indrelid,
+                    indnatts: index_meta.indkey.len() as i16,
+                    indnkeyatts: index_meta.indkey.len() as i16,
+                    indisunique: index_meta.indisunique,
+                    indisvalid: true,
+                    indisready: true,
+                    indislive: true,
+                    indkey: format_indkey(&index_meta.indkey),
+                });
             }
         }
 
         sort_pg_depend_rows(&mut cache.depend_rows);
+        sort_pg_index_rows(&mut cache.index_rows);
 
         cache
     }
@@ -166,6 +178,7 @@ impl CatCache {
             rows.attributes,
             rows.attrdefs,
             rows.depends,
+            rows.indexes,
             rows.types,
         ))
     }
@@ -176,6 +189,7 @@ impl CatCache {
         attribute_rows: Vec<PgAttributeRow>,
         attrdef_rows: Vec<PgAttrdefRow>,
         depend_rows: Vec<PgDependRow>,
+        index_rows: Vec<PgIndexRow>,
         type_rows: Vec<PgTypeRow>,
     ) -> Self {
         let mut cache = Self::default();
@@ -212,6 +226,8 @@ impl CatCache {
         }
         cache.depend_rows = depend_rows;
         sort_pg_depend_rows(&mut cache.depend_rows);
+        cache.index_rows = index_rows;
+        sort_pg_index_rows(&mut cache.index_rows);
         cache
     }
 
@@ -276,9 +292,21 @@ impl CatCache {
     pub fn depend_rows(&self) -> Vec<PgDependRow> {
         self.depend_rows.clone()
     }
+
+    pub fn index_rows(&self) -> Vec<PgIndexRow> {
+        self.index_rows.clone()
+    }
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+pub fn format_indkey(indkey: &[i16]) -> String {
+    indkey
+        .iter()
+        .map(|attnum| attnum.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn catalog_object_name(name: &str) -> &str {
@@ -404,6 +432,9 @@ mod tests {
                 desc,
             )
             .unwrap();
+        let index = store
+            .create_index("people_name_idx", "people", true, &["name".into()])
+            .unwrap();
 
         let cache = CatCache::from_physical(&base).unwrap();
         assert_eq!(cache.class_by_name("people").map(|row| row.oid), Some(entry.relation_oid));
@@ -436,6 +467,16 @@ mod tests {
                 && row.refobjid == entry.relation_oid
                 && row.refobjsubid == 2
                 && row.deptype == DEPENDENCY_AUTO
+        }));
+        assert_eq!(
+            cache.class_by_name("people_name_idx").map(|row| row.relkind),
+            Some('i')
+        );
+        assert!(cache.index_rows().iter().any(|row| {
+            row.indexrelid == index.relation_oid
+                && row.indrelid == entry.relation_oid
+                && row.indisunique
+                && row.indkey == "2"
         }));
     }
 }

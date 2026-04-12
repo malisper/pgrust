@@ -24,6 +24,7 @@
             row_type_oid: 60_000u32.saturating_add(rel_number),
             relkind: 'r',
             desc,
+            index_meta: None,
         }
     }
 

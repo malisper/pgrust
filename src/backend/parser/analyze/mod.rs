@@ -33,16 +33,20 @@ pub trait CatalogLookup {
 impl CatalogLookup for Catalog {
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
         let relcache = RelCache::from_catalog(self);
-        relcache.get_by_name(name).map(|entry| BoundRelation {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            desc: entry.desc.clone(),
+        relcache.get_by_name(name).and_then(|entry| {
+            (entry.relkind == 'r').then(|| BoundRelation {
+                rel: entry.rel,
+                relation_oid: entry.relation_oid,
+                desc: entry.desc.clone(),
+            })
         })
     }
 
     fn visible_table_names(&self) -> Vec<String> {
         let mut names = self
-            .table_names()
+            .entries()
+            .filter(|(_, entry)| entry.relkind == 'r')
+            .map(|(name, _)| name)
             .filter(|name| !name.contains('.'))
             .filter(|name| !name.starts_with("pg_temp."))
             .filter(|name| !name.starts_with("pg_"))
@@ -56,16 +60,19 @@ impl CatalogLookup for Catalog {
 
 impl CatalogLookup for RelCache {
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
-        self.get_by_name(name).map(|entry| BoundRelation {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            desc: entry.desc.clone(),
+        self.get_by_name(name).and_then(|entry| {
+            (entry.relkind == 'r').then(|| BoundRelation {
+                rel: entry.rel,
+                relation_oid: entry.relation_oid,
+                desc: entry.desc.clone(),
+            })
         })
     }
 
     fn visible_table_names(&self) -> Vec<String> {
         let mut names = self
             .entries()
+            .filter(|(_, entry)| entry.relkind == 'r')
             .map(|(name, _)| name)
             .filter(|name| !name.contains('.'))
             .filter(|name| !name.starts_with("pg_temp."))
@@ -278,6 +285,9 @@ pub fn bind_create_table(
             }
             crate::backend::catalog::catalog::CatalogError::UnknownTable(name) => {
                 ParseError::TableDoesNotExist(name)
+            }
+            crate::backend::catalog::catalog::CatalogError::UnknownColumn(name) => {
+                ParseError::UnknownColumn(name)
             }
             crate::backend::catalog::catalog::CatalogError::UnknownType(name) => {
                 ParseError::UnsupportedType(name)

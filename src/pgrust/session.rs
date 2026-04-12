@@ -109,7 +109,10 @@ impl Session {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
-            Statement::CreateIndex(_) | Statement::AlterTableSet(_) => {
+            Statement::CreateIndex(ref create_stmt) => {
+                db.execute_create_index_stmt(self.client_id, create_stmt)
+            }
+            Statement::AlterTableSet(_) => {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Begin => {
@@ -231,7 +234,10 @@ impl Session {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
-            Statement::CreateIndex(_) | Statement::AlterTableSet(_) => {
+            Statement::CreateIndex(ref create_stmt) => {
+                db.execute_create_index_stmt(client_id, create_stmt)
+            }
+            Statement::AlterTableSet(_) => {
                 Ok(StatementResult::AffectedRows(0))
             }
             Statement::Analyze(ref analyze_stmt) => {
@@ -369,9 +375,13 @@ impl Session {
                     } else {
                         let mut catalog_guard = db.catalog.write();
                         match catalog_guard.drop_table(table_name) {
-                            Ok(entry) => {
-                                let _ = ctx.pool.invalidate_relation(entry.rel);
-                                ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                            Ok(entries) => {
+                                drop(catalog_guard);
+                                db.refresh_catalog_storage();
+                                for entry in entries {
+                                    let _ = ctx.pool.invalidate_relation(entry.rel);
+                                    ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                                }
                                 dropped += 1;
                                 db.plan_cache.invalidate_all();
                             }

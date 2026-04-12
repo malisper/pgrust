@@ -1,3 +1,4 @@
+use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::executor::RelationDesc;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
@@ -18,7 +19,29 @@ pub fn sort_pg_depend_rows(rows: &mut [PgDependRow]) {
     });
 }
 
-pub fn derived_pg_depend_rows(
+pub fn derived_pg_depend_rows(entry: &CatalogEntry) -> Vec<PgDependRow> {
+    let mut rows = derived_relation_depend_rows(
+        entry.relation_oid,
+        entry.namespace_oid,
+        entry.row_type_oid,
+        &entry.desc,
+    );
+    if let Some(index_meta) = &entry.index_meta {
+        rows.extend(index_meta.indkey.iter().map(|attnum| PgDependRow {
+            classid: PG_CLASS_RELATION_OID,
+            objid: entry.relation_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: index_meta.indrelid,
+            refobjsubid: i32::from(*attnum),
+            deptype: DEPENDENCY_AUTO,
+        }));
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn derived_relation_depend_rows(
     relation_oid: u32,
     namespace_oid: u32,
     row_type_oid: u32,
@@ -57,6 +80,5 @@ pub fn derived_pg_depend_rows(
             deptype: DEPENDENCY_AUTO,
         })
     }));
-    sort_pg_depend_rows(&mut rows);
     rows
 }

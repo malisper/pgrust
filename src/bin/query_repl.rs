@@ -441,8 +441,24 @@ fn run_statement(
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Set(_)
         | Statement::Reset(_)
-        | Statement::CreateIndex(_)
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::CreateIndex(stmt) => {
+            Ok(catalog_store
+                .create_index(stmt.index_name, &stmt.table_name, stmt.unique, &stmt.columns)
+                .map(|entry| {
+                    let _ = pool.with_storage_mut(|s| {
+                        let _ = s.smgr.open(entry.rel);
+                        let _ = s.smgr.create(entry.rel, ForkNumber::Main, false);
+                    });
+                    StatementResult::AffectedRows(0)
+                })
+                .map_err(|other| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "catalog index creation",
+                        actual: format!("{other:?}"),
+                    })
+                })?)
+        }
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
@@ -527,9 +543,11 @@ fn run_statement(
             let mut dropped = 0;
             for table_name in stmt.table_names {
                 match catalog_store.drop_table(&table_name) {
-                    Ok(entry) => {
-                        let _ = pool.invalidate_relation(entry.rel);
-                        pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                    Ok(entries) => {
+                        for entry in entries {
+                            let _ = pool.invalidate_relation(entry.rel);
+                            pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                        }
                         dropped += 1;
                     }
                     Err(pgrust::backend::catalog::CatalogError::UnknownTable(_)) if stmt.if_exists => {}

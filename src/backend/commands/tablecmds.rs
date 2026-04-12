@@ -125,6 +125,35 @@ pub fn execute_create_table(
     Ok(StatementResult::AffectedRows(0))
 }
 
+pub fn execute_create_index(
+    stmt: crate::backend::parser::CreateIndexStatement,
+    catalog: &mut Catalog,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let entry = catalog
+        .create_index(stmt.index_name, &stmt.table_name, stmt.unique, &stmt.columns)
+        .map_err(|err| match err {
+            crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name) => {
+                ExecError::Parse(ParseError::TableAlreadyExists(name))
+            }
+            crate::backend::catalog::catalog::CatalogError::UnknownTable(name) => {
+                ExecError::Parse(ParseError::TableDoesNotExist(name))
+            }
+            crate::backend::catalog::catalog::CatalogError::UnknownColumn(name) => {
+                ExecError::Parse(ParseError::UnknownColumn(name))
+            }
+            other => ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "catalog index creation",
+                actual: format!("{other:?}"),
+            }),
+        })?;
+    let _ = ctx.pool.with_storage_mut(|s| s.smgr.open(entry.rel));
+    let _ = ctx
+        .pool
+        .with_storage_mut(|s| s.smgr.create(entry.rel, ForkNumber::Main, false));
+    Ok(StatementResult::AffectedRows(0))
+}
+
 pub fn execute_drop_table(
     stmt: DropTableStatement,
     catalog: &mut Catalog,

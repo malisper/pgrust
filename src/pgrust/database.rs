@@ -9,8 +9,8 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
-use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
+use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
+use crate::backend::catalog::pg_depend::derived_relation_depend_rows;
 use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
@@ -18,9 +18,9 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError, TablePersistence,
-    bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
-    normalize_create_table_as_name, normalize_create_table_name,
+    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction,
+    ParseError, TablePersistence, bind_delete, bind_insert, bind_update, build_plan,
+    create_relation_desc, normalize_create_table_as_name, normalize_create_table_name,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
@@ -189,6 +189,18 @@ impl Database {
         }
     }
 
+    pub(crate) fn refresh_catalog_storage(&self) {
+        for kind in bootstrap_catalog_kinds() {
+            let rel = bootstrap_catalog_entry(kind).rel;
+            let _ = self.pool.invalidate_relation(rel);
+            let _ = self.pool.with_storage_mut(|s| {
+                use crate::backend::storage::smgr::{ForkNumber, StorageManager};
+                let _ = s.smgr.open(rel);
+                let _ = s.smgr.create(rel, ForkNumber::Main, true);
+            });
+        }
+    }
+
     pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
         let catalog_guard = self.catalog.read();
         let mut relcache = catalog_guard
@@ -280,7 +292,7 @@ impl Database {
                                     })
                                 }),
                         );
-                        rows.depends.extend(derived_pg_depend_rows(
+                        rows.depends.extend(derived_relation_depend_rows(
                             temp.entry.relation_oid,
                             temp.entry.namespace_oid,
                             temp.entry.row_type_oid,
@@ -290,6 +302,7 @@ impl Database {
                 }
 
                 let _ = sync_catalog_rows(&base_dir, &rows, temp_namespace_oid);
+                self.refresh_catalog_storage();
             }
         }
     }
@@ -473,6 +486,9 @@ impl Database {
                         CatalogError::UnknownTable(name) => {
                             ExecError::Parse(ParseError::TableDoesNotExist(name))
                         }
+                        CatalogError::UnknownColumn(name) => {
+                            ExecError::Parse(ParseError::UnknownColumn(name))
+                        }
                         CatalogError::UnknownType(name) => {
                             ExecError::Parse(ParseError::UnsupportedType(name))
                         }
@@ -484,6 +500,8 @@ impl Database {
                         }
                     }),
                     Ok(entry) => {
+                        drop(catalog_guard);
+                        self.refresh_catalog_storage();
                         let rel = entry.rel;
                         let _ = self.pool.with_storage_mut(|s| {
                             use crate::backend::storage::smgr::StorageManager;
@@ -504,6 +522,65 @@ impl Database {
                     self.create_temp_relation(client_id, table_name, desc, create_stmt.on_commit)?;
                 Ok(StatementResult::AffectedRows(0))
             }
+        }
+    }
+
+    pub(crate) fn execute_create_index_stmt(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateIndexStatement,
+    ) -> Result<StatementResult, ExecError> {
+        if self.temp_entry(client_id, &create_stmt.table_name).is_some() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "permanent table for CREATE INDEX",
+                actual: "temporary table".into(),
+            }));
+        }
+
+        let mut catalog_guard = self.catalog.write();
+        let result = catalog_guard.create_index(
+            create_stmt.index_name.clone(),
+            &create_stmt.table_name,
+            create_stmt.unique,
+            &create_stmt.columns,
+        );
+        match result {
+            Ok(entry) => {
+                drop(catalog_guard);
+                self.refresh_catalog_storage();
+                let rel = entry.rel;
+                let _ = self.pool.with_storage_mut(|s| {
+                    use crate::backend::storage::smgr::StorageManager;
+                    let _ = s.smgr.open(rel);
+                    let _ = s.smgr.create(
+                        rel,
+                        crate::backend::storage::smgr::ForkNumber::Main,
+                        false,
+                    );
+                });
+                self.plan_cache.invalidate_all();
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Err(err) => Err(match err {
+                CatalogError::TableAlreadyExists(name) => {
+                    ExecError::Parse(ParseError::TableAlreadyExists(name))
+                }
+                CatalogError::UnknownTable(name) => {
+                    ExecError::Parse(ParseError::TableDoesNotExist(name))
+                }
+                CatalogError::UnknownColumn(name) => {
+                    ExecError::Parse(ParseError::UnknownColumn(name))
+                }
+                CatalogError::UnknownType(name) => {
+                    ExecError::Parse(ParseError::UnsupportedType(name))
+                }
+                CatalogError::Io(_) | CatalogError::Corrupt(_) => {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "valid catalog state",
+                        actual: "catalog error".into(),
+                    })
+                }
+            }),
         }
     }
 
@@ -615,6 +692,9 @@ impl Database {
                         CatalogError::UnknownTable(name) => {
                             ExecError::Parse(ParseError::TableDoesNotExist(name))
                         }
+                        CatalogError::UnknownColumn(name) => {
+                            ExecError::Parse(ParseError::UnknownColumn(name))
+                        }
                         CatalogError::UnknownType(name) => {
                             ExecError::Parse(ParseError::UnsupportedType(name))
                         }
@@ -625,6 +705,8 @@ impl Database {
                             })
                         }
                     })?;
+                drop(catalog_guard);
+                self.refresh_catalog_storage();
                 let _ = self.pool.with_storage_mut(|s| {
                     use crate::backend::storage::smgr::StorageManager;
                     let _ = s.smgr.open(entry.rel);
@@ -708,12 +790,11 @@ impl Database {
                 let visible_relcache = self.visible_relcache(client_id);
                 execute_analyze(analyze_stmt.clone(), &visible_relcache)
             }
+            Statement::CreateIndex(ref create_stmt) => {
+                self.execute_create_index_stmt(client_id, create_stmt)
+            }
             Statement::Set(_)
             | Statement::Reset(_)
-            // :HACK: numeric.sql creates helper indexes, but pgrust still lacks real index
-            // storage/planning support. Accept the statement so the file can exercise numeric
-            // semantics without pretending indexes work.
-            | Statement::CreateIndex(_)
             // :HACK: numeric.sql also sets parallel_workers reloptions. Accept and ignore that
             // narrow ALTER TABLE form until table reloptions are represented properly.
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
@@ -900,9 +981,13 @@ impl Database {
                     } else {
                         let mut catalog_guard = self.catalog.write();
                         match catalog_guard.drop_table(table_name) {
-                            Ok(entry) => {
-                                let _ = ctx.pool.invalidate_relation(entry.rel);
-                                ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                            Ok(entries) => {
+                                drop(catalog_guard);
+                                self.refresh_catalog_storage();
+                                for entry in entries {
+                                    let _ = ctx.pool.invalidate_relation(entry.rel);
+                                    ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                                }
                                 dropped += 1;
                                 self.plan_cache.invalidate_all();
                             }
