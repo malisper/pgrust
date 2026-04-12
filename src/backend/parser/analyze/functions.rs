@@ -131,7 +131,11 @@ pub(super) fn validate_scalar_function_arity(
 }
 
 pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Result<(), ParseError> {
-    let valid = match func {
+    let valid = aggregate_arity_overrides()
+        .iter()
+        .find_map(|(candidate, count)| (*candidate == func).then_some(*count))
+        .map(|count| args.len() == count)
+        .unwrap_or_else(|| match func {
         AggFunc::Count => args.len() <= 1,
         AggFunc::Sum
         | AggFunc::Avg
@@ -142,7 +146,7 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
         | AggFunc::JsonAgg
         | AggFunc::JsonbAgg => args.len() == 1,
         AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => args.len() == 2,
-    };
+    });
     if valid {
         Ok(())
     } else {
@@ -420,6 +424,43 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
     )
 }
 
+fn aggregate_arity_overrides() -> &'static Vec<(AggFunc, usize)> {
+    static ARITIES: OnceLock<Vec<(AggFunc, usize)>> = OnceLock::new();
+    ARITIES.get_or_init(|| {
+        let mut by_func = Vec::new();
+        for row in bootstrap_pg_proc_rows() {
+            if row.prokind != 'a' {
+                continue;
+            }
+            let Some(func) = aggregate_func_for_proname(&row.proname) else {
+                continue;
+            };
+            if func == AggFunc::Count || by_func.iter().any(|(candidate, _)| *candidate == func) {
+                continue;
+            }
+            by_func.push((func, row.pronargs.max(0) as usize));
+        }
+        by_func
+    })
+}
+
+fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
+    match name.to_ascii_lowercase().as_str() {
+        "count" => Some(AggFunc::Count),
+        "sum" => Some(AggFunc::Sum),
+        "avg" => Some(AggFunc::Avg),
+        "variance" => Some(AggFunc::Variance),
+        "stddev" => Some(AggFunc::Stddev),
+        "min" => Some(AggFunc::Min),
+        "max" => Some(AggFunc::Max),
+        "json_agg" => Some(AggFunc::JsonAgg),
+        "jsonb_agg" => Some(AggFunc::JsonbAgg),
+        "json_object_agg" => Some(AggFunc::JsonObjectAgg),
+        "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ScalarFunctionArity {
     Exact(usize),
@@ -497,5 +538,18 @@ mod tests {
             &[SqlExpr::Default, SqlExpr::Default]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn validate_aggregate_arity_uses_pg_proc_for_exact_rows() {
+        assert!(validate_aggregate_arity(AggFunc::Sum, &[SqlExpr::Default]).is_ok());
+        assert!(validate_aggregate_arity(AggFunc::Sum, &[]).is_err());
+        assert!(validate_aggregate_arity(
+            AggFunc::JsonObjectAgg,
+            &[SqlExpr::Default, SqlExpr::Default]
+        )
+        .is_ok());
+        assert!(validate_aggregate_arity(AggFunc::JsonObjectAgg, &[SqlExpr::Default]).is_err());
+        assert!(validate_aggregate_arity(AggFunc::Count, &[]).is_ok());
     }
 }
