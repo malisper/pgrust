@@ -1,11 +1,12 @@
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
+use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::access::htup::AttributeAlign;
-use crate::include::catalog::{PUBLIC_NAMESPACE_OID, PgConstraintRow};
+use crate::include::catalog::{PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow};
 use std::collections::BTreeMap;
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -43,6 +44,7 @@ pub enum CatalogError {
 pub struct Catalog {
     pub(crate) tables: BTreeMap<String, CatalogEntry>,
     pub(crate) constraints: Vec<PgConstraintRow>,
+    pub(crate) depends: Vec<PgDependRow>,
     pub(crate) next_rel_number: u32,
     pub(crate) next_oid: u32,
 }
@@ -52,6 +54,7 @@ impl Default for Catalog {
         let mut catalog = Self {
             tables: BTreeMap::new(),
             constraints: Vec::new(),
+            depends: Vec::new(),
             next_rel_number: DEFAULT_FIRST_REL_NUMBER,
             next_oid: DEFAULT_FIRST_USER_OID,
         };
@@ -96,6 +99,7 @@ impl Catalog {
             .max(next_attrdef_oid)
             .max(next_constraint_oid);
         self.replace_constraint_rows_for_entry(&name, &entry);
+        self.replace_depend_rows_for_entry(&entry);
         self.tables.insert(name, entry);
     }
 
@@ -121,6 +125,10 @@ impl Catalog {
 
     pub fn constraint_rows(&self) -> &[PgConstraintRow] {
         &self.constraints
+    }
+
+    pub fn depend_rows(&self) -> &[PgDependRow] {
+        &self.depends
     }
 
     pub fn next_oid(&self) -> u32 {
@@ -158,6 +166,7 @@ impl Catalog {
         self.next_rel_number = self.next_rel_number.saturating_add(1);
         self.next_oid = next_oid;
         self.replace_constraint_rows_for_entry(&name, &entry);
+        self.replace_depend_rows_for_entry(&entry);
         self.tables.insert(name, entry.clone());
         Ok(entry)
     }
@@ -233,6 +242,7 @@ impl Catalog {
         };
         self.next_rel_number = self.next_rel_number.saturating_add(1);
         self.next_oid = self.next_oid.saturating_add(1);
+        self.replace_depend_rows_for_entry(&entry);
         self.tables.insert(index_name, entry.clone());
         Ok(entry)
     }
@@ -247,6 +257,8 @@ impl Catalog {
             .remove(&name.to_ascii_lowercase())
             .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
         self.constraints.retain(|row| row.conrelid != entry.relation_oid);
+        self.depends
+            .retain(|row| row.objid != entry.relation_oid && row.refobjid != entry.relation_oid);
         Ok(entry)
     }
 
@@ -257,6 +269,8 @@ impl Catalog {
             .find_map(|(name, entry)| (entry.relation_oid == relation_oid).then(|| name.clone()))?;
         let entry = self.tables.remove(&name)?;
         self.constraints.retain(|row| row.conrelid != relation_oid);
+        self.depends
+            .retain(|row| row.objid != relation_oid && row.refobjid != relation_oid);
         Some((name, entry))
     }
 
@@ -273,6 +287,16 @@ impl Catalog {
             &entry.desc,
         ));
         sort_pg_constraint_rows(&mut self.constraints);
+    }
+
+    fn replace_depend_rows_for_entry(&mut self, entry: &CatalogEntry) {
+        self.depends
+            .retain(|row| row.objid != entry.relation_oid && row.refobjid != entry.relation_oid);
+        if entry.relation_oid < DEFAULT_FIRST_USER_OID {
+            return;
+        }
+        self.depends.extend(derived_pg_depend_rows(entry));
+        sort_pg_depend_rows(&mut self.depends);
     }
 }
 

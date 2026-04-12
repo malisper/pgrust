@@ -874,7 +874,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let class_rows = rows.classes;
     let attribute_rows = rows.attributes;
     let attrdef_rows = rows.attrdefs;
-    let _depend_rows = rows.depends;
+    let depend_rows = rows.depends;
     let index_rows = rows.indexes;
     let _am_rows = rows.ams;
     let _authid_rows = rows.authids;
@@ -952,6 +952,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let mut catalog = Catalog {
         tables: BTreeMap::new(),
         constraints: Vec::new(),
+        depends: Vec::new(),
         next_rel_number: DEFAULT_FIRST_REL_NUMBER,
         next_oid,
     };
@@ -1029,6 +1030,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
             .max(row.relfilenode.saturating_add(1));
     }
     catalog.constraints = constraint_rows;
+    catalog.depends = depend_rows;
     Ok(catalog)
 }
 
@@ -2006,6 +2008,18 @@ mod tests {
                 && row.deptype == DEPENDENCY_AUTO
         }));
         assert!(rows.depends.iter().any(|row| {
+            row.classid == PG_CONSTRAINT_RELATION_OID
+                && row.objid == constraint_oid
+                && row.objsubid == 0
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == entry.relation_oid
+                && row.refobjsubid == 1
+                && row.deptype == DEPENDENCY_AUTO
+        }));
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.depend_rows().iter().any(|row| {
             row.classid == PG_CONSTRAINT_RELATION_OID
                 && row.objid == constraint_oid
                 && row.objsubid == 0

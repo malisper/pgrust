@@ -12,13 +12,13 @@ use crate::backend::catalog::pg_cast::sort_pg_cast_rows;
 use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
 use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
-use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
+use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::pg_language::sort_pg_language_rows;
 use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
-use crate::backend::catalog::store::{DEFAULT_FIRST_USER_OID, load_physical_catalog_rows};
+use crate::backend::catalog::store::load_physical_catalog_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
@@ -204,10 +204,6 @@ impl CatCache {
                 cache.attrdefs_by_key.insert((row.adrelid, row.adnum), row);
             }
 
-            if entry.relation_oid >= DEFAULT_FIRST_USER_OID {
-                cache.depend_rows.extend(derived_pg_depend_rows(entry));
-            }
-
             if let Some(index_meta) = &entry.index_meta {
                 cache.index_rows.push(PgIndexRow {
                     indexrelid: entry.relation_oid,
@@ -226,6 +222,9 @@ impl CatCache {
         cache
             .constraint_rows
             .extend(catalog.constraint_rows().iter().cloned());
+        cache
+            .depend_rows
+            .extend(catalog.depend_rows().iter().cloned());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
         sort_pg_index_rows(&mut cache.index_rows);
