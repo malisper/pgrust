@@ -1061,7 +1061,12 @@ fn temp_catalog_sync_only_materializes_touched_catalog_relfiles() {
     session
         .execute(&db, "create temp table temp_items (id int4 not null)")
         .unwrap();
-    session.execute(&db, "show tables").unwrap();
+    session
+        .execute(
+            &db,
+            "select count(*) from pg_class where relname = 'temp_items'",
+        )
+        .unwrap();
 
     let temp_entry = db.temp_entry(1, "temp_items").unwrap();
     let temp_db_oid = temp_entry.rel.db_oid;
@@ -1106,7 +1111,12 @@ fn temp_catalog_sync_marks_namespace_clean_until_temp_state_changes() {
         assert!(namespace.generation > namespace.synced_generation);
     }
 
-    session.execute(&db, "show tables").unwrap();
+    session
+        .execute(
+            &db,
+            "select count(*) from pg_class where relname = 'temp_items'",
+        )
+        .unwrap();
 
     let synced_generation = {
         let namespaces = db.temp_relations.read();
@@ -1115,7 +1125,12 @@ fn temp_catalog_sync_marks_namespace_clean_until_temp_state_changes() {
         namespace.synced_generation
     };
 
-    session.execute(&db, "show tables").unwrap();
+    session
+        .execute(
+            &db,
+            "select count(*) from pg_class where relname = 'temp_items'",
+        )
+        .unwrap();
 
     {
         let namespaces = db.temp_relations.read();
