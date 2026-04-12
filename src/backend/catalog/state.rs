@@ -28,6 +28,14 @@ pub struct CatalogIndexMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogIndexBuildOptions {
+    pub am_oid: u32,
+    pub indclass: Vec<u32>,
+    pub indcollation: Vec<u32>,
+    pub indoption: Vec<i16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogEntry {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -212,6 +220,24 @@ impl Catalog {
         unique: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
+        let options = self.default_index_build_options(relation_oid, columns)?;
+        self.create_index_for_relation_with_options(
+            index_name,
+            relation_oid,
+            unique,
+            columns,
+            &options,
+        )
+    }
+
+    pub fn create_index_for_relation_with_options(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+        options: &CatalogIndexBuildOptions,
+    ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into().to_ascii_lowercase();
         if self.tables.contains_key(&index_name) {
             return Err(CatalogError::TableAlreadyExists(index_name));
@@ -224,12 +250,8 @@ impl Catalog {
         if table.relkind != 'r' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
-        let type_rows = crate::include::catalog::builtin_type_rows();
         let mut indkey = Vec::with_capacity(columns.len());
         let mut index_columns = Vec::with_capacity(columns.len());
-        let mut indclass = Vec::with_capacity(columns.len());
-        let mut indcollation = Vec::with_capacity(columns.len());
-        let mut indoption = Vec::with_capacity(columns.len());
         for column_name in columns {
             let (attnum, column) = table
                 .desc
@@ -243,25 +265,13 @@ impl Catalog {
             column.not_null_constraint_oid = None;
             column.attrdef_oid = None;
             column.default_expr = None;
-            let column_sql_type = column.sql_type;
             index_columns.push(column);
-            let type_oid = type_rows
-                .iter()
-                .find(|row| row.sql_type == column_sql_type)
-                .map(|row| row.oid)
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
-            let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
-            indclass.push(opclass_oid);
-            indcollation.push(0);
-            let mut option = 0i16;
-            if column_name.descending {
-                option |= 0x0001;
-            }
-            if column_name.nulls_first.unwrap_or(false) {
-                option |= 0x0002;
-            }
-            indoption.push(option);
+        }
+        if options.indclass.len() != columns.len()
+            || options.indcollation.len() != columns.len()
+            || options.indoption.len() != columns.len()
+        {
+            return Err(CatalogError::Corrupt("index build options length mismatch"));
         }
 
         let entry = CatalogEntry {
@@ -285,9 +295,9 @@ impl Catalog {
                 indisvalid: false,
                 indisready: false,
                 indislive: true,
-                indclass,
-                indcollation,
-                indoption,
+                indclass: options.indclass.clone(),
+                indcollation: options.indcollation.clone(),
+                indoption: options.indoption.clone(),
                 indexprs: None,
                 indpred: None,
             }),
@@ -297,6 +307,51 @@ impl Catalog {
         self.replace_depend_rows_for_entry(&entry);
         self.tables.insert(index_name, entry.clone());
         Ok(entry)
+    }
+
+    fn default_index_build_options(
+        &self,
+        relation_oid: u32,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    ) -> Result<CatalogIndexBuildOptions, CatalogError> {
+        let table = self
+            .get_by_oid(relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let type_rows = crate::include::catalog::builtin_type_rows();
+        let mut indclass = Vec::with_capacity(columns.len());
+        let mut indcollation = Vec::with_capacity(columns.len());
+        let mut indoption = Vec::with_capacity(columns.len());
+        for column_name in columns {
+            let column = table
+                .desc
+                .columns
+                .iter()
+                .find(|column| column.name.eq_ignore_ascii_case(&column_name.name))
+                .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
+            let type_oid = type_rows
+                .iter()
+                .find(|row| row.sql_type == column.sql_type)
+                .map(|row| row.oid)
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            indclass.push(opclass_oid);
+            indcollation.push(0);
+            let mut option = 0i16;
+            if column_name.descending {
+                option |= 0x0001;
+            }
+            if column_name.nulls_first.unwrap_or(false) {
+                option |= 0x0002;
+            }
+            indoption.push(option);
+        }
+        Ok(CatalogIndexBuildOptions {
+            am_oid: crate::include::catalog::BTREE_AM_OID,
+            indclass,
+            indcollation,
+            indoption,
+        })
     }
 
     pub fn drop_table(&mut self, name: &str) -> Result<CatalogEntry, CatalogError> {

@@ -41,6 +41,8 @@ pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
     let lowered = sql.trim().to_ascii_lowercase();
     match lowered.as_str() {
+        "int2vector" => return Ok(SqlType::new(SqlTypeKind::Int2Vector)),
+        "oidvector" => return Ok(SqlType::new(SqlTypeKind::OidVector)),
         "pg_node_tree" => return Ok(SqlType::new(SqlTypeKind::PgNodeTree)),
         _ => {}
     }
@@ -1175,9 +1177,11 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
 fn sql_type_output_name(ty: SqlType) -> &'static str {
     match ty.kind {
         SqlTypeKind::Int2 => "int2",
+        SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "int4",
         SqlTypeKind::Int8 => "int8",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",
         SqlTypeKind::VarBit => "varbit",
         SqlTypeKind::Float4 => "float4",

@@ -61,9 +61,11 @@ pub(super) fn resolve_numeric_binary_type(
 pub(super) fn sql_type_name(ty: SqlType) -> String {
     let base = match ty.kind {
         SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "integer",
         SqlTypeKind::Int8 => "bigint",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",
         SqlTypeKind::VarBit => "bit varying",
         SqlTypeKind::Bytea => "bytea",

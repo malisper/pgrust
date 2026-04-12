@@ -8,7 +8,7 @@ use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
-use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
 use crate::backend::catalog::namespace::{
     effective_search_path as namespace_effective_search_path,
     normalize_create_table_as_stmt_with_search_path as namespace_normalize_create_table_as_stmt_with_search_path,
@@ -387,6 +387,7 @@ impl Database {
                 relpersistence: 't',
                 relkind: 'n',
                 desc: crate::backend::executor::RelationDesc { columns: Vec::new() },
+                index: None,
             },
             on_commit: OnCommitAction::PreserveRows,
             namespace_created: true,
@@ -443,6 +444,7 @@ impl Database {
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc,
+            index: None,
         };
         {
             let mut namespaces = self.temp_relations.write();
@@ -761,11 +763,20 @@ impl Database {
                 create_stmt.table_name.clone(),
             )));
         }
-        if create_stmt
-            .using_method
-            .as_deref()
-            .is_some_and(|name| !name.eq_ignore_ascii_case("btree"))
-        {
+        let access_method = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
+            self,
+            client_id,
+            Some((xid, cid)),
+            create_stmt.using_method.as_deref().unwrap_or("btree"),
+        )
+        .filter(|row| row.amtype == 'i')
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "USING btree",
+                actual: "unsupported index access method".into(),
+            })
+        })?;
+        if !access_method.amname.eq_ignore_ascii_case("btree") {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "USING btree",
                 actual: "unsupported index access method".into(),
@@ -784,6 +795,51 @@ impl Database {
                 actual: "unsupported CREATE INDEX feature".into(),
             }));
         }
+        let type_rows = crate::backend::utils::cache::syscache::ensure_type_rows(
+            self,
+            client_id,
+            Some((xid, cid)),
+        );
+        let mut indclass = Vec::with_capacity(create_stmt.columns.len());
+        let mut indcollation = Vec::with_capacity(create_stmt.columns.len());
+        let mut indoption = Vec::with_capacity(create_stmt.columns.len());
+        for column in &create_stmt.columns {
+            let bound_column = entry
+                .desc
+                .columns
+                .iter()
+                .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.name.clone())))?;
+            let type_oid = type_rows
+                .iter()
+                .find(|row| row.sql_type == bound_column.sql_type)
+                .map(|row| row.oid)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(column.name.clone())))?;
+            let opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
+                self,
+                client_id,
+                Some((xid, cid)),
+                access_method.oid,
+                type_oid,
+            )
+            .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(column.name.clone())))?;
+            indclass.push(opclass.oid);
+            indcollation.push(0);
+            let mut option = 0i16;
+            if column.descending {
+                option |= 0x0001;
+            }
+            if column.nulls_first.unwrap_or(false) {
+                option |= 0x0002;
+            }
+            indoption.push(option);
+        }
+        let build_options = CatalogIndexBuildOptions {
+            am_oid: access_method.oid,
+            indclass,
+            indcollation,
+            indoption,
+        };
 
         let mut catalog_guard = self.catalog.write();
         let ctx = CatalogWriteContext {
@@ -794,11 +850,12 @@ impl Database {
             client_id,
             waiter: None,
         };
-        let result = catalog_guard.create_index_for_relation_mvcc(
+        let result = catalog_guard.create_index_for_relation_mvcc_with_options(
             create_stmt.index_name.clone(),
             entry.relation_oid,
             create_stmt.unique,
             &create_stmt.columns,
+            &build_options,
             &ctx,
         );
         match result {
@@ -809,7 +866,7 @@ impl Database {
                     crate::backend::access::index::indexam::index_build_stub(
                         entry.rel,
                         index_entry.rel,
-                        crate::include::catalog::BTREE_AM_OID,
+                        access_method.oid,
                         &mut storage.smgr,
                     )
                 }).map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {

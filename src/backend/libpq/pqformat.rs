@@ -205,7 +205,12 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::JsonPath => 4073,
             SqlTypeKind::InternalChar => 1002,
-            SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::PgNodeTree => 1009,
+            SqlTypeKind::Text
+            | SqlTypeKind::Int2Vector
+            | SqlTypeKind::OidVector
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::Char
+            | SqlTypeKind::PgNodeTree => 1009,
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
         };
@@ -228,7 +233,12 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::InternalChar => (18, 1, -1),
         SqlTypeKind::Bool => (16, 1, -1),
         SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
-        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Char | SqlTypeKind::PgNodeTree => {
+        SqlTypeKind::Text
+        | SqlTypeKind::Int2Vector
+        | SqlTypeKind::OidVector
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::Char
+        | SqlTypeKind::PgNodeTree => {
             (25, -1, col.sql_type.typmod)
         }
     }

@@ -239,22 +239,10 @@ impl CatCache {
                     indisready: index_meta.indisready,
                     indislive: index_meta.indislive,
                     indisreplident: false,
-                    indkey: format_indkey(&index_meta.indkey),
-                    indcollation: format_indkey(
-                        &index_meta
-                            .indcollation
-                            .iter()
-                            .map(|oid| *oid as i16)
-                            .collect::<Vec<_>>(),
-                    ),
-                    indclass: format_indkey(
-                        &index_meta
-                            .indclass
-                            .iter()
-                            .map(|oid| *oid as i16)
-                            .collect::<Vec<_>>(),
-                    ),
-                    indoption: format_indkey(&index_meta.indoption),
+                    indkey: index_meta.indkey.clone(),
+                    indcollation: index_meta.indcollation.clone(),
+                    indclass: index_meta.indclass.clone(),
+                    indoption: index_meta.indoption.clone(),
                     indexprs: index_meta.indexprs.clone(),
                     indpred: index_meta.indpred.clone(),
                 });
@@ -587,12 +575,16 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Int8, true) => INT8_ARRAY_TYPE_OID,
         (SqlTypeKind::Int2, false) => INT2_TYPE_OID,
         (SqlTypeKind::Int2, true) => INT2_ARRAY_TYPE_OID,
+        (SqlTypeKind::Int2Vector, false) => crate::include::catalog::INT2VECTOR_TYPE_OID,
+        (SqlTypeKind::Int2Vector, true) => unreachable!("int2vector arrays are unsupported"),
         (SqlTypeKind::Int4, false) => INT4_TYPE_OID,
         (SqlTypeKind::Int4, true) => INT4_ARRAY_TYPE_OID,
         (SqlTypeKind::Text, false) => TEXT_TYPE_OID,
         (SqlTypeKind::Text, true) => TEXT_ARRAY_TYPE_OID,
         (SqlTypeKind::Oid, false) => OID_TYPE_OID,
         (SqlTypeKind::Oid, true) => OID_ARRAY_TYPE_OID,
+        (SqlTypeKind::OidVector, false) => crate::include::catalog::OIDVECTOR_TYPE_OID,
+        (SqlTypeKind::OidVector, true) => unreachable!("oidvector arrays are unsupported"),
         (SqlTypeKind::Float4, false) => FLOAT4_TYPE_OID,
         (SqlTypeKind::Float4, true) => FLOAT4_ARRAY_TYPE_OID,
         (SqlTypeKind::Float8, false) => FLOAT8_TYPE_OID,
@@ -1034,7 +1026,7 @@ mod tests {
             row.indexrelid == index.relation_oid
                 && row.indrelid == entry.relation_oid
                 && row.indisunique
-                && row.indkey == "2"
+                && row.indkey == vec![2]
         }));
         assert!(
             cache
