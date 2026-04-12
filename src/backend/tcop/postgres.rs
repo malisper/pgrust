@@ -553,14 +553,7 @@ fn execute_psql_describe_query(
         && lower.contains("from pg_catalog.pg_constraint")
         && lower.contains("pg_catalog.pg_get_constraintdef")
     {
-        return Some((
-            vec![
-                QueryColumn::text("conname"),
-                QueryColumn::text("ontable"),
-                QueryColumn::text("condef"),
-            ],
-            Vec::new(),
-        ));
+        return psql_describe_constraints_query(relcache, sql);
     }
     if lower.contains("from pg_catalog.pg_policy pol") && lower.contains("pol.polroles") {
         return Some((vec![QueryColumn::text("Policies")], Vec::new()));
@@ -770,6 +763,41 @@ fn psql_describe_columns_query(
     ))
 }
 
+fn psql_describe_constraints_query(
+    relcache: &RelCache,
+    sql: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+    let oid = extract_constraint_relid(sql)?;
+    let entry = relcache.get_by_oid(oid)?;
+    let relname = relcache
+        .entries()
+        .find_map(|(name, candidate)| {
+            (candidate.relation_oid == oid && !name.contains('.')).then(|| name.to_string())
+        })
+        .unwrap_or_else(|| oid.to_string());
+    let rows = entry
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.storage.nullable)
+        .map(|column| {
+            vec![
+                Value::Text(format!("{relname}_{}_not_null", column.name).into()),
+                Value::Text(relname.clone().into()),
+                Value::Text("NOT NULL".into()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    Some((
+        vec![
+            QueryColumn::text("conname"),
+            QueryColumn::text("ontable"),
+            QueryColumn::text("condef"),
+        ],
+        rows,
+    ))
+}
+
 fn extract_psql_pattern_name(sql: &str) -> Option<&str> {
     let marker = "operator(pg_catalog.~) '";
     let lower = sql.to_ascii_lowercase();
@@ -788,6 +816,28 @@ fn extract_quoted_oid(sql: &str) -> Option<u32> {
         .find(marker)
         .map(|idx| idx + marker.len())
         .or_else(|| lower.find(alt_marker).map(|idx| idx + alt_marker.len()))?;
+    let rest = &sql[start..];
+    let end = rest.find('\'')?;
+    rest[..end].parse::<u32>().ok()
+}
+
+fn extract_constraint_relid(sql: &str) -> Option<u32> {
+    extract_quoted_oid_with_markers(
+        sql,
+        &[
+            "where c.conrelid = '",
+            "and c.conrelid = '",
+            "where conrelid = '",
+            "and conrelid = '",
+        ],
+    )
+}
+
+fn extract_quoted_oid_with_markers(sql: &str, markers: &[&str]) -> Option<u32> {
+    let lower = sql.to_ascii_lowercase();
+    let start = markers
+        .iter()
+        .find_map(|marker| lower.find(marker).map(|idx| idx + marker.len()))?;
     let rest = &sql[start..];
     let end = rest.find('\'')?;
     rest[..end].parse::<u32>().ok()
@@ -1293,6 +1343,7 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::backend::utils::cache::relcache::RelCache;
 
     #[test]
     fn substitute_params_resolves_regclass_parameters_to_relation_oids() {
@@ -1317,6 +1368,40 @@ mod tests {
                 "select relkind from pg_catalog.pg_class where oid={}",
                 entry.relation_oid
             )
+        );
+    }
+
+    #[test]
+    fn psql_describe_constraint_query_returns_not_null_rows() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+        let relcache = RelCache::from_catalog(&catalog);
+
+        let sql = format!(
+            "select conname, conrelid::pg_catalog.regclass as ontable, \
+                 pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}'",
+            entry.relation_oid
+        );
+        let (_, rows) = psql_describe_constraints_query(&relcache, &sql).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("widgets_id_not_null".into()),
+                Value::Text("widgets".into()),
+                Value::Text("NOT NULL".into()),
+            ]]
         );
     }
 }
