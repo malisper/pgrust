@@ -157,11 +157,58 @@ fn client_visible_cache_refreshes_after_create_table() {
 
     db.execute(1, "create table cache_test (id int4)").unwrap();
 
-    assert!(db.catalog_cache_generation() > initial_generation);
+    assert_eq!(db.catalog_cache_generation(), initial_generation);
+    assert!(!db.client_visible_caches.read().contains_key(&1));
     let visible = db.visible_catalog_with_search_path(1, None);
     assert!(visible.relcache().get_by_name("cache_test").is_some());
     let cache = db.client_visible_caches.read().get(&1).cloned().unwrap();
     assert_eq!(cache.generation, db.catalog_cache_generation());
+}
+
+#[test]
+fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
+    let base = temp_dir("commit_catalog_invalidation_fanout");
+    let db = Database::open(&base, 16).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    assert!(
+        db.visible_catalog_with_search_path(1, None)
+            .relcache()
+            .get_by_name("fanout_test")
+            .is_none()
+    );
+    assert!(
+        db.visible_catalog_with_search_path(2, None)
+            .relcache()
+            .get_by_name("fanout_test")
+            .is_none()
+    );
+    let initial_generation = db.catalog_cache_generation();
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "create table fanout_test (id int4 not null)")
+        .unwrap();
+
+    assert_eq!(db.catalog_cache_generation(), initial_generation);
+    assert!(!db.client_visible_caches.read().contains_key(&1));
+    assert!(db.client_visible_caches.read().contains_key(&2));
+    assert!(
+        reader.execute(&db, "select count(*) from fanout_test").is_err(),
+        "other sessions should keep their existing cache until commit"
+    );
+
+    writer.execute(&db, "commit").unwrap();
+
+    assert_eq!(db.catalog_cache_generation(), initial_generation);
+    assert!(!db.client_visible_caches.read().contains_key(&2));
+    match reader.execute(&db, "select count(*) from fanout_test").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
 }
 
 #[test]
