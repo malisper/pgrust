@@ -16,9 +16,10 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDatabaseRow,
-    PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
-    bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
+    BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
+    PgClassRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow,
+    PgTypeRow, bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_relation_desc,
+    builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::BufferPool;
@@ -36,6 +37,8 @@ pub(crate) struct PhysicalCatalogRows {
     pub depends: Vec<PgDependRow>,
     pub indexes: Vec<PgIndexRow>,
     pub ams: Vec<PgAmRow>,
+    pub authids: Vec<PgAuthIdRow>,
+    pub auth_members: Vec<PgAuthMembersRow>,
     pub databases: Vec<PgDatabaseRow>,
     pub tablespaces: Vec<PgTablespaceRow>,
     pub types: Vec<PgTypeRow>,
@@ -302,6 +305,34 @@ pub(crate) fn sync_catalog_rows(
         RelFileLocator {
             spc_oid: 0,
             db_oid,
+            rel_number: BootstrapCatalogKind::PgAuthId.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthId),
+        rows.authids
+            .iter()
+            .cloned()
+            .map(pg_authid_row_values)
+            .collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgAuthMembers.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthMembers),
+        rows.auth_members
+            .iter()
+            .cloned()
+            .map(pg_auth_members_row_values)
+            .collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
             rel_number: BootstrapCatalogKind::PgDatabase.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgDatabase),
@@ -413,6 +444,8 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         depends: catcache.depend_rows(),
         indexes: catcache.index_rows(),
         ams: catcache.am_rows(),
+        authids: catcache.authid_rows(),
+        auth_members: catcache.auth_members_rows(),
         databases: catcache.database_rows(),
         tablespaces: catcache.tablespace_rows(),
         types: catcache.type_rows(),
@@ -464,6 +497,33 @@ fn pg_am_row_values(row: PgAmRow) -> Vec<Value> {
         Value::Text(row.amname.into()),
         Value::Int32(row.amhandler as i32),
         Value::Text(row.amtype.to_string().into()),
+    ]
+}
+
+fn pg_authid_row_values(row: PgAuthIdRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.rolname.into()),
+        Value::Bool(row.rolsuper),
+        Value::Bool(row.rolinherit),
+        Value::Bool(row.rolcreaterole),
+        Value::Bool(row.rolcreatedb),
+        Value::Bool(row.rolcanlogin),
+        Value::Bool(row.rolreplication),
+        Value::Bool(row.rolbypassrls),
+        Value::Int32(row.rolconnlimit),
+    ]
+}
+
+fn pg_auth_members_row_values(row: PgAuthMembersRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.roleid as i32),
+        Value::Int32(row.member as i32),
+        Value::Int32(row.grantor as i32),
+        Value::Bool(row.admin_option),
+        Value::Bool(row.inherit_option),
+        Value::Bool(row.set_option),
     ]
 }
 
@@ -555,6 +615,8 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let _depend_rows = rows.depends;
     let index_rows = rows.indexes;
     let _am_rows = rows.ams;
+    let _authid_rows = rows.authids;
+    let _auth_members_rows = rows.auth_members;
     let _database_rows = rows.databases;
     let _tablespace_rows = rows.tablespaces;
 
@@ -720,6 +782,8 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut missing_depend = false;
     let mut missing_index = false;
     let mut missing_am = false;
+    let mut missing_authid = false;
+    let mut missing_auth_members = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
     for kind in bootstrap_catalog_kinds() {
@@ -743,6 +807,14 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             if kind == BootstrapCatalogKind::PgAm {
                 missing_am = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAuthId {
+                missing_authid = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAuthMembers {
+                missing_auth_members = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgDatabase {
@@ -802,6 +874,30 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         )?
         .into_iter()
         .map(pg_database_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let authid_rows = if missing_authid {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgAuthId],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthId),
+        )?
+        .into_iter()
+        .map(pg_authid_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let auth_members_rows = if missing_auth_members {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgAuthMembers],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthMembers),
+        )?
+        .into_iter()
+        .map(pg_auth_members_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
     let attrdef_rows = if missing_attrdef {
@@ -873,6 +969,8 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         depends: depend_rows,
         indexes: index_rows,
         ams: am_rows,
+        authids: authid_rows,
+        auth_members: auth_members_rows,
         databases: database_rows,
         tablespaces: tablespace_rows,
         types: type_rows,
@@ -988,6 +1086,33 @@ fn pg_am_row_from_values(values: Vec<Value>) -> Result<PgAmRow, CatalogError> {
         amname: expect_text(&values[1])?,
         amhandler: expect_oid(&values[2])?,
         amtype,
+    })
+}
+
+fn pg_authid_row_from_values(values: Vec<Value>) -> Result<PgAuthIdRow, CatalogError> {
+    Ok(PgAuthIdRow {
+        oid: expect_oid(&values[0])?,
+        rolname: expect_text(&values[1])?,
+        rolsuper: expect_bool(&values[2])?,
+        rolinherit: expect_bool(&values[3])?,
+        rolcreaterole: expect_bool(&values[4])?,
+        rolcreatedb: expect_bool(&values[5])?,
+        rolcanlogin: expect_bool(&values[6])?,
+        rolreplication: expect_bool(&values[7])?,
+        rolbypassrls: expect_bool(&values[8])?,
+        rolconnlimit: expect_int32(&values[9])?,
+    })
+}
+
+fn pg_auth_members_row_from_values(values: Vec<Value>) -> Result<PgAuthMembersRow, CatalogError> {
+    Ok(PgAuthMembersRow {
+        oid: expect_oid(&values[0])?,
+        roleid: expect_oid(&values[1])?,
+        member: expect_oid(&values[2])?,
+        grantor: expect_oid(&values[3])?,
+        admin_option: expect_bool(&values[4])?,
+        inherit_option: expect_bool(&values[5])?,
+        set_option: expect_bool(&values[6])?,
     })
 }
 
@@ -1110,10 +1235,10 @@ mod tests {
     use super::*;
     use crate::backend::storage::smgr::segment_path;
     use crate::include::catalog::{
-        BTREE_AM_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
-        CURRENT_DATABASE_NAME, DEFAULT_TABLESPACE_OID, HEAP_TABLE_AM_OID,
-        PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-        PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
+        BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, CURRENT_DATABASE_NAME,
+        DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+        HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1348,6 +1473,30 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_persists_pg_authid_rows() {
+        let base = temp_dir("authid_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+
+        assert!(rows.authids.iter().any(|row| {
+            row.oid == BOOTSTRAP_SUPERUSER_OID
+                && row.rolname == BOOTSTRAP_SUPERUSER_NAME
+                && row.rolsuper
+                && row.rolcreatedb
+                && row.rolcanlogin
+                && row.rolconnlimit == -1
+        }));
+    }
+
+    #[test]
+    fn catalog_store_persists_pg_auth_members_rows() {
+        let base = temp_dir("auth_members_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.auth_members.is_empty());
+    }
+
+    #[test]
     fn catalog_store_persists_pg_database_rows() {
         let base = temp_dir("database_rows");
         let _store = CatalogStore::load(&base).unwrap();
@@ -1442,6 +1591,12 @@ mod tests {
         let database = catalog.get("pg_database").unwrap();
         let database_path = segment_path(&base, database.rel, ForkNumber::Main, 0);
         assert!(database_path.exists(), "pg_database relfile should exist");
+        let authid = catalog.get("pg_authid").unwrap();
+        let authid_path = segment_path(&base, authid.rel, ForkNumber::Main, 0);
+        assert!(authid_path.exists(), "pg_authid relfile should exist");
+        let auth_members = catalog.get("pg_auth_members").unwrap();
+        let auth_members_path = segment_path(&base, auth_members.rel, ForkNumber::Main, 0);
+        assert!(auth_members_path.exists(), "pg_auth_members relfile should exist");
         let am = catalog.get("pg_am").unwrap();
         let am_path = segment_path(&base, am.rel, ForkNumber::Main, 0);
         assert!(am_path.exists(), "pg_am relfile should exist");
@@ -1712,6 +1867,81 @@ mod tests {
 
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.databases.iter().any(|row| row.datname == CURRENT_DATABASE_NAME));
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_authid_relation() {
+        let base = temp_dir("missing_authid_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let authid_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgAuthId.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&authid_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(authid_path.exists(), "pg_authid relfile should be recreated");
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.authids.iter().any(|row| {
+            row.oid == BOOTSTRAP_SUPERUSER_OID && row.rolname == BOOTSTRAP_SUPERUSER_NAME
+        }));
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_auth_members_relation() {
+        let base = temp_dir("missing_auth_members_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let auth_members_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgAuthMembers.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&auth_members_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(
+            auth_members_path.exists(),
+            "pg_auth_members relfile should be recreated"
+        );
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.auth_members.is_empty());
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 

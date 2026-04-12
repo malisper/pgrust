@@ -169,6 +169,33 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
+        match db
+            .execute(
+                1,
+                "select rolname, rolsuper, rolcreatedb from pg_authid order by oid",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Text("postgres".into()),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                    ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match db.execute(1, "select count(*) from pg_auth_members").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
         db.execute(1, "create table num_exp_add (id1 int4, id2 int4)")
             .unwrap();
 
