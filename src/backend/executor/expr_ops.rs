@@ -4,16 +4,15 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
 
+use super::ExecError;
 use super::expr_bit::{
-    bitwise_binary as bitwise_binary_bits, bitwise_not as bitwise_not_bits,
-    compare_bit_strings, concat_bit_strings, shift_left as shift_left_bits,
-    shift_right as shift_right_bits,
+    bitwise_binary as bitwise_binary_bits, bitwise_not as bitwise_not_bits, compare_bit_strings,
+    concat_bit_strings, shift_left as shift_left_bits, shift_right as shift_right_bits,
 };
-use super::expr_casts::cast_value;
 use super::expr_bool::order_bool_values;
+use super::expr_casts::cast_value;
 use super::node_types::*;
 use super::value_io::format_array_text;
-use super::ExecError;
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
@@ -273,12 +272,7 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => {
             let product = l * r;
-            if l.is_finite()
-                && r.is_finite()
-                && *l != 0.0
-                && *r != 0.0
-                && product.is_infinite()
-            {
+            if l.is_finite() && r.is_finite() && *l != 0.0 && *r != 0.0 && product.is_infinite() {
                 Err(ExecError::FloatOverflow)
             } else {
                 Ok(Value::Float64(product))
@@ -498,11 +492,15 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
                 left: left_text.clone(),
                 right: right_text.clone(),
             })?);
-            out.push_str(right_text.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "||",
-                left: left_text.clone(),
-                right: right_text.clone(),
-            })?);
+            out.push_str(
+                right_text
+                    .as_text()
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "||",
+                        left: left_text.clone(),
+                        right: right_text.clone(),
+                    })?,
+            );
             Ok(Value::Text(CompactString::from_owned(out)))
         }
     }
@@ -1053,10 +1051,7 @@ fn normalize_numeric_decimal_component(component: &str, allow_empty: bool) -> Op
     normalize_numeric_digits(component, |ch| ch.is_ascii_digit())
 }
 
-fn normalize_numeric_digits(
-    digits: &str,
-    valid_digit: impl Fn(char) -> bool,
-) -> Option<String> {
+fn normalize_numeric_digits(digits: &str, valid_digit: impl Fn(char) -> bool) -> Option<String> {
     if digits.is_empty()
         || digits.starts_with('_')
         || digits.ends_with('_')

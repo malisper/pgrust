@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, BLCKSZ};
+use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, RelFileLocator};
 
 pub const PAGE_SIZE: usize = BLCKSZ;
 pub type Page = [u8; PAGE_SIZE];
@@ -148,7 +148,10 @@ impl BufferState {
     /// Release the buffer header spinlock by storing a new state value.
     /// The caller must ensure BM_LOCKED is NOT set in `new_state`.
     pub fn unlock_header(&self, new_state: u32) {
-        debug_assert!(new_state & BM_LOCKED == 0, "must clear BM_LOCKED before unlock");
+        debug_assert!(
+            new_state & BM_LOCKED == 0,
+            "must clear BM_LOCKED before unlock"
+        );
         self.0.store(new_state, Ordering::Release);
     }
 
@@ -180,7 +183,10 @@ impl BufferState {
                 old = self.wait_unlocked();
             }
             let new = old + 1; // pin_count is in bits 0-13
-            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            match self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => return old,
                 Err(current) => old = current,
             }
@@ -198,7 +204,10 @@ impl BufferState {
                 panic!("decrement_pin: pin_count already 0 (state={:#010x})", old);
             }
             let new = old - 1; // pin_count is in bits 0-13
-            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            match self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => return old,
                 Err(current) => old = current,
             }
@@ -219,8 +228,13 @@ impl BufferState {
                 old = self.wait_unlocked();
             }
             let new = old | flag;
-            if new == old { return; }
-            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            if new == old {
+                return;
+            }
+            match self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => return,
                 Err(current) => old = current,
             }
@@ -235,22 +249,43 @@ impl BufferState {
                 old = self.wait_unlocked();
             }
             let new = old & !flag;
-            if new == old { return; }
-            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            if new == old {
+                return;
+            }
+            match self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => return,
                 Err(current) => old = current,
             }
         }
     }
 
-    pub fn set_valid(&self) { self.set_flag(BM_VALID); }
-    pub fn clear_valid(&self) { self.clear_flag(BM_VALID); }
-    pub fn set_dirty(&self) { self.set_flag(BM_DIRTY); }
-    pub fn clear_dirty(&self) { self.clear_flag(BM_DIRTY); }
-    pub fn set_io_in_progress(&self) { self.set_flag(BM_IO_IN_PROGRESS); }
-    pub fn clear_io_in_progress(&self) { self.clear_flag(BM_IO_IN_PROGRESS); }
-    pub fn set_io_error(&self) { self.set_flag(BM_IO_ERROR); }
-    pub fn clear_io_error(&self) { self.clear_flag(BM_IO_ERROR); }
+    pub fn set_valid(&self) {
+        self.set_flag(BM_VALID);
+    }
+    pub fn clear_valid(&self) {
+        self.clear_flag(BM_VALID);
+    }
+    pub fn set_dirty(&self) {
+        self.set_flag(BM_DIRTY);
+    }
+    pub fn clear_dirty(&self) {
+        self.clear_flag(BM_DIRTY);
+    }
+    pub fn set_io_in_progress(&self) {
+        self.set_flag(BM_IO_IN_PROGRESS);
+    }
+    pub fn clear_io_in_progress(&self) {
+        self.clear_flag(BM_IO_IN_PROGRESS);
+    }
+    pub fn set_io_error(&self) {
+        self.set_flag(BM_IO_ERROR);
+    }
+    pub fn clear_io_error(&self) {
+        self.clear_flag(BM_IO_ERROR);
+    }
 
     // --- Combined operations ---
 
@@ -268,7 +303,10 @@ impl BufferState {
             if usage < max_usage {
                 new += 1 << USAGE_COUNT_SHIFT; // increment usage_count
             }
-            match self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed) {
+            match self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => return old,
                 Err(current) => old = current,
             }
@@ -286,7 +324,11 @@ impl BufferState {
                 return false;
             }
             let new = (old & !USAGE_COUNT_MASK) | (((usage + 1) as u32) << USAGE_COUNT_SHIFT);
-            if self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -301,7 +343,11 @@ impl BufferState {
                 return false;
             }
             let new = (old & !USAGE_COUNT_MASK) | (((usage - 1) as u32) << USAGE_COUNT_SHIFT);
-            if self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -312,7 +358,11 @@ impl BufferState {
         loop {
             let old = self.load();
             let new = (old & !USAGE_COUNT_MASK) | ((count as u32) << USAGE_COUNT_SHIFT);
-            if self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return;
             }
         }
@@ -334,7 +384,11 @@ impl BufferState {
         loop {
             let old = self.load();
             let new = old & !PIN_COUNT_MASK;
-            if self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return;
             }
         }
@@ -359,11 +413,21 @@ impl BufferState {
     pub fn try_start_flush(&self) -> Result<(), FlushResult> {
         loop {
             let old = self.load();
-            if old & BM_IO_IN_PROGRESS != 0 { return Err(FlushResult::InProgress); }
-            if old & BM_VALID == 0 { return Err(FlushResult::Invalid); }
-            if old & BM_DIRTY == 0 { return Err(FlushResult::AlreadyClean); }
+            if old & BM_IO_IN_PROGRESS != 0 {
+                return Err(FlushResult::InProgress);
+            }
+            if old & BM_VALID == 0 {
+                return Err(FlushResult::Invalid);
+            }
+            if old & BM_DIRTY == 0 {
+                return Err(FlushResult::AlreadyClean);
+            }
             let new = (old | BM_IO_IN_PROGRESS) & !BM_IO_ERROR;
-            if self.0.compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if self
+                .0
+                .compare_exchange_weak(old, new, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 return Ok(());
             }
         }
@@ -375,7 +439,10 @@ impl std::fmt::Debug for BufferState {
         let raw = self.load();
         f.debug_struct("BufferState")
             .field("pin_count", &(raw & PIN_COUNT_MASK))
-            .field("usage_count", &((raw & USAGE_COUNT_MASK) >> USAGE_COUNT_SHIFT))
+            .field(
+                "usage_count",
+                &((raw & USAGE_COUNT_MASK) >> USAGE_COUNT_SHIFT),
+            )
             .field("valid", &(raw & BM_VALID != 0))
             .field("dirty", &(raw & BM_DIRTY != 0))
             .field("io_in_progress", &(raw & BM_IO_IN_PROGRESS != 0))
@@ -495,7 +562,6 @@ mod state_tests {
         assert!(!s.is_dirty());
         assert!(!s.is_io_error());
     }
-
 
     #[test]
     fn try_start_flush_succeeds_when_valid_dirty() {

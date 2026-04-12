@@ -6,7 +6,9 @@
 //!
 //! Run with:  cargo run --bin smgr_inspect
 
-use pgrust::backend::storage::smgr::{BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+use pgrust::backend::storage::smgr::{
+    BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
+};
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;

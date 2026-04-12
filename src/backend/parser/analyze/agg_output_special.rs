@@ -1,7 +1,7 @@
-use super::*;
 use super::agg_output::bind_agg_output_expr;
 use super::functions::{resolve_scalar_function, validate_scalar_function_arity};
-use super::infer::{infer_sql_expr_type, infer_array_literal_type};
+use super::infer::{infer_array_literal_type, infer_sql_expr_type};
+use super::*;
 
 pub(super) fn bind_grouped_concat_expr(
     left: &SqlExpr,
@@ -46,7 +46,8 @@ pub(super) fn bind_grouped_scalar_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<Expr, ParseError> {
-    let plan = build_grouped_subquery_plan(select, group_by_exprs, input_scope, catalog, outer_scopes)?;
+    let plan =
+        build_grouped_subquery_plan(select, group_by_exprs, input_scope, catalog, outer_scopes)?;
     ensure_single_column_subquery(&plan)?;
     Ok(Expr::ScalarSubquery(Box::new(plan)))
 }

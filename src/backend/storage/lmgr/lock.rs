@@ -73,13 +73,21 @@ impl TableLockManager {
     }
 }
 
-pub(crate) fn lock_relations(table_locks: &TableLockManager, client_id: ClientId, rels: &[RelFileLocator]) {
+pub(crate) fn lock_relations(
+    table_locks: &TableLockManager,
+    client_id: ClientId,
+    rels: &[RelFileLocator],
+) {
     for rel in rels {
         table_locks.lock_table(*rel, TableLockMode::AccessShare, client_id);
     }
 }
 
-pub(crate) fn unlock_relations(table_locks: &TableLockManager, client_id: ClientId, rels: &[RelFileLocator]) {
+pub(crate) fn unlock_relations(
+    table_locks: &TableLockManager,
+    client_id: ClientId,
+    rels: &[RelFileLocator],
+) {
     for rel in rels {
         table_locks.unlock_table(*rel, client_id);
     }

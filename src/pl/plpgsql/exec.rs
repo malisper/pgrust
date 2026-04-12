@@ -78,7 +78,10 @@ fn exec_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecError>
             end_expr,
             body,
         } => {
-            let start = match cast_value(eval_expr(start_expr, values)?, SqlType::new(SqlTypeKind::Int4))? {
+            let start = match cast_value(
+                eval_expr(start_expr, values)?,
+                SqlType::new(SqlTypeKind::Int4),
+            )? {
                 Value::Int32(value) => value,
                 other => {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -87,7 +90,10 @@ fn exec_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecError>
                     }));
                 }
             };
-            let end = match cast_value(eval_expr(end_expr, values)?, SqlType::new(SqlTypeKind::Int4))? {
+            let end = match cast_value(
+                eval_expr(end_expr, values)?,
+                SqlType::new(SqlTypeKind::Int4),
+            )? {
                 Value::Int32(value) => value,
                 other => {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -143,10 +149,12 @@ fn render_raise_message(
     let mut params = params.iter();
     for ch in message.chars() {
         if ch == '%' {
-            let value = params.next().ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "RAISE parameter",
-                actual: message.to_string(),
-            }))?;
+            let value = params.next().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "RAISE parameter",
+                    actual: message.to_string(),
+                })
+            })?;
             rendered.push_str(&render_raise_value(&eval_expr(value, values)?));
         } else {
             rendered.push(ch);

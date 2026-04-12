@@ -260,7 +260,10 @@ mod tests {
             "create table width_bucket_test (operand_num numeric, operand_f8 float8)",
         );
         let _ = read_until_ready(&mut stream, "create");
-        send_query(&mut stream, "copy width_bucket_test (operand_num) from stdin");
+        send_query(
+            &mut stream,
+            "copy width_bucket_test (operand_num) from stdin",
+        );
         let copy_start = read_message(&mut stream, "copy_start");
         assert_eq!(copy_start.0, b'G');
         send_copy_data(&mut stream, b"5.5\n");
@@ -466,7 +469,10 @@ mod tests {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
-        send_query(&mut stream, "select '$.a'::jsonpath, ARRAY['$.a']::jsonpath[]");
+        send_query(
+            &mut stream,
+            "select '$.a'::jsonpath, ARRAY['$.a']::jsonpath[]",
+        );
         let response = read_until_ready(&mut stream, "jsonpath_row_description");
         let fields = response
             .iter()

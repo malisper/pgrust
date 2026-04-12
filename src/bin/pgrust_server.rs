@@ -10,7 +10,10 @@ use pgrust::pgrust::server::serve;
 
 fn raise_fd_limit() {
     unsafe {
-        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
             let target = 10240u64.min(rlim.rlim_max);
             if rlim.rlim_cur < target {

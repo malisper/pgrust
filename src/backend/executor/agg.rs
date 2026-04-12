@@ -1,14 +1,14 @@
+use super::render_bit_text;
 use super::{compare_order_values, parse_numeric_text};
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{NumericValue, Value};
 use crate::include::nodes::plannodes::AggFunc;
 use crate::pgrust::session::ByteaOutputFormat;
-use super::render_bit_text;
 
+use num_traits::Zero;
 use std::cmp::Ordering;
 use std::collections::HashSet;
-use num_traits::Zero;
 
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 
@@ -158,7 +158,10 @@ impl AccumState {
                 }
             },
             (AggFunc::Variance | AggFunc::Stddev, _, _) => |state, values| {
-                if let AccumState::NumericStats { count, sum, sum_sq, .. } = state {
+                if let AccumState::NumericStats {
+                    count, sum, sum_sq, ..
+                } = state
+                {
                     let value = values.first().unwrap_or(&Value::Null);
                     if let Some(numeric) = aggregate_numeric_value(value) {
                         *sum = sum.add(&numeric);
@@ -275,10 +278,7 @@ impl AccumState {
                 } else {
                     let n = NumericValue::from_i64(*count);
                     let n_minus_one = NumericValue::from_i64(*count - 1);
-                    let mean_square = sum
-                        .mul(sum)
-                        .div(&n, 32)
-                        .unwrap_or_else(NumericValue::zero);
+                    let mean_square = sum.mul(sum).div(&n, 32).unwrap_or_else(NumericValue::zero);
                     let variance = sum_sq
                         .sub(&mean_square)
                         .div(&n_minus_one, 32)
@@ -410,16 +410,21 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => {
             serde_json::to_string(value.as_text().unwrap()).unwrap()
         }
-        Value::Bytea(v) => serde_json::to_string(&format_bytea_text(v, ByteaOutputFormat::Hex)).unwrap(),
-        Value::InternalChar(v) => serde_json::to_string(
-            &crate::backend::executor::render_internal_char_text(*v),
-        )
-        .unwrap(),
+        Value::Bytea(v) => {
+            serde_json::to_string(&format_bytea_text(v, ByteaOutputFormat::Hex)).unwrap()
+        }
+        Value::InternalChar(v) => {
+            serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
+        }
         Value::Array(items) => render_json_array(items),
     }
 }
 
-fn accumulate_value(sum: Option<NumericAccum>, result_type: SqlType, value: &Value) -> Option<NumericAccum> {
+fn accumulate_value(
+    sum: Option<NumericAccum>,
+    result_type: SqlType,
+    value: &Value,
+) -> Option<NumericAccum> {
     match value {
         Value::Null => sum,
         Value::Int16(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
@@ -488,7 +493,11 @@ fn numeric_sqrt(value: &NumericValue, scale: u32) -> NumericValue {
             let mut current = seed;
             for _ in 0..24 {
                 let next = current
-                    .add(&value.div(&current, scale + 12).unwrap_or_else(NumericValue::zero))
+                    .add(
+                        &value
+                            .div(&current, scale + 12)
+                            .unwrap_or_else(NumericValue::zero),
+                    )
                     .div(&two, scale + 12)
                     .unwrap_or_else(|| current.clone());
                 if next.cmp(&current) == Ordering::Equal {
@@ -504,7 +513,11 @@ fn numeric_sqrt(value: &NumericValue, scale: u32) -> NumericValue {
     }
 }
 
-fn accumulate_integral(sum: Option<NumericAccum>, result_type: SqlType, value: i64) -> NumericAccum {
+fn accumulate_integral(
+    sum: Option<NumericAccum>,
+    result_type: SqlType,
+    value: i64,
+) -> NumericAccum {
     match sum {
         Some(NumericAccum::Numeric(cur)) => {
             NumericAccum::Numeric(cur.add(&NumericValue::from_i64(value)))

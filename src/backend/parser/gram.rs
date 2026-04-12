@@ -14,7 +14,8 @@ use crate::include::nodes::datum::BitString;
 struct SqlParser;
 
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
-    let sql = normalize_position_syntax_preserving_layout(&strip_sql_comments_preserving_layout(sql));
+    let sql =
+        normalize_position_syntax_preserving_layout(&strip_sql_comments_preserving_layout(sql));
     SqlParser::parse(Rule::statement, &sql)
         .map_err(|e| map_pest_error("statement", e))
         .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
@@ -830,11 +831,9 @@ fn build_set_value_atom(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
         | Rule::escape_string_literal
         | Rule::dollar_string_literal => decode_string_literal(part.as_str()),
         Rule::identifier | Rule::numeric_literal | Rule::integer => Ok(part.as_str().to_string()),
-        Rule::kw_default
-        | Rule::kw_true
-        | Rule::kw_false
-        | Rule::kw_on_value
-        | Rule::kw_off => Ok(part.as_str().to_ascii_lowercase()),
+        Rule::kw_default | Rule::kw_true | Rule::kw_false | Rule::kw_on_value | Rule::kw_off => {
+            Ok(part.as_str().to_ascii_lowercase())
+        }
         _ => Ok(part.as_str().to_string()),
     }
 }
@@ -844,10 +843,15 @@ fn validate_table_storage_clause(pair: Pair<'_, Rule>) -> Result<(), ParseError>
     match part.as_rule() {
         Rule::without_oids_clause => Ok(()),
         Rule::table_with_clause => {
-            for item in part.into_inner().filter(|inner| inner.as_rule() == Rule::table_with_item) {
+            for item in part
+                .into_inner()
+                .filter(|inner| inner.as_rule() == Rule::table_with_item)
+            {
                 let mut item_parts = item.into_inner();
                 let name = build_identifier(item_parts.next().ok_or(ParseError::UnexpectedEof)?);
-                let value = item_parts.next().map(|value| value.as_str().to_ascii_lowercase());
+                let value = item_parts
+                    .next()
+                    .map(|value| value.as_str().to_ascii_lowercase());
                 if name != name.to_ascii_lowercase() {
                     return Err(ParseError::UnrecognizedParameter(name));
                 }
@@ -1385,8 +1389,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         op: SubqueryComparisonOp::Eq,
                         is_all: negated,
                         array: Box::new(SqlExpr::ArrayLiteral(values)),
-        })
-}
+                    })
+                }
 
                 Rule::in_subquery_suffix => {
                     let mut negated = false;
@@ -1632,20 +1636,16 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let literal = decode_string_literal(
-                inner
-                    .next()
-                    .ok_or(ParseError::UnexpectedEof)?
-                    .as_str(),
-            )?;
+            let literal =
+                decode_string_literal(inner.next().ok_or(ParseError::UnexpectedEof)?.as_str())?;
             Ok(SqlExpr::Cast(
                 Box::new(SqlExpr::Const(Value::Text(literal.into()))),
                 ty,
             ))
         }
-        Rule::bit_string_literal | Rule::binary_bit_literal | Rule::hex_bit_literal => {
-            Ok(SqlExpr::Const(Value::Bit(parse_bit_string_literal(pair.as_str())?)))
-        }
+        Rule::bit_string_literal | Rule::binary_bit_literal | Rule::hex_bit_literal => Ok(
+            SqlExpr::Const(Value::Bit(parse_bit_string_literal(pair.as_str())?)),
+        ),
         Rule::identifier => Ok(SqlExpr::Column(build_identifier(pair))),
         Rule::kw_default => Ok(SqlExpr::Default),
         Rule::numeric_literal => Ok(SqlExpr::NumericLiteral(pair.as_str().to_string())),
@@ -1855,7 +1855,10 @@ fn parse_bit_string_literal(raw: &str) -> Result<BitString, ParseError> {
                     other => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "valid binary digit",
-                            actual: format!("\"{}\" is not a valid binary digit", char::from(*other)),
+                            actual: format!(
+                                "\"{}\" is not a valid binary digit",
+                                char::from(*other)
+                            ),
                         });
                     }
                 }
@@ -1873,7 +1876,10 @@ fn parse_bit_string_literal(raw: &str) -> Result<BitString, ParseError> {
                     other => {
                         return Err(ParseError::UnexpectedToken {
                             expected: "valid hexadecimal digit",
-                            actual: format!("\"{}\" is not a valid hexadecimal digit", char::from(*other)),
+                            actual: format!(
+                                "\"{}\" is not a valid hexadecimal digit",
+                                char::from(*other)
+                            ),
                         });
                     }
                 };
@@ -1954,10 +1960,11 @@ fn decode_escape_string(raw: &str) -> Result<String, ParseError> {
                         }
                     }
                 }
-                let value = u8::from_str_radix(&digits, 8).map_err(|_| ParseError::UnexpectedToken {
-                    expected: "valid octal escape",
-                    actual: raw.into(),
-                })?;
+                let value =
+                    u8::from_str_radix(&digits, 8).map_err(|_| ParseError::UnexpectedToken {
+                        expected: "valid octal escape",
+                        actual: raw.into(),
+                    })?;
                 out.push(value as char);
             }
             other => out.push(other),
@@ -1988,11 +1995,9 @@ fn decode_dollar_string(raw: &str) -> Result<String, ParseError> {
         .ok_or(ParseError::UnexpectedEof)?;
     let tag = &raw[..=end_tag_start];
     let suffix = &raw[end_tag_start + 1..];
-    let closing = suffix
-        .rfind(tag)
-        .ok_or(ParseError::UnexpectedToken {
-            expected: "matching dollar-quote terminator",
-            actual: raw.into(),
-        })?;
+    let closing = suffix.rfind(tag).ok_or(ParseError::UnexpectedToken {
+        expected: "matching dollar-quote terminator",
+        actual: raw.into(),
+    })?;
     Ok(suffix[..closing].to_string())
 }

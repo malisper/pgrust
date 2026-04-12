@@ -4,11 +4,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::BLCKSZ;
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::storage::page::bufpage::page_add_item;
 use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-use crate::BLCKSZ;
 
 use super::{WalError, WalReader, WalRecord};
 
@@ -62,7 +62,12 @@ pub fn perform_wal_recovery(
                     .map_err(smgr_to_wal)?;
             }
 
-            WalRecord::HeapInsert { xid, tag, offset_number, tuple_data } => {
+            WalRecord::HeapInsert {
+                xid,
+                tag,
+                offset_number,
+                tuple_data,
+            } => {
                 stats.inserts += 1;
                 seen_xids.insert(xid);
 
@@ -141,19 +146,24 @@ fn ensure_block_exists(
 }
 
 fn smgr_to_wal(e: crate::backend::storage::smgr::SmgrError) -> WalError {
-    WalError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}")))
+    WalError::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("{e:?}"),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::access::transam::xact::{TransactionManager, TransactionStatus};
-    use crate::include::access::htup::heap_page_init;
+    use crate::backend::access::transam::xlog::{WalReader, WalRecord, WalWriter};
     use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
-    use crate::backend::storage::page::bufpage::{page_add_item, page_get_item, page_get_max_offset_number};
+    use crate::backend::storage::page::bufpage::{
+        page_add_item, page_get_item, page_get_max_offset_number,
+    };
     use crate::backend::storage::smgr::md::MdStorageManager;
     use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
-    use crate::backend::access::transam::xlog::{WalReader, WalRecord, WalWriter};
+    use crate::include::access::htup::heap_page_init;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -162,7 +172,8 @@ mod tests {
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
             "pgrust_wal_replay_{}_{}_{}",
-            label, std::process::id(),
+            label,
+            std::process::id(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = fs::remove_dir_all(&p);
@@ -171,7 +182,11 @@ mod tests {
     }
 
     fn test_rel(n: u32) -> RelFileLocator {
-        RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: n }
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: n,
+        }
     }
 
     fn test_tag(rel_num: u32, block: u32) -> BufferTag {
@@ -231,7 +246,11 @@ mod tests {
         let (rec_lsn, record) = reader.next_record().unwrap().unwrap();
         assert_eq!(rec_lsn, lsn);
         match record {
-            WalRecord::FullPageImage { xid, tag: t, page: p } => {
+            WalRecord::FullPageImage {
+                xid,
+                tag: t,
+                page: p,
+            } => {
                 assert_eq!(xid, 10);
                 assert_eq!(t, tag);
                 assert_eq!(p[100], 0xAB);
@@ -296,7 +315,12 @@ mod tests {
         let (rec_lsn, rec2) = reader.next_record().unwrap().unwrap();
         assert_eq!(rec_lsn, lsn2);
         match rec2 {
-            WalRecord::HeapInsert { xid, tag: t, offset_number, tuple_data } => {
+            WalRecord::HeapInsert {
+                xid,
+                tag: t,
+                offset_number,
+                tuple_data,
+            } => {
                 assert_eq!(xid, 1);
                 assert_eq!(t, tag);
                 assert_eq!(offset_number, 2);
@@ -484,7 +508,8 @@ mod tests {
 
         // Verify the page was written to disk.
         let mut disk_page = [0u8; PAGE_SIZE];
-        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+            .unwrap();
         assert_eq!(page_get_item(&disk_page, 1).unwrap(), &[0xDE; 40]);
     }
 
@@ -509,7 +534,8 @@ mod tests {
         // File should have been extended to at least 6 blocks.
         assert!(smgr.nblocks(rel, ForkNumber::Main).unwrap() >= 6);
         let mut disk_page = [0u8; PAGE_SIZE];
-        smgr.read_block(rel, ForkNumber::Main, 5, &mut disk_page).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 5, &mut disk_page)
+            .unwrap();
         assert_eq!(page_get_item(&disk_page, 1).unwrap(), &[0x11; 10]);
     }
 
@@ -546,7 +572,8 @@ mod tests {
         assert_eq!(stats.inserts, 1);
 
         let mut disk_page = [0u8; PAGE_SIZE];
-        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+            .unwrap();
         assert_eq!(page_get_max_offset_number(&disk_page).unwrap(), 2);
         assert_eq!(page_get_item(&disk_page, 1).unwrap(), &[0xAA; 30]);
         assert_eq!(page_get_item(&disk_page, 2).unwrap(), &[0xBB; 25]);
@@ -635,7 +662,8 @@ mod tests {
             perform_wal_recovery(&wal_dir, &mut smgr, &mut txns).unwrap();
 
             let mut disk_page = [0u8; PAGE_SIZE];
-            smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+            smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+                .unwrap();
             assert_eq!(page_get_item(&disk_page, 1).unwrap(), &[0xFF; 50]);
         }
     }
@@ -667,7 +695,8 @@ mod tests {
             perform_wal_recovery(&wal_dir, &mut smgr, &mut txns).unwrap();
 
             let mut disk_page = [0u8; PAGE_SIZE];
-            smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+            smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+                .unwrap();
             assert_eq!(page_get_max_offset_number(&disk_page).unwrap(), 2);
         }
     }
@@ -693,7 +722,8 @@ mod tests {
 
         for block in 0..5u32 {
             let mut disk_page = [0u8; PAGE_SIZE];
-            smgr.read_block(rel, ForkNumber::Main, block, &mut disk_page).unwrap();
+            smgr.read_block(rel, ForkNumber::Main, block, &mut disk_page)
+                .unwrap();
             assert_eq!(page_get_item(&disk_page, 1).unwrap(), &[block as u8; 20]);
         }
     }
@@ -720,8 +750,10 @@ mod tests {
 
         let mut p1 = [0u8; PAGE_SIZE];
         let mut p2 = [0u8; PAGE_SIZE];
-        smgr.read_block(test_rel(700), ForkNumber::Main, 0, &mut p1).unwrap();
-        smgr.read_block(test_rel(701), ForkNumber::Main, 0, &mut p2).unwrap();
+        smgr.read_block(test_rel(700), ForkNumber::Main, 0, &mut p1)
+            .unwrap();
+        smgr.read_block(test_rel(701), ForkNumber::Main, 0, &mut p2)
+            .unwrap();
         assert_eq!(page_get_item(&p1, 1).unwrap(), &[0x11; 10]);
         assert_eq!(page_get_item(&p2, 1).unwrap(), &[0x22; 10]);
     }
@@ -758,7 +790,8 @@ mod tests {
         setup_relation(&mut smgr, rel);
         let mut existing_page = make_page_with_tuples(&[&[0xEE; 30]]);
         existing_page[0..8].copy_from_slice(&999999u64.to_le_bytes());
-        smgr.extend(rel, ForkNumber::Main, 0, &existing_page, true).unwrap();
+        smgr.extend(rel, ForkNumber::Main, 0, &existing_page, true)
+            .unwrap();
         drop(smgr);
 
         // Write a WAL FPI with a lower LSN.
@@ -777,7 +810,8 @@ mod tests {
         perform_wal_recovery(&wal_dir, &mut smgr, &mut txns).unwrap();
 
         let mut disk_page = [0u8; PAGE_SIZE];
-        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+            .unwrap();
         // FPI data should have replaced the existing page.
         assert_eq!(page_get_item(&disk_page, 1).unwrap(), &[0x00; 30]);
     }
@@ -821,7 +855,8 @@ mod tests {
 
         // First page should be recovered.
         let mut disk_page = [0u8; PAGE_SIZE];
-        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+            .unwrap();
         assert_eq!(page_get_item(&disk_page, 1).unwrap(), &[0x11; 20]);
     }
 
@@ -839,7 +874,8 @@ mod tests {
         for i in 0..50u8 {
             let tuple = vec![i; 20];
             page_add_item(&mut page, &tuple).unwrap();
-            wal.write_insert(1, tag, &page, (i as u16) + 1, &tuple).unwrap();
+            wal.write_insert(1, tag, &page, (i as u16) + 1, &tuple)
+                .unwrap();
         }
         wal.write_commit(1).unwrap();
         wal.flush().unwrap();
@@ -854,10 +890,14 @@ mod tests {
         assert_eq!(stats.inserts, 49);
 
         let mut disk_page = [0u8; PAGE_SIZE];
-        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+            .unwrap();
         assert_eq!(page_get_max_offset_number(&disk_page).unwrap(), 50);
         for i in 0..50u8 {
-            assert_eq!(page_get_item(&disk_page, (i as u16) + 1).unwrap(), &vec![i; 20]);
+            assert_eq!(
+                page_get_item(&disk_page, (i as u16) + 1).unwrap(),
+                &vec![i; 20]
+            );
         }
     }
 
@@ -907,7 +947,8 @@ mod tests {
         perform_wal_recovery(&wal_dir, &mut smgr, &mut txns).unwrap();
 
         let mut disk_page = [0u8; PAGE_SIZE];
-        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page).unwrap();
+        smgr.read_block(rel, ForkNumber::Main, 0, &mut disk_page)
+            .unwrap();
         // Skip LSN bytes (0-7 are overwritten with record LSN).
         assert_eq!(disk_page[8..100], [0xFE; 92]);
     }

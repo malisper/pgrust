@@ -3,8 +3,8 @@ use crate::backend::storage::page::bufpage::{
 };
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::include::access::htup::{
-    AttributeDesc, HEAP_HASNULL, HEAP_HASVARWIDTH, HEAP_NATTS_MASK, HeapTuple,
-    HeapTupleHeaderData, ItemPointerData, SIZEOF_HEAP_TUPLE_HEADER, TupleError, TupleValue,
+    AttributeDesc, HEAP_HASNULL, HEAP_HASVARWIDTH, HEAP_NATTS_MASK, HeapTuple, HeapTupleHeaderData,
+    ItemPointerData, SIZEOF_HEAP_TUPLE_HEADER, TupleError, TupleValue,
 };
 
 impl HeapTupleHeaderData {
@@ -202,7 +202,10 @@ impl HeapTuple {
         Ok(Self { header, data })
     }
 
-    pub fn deform<'a>(&'a self, desc: &[AttributeDesc]) -> Result<Vec<Option<&'a [u8]>>, TupleError> {
+    pub fn deform<'a>(
+        &'a self,
+        desc: &[AttributeDesc],
+    ) -> Result<Vec<Option<&'a [u8]>>, TupleError> {
         let natts = usize::from(self.header.infomask2 & HEAP_NATTS_MASK);
         if natts != desc.len() {
             return Err(TupleError::WrongValueCount {
@@ -273,7 +276,10 @@ impl HeapTuple {
     }
 }
 
-pub fn deform_raw<'a>(bytes: &'a [u8], desc: &[AttributeDesc]) -> Result<Vec<Option<&'a [u8]>>, TupleError> {
+pub fn deform_raw<'a>(
+    bytes: &'a [u8],
+    desc: &[AttributeDesc],
+) -> Result<Vec<Option<&'a [u8]>>, TupleError> {
     if bytes.len() < SIZEOF_HEAP_TUPLE_HEADER {
         return Err(TupleError::HeaderTooShort);
     }

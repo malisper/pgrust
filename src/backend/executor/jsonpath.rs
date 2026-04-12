@@ -17,7 +17,10 @@ pub(crate) struct JsonPath {
 
 #[derive(Debug, Clone)]
 enum Expr {
-    Path { base: Base, steps: Vec<Step> },
+    Path {
+        base: Base,
+        steps: Vec<Step>,
+    },
     Literal(JsonbValue),
     Compare {
         op: CompareOp,
@@ -133,20 +136,27 @@ fn predicate_bool(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<bool, ExecErr
         return Ok(false);
     }
     if values.len() != 1 {
-        return Err(exec_jsonpath_error("predicate expression must return one item"));
+        return Err(exec_jsonpath_error(
+            "predicate expression must return one item",
+        ));
     }
     match &values[0] {
         JsonbValue::Bool(value) => Ok(*value),
         JsonbValue::Null => Ok(false),
-        _ => Err(exec_jsonpath_error("predicate expression must return boolean")),
+        _ => Err(exec_jsonpath_error(
+            "predicate expression must return boolean",
+        )),
     }
 }
 
 fn lookup_var<'a>(ctx: &'a RuntimeContext<'_>, name: &str) -> Result<&'a JsonbValue, ExecError> {
     let Some(JsonbValue::Object(items)) = ctx.global.vars else {
-        return Err(exec_jsonpath_error("jsonpath variables must be a jsonb object"));
+        return Err(exec_jsonpath_error(
+            "jsonpath variables must be a jsonb object",
+        ));
     };
-    items.iter()
+    items
+        .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value)
         .ok_or_else(|| exec_jsonpath_error(&format!("jsonpath variable \"{name}\" not found")))
@@ -185,7 +195,9 @@ fn apply_step_single(
                 }
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
-                return Err(exec_jsonpath_error("jsonpath member access requires object"));
+                return Err(exec_jsonpath_error(
+                    "jsonpath member access requires object",
+                ));
             }
             _ => {}
         },
@@ -197,7 +209,9 @@ fn apply_step_single(
                 }
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
-                return Err(exec_jsonpath_error("jsonpath wildcard member access requires object"));
+                return Err(exec_jsonpath_error(
+                    "jsonpath wildcard member access requires object",
+                ));
             }
             _ => {}
         },
@@ -210,14 +224,18 @@ fn apply_step_single(
                 }
             }
             _ if matches!(ctx.mode, PathMode::Strict) => {
-                return Err(exec_jsonpath_error("jsonpath array subscript requires array"));
+                return Err(exec_jsonpath_error(
+                    "jsonpath array subscript requires array",
+                ));
             }
             _ => {}
         },
         Step::IndexWildcard => match value {
             JsonbValue::Array(items) => out.extend(items.iter().cloned()),
             _ if matches!(ctx.mode, PathMode::Strict) => {
-                return Err(exec_jsonpath_error("jsonpath array wildcard requires array"));
+                return Err(exec_jsonpath_error(
+                    "jsonpath array wildcard requires array",
+                ));
             }
             _ => {}
         },
@@ -720,7 +738,9 @@ impl<'a> Parser<'a> {
         let start = self.offset;
         self.skip_ws();
         if self.offset == start {
-            Err(exec_jsonpath_error("expected whitespace after jsonpath mode"))
+            Err(exec_jsonpath_error(
+                "expected whitespace after jsonpath mode",
+            ))
         } else {
             Ok(())
         }
@@ -753,24 +773,33 @@ impl<'a> Parser<'a> {
                     self.expect("\\u")?;
                     let low = self.parse_unicode_escape()?;
                     if !(0xDC00..=0xDFFF).contains(&low) {
-                        return Err(exec_jsonpath_error("invalid low surrogate in jsonpath string"));
+                        return Err(exec_jsonpath_error(
+                            "invalid low surrogate in jsonpath string",
+                        ));
                     }
-                    let scalar = 0x10000 + (((codepoint - 0xD800) as u32) << 10) + (low - 0xDC00) as u32;
-                    let ch = char::from_u32(scalar)
-                        .ok_or_else(|| exec_jsonpath_error("invalid Unicode scalar value in jsonpath string"))?;
+                    let scalar =
+                        0x10000 + (((codepoint - 0xD800) as u32) << 10) + (low - 0xDC00) as u32;
+                    let ch = char::from_u32(scalar).ok_or_else(|| {
+                        exec_jsonpath_error("invalid Unicode scalar value in jsonpath string")
+                    })?;
                     out.push(ch);
                 } else if (0xDC00..=0xDFFF).contains(&codepoint) {
-                    return Err(exec_jsonpath_error("invalid low surrogate in jsonpath string"));
+                    return Err(exec_jsonpath_error(
+                        "invalid low surrogate in jsonpath string",
+                    ));
                 } else if codepoint == 0 {
                     return Err(exec_jsonpath_error("unsupported Unicode escape sequence"));
                 } else {
-                    let ch = char::from_u32(codepoint as u32)
-                        .ok_or_else(|| exec_jsonpath_error("invalid Unicode scalar value in jsonpath string"))?;
+                    let ch = char::from_u32(codepoint as u32).ok_or_else(|| {
+                        exec_jsonpath_error("invalid Unicode scalar value in jsonpath string")
+                    })?;
                     out.push(ch);
                 }
             }
             _ => {
-                return Err(exec_jsonpath_error("invalid escape sequence in jsonpath string"));
+                return Err(exec_jsonpath_error(
+                    "invalid escape sequence in jsonpath string",
+                ));
             }
         }
         Ok(())

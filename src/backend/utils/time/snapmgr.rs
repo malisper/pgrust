@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::backend::access::transam::xact::{CommandId, TransactionId, INVALID_TRANSACTION_ID};
+use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {

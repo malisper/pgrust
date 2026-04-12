@@ -1,9 +1,9 @@
 use std::io::{self, Write};
 use std::str::FromStr;
 
-use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::access::heap::heapam::HeapError;
-use crate::backend::executor::{render_internal_char_text, ExecError, QueryColumn, Value};
+use crate::backend::executor::exec_expr::format_array_text;
+use crate::backend::executor::{ExecError, QueryColumn, Value, render_internal_char_text};
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::TupleError;
 use crate::pgrust::session::ByteaOutputFormat;
@@ -742,7 +742,11 @@ fn rational_from_binary_parts(negative: bool, mut num: BigInt, exp2: i32) -> Exa
     }
 }
 
-fn rational_is_midpoint(candidate: &ExactRational, left: &ExactRational, right: &ExactRational) -> bool {
+fn rational_is_midpoint(
+    candidate: &ExactRational,
+    left: &ExactRational,
+    right: &ExactRational,
+) -> bool {
     let lhs = &candidate.num * BigInt::from(2u8) * &left.den * &right.den;
     let rhs = &candidate.den * (&left.num * &right.den + &right.num * &left.den);
     lhs == rhs
@@ -832,7 +836,10 @@ fn format_float_with_precision(value: f64, precision: i32) -> String {
         let rendered = if decimal_pos <= 0 {
             format!("0.{}{}", "0".repeat((-decimal_pos) as usize), digits)
         } else if decimal_pos as usize >= digits.len() {
-            format!("{digits}{}", "0".repeat(decimal_pos as usize - digits.len()))
+            format!(
+                "{digits}{}",
+                "0".repeat(decimal_pos as usize - digits.len())
+            )
         } else {
             format!(
                 "{}.{}",
@@ -855,8 +862,14 @@ fn normalize_float_rendering(raw: &str, is_float4: bool) -> String {
     let (mut digits, exponent) = if let Some((mantissa, exponent)) = unsigned.split_once(['e', 'E'])
     {
         let exponent = exponent.parse::<i32>().unwrap_or(0);
-        let fractional_digits = mantissa.split_once('.').map(|(_, frac)| frac.len()).unwrap_or(0);
-        (mantissa.replace('.', ""), exponent - fractional_digits as i32)
+        let fractional_digits = mantissa
+            .split_once('.')
+            .map(|(_, frac)| frac.len())
+            .unwrap_or(0);
+        (
+            mantissa.replace('.', ""),
+            exponent - fractional_digits as i32,
+        )
     } else if let Some((whole, frac)) = unsigned.split_once('.') {
         (format!("{whole}{frac}"), -(frac.len() as i32))
     } else {
@@ -876,7 +889,10 @@ fn normalize_float_rendering(raw: &str, is_float4: bool) -> String {
         } else {
             format!("{}.{}", &significant_digits[..1], &significant_digits[1..])
         };
-        return format!("{sign}{}", format_scientific_mantissa(&mantissa, display_exponent, true));
+        return format!(
+            "{sign}{}",
+            format_scientific_mantissa(&mantissa, display_exponent, true)
+        );
     }
 
     if exponent >= 0 {
@@ -935,7 +951,10 @@ mod tests {
             format_float8_text(-4_567_890_123_456_789.0, FloatFormatOptions::default()),
             "-4.567890123456789e+15"
         );
-        assert_eq!(format_float8_text(123.0, FloatFormatOptions::default()), "123");
+        assert_eq!(
+            format_float8_text(123.0, FloatFormatOptions::default()),
+            "123"
+        );
     }
 
     #[test]
@@ -944,12 +963,18 @@ mod tests {
             format_float4_text(4_567_890_123_456_789.0, FloatFormatOptions::default()),
             "4.56789e+15"
         );
-        assert_eq!(format_float4_text(123.0, FloatFormatOptions::default()), "123");
+        assert_eq!(
+            format_float4_text(123.0, FloatFormatOptions::default()),
+            "123"
+        );
     }
 
     #[test]
     fn float_special_values_use_postgres_spelling() {
-        assert_eq!(format_float8_text(f64::NAN, FloatFormatOptions::default()), "NaN");
+        assert_eq!(
+            format_float8_text(f64::NAN, FloatFormatOptions::default()),
+            "NaN"
+        );
         assert_eq!(
             format_float8_text(f64::INFINITY, FloatFormatOptions::default()),
             "Infinity"
@@ -958,7 +983,10 @@ mod tests {
             format_float8_text(f64::NEG_INFINITY, FloatFormatOptions::default()),
             "-Infinity"
         );
-        assert_eq!(format_float4_text(f64::NAN, FloatFormatOptions::default()), "NaN");
+        assert_eq!(
+            format_float4_text(f64::NAN, FloatFormatOptions::default()),
+            "NaN"
+        );
         assert_eq!(
             format_float4_text(f64::INFINITY, FloatFormatOptions::default()),
             "Infinity"
@@ -975,9 +1003,15 @@ mod tests {
             extra_float_digits: 0,
             bytea_output: ByteaOutputFormat::Hex,
         };
-        assert_eq!(format_float8_text(31.690692639953454, options), "31.6906926399535");
+        assert_eq!(
+            format_float8_text(31.690692639953454, options),
+            "31.6906926399535"
+        );
         assert_eq!(format_float8_text(1004.3000000000004, options), "1004.3");
-        assert_eq!(format_float4_text(1.2345679402097818e20, options), "1.23457e+20");
+        assert_eq!(
+            format_float4_text(1.2345679402097818e20, options),
+            "1.23457e+20"
+        );
     }
 
     #[test]
@@ -998,8 +1032,14 @@ mod tests {
 
     #[test]
     fn shortest_format_preserves_negative_zero() {
-        assert_eq!(format_float8_text(-0.0, FloatFormatOptions::default()), "-0");
-        assert_eq!(format_float4_text(-0.0, FloatFormatOptions::default()), "-0");
+        assert_eq!(
+            format_float8_text(-0.0, FloatFormatOptions::default()),
+            "-0"
+        );
+        assert_eq!(
+            format_float4_text(-0.0, FloatFormatOptions::default()),
+            "-0"
+        );
     }
 
     #[test]

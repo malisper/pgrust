@@ -3,15 +3,21 @@ use parking_lot::RwLock;
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager, TransactionStatus,
 };
+use crate::backend::storage::buffer::Page;
+use crate::backend::storage::page::bufpage::{
+    ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, page_get_item, page_get_item_id,
+    page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
+};
+use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::include::access::htup::{
-    HeapTuple, ItemPointerData, TupleError, heap_page_add_tuple, heap_page_get_ctid, heap_page_get_tuple,
-    heap_page_init, heap_page_replace_tuple,
+    HeapTuple, ItemPointerData, TupleError, heap_page_add_tuple, heap_page_get_ctid,
+    heap_page_get_tuple, heap_page_init, heap_page_replace_tuple,
 };
 use crate::pgrust::database::TransactionWaiter;
-use crate::backend::storage::page::bufpage::{ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, page_get_item, page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number};
-use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
-use crate::backend::storage::buffer::Page;
-use crate::{BufferPool, ClientId, Error, OwnedBufferPin, PinnedBuffer, RequestPageResult, SmgrStorageBackend};
+use crate::{
+    BufferPool, ClientId, Error, OwnedBufferPin, PinnedBuffer, RequestPageResult,
+    SmgrStorageBackend,
+};
 use std::rc::Rc;
 
 #[derive(Debug)]
@@ -69,7 +75,6 @@ impl From<MvccError> for HeapError {
 
 /// Maximum tuples per 8kB page: 8160 usable / 28 min per tuple = 291.
 const MAX_HEAP_TUPLES_PER_PAGE: usize = 291;
-
 
 pub struct VisibleHeapScan {
     pub(crate) scan: HeapScan,
@@ -225,11 +230,10 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
             _ => {
                 // Drop previous pin (Rc<OwnedBufferPin> handles unpin).
                 drop(scan.pinned_buffer.take());
-                let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
+                let pin =
+                    pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
                 let bid = pin.into_raw();
-                let owned = OwnedBufferPin::wrap_existing(
-                    std::sync::Arc::clone(&scan.pool), bid,
-                );
+                let owned = OwnedBufferPin::wrap_existing(std::sync::Arc::clone(&scan.pool), bid);
                 scan.pinned_buffer = Some((block, Rc::new(owned)));
                 bid
             }
@@ -237,26 +241,34 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
 
         // Acquire shared content lock briefly for this tuple batch.
         // Released after processing — does NOT block writers across exec_next calls.
-        let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let guard = pool
+            .lock_buffer_shared(buffer_id)
+            .map_err(|e| E::from(HeapError::Buffer(e)))?;
         let page: &Page = &*guard;
         let mut any_hints_written = false;
 
         let found: Result<Option<T>, E> = (|| {
-            let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+            let max_offset = page_get_max_offset_number(page)
+                .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
 
             while scan.scan.current_offset <= max_offset {
                 let off = scan.scan.current_offset;
                 scan.scan.current_offset += 1;
 
-                let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                let item_id = page_get_item_id(page, off)
+                    .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
                 if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
                     continue;
                 }
 
-                let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                let tuple_bytes = page_get_item(page, off)
+                    .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
 
                 // Fast path: check hint bits without acquiring the txns lock.
-                if let Some(visible) = scan.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
+                if let Some(visible) = scan
+                    .snapshot
+                    .tuple_bytes_try_visible_from_hints(tuple_bytes)
+                {
                     if !visible {
                         continue;
                     }
@@ -270,14 +282,18 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
                 // Slow path: need CLOG lookup — acquire the txns lock.
                 let (visible, hints) = {
                     let txns_guard = txns.read();
-                    scan.snapshot.tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
+                    scan.snapshot
+                        .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
                 };
 
                 if hints != 0 {
                     unsafe {
                         let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
                         let page_ptr = page as *const Page as *mut u8;
-                        let current = u16::from_le_bytes([*page_ptr.add(hint_off), *page_ptr.add(hint_off + 1)]);
+                        let current = u16::from_le_bytes([
+                            *page_ptr.add(hint_off),
+                            *page_ptr.add(hint_off + 1),
+                        ]);
                         let updated = (current | hints).to_le_bytes();
                         *page_ptr.add(hint_off) = updated[0];
                         *page_ptr.add(hint_off + 1) = updated[1];
@@ -344,15 +360,16 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
         let block = scan.scan.current_block;
         let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
         let buffer_id = pin.into_raw();
-        let owned = OwnedBufferPin::wrap_existing(
-            std::sync::Arc::clone(&scan.pool), buffer_id,
-        );
+        let owned = OwnedBufferPin::wrap_existing(std::sync::Arc::clone(&scan.pool), buffer_id);
         scan.pinned_buffer = Some((block, Rc::new(owned)));
 
         // Collect visible tuple offsets under a single lock.
-        let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let guard = pool
+            .lock_buffer_shared(buffer_id)
+            .map_err(|e| E::from(HeapError::Buffer(e)))?;
         let page: &Page = &*guard;
-        let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+        let max_offset = page_get_max_offset_number(page)
+            .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
 
         let mut ntup: u16 = 0;
         let mut any_hints_written = false;
@@ -366,18 +383,25 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
 
             let tuple_bytes = page_get_item_unchecked(page, off);
 
-            let visible = if let Some(vis) = scan.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
+            let visible = if let Some(vis) = scan
+                .snapshot
+                .tuple_bytes_try_visible_from_hints(tuple_bytes)
+            {
                 vis
             } else {
                 let (vis, hints) = {
                     let txns_guard = txns.read();
-                    scan.snapshot.tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
+                    scan.snapshot
+                        .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
                 };
                 if hints != 0 {
                     unsafe {
                         let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
                         let page_ptr = page as *const Page as *mut u8;
-                        let current = u16::from_le_bytes([*page_ptr.add(hint_off), *page_ptr.add(hint_off + 1)]);
+                        let current = u16::from_le_bytes([
+                            *page_ptr.add(hint_off),
+                            *page_ptr.add(hint_off + 1),
+                        ]);
                         let updated = (current | hints).to_le_bytes();
                         *page_ptr.add(hint_off) = updated[0];
                         *page_ptr.add(hint_off + 1) = updated[1];
@@ -462,26 +486,34 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
         let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
         let buffer_id = pin.buffer_id();
 
-        let guard = pool.lock_buffer_shared(buffer_id).map_err(|e| E::from(HeapError::Buffer(e)))?;
+        let guard = pool
+            .lock_buffer_shared(buffer_id)
+            .map_err(|e| E::from(HeapError::Buffer(e)))?;
         let page: &Page = &*guard;
         let mut any_hints_written = false;
 
         let result: Result<(), E> = (|| {
-            let max_offset = page_get_max_offset_number(page).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+            let max_offset = page_get_max_offset_number(page)
+                .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
 
             while scan.scan.current_offset <= max_offset {
                 let off = scan.scan.current_offset;
                 scan.scan.current_offset += 1;
 
-                let item_id = page_get_item_id(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                let item_id = page_get_item_id(page, off)
+                    .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
                 if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
                     continue;
                 }
 
-                let tuple_bytes = page_get_item(page, off).map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
+                let tuple_bytes = page_get_item(page, off)
+                    .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
 
                 // Fast path: check hint bits without acquiring the txns lock.
-                if let Some(visible) = scan.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
+                if let Some(visible) = scan
+                    .snapshot
+                    .tuple_bytes_try_visible_from_hints(tuple_bytes)
+                {
                     if visible {
                         process(tuple_bytes)?;
                         count += 1;
@@ -492,14 +524,18 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
                 // Slow path: need CLOG lookup — acquire the txns lock.
                 let (visible, hints) = {
                     let txns_guard = txns.read();
-                    scan.snapshot.tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
+                    scan.snapshot
+                        .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
                 };
 
                 if hints != 0 {
                     unsafe {
                         let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
                         let page_ptr = page as *const Page as *mut u8;
-                        let current = u16::from_le_bytes([*page_ptr.add(hint_off), *page_ptr.add(hint_off + 1)]);
+                        let current = u16::from_le_bytes([
+                            *page_ptr.add(hint_off),
+                            *page_ptr.add(hint_off + 1),
+                        ]);
                         let updated = (current | hints).to_le_bytes();
                         *page_ptr.add(hint_off) = updated[0];
                         *page_ptr.add(hint_off + 1) = updated[1];
@@ -566,7 +602,9 @@ pub fn heap_fetch(
     tid: ItemPointerData,
 ) -> Result<HeapTuple, HeapError> {
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
-    let page = pool.read_page(pin.buffer_id()).ok_or(Error::InvalidBuffer)?;
+    let page = pool
+        .read_page(pin.buffer_id())
+        .ok_or(Error::InvalidBuffer)?;
     let tuple = heap_page_get_tuple(&page, tid.offset_number)?;
     drop(pin);
     Ok(tuple)
@@ -634,7 +672,6 @@ pub fn heap_delete_with_waiter(
     snapshot: &Snapshot,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<(), HeapError> {
-
     loop {
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
         let buffer_id = pin.buffer_id();
@@ -698,8 +735,8 @@ pub fn heap_delete_with_waiter(
                 let pin2 = pin_existing_block(pool, client_id, rel, tid.block_number)?;
                 let buffer_id2 = pin2.buffer_id();
                 let guard2 = pool.lock_buffer_shared(buffer_id2)?;
-                let current_ctid = heap_page_get_ctid(&*guard2, tid.offset_number)
-                    .map_err(HeapError::from)?;
+                let current_ctid =
+                    heap_page_get_ctid(&*guard2, tid.offset_number).map_err(HeapError::from)?;
                 drop(guard2);
                 drop(pin2);
                 if current_ctid == tid {
@@ -807,9 +844,7 @@ fn try_claim_tuple(
     let xmax_status = txns.read().status(xmax);
 
     match xmax_status {
-        Some(TransactionStatus::InProgress) | None => {
-            Ok((ClaimResult::WaitFor(xmax), target_tid))
-        }
+        Some(TransactionStatus::InProgress) | None => Ok((ClaimResult::WaitFor(xmax), target_tid)),
         Some(TransactionStatus::Aborted) => {
             let pin2 = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
             let buffer_id2 = pin2.buffer_id();
@@ -833,14 +868,19 @@ fn try_claim_tuple(
             let pin2 = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
             let buffer_id2 = pin2.buffer_id();
             let guard = pool.lock_buffer_shared(buffer_id2)?;
-            let current_ctid = heap_page_get_ctid(&*guard, target_tid.offset_number)
-                .map_err(HeapError::from)?;
+            let current_ctid =
+                heap_page_get_ctid(&*guard, target_tid.offset_number).map_err(HeapError::from)?;
             drop(guard);
             drop(pin2);
             if current_ctid == target_tid {
                 Ok((ClaimResult::Deleted, target_tid))
             } else {
-                Ok((ClaimResult::Updated { new_ctid: current_ctid }, target_tid))
+                Ok((
+                    ClaimResult::Updated {
+                        new_ctid: current_ctid,
+                    },
+                    target_tid,
+                ))
             }
         }
     }
@@ -868,15 +908,10 @@ pub fn heap_update_with_waiter(
                 let buffer_id = pin.buffer_id();
                 let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
                 let mut new_page = *guard;
-                let mut old_version =
-                    heap_page_get_tuple(&new_page, tid.offset_number)?;
+                let mut old_version = heap_page_get_tuple(&new_page, tid.offset_number)?;
                 old_version.header.ctid = new_tid;
                 // xmax was already set by try_claim_tuple, and HEAP_XMAX_INVALID cleared there.
-                heap_page_replace_tuple(
-                    &mut new_page,
-                    tid.offset_number,
-                    &old_version,
-                )?;
+                heap_page_replace_tuple(&mut new_page, tid.offset_number, &old_version)?;
                 pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
 
                 return Ok(new_tid);
@@ -957,8 +992,12 @@ fn heap_insert_version(
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
                 pool.write_page_insert_locked(
-                    buffer_id, xmin, &new_page, &mut guard,
-                    offset_number, &serialized_tuple,
+                    buffer_id,
+                    xmin,
+                    &new_page,
+                    &mut guard,
+                    offset_number,
+                    &serialized_tuple,
                 )?;
                 return Ok(ItemPointerData {
                     block_number: target_block,
@@ -972,7 +1011,8 @@ fn heap_insert_version(
                     let current_nblocks = s.smgr.nblocks(rel, ForkNumber::Main)?;
                     let mut page = [0u8; crate::BLCKSZ];
                     heap_page_init(&mut page);
-                    s.smgr.extend(rel, ForkNumber::Main, current_nblocks, &page, true)?;
+                    s.smgr
+                        .extend(rel, ForkNumber::Main, current_nblocks, &page, true)?;
                     Ok(())
                 })?;
             }
@@ -982,7 +1022,6 @@ fn heap_insert_version(
         }
     }
 }
-
 
 fn pin_existing_block<'a>(
     pool: &'a BufferPool<SmgrStorageBackend>,
@@ -1072,8 +1111,7 @@ mod tests {
         let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 4));
         let mut scan = heap_scan_begin_visible(&pool, 1, rel, snapshot).unwrap();
         let mut rows = Vec::new();
-        while let Some((_tid, tuple)) =
-            heap_scan_next_visible(&*pool, 1, txns, &mut scan).unwrap()
+        while let Some((_tid, tuple)) = heap_scan_next_visible(&*pool, 1, txns, &mut scan).unwrap()
         {
             rows.push(tuple.data);
         }
@@ -1177,10 +1215,13 @@ mod tests {
             heap_page_add_tuple(&mut page, 0, &HeapTuple::new_raw(1, b"second".to_vec())).unwrap();
 
         // Mark the second line pointer unused to simulate a hole on the page.
-        let idx = crate::backend::storage::page::bufpage::max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
-            + (usize::from(off2) - 1) * crate::backend::storage::page::bufpage::ITEM_ID_SIZE;
-        page[idx..idx + crate::backend::storage::page::bufpage::ITEM_ID_SIZE]
-            .copy_from_slice(&crate::backend::storage::page::bufpage::ItemIdData::unused().encode());
+        let idx = crate::backend::storage::page::bufpage::max_align(
+            crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA,
+        ) + (usize::from(off2) - 1)
+            * crate::backend::storage::page::bufpage::ITEM_ID_SIZE;
+        page[idx..idx + crate::backend::storage::page::bufpage::ITEM_ID_SIZE].copy_from_slice(
+            &crate::backend::storage::page::bufpage::ItemIdData::unused().encode(),
+        );
 
         smgr.extend(rel, ForkNumber::Main, 0, &page, true).unwrap();
 
@@ -1207,11 +1248,9 @@ mod tests {
             attalign: AttributeAlign::Int,
             nullable: false,
         }];
-        let tuple = HeapTuple::from_values(
-            &desc,
-            &[TupleValue::Bytes(vec![b'x'; MAX_HEAP_TUPLE_SIZE])],
-        )
-        .unwrap();
+        let tuple =
+            HeapTuple::from_values(&desc, &[TupleValue::Bytes(vec![b'x'; MAX_HEAP_TUPLE_SIZE])])
+                .unwrap();
 
         assert!(tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE);
         match heap_insert(&pool, 1, rel, &tuple) {
@@ -1248,8 +1287,7 @@ mod tests {
 
         let other = txns.begin();
         let other_snapshot = txns.snapshot(other).unwrap();
-        let before_commit =
-            heap_fetch_visible(&pool, 3, rel, tid, &txns, &other_snapshot).unwrap();
+        let before_commit = heap_fetch_visible(&pool, 3, rel, tid, &txns, &other_snapshot).unwrap();
         assert!(before_commit.is_some());
 
         txns.commit(deleter).unwrap();
@@ -1295,10 +1333,9 @@ mod tests {
 
         let concurrent = txns.begin();
         let concurrent_snapshot = txns.snapshot(concurrent).unwrap();
-        let old_visible =
-            heap_fetch_visible(&pool, 3, rel, old_tid, &txns, &concurrent_snapshot)
-                .unwrap()
-                .unwrap();
+        let old_visible = heap_fetch_visible(&pool, 3, rel, old_tid, &txns, &concurrent_snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(old_visible.data, b"old".to_vec());
         assert!(
             heap_fetch_visible(&pool, 3, rel, new_tid, &txns, &concurrent_snapshot)
@@ -1313,10 +1350,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let new_visible =
-            heap_fetch_visible(&pool, 4, rel, new_tid, &txns, &committed_snapshot)
-                .unwrap()
-                .unwrap();
+        let new_visible = heap_fetch_visible(&pool, 4, rel, new_tid, &txns, &committed_snapshot)
+            .unwrap()
+            .unwrap();
         assert_eq!(new_visible.data, b"new".to_vec());
 
         let old_stored = heap_fetch(&pool, 5, rel, old_tid).unwrap();
@@ -1360,8 +1396,7 @@ mod tests {
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
         let mut scan = heap_scan_begin_visible(&pool, 3, rel, snapshot).unwrap();
         let mut rows = Vec::new();
-        while let Some((_tid, tuple)) =
-            heap_scan_next_visible(&*pool, 3, &txns, &mut scan).unwrap()
+        while let Some((_tid, tuple)) = heap_scan_next_visible(&*pool, 3, &txns, &mut scan).unwrap()
         {
             rows.push(tuple.data);
         }
@@ -1465,14 +1500,8 @@ mod tests {
             let mut txns = TransactionManager::new_durable(&base).unwrap();
 
             let xid = txns.begin();
-            let tid = heap_insert_mvcc(
-                &pool,
-                1,
-                rel,
-                xid,
-                &HeapTuple::new_raw(1, b"row".to_vec()),
-            )
-            .unwrap();
+            let tid = heap_insert_mvcc(&pool, 1, rel, xid, &HeapTuple::new_raw(1, b"row".to_vec()))
+                .unwrap();
             txns.commit(xid).unwrap();
             heap_flush(&pool, 1, rel, tid.block_number).unwrap();
             tid
@@ -1505,5 +1534,4 @@ mod tests {
                 .is_none()
         );
     }
-
 }

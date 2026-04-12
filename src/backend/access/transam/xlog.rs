@@ -34,12 +34,12 @@
 //!  bytes 44..  : page data    (PAGE_SIZE = 8192 bytes)
 //! ```
 
+use parking_lot::{Condvar, Mutex};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use parking_lot::{Mutex, Condvar};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// WAL buffer size — accumulate this many bytes before flushing to kernel.
@@ -72,9 +72,9 @@ pub(crate) const FPI_HOLE_META: usize = 4;
 pub(crate) const CRC_OFFSET: usize = 20;
 
 /// xl_info values
-pub(crate) const XLOG_FPI: u8 = 0;           // Full page image
-pub(crate) const XLOG_HEAP_INSERT: u8 = 1;   // Row-level insert delta
-pub(crate) const XLOG_XACT_COMMIT: u8 = 0;   // Transaction commit
+pub(crate) const XLOG_FPI: u8 = 0; // Full page image
+pub(crate) const XLOG_HEAP_INSERT: u8 = 1; // Row-level insert delta
+pub(crate) const XLOG_XACT_COMMIT: u8 = 0; // Transaction commit
 
 /// xl_rmid values (resource manager IDs)
 pub(crate) const RM_HEAP_ID: u8 = 0;
@@ -198,11 +198,12 @@ impl WalReader {
                     return Err(WalError::Corrupt("FPI record too short".into()));
                 }
                 let tag = parse_block_header(&record);
-                let hole_offset = u16::from_le_bytes([
-                    record[WAL_RECORD_HEADER], record[WAL_RECORD_HEADER + 1],
-                ]) as usize;
+                let hole_offset =
+                    u16::from_le_bytes([record[WAL_RECORD_HEADER], record[WAL_RECORD_HEADER + 1]])
+                        as usize;
                 let hole_length = u16::from_le_bytes([
-                    record[WAL_RECORD_HEADER + 2], record[WAL_RECORD_HEADER + 3],
+                    record[WAL_RECORD_HEADER + 2],
+                    record[WAL_RECORD_HEADER + 3],
                 ]) as usize;
 
                 // Decompress: inverse of write_fpi (lines 322-329 of writer).
@@ -217,26 +218,34 @@ impl WalReader {
                     page.copy_from_slice(compressed);
                 }
 
-                WalRecord::FullPageImage { xid: xl_xid, tag, page }
+                WalRecord::FullPageImage {
+                    xid: xl_xid,
+                    tag,
+                    page,
+                }
             }
             (RM_HEAP_ID, XLOG_HEAP_INSERT) => {
                 if xl_tot_len < WAL_RECORD_HEADER + 4 {
                     return Err(WalError::Corrupt("Insert record too short".into()));
                 }
                 let tag = parse_block_header(&record);
-                let offset_number = u16::from_le_bytes([
-                    record[WAL_RECORD_HEADER], record[WAL_RECORD_HEADER + 1],
-                ]);
+                let offset_number =
+                    u16::from_le_bytes([record[WAL_RECORD_HEADER], record[WAL_RECORD_HEADER + 1]]);
                 let tuple_len = u16::from_le_bytes([
-                    record[WAL_RECORD_HEADER + 2], record[WAL_RECORD_HEADER + 3],
+                    record[WAL_RECORD_HEADER + 2],
+                    record[WAL_RECORD_HEADER + 3],
                 ]) as usize;
-                let tuple_data = record[WAL_RECORD_HEADER + 4..WAL_RECORD_HEADER + 4 + tuple_len].to_vec();
+                let tuple_data =
+                    record[WAL_RECORD_HEADER + 4..WAL_RECORD_HEADER + 4 + tuple_len].to_vec();
 
-                WalRecord::HeapInsert { xid: xl_xid, tag, offset_number, tuple_data }
+                WalRecord::HeapInsert {
+                    xid: xl_xid,
+                    tag,
+                    offset_number,
+                    tuple_data,
+                }
             }
-            (RM_XACT_ID, XLOG_XACT_COMMIT) => {
-                WalRecord::XactCommit { xid: xl_xid }
-            }
+            (RM_XACT_ID, XLOG_XACT_COMMIT) => WalRecord::XactCommit { xid: xl_xid },
             _ => {
                 return Err(WalError::Corrupt(format!(
                     "unknown WAL record: rmid={xl_rmid} info={xl_info}"
@@ -256,7 +265,11 @@ fn parse_block_header(record: &[u8]) -> BufferTag {
     let fork_byte = record[36];
     let block = u32::from_le_bytes([record[40], record[41], record[42], record[43]]);
     BufferTag {
-        rel: RelFileLocator { spc_oid, db_oid, rel_number },
+        rel: RelFileLocator {
+            spc_oid,
+            db_oid,
+            rel_number,
+        },
         fork: ForkNumber::from_u8(fork_byte),
         block,
     }
@@ -459,11 +472,12 @@ impl WalWriter {
         let pd_lower = u16::from_le_bytes([page[12], page[13]]) as usize;
         let pd_upper = u16::from_le_bytes([page[14], page[15]]) as usize;
 
-        let (hole_offset, hole_length) = if pd_upper > pd_lower && pd_upper <= PAGE_SIZE && pd_lower > 0 {
-            (pd_lower as u16, (pd_upper - pd_lower) as u16)
-        } else {
-            (0u16, 0u16)
-        };
+        let (hole_offset, hole_length) =
+            if pd_upper > pd_lower && pd_upper <= PAGE_SIZE && pd_lower > 0 {
+                (pd_lower as u16, (pd_upper - pd_lower) as u16)
+            } else {
+                (0u16, 0u16)
+            };
 
         let page_data_len = PAGE_SIZE - hole_length as usize;
         let record_len = WAL_RECORD_HEADER + FPI_HOLE_META + page_data_len;
@@ -643,7 +657,11 @@ mod tests {
 
     fn test_tag(block: u32) -> BufferTag {
         BufferTag {
-            rel: RelFileLocator { spc_oid: 0, db_oid: 1, rel_number: 42 },
+            rel: RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 42,
+            },
             fork: ForkNumber::Main,
             block,
         }
@@ -719,7 +737,11 @@ mod tests {
 
         let xid: u32 = 0x1234_5678;
         let tag = BufferTag {
-            rel: RelFileLocator { spc_oid: 0xAA, db_oid: 0xBB, rel_number: 0xCC },
+            rel: RelFileLocator {
+                spc_oid: 0xAA,
+                db_oid: 0xBB,
+                rel_number: 0xCC,
+            },
             fork: ForkNumber::Main,
             block: 0xDD,
         };
@@ -740,7 +762,10 @@ mod tests {
 
         // XLogRecord header
         // xl_tot_len at bytes 0-3
-        assert_eq!(u32::from_le_bytes(raw[0..4].try_into().unwrap()), WAL_RECORD_LEN as u32);
+        assert_eq!(
+            u32::from_le_bytes(raw[0..4].try_into().unwrap()),
+            WAL_RECORD_LEN as u32
+        );
         // xl_xid at bytes 4-7
         assert_eq!(u32::from_le_bytes(raw[4..8].try_into().unwrap()), xid);
         // xl_prev at bytes 8-15 (previous LSN = 0 for first record)
@@ -770,8 +795,16 @@ mod tests {
         assert_eq!(u32::from_le_bytes(raw[40..44].try_into().unwrap()), 0xDD);
 
         // Hole metadata at bytes 44-47 (no hole since page header is invalid)
-        assert_eq!(u16::from_le_bytes(raw[44..46].try_into().unwrap()), 0, "hole_offset");
-        assert_eq!(u16::from_le_bytes(raw[46..48].try_into().unwrap()), 0, "hole_length");
+        assert_eq!(
+            u16::from_le_bytes(raw[44..46].try_into().unwrap()),
+            0,
+            "hole_offset"
+        );
+        assert_eq!(
+            u16::from_le_bytes(raw[46..48].try_into().unwrap()),
+            0,
+            "hole_length"
+        );
 
         // page data starts at byte 48 (after header + hole meta)
         let data_start = WAL_RECORD_HEADER + FPI_HOLE_META;
@@ -841,12 +874,17 @@ mod tests {
         assert_eq!(file_len, expected_size as u64);
 
         // Verify the record is much smaller than an uncompressed FPI.
-        assert!(expected_size < WAL_RECORD_LEN,
-            "compressed FPI ({expected_size}) should be smaller than max ({WAL_RECORD_LEN})");
+        assert!(
+            expected_size < WAL_RECORD_LEN,
+            "compressed FPI ({expected_size}) should be smaller than max ({WAL_RECORD_LEN})"
+        );
 
         // Read back and verify hole metadata.
         let mut raw = Vec::new();
-        fs::File::open(dir.join("wal.log")).unwrap().read_to_end(&mut raw).unwrap();
+        fs::File::open(dir.join("wal.log"))
+            .unwrap()
+            .read_to_end(&mut raw)
+            .unwrap();
         let hole_offset = u16::from_le_bytes(raw[44..46].try_into().unwrap());
         let hole_length = u16::from_le_bytes(raw[46..48].try_into().unwrap());
         assert_eq!(hole_offset as usize, pd_lower);

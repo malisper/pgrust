@@ -12,10 +12,9 @@ use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 #[cfg(unix)]
-use std::os::unix::io::AsRawFd;
-#[cfg(unix)]
 use std::os::unix::fs::FileExt;
-
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 
 #[cfg(target_os = "linux")]
 extern crate libc;
@@ -310,7 +309,8 @@ impl StorageManager for MdStorageManager {
     fn close(&mut self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), SmgrError> {
         self.open_segs
             .retain(|key, _| !(key.rel == rel && key.fork == fork));
-        self.lru_order.retain(|key| !(key.rel == rel && key.fork == fork));
+        self.lru_order
+            .retain(|key| !(key.rel == rel && key.fork == fork));
         self.nblocks_cache.remove(&(rel, fork));
         Ok(())
     }
@@ -1204,7 +1204,11 @@ mod tests {
             smgr2
                 .read_block(rel, ForkNumber::Main, i, &mut buf)
                 .unwrap();
-            assert_eq!(buf, page_pattern(i), "block {i} must survive reopen after fsynced extend");
+            assert_eq!(
+                buf,
+                page_pattern(i),
+                "block {i} must survive reopen after fsynced extend"
+            );
         }
     }
 

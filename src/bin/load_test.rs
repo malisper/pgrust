@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pgrust::pgrust::database::Database;
-use pgrust::executor::{StatementResult, Value};
 use pgrust::ClientId;
+use pgrust::executor::{StatementResult, Value};
+use pgrust::pgrust::database::Database;
 
 struct LoadTestConfig {
     num_writer_threads: usize,
@@ -90,9 +90,8 @@ fn main() {
 
             for i in 0..n {
                 let id = t as i32 * 10000 + i as i32;
-                let sql = format!(
-                    "insert into events (id, thread_id, seq) values ({id}, {t}, {i})"
-                );
+                let sql =
+                    format!("insert into events (id, thread_id, seq) values ({id}, {t}, {i})");
                 match db.execute(client_id, &sql) {
                     Ok(_) => {
                         total_writer_ops.fetch_add(1, Ordering::Relaxed);
@@ -194,7 +193,10 @@ fn main() {
 
     println!();
     println!("--- Aggregate ---");
-    println!("Wall time:       {:.1} ms", wall_time.as_secs_f64() * 1000.0);
+    println!(
+        "Wall time:       {:.1} ms",
+        wall_time.as_secs_f64() * 1000.0
+    );
     println!("Total inserts:   {total_w}");
     println!("Total selects:   {total_r}");
     println!("Total errors:    {total_e}");
