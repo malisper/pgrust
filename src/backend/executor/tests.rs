@@ -3559,6 +3559,22 @@
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
+            "insert into bit_defaults (b2) values (B'1')",
+            catalog.clone(),
+        )
+        .unwrap();
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults values (DEFAULT, B'11')",
+            catalog.clone(),
+        )
+        .unwrap();
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
             "insert into bit_defaults select B'1111', B'1'",
             catalog.clone(),
         )
@@ -3572,10 +3588,98 @@
                     Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b0101_0000])),
                 ],
                 vec![
+                    Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1001_0000])),
+                    Value::Bit(crate::include::nodes::datum::BitString::new(1, vec![0b1000_0000])),
+                ],
+                vec![
+                    Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1001_0000])),
+                    Value::Bit(crate::include::nodes::datum::BitString::new(2, vec![0b1100_0000])),
+                ],
+                vec![
                     Value::Bit(crate::include::nodes::datum::BitString::new(4, vec![0b1111_0000])),
                     Value::Bit(crate::include::nodes::datum::BitString::new(1, vec![0b1000_0000])),
                 ],
             ],
+        );
+    }
+
+    #[test]
+    fn prepared_insert_uses_defaults_for_omitted_columns() {
+        let base = temp_dir("prepared_insert_defaults");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        let mut catalog = Catalog::default();
+        let mut desc = RelationDesc {
+            columns: vec![
+                crate::backend::catalog::catalog::column_desc(
+                    "id",
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                    false,
+                ),
+                crate::backend::catalog::catalog::column_desc(
+                    "note",
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text),
+                    true,
+                ),
+            ],
+        };
+        desc.columns[1].default_expr = Some("'default note'".into());
+        catalog.insert(
+            "prepared_defaults",
+            test_catalog_entry(
+                crate::RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: 15007,
+                },
+                desc.clone(),
+            ),
+        );
+        crate::backend::catalog::store::sync_catalog_heaps_for_tests(&base, &catalog).unwrap();
+
+        let smgr = MdStorageManager::new(&base);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        for name in catalog.table_names().collect::<Vec<_>>() {
+            if let Some(entry) = catalog.get(&name) {
+                create_fork(&*pool, entry.rel);
+            }
+        }
+        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
+        let mut ctx = ExecutorContext {
+            pool,
+            txns: txns_arc,
+            snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            client_id: 77,
+            next_command_id: 0,
+            outer_rows: Vec::new(),
+            timed: false,
+        };
+
+        let prepared = crate::backend::parser::bind_insert_prepared(
+            "prepared_defaults",
+            Some(&["id".to_string()]),
+            1,
+            &catalog,
+        )
+        .unwrap();
+        execute_prepared_insert_row(
+            &prepared,
+            &[Value::Int32(7)],
+            &mut ctx,
+            INVALID_TRANSACTION_ID,
+            0,
+        )
+        .unwrap();
+
+        assert_query_rows(
+            run_sql_with_catalog(
+                &base,
+                &txns,
+                INVALID_TRANSACTION_ID,
+                "table prepared_defaults",
+                catalog,
+            )
+            .unwrap(),
+            vec![vec![Value::Int32(7), Value::Text("default note".into())]],
         );
     }
 
@@ -6393,6 +6497,48 @@
     }
 
     #[test]
+    fn generate_series_rejects_non_finite_numeric_bounds() {
+        let base = temp_dir("generate_series_numeric_non_finite");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(-100::numeric, 100::numeric, 'nan'::numeric)",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::GenerateSeriesInvalidArg("step size", "NaN")
+        ));
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series('nan'::numeric, 100::numeric, 10::numeric)",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::GenerateSeriesInvalidArg("start", "NaN")
+        ));
+
+        let err = run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from generate_series(0::numeric, 'nan'::numeric, 10::numeric)",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::GenerateSeriesInvalidArg("stop", "NaN")
+        ));
+    }
+
+    #[test]
     fn mod_function_works_for_numeric_values() {
         let base = temp_dir("mod_function_numeric");
         let txns = TransactionManager::new_durable(&base).unwrap();
@@ -6464,6 +6610,28 @@
                         Value::Numeric("2".into()),
                         Value::Numeric("1.000".into()),
                     ]]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trunc_and_round_large_negative_scale_short_circuit_to_zero() {
+        let base = temp_dir("trunc_round_large_negative_scale");
+        let txns = TransactionManager::new_durable(&base).unwrap();
+        match run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select trunc(9.9e131071, -1000000), round(5.5e131071, -1000000)",
+        )
+        .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Numeric("0".into()), Value::Numeric("0".into())]]
                 );
             }
             other => panic!("expected query result, got {:?}", other),

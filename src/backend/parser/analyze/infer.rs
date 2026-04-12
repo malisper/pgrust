@@ -30,6 +30,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
             .unwrap_or(SqlType::new(SqlTypeKind::Text))
         }
+        SqlExpr::Default => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),

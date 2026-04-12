@@ -42,6 +42,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ResolvedColumn::Outer { depth, index } => Expr::OuterColumn { depth, index },
             }
         }
+        SqlExpr::Default => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "expression",
+                actual: "DEFAULT".into(),
+            });
+        }
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
         SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),

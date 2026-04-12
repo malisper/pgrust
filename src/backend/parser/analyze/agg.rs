@@ -4,6 +4,7 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::AggCall { .. } => true,
         SqlExpr::Column(_)
+        | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
@@ -69,6 +70,7 @@ pub(super) fn targets_contain_agg(targets: &[SelectItem]) -> bool {
 pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::Column(_) => true,
+        SqlExpr::Default => false,
         SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
@@ -144,6 +146,7 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>
             }
         }
         SqlExpr::Column(_)
+        | SqlExpr::Default
         | SqlExpr::Const(_)
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)

@@ -508,6 +508,7 @@ pub enum SubqueryComparisonOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlExpr {
     Column(String),
+    Default,
     Const(Value),
     IntegerLiteral(String),
     NumericLiteral(String),
