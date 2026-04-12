@@ -1,16 +1,132 @@
-# pgrust development notes
+# AGENTS
 
-## Storage fork creation
+## Overview
 
-Storage forks are created at startup by `Database::open` and by `CREATE TABLE`.
-The insert path (`heap_insert_version`) assumes forks already exist and does NOT
-create them on the fly.
+`pgrust` is a PostgreSQL-style database prototype implemented in Rust. The repo is structured around the same broad layers PostgreSQL uses:
 
-Tests that use raw `BufferPool` instances (without going through `Database`) must
-call a test-only `create_fork()` helper to set up the fork before inserting.
-Fork creation code should only appear in test helpers, never on the hot insert path.
+- `src/backend/parser`: SQL grammar, parse tree handling, semantic analysis, and logical plan construction.
+- `src/backend/executor`: expression evaluation, plan startup, runtime plan-node execution, tuple/value I/O, and aggregates.
+- `src/backend/catalog`: table/type metadata and catalog mutations.
+- `src/backend/access` and `src/backend/storage`: heap access, page layout, buffer/storage concerns.
+- `src/backend/tcop` and `src/backend/libpq`: protocol entry points, error mapping, and frontend/backend message handling.
+- `src/include/nodes`: shared node/value/plan/runtime data structures.
+- `src/pgrust`: server/session/database orchestration outside the PostgreSQL-style backend tree.
 
-## Running tests
+The current codebase was recently refactored to separate parser, logical plan, and executor-runtime responsibilities more cleanly. Prefer extending those boundaries instead of reintroducing cross-layer dependencies.
 
-When running tests, redirect output to a file (e.g. `cargo test 2>&1 | tee test_output.txt`)
-so you can re-read the results without having to re-run the full test suite.
+## Shared Node Layers
+
+The canonical shared types live under `src/include/nodes`:
+
+- [src/include/nodes/parsenodes.rs](src/include/nodes/parsenodes.rs): raw SQL AST produced by the parser.
+- [src/include/nodes/datum.rs](src/include/nodes/datum.rs): logical scalar values like `Value` and `NumericValue`.
+- [src/include/nodes/plannodes.rs](src/include/nodes/plannodes.rs): bound expressions, logical plans, column metadata, aggregates, and scalar-function identifiers.
+- [src/include/nodes/execnodes.rs](src/include/nodes/execnodes.rs): executor runtime state such as tuple slots and concrete `*State` plan-node structs.
+
+Rules:
+
+- Parser code should depend on `parsenodes`, `datum`, and `plannodes`, not executor implementation files.
+- Executor code may depend on `datum`, `plannodes`, and `execnodes`.
+- Runtime behavior should not live in `src/include/nodes`; keep behavior in `src/backend/*`.
+
+## Parser Structure
+
+Top-level parser entry points are in [src/backend/parser/mod.rs](src/backend/parser/mod.rs). This module should stay thin: grammar entry points, public parser API, and re-exports.
+
+Grammar files:
+
+- [src/backend/parser/gram.pest](src/backend/parser/gram.pest)
+- [src/backend/parser/gram.rs](src/backend/parser/gram.rs)
+
+Semantic analysis lives in `src/backend/parser/analyze`:
+
+- [src/backend/parser/analyze/mod.rs](src/backend/parser/analyze/mod.rs): statement-level orchestration, DDL/DML binding entry points, and top-level `SELECT` planning flow.
+- [src/backend/parser/analyze/scope.rs](src/backend/parser/analyze/scope.rs): relation binding, scope construction, column resolution, outer-scope lookup.
+- [src/backend/parser/analyze/coerce.rs](src/backend/parser/analyze/coerce.rs): coercion helpers, type-family logic, and common-type selection.
+- [src/backend/parser/analyze/functions.rs](src/backend/parser/analyze/functions.rs): builtin scalar-function and aggregate lookup plus arity validation.
+- [src/backend/parser/analyze/expr.rs](src/backend/parser/analyze/expr.rs): normal expression binding.
+- [src/backend/parser/analyze/infer.rs](src/backend/parser/analyze/infer.rs): SQL expression type inference.
+- [src/backend/parser/analyze/agg.rs](src/backend/parser/analyze/agg.rs): aggregate discovery and grouped-column validation.
+- [src/backend/parser/analyze/agg_output.rs](src/backend/parser/analyze/agg_output.rs): binding grouped aggregate output expressions.
+- [src/backend/parser/analyze/agg_output_special.rs](src/backend/parser/analyze/agg_output_special.rs): grouped subquery/function/array helper paths.
+
+Guidance:
+
+- Add new raw syntax in `gram.pest`/`gram.rs`, then map it into `parsenodes`.
+- Add new semantic binding in the narrowest `analyze/*` module that matches the responsibility.
+- Avoid growing `analyze/mod.rs` back into a catch-all file.
+
+## Executor Structure
+
+The executor facade is [src/backend/executor/mod.rs](src/backend/executor/mod.rs). It owns public executor entry points, shared executor error types, and exports, but most production logic should live in submodules.
+
+Execution modules:
+
+- [src/backend/executor/startup.rs](src/backend/executor/startup.rs): plan startup and plan-state construction.
+- [src/backend/executor/driver.rs](src/backend/executor/driver.rs): top-level execution flow and tuple production.
+- [src/backend/executor/nodes.rs](src/backend/executor/nodes.rs): runtime behavior for concrete plan-node state structs.
+- [src/backend/executor/agg.rs](src/backend/executor/agg.rs): aggregate transition and finalize logic.
+
+Expression and value handling:
+
+- [src/backend/executor/exec_expr.rs](src/backend/executor/exec_expr.rs): high-level expression evaluation entry points.
+- [src/backend/executor/expr_ops.rs](src/backend/executor/expr_ops.rs): arithmetic, comparison, ordering, and boolean operator helpers.
+- [src/backend/executor/expr_casts.rs](src/backend/executor/expr_casts.rs): cast and coercion behavior during execution.
+- [src/backend/executor/expr_compile.rs](src/backend/executor/expr_compile.rs): predicate compilation and fixed-layout fast paths.
+- [src/backend/executor/expr_json.rs](src/backend/executor/expr_json.rs): JSON operator and builder behavior.
+- [src/backend/executor/value_io.rs](src/backend/executor/value_io.rs): tuple encoding/decoding and value serialization helpers.
+- [src/backend/executor/exec_tuples.rs](src/backend/executor/exec_tuples.rs): tuple decoding/deformation helpers.
+- [src/backend/executor/jsonb.rs](src/backend/executor/jsonb.rs) and [src/backend/executor/jsonpath.rs](src/backend/executor/jsonpath.rs): JSONB and JSONPath support.
+
+Guidance:
+
+- Do not move logical plan or `Value` definitions back into executor files.
+- Keep type-specific I/O in focused helper modules instead of growing `exec_expr.rs`.
+- Keep runtime node behavior in `nodes.rs`, not `execnodes.rs`.
+
+## Catalog, Access, Storage, and Protocol
+
+- [src/backend/catalog/catalog.rs](src/backend/catalog/catalog.rs): catalog state and metadata operations.
+- [src/backend/commands/tablecmds.rs](src/backend/commands/tablecmds.rs): DDL-heavy command handling.
+- [src/backend/commands/copyfrom.rs](src/backend/commands/copyfrom.rs): `COPY FROM`.
+- [src/backend/commands/explain.rs](src/backend/commands/explain.rs): `EXPLAIN` formatting and explain-only behavior.
+- `src/backend/access/*`: heap access methods and transaction-visible tuple handling.
+- `src/backend/storage/*`: page layout and storage primitives.
+- [src/backend/libpq/pqcomm.rs](src/backend/libpq/pqcomm.rs) and [src/backend/libpq/pqformat.rs](src/backend/libpq/pqformat.rs): wire protocol messaging and error formatting.
+- [src/backend/tcop/postgres.rs](src/backend/tcop/postgres.rs): SQL execution entry flow and SQLSTATE mapping.
+
+## Server Layer
+
+The PostgreSQL-like backend modules sit under `src/backend`, but process/session orchestration is in `src/pgrust`:
+
+- [src/pgrust/server.rs](src/pgrust/server.rs): TCP server loop.
+- [src/pgrust/session.rs](src/pgrust/session.rs): per-client session behavior.
+- [src/pgrust/database.rs](src/pgrust/database.rs): database-level shared state and temp-object/session interactions.
+
+If a change is about SQL semantics, planning, or execution, it usually belongs under `src/backend`, not `src/pgrust`.
+
+## Working Rules
+
+- Before adding code to a large file, check whether there is already a responsibility-specific sibling module.
+- Prefer moving logic outward into narrow modules rather than adding another broad helper section to `mod.rs`.
+- Keep parser analysis, logical plan construction, and executor runtime concerns separate.
+- Keep tests close to the module they validate when practical. The executor facade still has a large test block; shrinking that is still a good follow-up.
+- Avoid adding new parser dependencies on executor implementation modules.
+- When you introduce a narrow workaround, compatibility shim, or intentionally temporary shortcut, add a nearby `:HACK:` comment explaining what is being worked around and what the preferred long-term shape should be.
+
+## Validation
+
+For structural refactors, the default verification loop is:
+
+- `cargo check`
+- `cargo test --lib --quiet`
+
+If a change affects SQL behavior more broadly, run the regression harness afterward.
+
+## Profiling Output
+
+When the user asks for a profile or profiling analysis:
+
+- Present the results in a clean, readable format.
+- Include the profile source or file path, a short summary of the main hotspots, and a compact list of the most important syscall or caller chains when relevant.
+- Prefer concise sections such as `Summary`, `Top Hotspots`, and `Key Call Paths` over dumping raw profiler output without interpretation.
