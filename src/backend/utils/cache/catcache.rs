@@ -10,7 +10,7 @@ use crate::backend::catalog::pg_auth_members::sort_pg_auth_members_rows;
 use crate::backend::catalog::pg_authid::sort_pg_authid_rows;
 use crate::backend::catalog::pg_cast::sort_pg_cast_rows;
 use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
-use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
+use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
@@ -205,6 +205,12 @@ impl CatCache {
             }
 
             if entry.relation_oid >= DEFAULT_FIRST_USER_OID {
+                cache.constraint_rows.extend(derived_pg_constraint_rows(
+                    entry.relation_oid,
+                    relname,
+                    entry.namespace_oid,
+                    &entry.desc,
+                ));
                 cache.depend_rows.extend(derived_pg_depend_rows(entry));
             }
 
@@ -686,7 +692,13 @@ mod tests {
                 .iter()
                 .any(|row| { row.lanname == "sql" && row.lanpltrusted })
         );
-        assert!(cache.constraint_rows().is_empty());
+        assert!(cache.constraint_rows().iter().any(|row| {
+            row.conname == "people_id_not_null"
+                && row.contype == 'n'
+                && row.conrelid == entry.relation_oid
+                && row.connamespace == PUBLIC_NAMESPACE_OID
+                && row.convalidated
+        }));
         assert!(cache.operator_rows().iter().any(|row| {
             row.oid == 91
                 && row.oprname == "="

@@ -1001,6 +1001,58 @@ fn temp_catalog_rows_appear_with_pg_temp_namespace() {
 }
 
 #[test]
+fn pg_constraint_lists_not_null_columns_for_permanent_and_temp_tables() {
+    let base = temp_dir("pg_constraint_not_null_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table temp_items (id int4 not null, note text not null)",
+        )
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select c.conname, r.relname, c.contype \
+                 from pg_constraint c \
+                 join pg_class r on r.oid = c.conrelid \
+                 where r.relname in ('items', 'temp_items') \
+                 order by r.relname, c.conname",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Text("items_id_not_null".into()),
+                        Value::Text("items".into()),
+                        Value::Text("n".into()),
+                    ],
+                    vec![
+                        Value::Text("temp_items_id_not_null".into()),
+                        Value::Text("temp_items".into()),
+                        Value::Text("n".into()),
+                    ],
+                    vec![
+                        Value::Text("temp_items_note_not_null".into()),
+                        Value::Text("temp_items".into()),
+                        Value::Text("n".into()),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn show_tables_does_not_duplicate_catalog_aliases_under_temp_shadowing() {
     let base = temp_dir("show_tables_temp_shadow");
     let db = Database::open(&base, 16).unwrap();
