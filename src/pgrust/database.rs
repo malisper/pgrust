@@ -294,8 +294,12 @@ impl Database {
         Some(rebuilt)
     }
 
-    fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
-        let mut relcache = {
+    fn snapshot_visible_state(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+    ) -> (RelCache, Option<CatCache>) {
+        {
             let catalog_guard = self.catalog.read();
             let txns = self.txns.read();
             let snapshot = match txn_ctx {
@@ -304,15 +308,19 @@ impl Database {
                     .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
                     .ok(),
             };
-            match snapshot.and_then(|snapshot| {
-                catalog_guard
-                    .relcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
-                    .ok()
-            }) {
-                Some(relcache) => relcache,
-                None => catalog_guard.relcache().unwrap_or_default(),
+            if let Some(snapshot) = snapshot
+                && let Ok(catcache) = catalog_guard
+                    .catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
+            {
+                let relcache = RelCache::from_catcache(&catcache).unwrap_or_default();
+                return (relcache, Some(catcache));
             }
-        };
+            (catalog_guard.relcache().unwrap_or_default(), catalog_guard.catcache().ok())
+        }
+    }
+
+    fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
+        let (mut relcache, _) = self.snapshot_visible_state(client_id, txn_ctx);
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {
                 relcache.insert(name.clone(), temp.entry.clone());
@@ -484,27 +492,10 @@ impl Database {
             }
         }
 
-        let relcache =
-            self.visible_relcache_with_txn_search_path(client_id, txn_ctx, configured_search_path);
-        let catcache = {
-            let catalog_guard = self.catalog.read();
-            let txns = self.txns.read();
-            let snapshot = match txn_ctx {
-                Some((xid, cid)) => txns.snapshot_for_command(xid, cid).ok(),
-                None => txns
-                    .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
-                    .ok(),
-            };
-            match snapshot.and_then(|snapshot| {
-                catalog_guard
-                    .catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
-                    .ok()
-            }) {
-                Some(catcache) => Some(catcache),
-                None => catalog_guard.catcache().ok(),
-            }
-        };
-        VisibleCatalog::new(relcache, catcache)
+        let relcache = self.raw_visible_relcache(client_id, txn_ctx);
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let (_, catcache) = self.snapshot_visible_state(client_id, txn_ctx);
+        VisibleCatalog::new(relcache.with_search_path(&search_path), catcache)
     }
 
     pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
