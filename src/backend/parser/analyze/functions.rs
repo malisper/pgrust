@@ -28,19 +28,9 @@ pub(super) fn resolve_function_cast_type(name: &str) -> Option<SqlType> {
 }
 
 pub(super) fn resolve_json_table_function(name: &str) -> Option<JsonTableFunction> {
-    match name.to_ascii_lowercase().as_str() {
-        "json_object_keys" => Some(JsonTableFunction::ObjectKeys),
-        "json_each" => Some(JsonTableFunction::Each),
-        "json_each_text" => Some(JsonTableFunction::EachText),
-        "json_array_elements" => Some(JsonTableFunction::ArrayElements),
-        "json_array_elements_text" => Some(JsonTableFunction::ArrayElementsText),
-        "jsonb_object_keys" => Some(JsonTableFunction::JsonbObjectKeys),
-        "jsonb_each" => Some(JsonTableFunction::JsonbEach),
-        "jsonb_each_text" => Some(JsonTableFunction::JsonbEachText),
-        "jsonb_array_elements" => Some(JsonTableFunction::JsonbArrayElements),
-        "jsonb_array_elements_text" => Some(JsonTableFunction::JsonbArrayElementsText),
-        _ => None,
-    }
+    json_table_functions_by_name()
+        .get(&name.to_ascii_lowercase())
+        .copied()
 }
 
 pub(super) fn validate_scalar_function_arity(
@@ -309,6 +299,49 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
     ]
 }
 
+fn json_table_functions_by_name() -> &'static BTreeMap<String, JsonTableFunction> {
+    static FUNCTIONS: OnceLock<BTreeMap<String, JsonTableFunction>> = OnceLock::new();
+    FUNCTIONS.get_or_init(|| {
+        let mut by_name = BTreeMap::new();
+        for row in bootstrap_pg_proc_rows() {
+            if row.prokind != 'f' || !row.proretset {
+                continue;
+            }
+            if let Some(func) = legacy_json_table_function_entries()
+                .iter()
+                .find_map(|(name, func)| row.proname.eq_ignore_ascii_case(name).then_some(*func))
+            {
+                by_name.insert(row.proname.to_ascii_lowercase(), func);
+            }
+        }
+        for (name, func) in legacy_json_table_function_entries() {
+            by_name.entry((*name).into()).or_insert(*func);
+        }
+        by_name
+    })
+}
+
+fn legacy_json_table_function_entries() -> &'static [(&'static str, JsonTableFunction)] {
+    &[
+        ("json_object_keys", JsonTableFunction::ObjectKeys),
+        ("json_each", JsonTableFunction::Each),
+        ("json_each_text", JsonTableFunction::EachText),
+        ("json_array_elements", JsonTableFunction::ArrayElements),
+        (
+            "json_array_elements_text",
+            JsonTableFunction::ArrayElementsText,
+        ),
+        ("jsonb_object_keys", JsonTableFunction::JsonbObjectKeys),
+        ("jsonb_each", JsonTableFunction::JsonbEach),
+        ("jsonb_each_text", JsonTableFunction::JsonbEachText),
+        ("jsonb_array_elements", JsonTableFunction::JsonbArrayElements),
+        (
+            "jsonb_array_elements_text",
+            JsonTableFunction::JsonbArrayElementsText,
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +363,22 @@ mod tests {
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);
         assert_eq!(resolve_scalar_function("int4"), None);
+    }
+
+    #[test]
+    fn resolve_json_table_function_uses_pg_proc_and_legacy_fallback() {
+        assert_eq!(
+            resolve_json_table_function("json_array_elements"),
+            Some(JsonTableFunction::ArrayElements)
+        );
+        assert_eq!(
+            resolve_json_table_function("jsonb_array_elements"),
+            Some(JsonTableFunction::JsonbArrayElements)
+        );
+        assert_eq!(
+            resolve_json_table_function("json_each"),
+            Some(JsonTableFunction::Each)
+        );
+        assert_eq!(resolve_json_table_function("random"), None);
     }
 }
