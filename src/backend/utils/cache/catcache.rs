@@ -18,7 +18,7 @@ use crate::backend::catalog::pg_language::sort_pg_language_rows;
 use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
-use crate::backend::catalog::store::load_physical_catalog_rows;
+use crate::backend::catalog::loader::load_physical_catalog_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
