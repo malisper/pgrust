@@ -243,10 +243,13 @@ pub(super) fn ensure_single_column_subquery(plan: &Plan) -> Result<(), ParseErro
 }
 
 pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> SqlType {
+    if let Some(sql_type) = fixed_aggregate_return_type(func) {
+        return sql_type;
+    }
+
     use SqlTypeKind::*;
 
     match func {
-        AggFunc::Count => SqlType::new(Int8),
         AggFunc::Sum => match arg_type.map(|t| t.element_type().kind) {
             Some(Int2 | Int4) => SqlType::new(Int8),
             Some(Int8 | Numeric) => SqlType::new(Numeric),
@@ -268,7 +271,38 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             None => SqlType::new(Numeric),
         },
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
-        AggFunc::JsonAgg | AggFunc::JsonObjectAgg => SqlType::new(Json),
-        AggFunc::JsonbAgg | AggFunc::JsonbObjectAgg => SqlType::new(Jsonb),
+        AggFunc::Count
+        | AggFunc::JsonAgg
+        | AggFunc::JsonbAgg
+        | AggFunc::JsonObjectAgg
+        | AggFunc::JsonbObjectAgg => unreachable!("fixed aggregate return types handled above"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_sql_type_uses_pg_proc_for_fixed_return_aggs() {
+        assert_eq!(
+            aggregate_sql_type(AggFunc::Count, Some(SqlType::new(SqlTypeKind::Int4))),
+            SqlType::new(SqlTypeKind::Int8)
+        );
+        assert_eq!(
+            aggregate_sql_type(AggFunc::JsonAgg, Some(SqlType::new(SqlTypeKind::Text))),
+            SqlType::new(SqlTypeKind::Json)
+        );
+        assert_eq!(
+            aggregate_sql_type(
+                AggFunc::JsonbObjectAgg,
+                Some(SqlType::new(SqlTypeKind::Text)),
+            ),
+            SqlType::new(SqlTypeKind::Jsonb)
+        );
+        assert_eq!(
+            aggregate_sql_type(AggFunc::Sum, Some(SqlType::new(SqlTypeKind::Int4))),
+            SqlType::new(SqlTypeKind::Int8)
+        );
     }
 }

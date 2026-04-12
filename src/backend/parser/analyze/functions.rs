@@ -157,6 +157,12 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
     }
 }
 
+pub(super) fn fixed_aggregate_return_type(func: AggFunc) -> Option<SqlType> {
+    aggregate_fixed_return_types()
+        .iter()
+        .find_map(|(candidate, sql_type)| (*candidate == func).then_some(*sql_type))
+}
+
 fn scalar_functions_by_name() -> &'static BTreeMap<String, BuiltinScalarFunction> {
     static FUNCTIONS: OnceLock<BTreeMap<String, BuiltinScalarFunction>> = OnceLock::new();
     FUNCTIONS.get_or_init(|| {
@@ -444,6 +450,48 @@ fn aggregate_arity_overrides() -> &'static Vec<(AggFunc, usize)> {
     })
 }
 
+fn aggregate_fixed_return_types() -> &'static Vec<(AggFunc, SqlType)> {
+    static TYPES: OnceLock<Vec<(AggFunc, SqlType)>> = OnceLock::new();
+    TYPES.get_or_init(|| {
+        let mut by_func = Vec::new();
+        for row in bootstrap_pg_proc_rows() {
+            if row.prokind != 'a' {
+                continue;
+            }
+            let Some(func) = aggregate_func_for_proname(&row.proname) else {
+                continue;
+            };
+            if !supports_fixed_aggregate_return_type(func) {
+                continue;
+            }
+            let Some(sql_type) = builtin_sql_type_for_oid(row.prorettype) else {
+                continue;
+            };
+            if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                by_func.push((func, sql_type));
+            }
+        }
+        by_func
+    })
+}
+
+fn supports_fixed_aggregate_return_type(func: AggFunc) -> bool {
+    matches!(
+        func,
+        AggFunc::Count
+            | AggFunc::JsonAgg
+            | AggFunc::JsonbAgg
+            | AggFunc::JsonObjectAgg
+            | AggFunc::JsonbObjectAgg
+    )
+}
+
+fn builtin_sql_type_for_oid(oid: u32) -> Option<SqlType> {
+    builtin_type_rows()
+        .into_iter()
+        .find_map(|row| (row.oid == oid).then_some(row.sql_type))
+}
+
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
@@ -551,5 +599,23 @@ mod tests {
         .is_ok());
         assert!(validate_aggregate_arity(AggFunc::JsonObjectAgg, &[SqlExpr::Default]).is_err());
         assert!(validate_aggregate_arity(AggFunc::Count, &[]).is_ok());
+    }
+
+    #[test]
+    fn fixed_aggregate_return_type_uses_pg_proc_for_type_invariant_rows() {
+        assert_eq!(
+            fixed_aggregate_return_type(AggFunc::Count),
+            Some(SqlType::new(SqlTypeKind::Int8))
+        );
+        assert_eq!(
+            fixed_aggregate_return_type(AggFunc::JsonAgg),
+            Some(SqlType::new(SqlTypeKind::Json))
+        );
+        assert_eq!(
+            fixed_aggregate_return_type(AggFunc::JsonbObjectAgg),
+            Some(SqlType::new(SqlTypeKind::Jsonb))
+        );
+        assert_eq!(fixed_aggregate_return_type(AggFunc::Sum), None);
+        assert_eq!(fixed_aggregate_return_type(AggFunc::Max), None);
     }
 }
