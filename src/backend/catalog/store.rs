@@ -951,6 +951,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
         );
     let mut catalog = Catalog {
         tables: BTreeMap::new(),
+        constraints: Vec::new(),
         next_rel_number: DEFAULT_FIRST_REL_NUMBER,
         next_oid,
     };
@@ -1027,6 +1028,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
             .next_rel_number
             .max(row.relfilenode.saturating_add(1));
     }
+    catalog.constraints = constraint_rows;
     Ok(catalog)
 }
 

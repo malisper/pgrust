@@ -10,7 +10,7 @@ use crate::backend::catalog::pg_auth_members::sort_pg_auth_members_rows;
 use crate::backend::catalog::pg_authid::sort_pg_authid_rows;
 use crate::backend::catalog::pg_cast::sort_pg_cast_rows;
 use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
-use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
+use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
@@ -205,12 +205,6 @@ impl CatCache {
             }
 
             if entry.relation_oid >= DEFAULT_FIRST_USER_OID {
-                cache.constraint_rows.extend(derived_pg_constraint_rows(
-                    entry.relation_oid,
-                    relname,
-                    entry.namespace_oid,
-                    &entry.desc,
-                ));
                 cache.depend_rows.extend(derived_pg_depend_rows(entry));
             }
 
@@ -229,6 +223,10 @@ impl CatCache {
             }
         }
 
+        cache
+            .constraint_rows
+            .extend(catalog.constraint_rows().iter().cloned());
+        sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
