@@ -48,6 +48,23 @@ impl VisibleCatalog {
             })
             .unwrap_or(false)
     }
+
+    pub fn access_method_name_for_relation(&self, relation_oid: u32) -> Option<String> {
+        if let Some(catcache) = &self.catcache {
+            let relam = catcache.class_by_oid(relation_oid)?.relam;
+            return catcache
+                .am_rows()
+                .into_iter()
+                .find(|row| row.oid == relam)
+                .map(|row| row.amname);
+        }
+
+        match self.relcache.get_by_oid(relation_oid)?.relkind {
+            'r' => Some("heap".to_string()),
+            'i' => Some("btree".to_string()),
+            _ => None,
+        }
+    }
 }
 
 impl CatalogLookup for VisibleCatalog {
