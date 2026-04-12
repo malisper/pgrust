@@ -20,8 +20,7 @@ use pgrust::executor::{
 use pgrust::include::access::htup::{HeapTuple, TupleValue};
 use pgrust::parser::{
     ParseError, SqlType, SqlTypeKind, Statement, bind_delete, bind_insert, bind_update,
-    create_relation_desc,
-    normalize_create_table_name, parse_statement,
+    create_relation_desc, normalize_create_table_name, parse_statement,
 };
 use pgrust::pl::plpgsql::{RaiseLevel, clear_notices, execute_do, take_notices};
 use pgrust::{BufferPool, SmgrStorageBackend};
@@ -439,26 +438,29 @@ fn run_statement(
     clear_notices();
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
-        Statement::Set(_)
-        | Statement::Reset(_)
-        | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
-        Statement::CreateIndex(stmt) => {
-            Ok(catalog_store
-                .create_index(stmt.index_name, &stmt.table_name, stmt.unique, &stmt.columns)
-                .map(|entry| {
-                    let _ = pool.with_storage_mut(|s| {
-                        let _ = s.smgr.open(entry.rel);
-                        let _ = s.smgr.create(entry.rel, ForkNumber::Main, false);
-                    });
-                    StatementResult::AffectedRows(0)
-                })
-                .map_err(|other| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "catalog index creation",
-                        actual: format!("{other:?}"),
-                    })
-                })?)
+        Statement::Set(_) | Statement::Reset(_) | Statement::AlterTableSet(_) => {
+            Ok(StatementResult::AffectedRows(0))
         }
+        Statement::CreateIndex(stmt) => Ok(catalog_store
+            .create_index(
+                stmt.index_name,
+                &stmt.table_name,
+                stmt.unique,
+                &stmt.columns,
+            )
+            .map(|entry| {
+                let _ = pool.with_storage_mut(|s| {
+                    let _ = s.smgr.open(entry.rel);
+                    let _ = s.smgr.create(entry.rel, ForkNumber::Main, false);
+                });
+                StatementResult::AffectedRows(0)
+            })
+            .map_err(|other| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "catalog index creation",
+                    actual: format!("{other:?}"),
+                })
+            })?),
         Statement::Explain(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
@@ -550,7 +552,8 @@ fn run_statement(
                         }
                         dropped += 1;
                     }
-                    Err(pgrust::backend::catalog::CatalogError::UnknownTable(_)) if stmt.if_exists => {}
+                    Err(pgrust::backend::catalog::CatalogError::UnknownTable(_))
+                        if stmt.if_exists => {}
                     Err(pgrust::backend::catalog::CatalogError::UnknownTable(name)) => {
                         return Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
                     }

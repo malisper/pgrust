@@ -10,14 +10,14 @@ pub fn relation_lookup_by_name<'a>(
     relcache.get_by_name(name)
 }
 
-pub fn relation_lookup_by_oid<'a>(
-    relcache: &'a RelCache,
-    oid: u32,
-) -> Option<&'a RelCacheEntry> {
+pub fn relation_lookup_by_oid<'a>(relcache: &'a RelCache, oid: u32) -> Option<&'a RelCacheEntry> {
     relcache.get_by_oid(oid)
 }
 
-pub fn namespace_lookup_by_name<'a>(catcache: &'a CatCache, name: &str) -> Option<&'a PgNamespaceRow> {
+pub fn namespace_lookup_by_name<'a>(
+    catcache: &'a CatCache,
+    name: &str,
+) -> Option<&'a PgNamespaceRow> {
     catcache.namespace_by_name(name)
 }
 
@@ -34,5 +34,8 @@ pub fn pg_attribute_rows(catcache: &CatCache, relid: u32) -> Option<&[PgAttribut
 }
 
 pub fn caches_for_catalog(catalog: &Catalog) -> (RelCache, CatCache) {
-    (RelCache::from_catalog(catalog), CatCache::from_catalog(catalog))
+    (
+        RelCache::from_catalog(catalog),
+        CatCache::from_catalog(catalog),
+    )
 }

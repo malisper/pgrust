@@ -1,5 +1,5 @@
-use parking_lot::{Condvar, RwLock};
 use parking_lot::Mutex;
+use parking_lot::{Condvar, RwLock};
 
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager, TransactionStatus};
 
@@ -34,7 +34,8 @@ impl TransactionWaiter {
                 return false;
             }
             let mut guard = self.mu.lock();
-            self.cv.wait_for(&mut guard, std::time::Duration::from_millis(10));
+            self.cv
+                .wait_for(&mut guard, std::time::Duration::from_millis(10));
         }
     }
 

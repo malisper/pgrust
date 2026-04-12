@@ -86,7 +86,10 @@ mod tests {
             code: "begin null; end".into(),
         };
         let err = execute_do(&stmt).unwrap_err();
-        assert!(matches!(err, ExecError::Parse(ParseError::UnexpectedToken { .. })));
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::UnexpectedToken { .. })
+        ));
     }
 
     #[test]

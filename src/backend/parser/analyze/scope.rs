@@ -103,18 +103,20 @@ pub(super) fn bind_values_rows(
                         existing,
                         inferred,
                     );
-                    let adjusted = coerce_unknown_string_literal_type(&row[col_idx], inferred, existing);
-                    let resolved = resolve_common_scalar_type(existing, adjusted).ok_or_else(|| {
-                        ParseError::UnexpectedToken {
-                            expected: "VALUES columns with a common type",
-                            actual: format!(
-                                "VALUES column {} cannot reconcile {} and {}",
-                                col_idx + 1,
-                                sql_type_name(existing),
-                                sql_type_name(adjusted)
-                            ),
-                        }
-                    })?;
+                    let adjusted =
+                        coerce_unknown_string_literal_type(&row[col_idx], inferred, existing);
+                    let resolved =
+                        resolve_common_scalar_type(existing, adjusted).ok_or_else(|| {
+                            ParseError::UnexpectedToken {
+                                expected: "VALUES columns with a common type",
+                                actual: format!(
+                                    "VALUES column {} cannot reconcile {} and {}",
+                                    col_idx + 1,
+                                    sql_type_name(existing),
+                                    sql_type_name(adjusted)
+                                ),
+                            }
+                        })?;
                     common_expr = Some(&row[col_idx]);
                     resolved
                 }
@@ -291,10 +293,7 @@ pub(super) fn bind_from_item_with_ctes(
     match stmt {
         FromItem::Table { name } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
-                return Ok((
-                    cte.plan.clone(),
-                    scope_for_relation(Some(name), &cte.desc),
-                ));
+                return Ok((cte.plan.clone(), scope_for_relation(Some(name), &cte.desc)));
             }
             let entry = lookup_relation(catalog, name)?;
             let desc = entry.desc.clone();
@@ -332,10 +331,20 @@ pub(super) fn bind_from_item_with_ctes(
                     outer_scopes,
                     grouped_outer,
                 )?;
-                let start_type =
-                    infer_sql_expr_type(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer);
-                let stop_type =
-                    infer_sql_expr_type(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer);
+                let start_type = infer_sql_expr_type(
+                    &args[0],
+                    &empty_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                );
+                let stop_type = infer_sql_expr_type(
+                    &args[1],
+                    &empty_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                );
                 let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
                 if !matches!(
                     common.kind,
@@ -372,11 +381,7 @@ pub(super) fn bind_from_item_with_ctes(
                     }
                 };
                 let desc = RelationDesc {
-                    columns: vec![column_desc(
-                        "generate_series",
-                        common,
-                        false,
-                    )],
+                    columns: vec![column_desc("generate_series", common, false)],
                 };
                 let scope = scope_for_relation(Some(name), &desc);
                 Ok((
@@ -457,15 +462,39 @@ pub(super) fn bind_from_item_with_ctes(
                 }
                 let empty_scope = empty_scope();
                 let text_type = SqlType::new(SqlTypeKind::Text);
-                let left_type = infer_sql_expr_type(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer);
-                let right_type = infer_sql_expr_type(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer);
+                let left_type = infer_sql_expr_type(
+                    &args[0],
+                    &empty_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                );
+                let right_type = infer_sql_expr_type(
+                    &args[1],
+                    &empty_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                );
                 let left = coerce_bound_expr(
-                    bind_expr_with_outer(&args[0], &empty_scope, catalog, outer_scopes, grouped_outer)?,
+                    bind_expr_with_outer(
+                        &args[0],
+                        &empty_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                    )?,
                     left_type,
                     text_type,
                 );
                 let right = coerce_bound_expr(
-                    bind_expr_with_outer(&args[1], &empty_scope, catalog, outer_scopes, grouped_outer)?,
+                    bind_expr_with_outer(
+                        &args[1],
+                        &empty_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                    )?,
                     right_type,
                     text_type,
                 );
@@ -540,7 +569,9 @@ pub(super) fn bind_from_item_with_ctes(
                         grouped_outer,
                     )?;
                     let output_columns = match kind {
-                        JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
+                        JsonTableFunction::ObjectKeys => {
+                            vec![QueryColumn::text("json_object_keys")]
+                        }
                         JsonTableFunction::Each => vec![
                             QueryColumn::text("key"),
                             QueryColumn {
@@ -616,16 +647,14 @@ pub(super) fn bind_from_item_with_ctes(
                 bind_from_item_with_ctes(right, catalog, outer_scopes, grouped_outer, ctes)?;
             let scope = combine_scopes(&left_scope, &right_scope);
             let on = match (kind, on) {
-                (JoinKind::Inner, Some(on)) => {
-                    bind_expr_with_outer_and_ctes(
-                        on,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?
-                }
+                (JoinKind::Inner, Some(on)) => bind_expr_with_outer_and_ctes(
+                    on,
+                    &scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
                 (JoinKind::Cross, None) => Expr::Const(Value::Bool(true)),
                 _ => {
                     return Err(ParseError::UnexpectedToken {
@@ -655,7 +684,10 @@ pub(super) fn bind_from_item_with_ctes(
     }
 }
 
-pub(super) fn lookup_relation(catalog: &dyn CatalogLookup, name: &str) -> Result<BoundRelation, ParseError> {
+pub(super) fn lookup_relation(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<BoundRelation, ParseError> {
     catalog
         .lookup_relation(name)
         .ok_or_else(|| ParseError::UnknownTable(name.to_string()))

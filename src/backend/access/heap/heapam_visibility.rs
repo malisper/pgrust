@@ -1,10 +1,10 @@
 use crate::backend::access::transam::xact::{
-    CommandId, TransactionId, TransactionManager, TransactionStatus, INVALID_TRANSACTION_ID,
+    CommandId, INVALID_TRANSACTION_ID, TransactionId, TransactionManager, TransactionStatus,
 };
 use crate::backend::utils::time::snapmgr::Snapshot;
 use crate::include::access::htup::{
-    HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID,
-    INFOMASK_OFFSET, HeapTuple,
+    HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID, HeapTuple,
+    INFOMASK_OFFSET,
 };
 
 impl Snapshot {
@@ -68,7 +68,11 @@ impl Snapshot {
         check_visibility(self, txns, xmin, xmax, cid)
     }
 
-    pub fn tuple_bytes_visible_with_hints(&self, txns: &TransactionManager, bytes: &[u8]) -> (bool, u16) {
+    pub fn tuple_bytes_visible_with_hints(
+        &self,
+        txns: &TransactionManager,
+        bytes: &[u8],
+    ) -> (bool, u16) {
         let infomask = u16::from_le_bytes([bytes[INFOMASK_OFFSET], bytes[INFOMASK_OFFSET + 1]]);
         let xmin = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 

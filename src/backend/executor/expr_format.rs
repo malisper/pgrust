@@ -36,7 +36,11 @@ pub(crate) fn to_char_numeric(value: &NumericValue, format: &str) -> Result<Stri
     let mut parser = FormatParser::new(format);
     let spec = parser.parse()?;
     if spec.roman {
-        return Ok(format_roman_numeric(value, spec.fill_mode, spec.roman_lower));
+        return Ok(format_roman_numeric(
+            value,
+            spec.fill_mode,
+            spec.roman_lower,
+        ));
     }
     if spec.scientific {
         return format_scientific_numeric(value, &spec);
@@ -169,8 +173,7 @@ pub(crate) fn to_number_numeric(input: &str, format: &str) -> Result<NumericValu
         )
     };
 
-    parse_numeric_text(&rendered)
-        .ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))
+    parse_numeric_text(&rendered).ok_or_else(|| ExecError::InvalidNumericInput(input.to_string()))
 }
 
 #[derive(Debug)]
@@ -292,8 +295,8 @@ impl<'a> FormatParser<'a> {
             }
         }
 
-        let roman =
-            self.idx == self.chars.len() && self.raw[self.raw.len().saturating_sub(2)..].eq_ignore_ascii_case("RN");
+        let roman = self.idx == self.chars.len()
+            && self.raw[self.raw.len().saturating_sub(2)..].eq_ignore_ascii_case("RN");
         let roman_lower = roman && self.raw[self.raw.len().saturating_sub(2)..] == *"rn";
         if roman {
             tokens.clear();
@@ -343,7 +346,11 @@ impl<'a> FormatParser<'a> {
     fn peek_exact(&self, needle: &str) -> bool {
         let end = self.idx + needle.len();
         end <= self.chars.len()
-            && self.chars[self.idx..end].iter().copied().collect::<String>() == needle
+            && self.chars[self.idx..end]
+                .iter()
+                .copied()
+                .collect::<String>()
+                == needle
     }
 }
 
@@ -375,10 +382,16 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
     for idx in (0..int_end).rev() {
         match spec.tokens[idx] {
             Token::Digit9 => {
-                rendered[idx] = digit_chars.next().map(|ch| ch.to_string()).unwrap_or_else(|| " ".into());
+                rendered[idx] = digit_chars
+                    .next()
+                    .map(|ch| ch.to_string())
+                    .unwrap_or_else(|| " ".into());
             }
             Token::Digit0 => {
-                rendered[idx] = digit_chars.next().map(|ch| ch.to_string()).unwrap_or_else(|| "0".into());
+                rendered[idx] = digit_chars
+                    .next()
+                    .map(|ch| ch.to_string())
+                    .unwrap_or_else(|| "0".into());
             }
             _ => {}
         }
@@ -401,7 +414,11 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         for idx in dot + 1..spec.tokens.len() {
             match spec.tokens[idx] {
                 Token::Digit9 => {
-                    rendered[idx] = if spec.fill_mode { " ".into() } else { "0".into() }
+                    rendered[idx] = if spec.fill_mode {
+                        " ".into()
+                    } else {
+                        "0".into()
+                    }
                 }
                 Token::Digit0 => rendered[idx] = "0".into(),
                 _ => {}
@@ -443,7 +460,12 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         }
     }
 
-    if spec.tokens.iter().take(int_end).any(|token| matches!(token, Token::Digit0)) {
+    if spec
+        .tokens
+        .iter()
+        .take(int_end)
+        .any(|token| matches!(token, Token::Digit0))
+    {
         for idx in 0..int_end {
             if matches!(spec.tokens[idx], Token::Digit9) && rendered[idx] == " " {
                 rendered[idx] = "0".into();
@@ -465,7 +487,12 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
     }
 
     let mut out = rendered.concat();
-    if !spec.tokens.iter().any(|token| matches!(token, Token::Sign(_))) && !spec.angle_pr {
+    if !spec
+        .tokens
+        .iter()
+        .any(|token| matches!(token, Token::Sign(_)))
+        && !spec.angle_pr
+    {
         out = if negative
             && matches!(spec.tokens.first(), Some(Token::Literal(space)) if space == " ")
         {
@@ -484,7 +511,12 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         };
     }
 
-    if negative && spec.tokens.iter().any(|token| matches!(token, Token::Sign(SignKind::Pl))) {
+    if negative
+        && spec
+            .tokens
+            .iter()
+            .any(|token| matches!(token, Token::Sign(SignKind::Pl)))
+    {
         out = format!("-{}", out.trim_start());
     }
 
@@ -535,11 +567,7 @@ fn round_decimal_parts(
     let split = digits.len() - trim;
     let head = &digits[..split];
     let tail = &digits[split..];
-    let mut carry = tail
-        .chars()
-        .next()
-        .map(|ch| ch >= '5')
-        .unwrap_or(false);
+    let mut carry = tail.chars().next().map(|ch| ch >= '5').unwrap_or(false);
     let mut rounded: Vec<u8> = head.bytes().collect();
     if carry {
         for digit in rounded.iter_mut().rev() {
@@ -595,7 +623,11 @@ fn shift_value_text_for_v(rendered: &str, scale_digits: usize) -> String {
     let frac_len = frac_part.len();
     let new_scale = frac_len.saturating_sub(scale_digits);
     if new_scale == 0 {
-        let mut out = if digits.is_empty() { "0".to_string() } else { digits };
+        let mut out = if digits.is_empty() {
+            "0".to_string()
+        } else {
+            digits
+        };
         if negative && out != "0" {
             out.insert(0, '-');
         }
@@ -640,13 +672,21 @@ fn overflow_pattern(spec: &FormatSpec, negative: bool) -> String {
             Token::Group => ",".to_string(),
             Token::Literal(text) => text.clone(),
             Token::Sign(kind) => match kind {
-                SignKind::Mi | SignKind::S | SignKind::Sg | SignKind::Pl if negative => "-".to_string(),
+                SignKind::Mi | SignKind::S | SignKind::Sg | SignKind::Pl if negative => {
+                    "-".to_string()
+                }
                 _ => " ".to_string(),
             },
         })
         .collect::<Vec<_>>()
         .concat();
-    if !spec.tokens.iter().any(|token| matches!(token, Token::Sign(_))) && negative && !spec.angle_pr {
+    if !spec
+        .tokens
+        .iter()
+        .any(|token| matches!(token, Token::Sign(_)))
+        && negative
+        && !spec.angle_pr
+    {
         rendered = format!("-{rendered}");
     }
     if spec.fill_mode {
@@ -682,7 +722,9 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
                 Token::Decimal | Token::Group => " ".to_string(),
                 Token::Literal(text) => text.clone(),
                 Token::Sign(kind) => match kind {
-                    SignKind::Mi | SignKind::S | SignKind::Sg | SignKind::Pl if negative => "-".to_string(),
+                    SignKind::Mi | SignKind::S | SignKind::Sg | SignKind::Pl if negative => {
+                        "-".to_string()
+                    }
                     _ => " ".to_string(),
                 },
             })
@@ -704,7 +746,13 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             return overflow_pattern(spec, negative);
         }
         let mut out = out.concat();
-        if !spec.tokens.iter().any(|token| matches!(token, Token::Sign(_))) && negative && !spec.angle_pr {
+        if !spec
+            .tokens
+            .iter()
+            .any(|token| matches!(token, Token::Sign(_)))
+            && negative
+            && !spec.angle_pr
+        {
             out = format!("-{out}");
         }
         if spec.fill_mode {
@@ -783,13 +831,22 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
                 }
             }
             Token::Group if !seen_digit => {
-                rendered[idx] = if spec.fill_mode { String::new() } else { " ".into() }
+                rendered[idx] = if spec.fill_mode {
+                    String::new()
+                } else {
+                    " ".into()
+                }
             }
             _ => {}
         }
     }
 
-    if spec.tokens.iter().take(int_end).any(|token| matches!(token, Token::Digit0)) {
+    if spec
+        .tokens
+        .iter()
+        .take(int_end)
+        .any(|token| matches!(token, Token::Digit0))
+    {
         for idx in 0..int_end {
             if matches!(spec.tokens[idx], Token::Digit9) && rendered[idx] == " " {
                 rendered[idx] = "0".into();
@@ -802,10 +859,17 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         for idx in dot + 1..spec.tokens.len() {
             match spec.tokens[idx] {
                 Token::Digit9 => {
-                    rendered[idx] = frac_iter
-                        .next()
-                        .map(|ch| ch.to_string())
-                        .unwrap_or_else(|| if spec.fill_mode { String::new() } else { "0".into() });
+                    rendered[idx] =
+                        frac_iter
+                            .next()
+                            .map(|ch| ch.to_string())
+                            .unwrap_or_else(|| {
+                                if spec.fill_mode {
+                                    String::new()
+                                } else {
+                                    "0".into()
+                                }
+                            });
                 }
                 Token::Digit0 => {
                     rendered[idx] = frac_iter
@@ -866,7 +930,12 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     }
 
     let mut out = rendered.concat();
-    if !spec.tokens.iter().any(|token| matches!(token, Token::Sign(_))) && !spec.angle_pr {
+    if !spec
+        .tokens
+        .iter()
+        .any(|token| matches!(token, Token::Sign(_)))
+        && !spec.angle_pr
+    {
         out = if negative
             && matches!(spec.tokens.first(), Some(Token::Literal(space)) if space == " ")
         {
@@ -884,7 +953,12 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             format!(" {out}")
         };
     }
-    if negative && spec.tokens.iter().any(|token| matches!(token, Token::Sign(SignKind::Pl))) {
+    if negative
+        && spec
+            .tokens
+            .iter()
+            .any(|token| matches!(token, Token::Sign(SignKind::Pl)))
+    {
         out = format!("-{}", out.trim_start());
     }
     if spec.ordinal && !negative {
@@ -993,7 +1067,10 @@ fn parse_roman_to_number(input: &str, format: &str) -> Result<NumericValue, Exec
     }
     let normalized_format = format.trim_matches(' ');
     if normalized_format.eq_ignore_ascii_case("rn") {
-        let non_space = trimmed.chars().take_while(|ch| ch.is_ascii_alphabetic()).collect::<String>();
+        let non_space = trimmed
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphabetic())
+            .collect::<String>();
         if non_space.is_empty() {
             if input.is_empty() {
                 return Err(ExecError::InvalidNumericInput(" ".to_string()));
@@ -1132,11 +1209,7 @@ fn format_roman(value: i128, fill_mode: bool, lower: bool) -> String {
     if lower {
         out = out.to_ascii_lowercase();
     }
-    if fill_mode {
-        out
-    } else {
-        format!("{out:>15}")
-    }
+    if fill_mode { out } else { format!("{out:>15}") }
 }
 
 fn ordinal_suffix(value: i128) -> &'static str {
@@ -1170,7 +1243,10 @@ mod tests {
     #[test]
     fn formats_roman_numerals() {
         assert_eq!(to_char_int(456, "FMRN").unwrap(), "CDLVI");
-        assert_eq!(to_char_int(4567890123456789, "FMRN").unwrap(), "###############");
+        assert_eq!(
+            to_char_int(4567890123456789, "FMRN").unwrap(),
+            "###############"
+        );
         assert_eq!(to_char_int(456, "rn").unwrap(), "          cdlvi");
     }
 
@@ -1183,7 +1259,11 @@ mod tests {
     #[test]
     fn formats_numeric_fixed_and_overflow_cases() {
         assert_eq!(
-            to_char_numeric(&NumericValue::from("-34338492.215397047"), "FM9999999999999999.999999999999999").unwrap(),
+            to_char_numeric(
+                &NumericValue::from("-34338492.215397047"),
+                "FM9999999999999999.999999999999999"
+            )
+            .unwrap(),
             "-34338492.215397047"
         );
         assert_eq!(
@@ -1198,29 +1278,41 @@ mod tests {
 
     #[test]
     fn formats_numeric_roman_and_scientific_cases() {
-        assert_eq!(to_char_numeric(&NumericValue::from("1234"), "rn").unwrap(), "       mccxxxiv");
-        assert_eq!(to_char_numeric(&NumericValue::from("1234.56"), "99999V99").unwrap().trim(), "123456");
-        assert_eq!(to_char_numeric(&NumericValue::PosInf, "9.999EEEE").unwrap(), " #.#######");
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("1234"), "rn").unwrap(),
+            "       mccxxxiv"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("1234.56"), "99999V99")
+                .unwrap()
+                .trim(),
+            "123456"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::PosInf, "9.999EEEE").unwrap(),
+            " #.#######"
+        );
     }
 
     #[test]
     fn parses_to_number_decimal_formats() {
         assert_eq!(
-            to_number_numeric("-34,338,492", "99G999G999").unwrap().render(),
+            to_number_numeric("-34,338,492", "99G999G999")
+                .unwrap()
+                .render(),
             "-34338492"
         );
         assert_eq!(
-            to_number_numeric("<564646.654564>", "999999.999999PR").unwrap().render(),
+            to_number_numeric("<564646.654564>", "999999.999999PR")
+                .unwrap()
+                .render(),
             "-564646.654564"
         );
         assert_eq!(
             to_number_numeric("123456", "99999V99").unwrap().render(),
             "1234.56"
         );
-        assert_eq!(
-            to_number_numeric("42nd", "99th").unwrap().render(),
-            "42"
-        );
+        assert_eq!(to_number_numeric("42nd", "99th").unwrap().render(), "42");
     }
 
     #[test]

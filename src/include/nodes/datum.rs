@@ -334,7 +334,9 @@ impl Value {
             Value::Text(s) => Value::Text(s.clone()),
             Value::InternalChar(v) => Value::InternalChar(*v),
             Value::Bool(v) => Value::Bool(*v),
-            Value::Array(values) => Value::Array(values.iter().map(Value::to_owned_value).collect()),
+            Value::Array(values) => {
+                Value::Array(values.iter().map(Value::to_owned_value).collect())
+            }
             Value::Null => Value::Null,
         }
     }

@@ -25,8 +25,16 @@ pub fn pg_collation_desc() -> RelationDesc {
             column_desc("collname", SqlType::new(SqlTypeKind::Text), false),
             column_desc("collnamespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("collowner", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("collprovider", SqlType::new(SqlTypeKind::InternalChar), false),
-            column_desc("collisdeterministic", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc(
+                "collprovider",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
+            column_desc(
+                "collisdeterministic",
+                SqlType::new(SqlTypeKind::Bool),
+                false,
+            ),
             column_desc("collencoding", SqlType::new(SqlTypeKind::Int4), false),
         ],
     }
@@ -74,7 +82,11 @@ mod tests {
     #[test]
     fn pg_collation_desc_matches_expected_columns() {
         let desc = pg_collation_desc();
-        let names: Vec<_> = desc.columns.iter().map(|column| column.name.as_str()).collect();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec![

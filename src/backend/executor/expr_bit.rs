@@ -1,6 +1,6 @@
 use super::ExecError;
-use crate::include::nodes::datum::BitString;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::nodes::datum::BitString;
 use std::cmp::Ordering;
 
 pub(crate) fn parse_bit_text(text: &str) -> Result<BitString, ExecError> {
@@ -135,7 +135,11 @@ pub(crate) fn bit_length(bits: &BitString) -> i32 {
     bits.bit_len
 }
 
-pub(crate) fn substring(bits: &BitString, start: i32, len: Option<i32>) -> Result<BitString, ExecError> {
+pub(crate) fn substring(
+    bits: &BitString,
+    start: i32,
+    len: Option<i32>,
+) -> Result<BitString, ExecError> {
     let total = bits.bit_len.max(0);
     let start = start as i64;
     let total_i64 = total as i64;
@@ -154,16 +158,31 @@ pub(crate) fn substring(bits: &BitString, start: i32, len: Option<i32>) -> Resul
     Ok(slice_bits(bits, start_index, take))
 }
 
-pub(crate) fn overlay(bits: &BitString, placing: &BitString, start: i32, len: Option<i32>) -> Result<BitString, ExecError> {
+pub(crate) fn overlay(
+    bits: &BitString,
+    placing: &BitString,
+    start: i32,
+    len: Option<i32>,
+) -> Result<BitString, ExecError> {
     let replace_len = len.unwrap_or(placing.bit_len);
     if replace_len < 0 {
         return Err(ExecError::NegativeSubstringLength);
     }
     let prefix_len = (start - 1).max(0).min(bits.bit_len);
-    let suffix_start = (start - 1).saturating_add(replace_len).max(0).min(bits.bit_len);
+    let suffix_start = (start - 1)
+        .saturating_add(replace_len)
+        .max(0)
+        .min(bits.bit_len);
     let prefix = slice_bits(bits, 0, prefix_len);
-    let suffix = slice_bits(bits, suffix_start, bits.bit_len.saturating_sub(suffix_start));
-    Ok(concat_bit_strings(&concat_bit_strings(&prefix, placing), &suffix))
+    let suffix = slice_bits(
+        bits,
+        suffix_start,
+        bits.bit_len.saturating_sub(suffix_start),
+    );
+    Ok(concat_bit_strings(
+        &concat_bit_strings(&prefix, placing),
+        &suffix,
+    ))
 }
 
 pub(crate) fn position(needle: &BitString, haystack: &BitString) -> i32 {
@@ -186,7 +205,11 @@ pub(crate) fn get_bit(bits: &BitString, index: i32) -> Result<i32, ExecError> {
     Ok(if bit_is_set(bits, index) { 1 } else { 0 })
 }
 
-pub(crate) fn set_bit(bits: &BitString, index: i32, new_value: i32) -> Result<BitString, ExecError> {
+pub(crate) fn set_bit(
+    bits: &BitString,
+    index: i32,
+    new_value: i32,
+) -> Result<BitString, ExecError> {
     validate_bit_index(bits, index)?;
     let mut out = bits.bytes.clone();
     set_raw_bit(&mut out, index as usize, new_value != 0);

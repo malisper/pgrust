@@ -28,7 +28,11 @@ mod tests {
     #[test]
     fn pg_attrdef_desc_contains_default_columns() {
         let desc = pg_attrdef_desc();
-        let names: Vec<_> = desc.columns.iter().map(|column| column.name.as_str()).collect();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
         assert_eq!(names, vec!["oid", "adrelid", "adnum", "adbin"]);
     }
 }

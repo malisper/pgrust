@@ -1,7 +1,7 @@
 use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, Statement, StatementResult,
-    TransactionId, Value, bind_delete, bind_insert, bind_update, build_plan, execute_analyze,
-    build_values_plan, execute_create_index, execute_create_table, execute_delete,
+    TransactionId, Value, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,
+    execute_analyze, execute_create_index, execute_create_table, execute_delete,
     execute_drop_table, execute_explain, execute_insert, execute_show_tables,
     execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
 };
@@ -89,9 +89,9 @@ pub fn execute_readonly_statement(
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
         Statement::Values(stmt) => execute_plan(build_values_plan(&stmt, catalog)?, ctx),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
-        Statement::Set(_)
-        | Statement::Reset(_)
-        | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::Set(_) | Statement::Reset(_) | Statement::AlterTableSet(_) => {
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::CreateIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),

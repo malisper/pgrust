@@ -108,7 +108,9 @@ mod tests {
 
     #[test]
     fn parse_pg_bool_text_rejects_invalid_spellings() {
-        for input in ["test", "foo", "yeah", "nay", "o", "on_", "off_", "11", "000", ""] {
+        for input in [
+            "test", "foo", "yeah", "nay", "o", "on_", "off_", "11", "000", "",
+        ] {
             assert!(parse_pg_bool_text(input).is_err(), "{input}");
         }
     }

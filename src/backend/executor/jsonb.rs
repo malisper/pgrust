@@ -797,8 +797,8 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
     if integer_group_gap > 0 {
         coeff *= pow10(integer_group_gap * DEC_DIGITS);
     }
-    let fractional_digits = usize::saturating_sub(ndigits, (weight + 1).max(0) as usize)
-        * DEC_DIGITS;
+    let fractional_digits =
+        usize::saturating_sub(ndigits, (weight + 1).max(0) as usize) * DEC_DIGITS;
     let coeff = if dscale as usize >= fractional_digits {
         coeff * pow10((dscale as usize) - fractional_digits)
     } else {
@@ -1120,7 +1120,10 @@ mod tests {
         let encoded = encode_jsonb(&value);
         let decoded = decode_jsonb(&encoded).unwrap();
         assert_eq!(decoded, value);
-        assert_eq!(decoded.render(), "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        assert_eq!(
+            decoded.render(),
+            "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        );
     }
 
     #[test]

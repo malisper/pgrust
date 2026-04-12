@@ -4,26 +4,28 @@ use parking_lot::RwLock;
 
 use crate::backend::access::heap::heapam::{
     HeapError, heap_delete_with_waiter, heap_fetch, heap_insert_mvcc_with_cid,
-    heap_scan_begin_visible, heap_scan_end,
-    heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
     heap_update_with_waiter,
 };
-use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::access::transam::xact::CommandId;
-use crate::pgrust::database::TransactionWaiter;
+use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
-    AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement, BoundUpdateStatement,
-    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
-    TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
+    AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement,
+    BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
+    MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement,
+    bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
+use crate::pgrust::database::TransactionWaiter;
 
-use crate::include::nodes::execnodes::*;
-use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr, tuple_from_values};
+use super::explain::{format_buffer_usage, format_explain_lines};
+use crate::backend::executor::exec_expr::{
+    compile_predicate_with_decoder, eval_expr, tuple_from_values,
+};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start};
-use super::explain::{format_buffer_usage, format_explain_lines};
+use crate::include::nodes::execnodes::*;
 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
@@ -53,8 +55,14 @@ pub(crate) fn execute_explain(
         ctx.timed = false;
         let elapsed = started_at.elapsed();
         format_explain_lines(state.as_ref(), 0, true, &mut lines);
-        lines.push(format!("Planning Time: {:.3} ms", plan_elapsed.as_secs_f64() * 1000.0));
-        lines.push(format!("Execution Time: {:.3} ms", elapsed.as_secs_f64() * 1000.0));
+        lines.push(format!(
+            "Planning Time: {:.3} ms",
+            plan_elapsed.as_secs_f64() * 1000.0
+        ));
+        lines.push(format!(
+            "Execution Time: {:.3} ms",
+            elapsed.as_secs_f64() * 1000.0
+        ));
         if stmt.buffers {
             let stats = ctx.pool.usage_stats();
             lines.push(format_buffer_usage(stats));
@@ -68,7 +76,10 @@ pub(crate) fn execute_explain(
     Ok(StatementResult::Query {
         columns: vec![QueryColumn::text("QUERY PLAN")],
         column_names: vec!["QUERY PLAN".into()],
-        rows: lines.into_iter().map(|line| vec![Value::Text(line.into())]).collect(),
+        rows: lines
+            .into_iter()
+            .map(|line| vec![Value::Text(line.into())])
+            .collect(),
     })
 }
 
@@ -93,7 +104,12 @@ fn validate_maintenance_targets(
             .lookup_relation(&target.table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.table_name.clone())))?;
         for column in &target.columns {
-            if !entry.desc.columns.iter().any(|desc| desc.name.eq_ignore_ascii_case(column)) {
+            if !entry
+                .desc
+                .columns
+                .iter()
+                .any(|desc| desc.name.eq_ignore_ascii_case(column))
+            {
                 return Err(ExecError::Parse(ParseError::UnknownColumn(column.clone())));
             }
         }
@@ -131,7 +147,12 @@ pub fn execute_create_index(
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     let entry = catalog
-        .create_index(stmt.index_name, &stmt.table_name, stmt.unique, &stmt.columns)
+        .create_index(
+            stmt.index_name,
+            &stmt.table_name,
+            stmt.unique,
+            &stmt.columns,
+        )
         .map_err(|err| match err {
             crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name) => {
                 ExecError::Parse(ParseError::TableAlreadyExists(name))
@@ -164,10 +185,13 @@ pub fn execute_drop_table(
         match catalog.drop_table(&table_name) {
             Ok(entry) => {
                 let _ = ctx.pool.invalidate_relation(entry.rel);
-                ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                ctx.pool
+                    .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
                 dropped += 1;
             }
-            Err(crate::backend::catalog::catalog::CatalogError::UnknownTable(name)) if stmt.if_exists => {
+            Err(crate::backend::catalog::catalog::CatalogError::UnknownTable(name))
+                if stmt.if_exists =>
+            {
                 let _ = name;
             }
             Err(crate::backend::catalog::catalog::CatalogError::UnknownTable(name)) => {
@@ -248,7 +272,8 @@ pub fn execute_insert(
                 let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                 let mut values =
                     eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-                for (column_index, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
+                for (column_index, value) in stmt.target_columns.iter().zip(row_values.into_iter())
+                {
                     values[*column_index] = value;
                 }
                 rows.push(values);
@@ -316,7 +341,8 @@ pub fn execute_update_with_waiter(
     cid: CommandId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
-    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
+    let mut scan =
+        heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
     // Hoist descriptor allocation, decoder compilation, and predicate
@@ -326,7 +352,10 @@ pub fn execute_update_with_waiter(
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
     // Compiled predicate: uses the fixed-offset fast path for BufferHeapTuple
     // and falls back for HeapTuple.
-    let qual = stmt.predicate.as_ref().map(|p| compile_predicate_with_decoder(p, &decoder));
+    let qual = stmt
+        .predicate
+        .as_ref()
+        .map(|p| compile_predicate_with_decoder(p, &decoder));
 
     // Reusable slot — allocated once, reset per tuple (like PG's ss_ScanTupleSlot).
     let mut slot = TupleSlot::empty(decoder.ncols());
@@ -338,14 +367,18 @@ pub fn execute_update_with_waiter(
     loop {
         let next: Result<Option<usize>, ExecError> =
             heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
-        let Some(buffer_id) = next? else { break; };
+        let Some(buffer_id) = next? else {
+            break;
+        };
 
         // SAFETY: buffer is pinned, visibility offsets were collected under
         // lock in prepare_next_page, and tuple user data is immutable.
-        let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
-            .expect("pinned buffer must be valid");
+        let page =
+            unsafe { ctx.pool.page_unlocked(buffer_id) }.expect("pinned buffer must be valid");
 
-        let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
+        let pin = scan
+            .pinned_buffer_rc()
+            .expect("buffer must be pinned after prepare_next_page");
 
         let mut page_rows = Vec::new();
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
@@ -368,7 +401,9 @@ pub fn execute_update_with_waiter(
         for (tid, original_values) in page_rows {
             let mut slot = TupleSlot::virtual_row(original_values.clone());
             if let Some(q) = &qual {
-                if !q(&mut slot, ctx)? { continue; }
+                if !q(&mut slot, ctx)? {
+                    continue;
+                }
             }
             let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
             let mut values = original_values;
@@ -399,9 +434,15 @@ pub fn execute_update_with_waiter(
                     Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
                         let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
                         let mut new_slot = TupleSlot::from_heap_tuple(
-                            Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
+                            Rc::clone(&desc),
+                            Rc::clone(&attr_descs),
+                            new_ctid,
+                            new_tuple,
                         );
-                        let passes = match &qual { Some(q) => q(&mut new_slot, ctx)?, None => true };
+                        let passes = match &qual {
+                            Some(q) => q(&mut new_slot, ctx)?,
+                            None => true,
+                        };
                         if !passes {
                             break;
                         }
@@ -442,7 +483,8 @@ pub fn execute_delete_with_waiter(
     xid: TransactionId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
-    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
+    let mut scan =
+        heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();
 
     // Hoist descriptor allocation, decoder compilation, and predicate
@@ -450,7 +492,10 @@ pub fn execute_delete_with_waiter(
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
-    let qual = stmt.predicate.as_ref().map(|p| compile_predicate_with_decoder(p, &decoder));
+    let qual = stmt
+        .predicate
+        .as_ref()
+        .map(|p| compile_predicate_with_decoder(p, &decoder));
 
     // Reusable slot — allocated once, reset per tuple.
     let mut slot = TupleSlot::empty(decoder.ncols());
@@ -460,12 +505,16 @@ pub fn execute_delete_with_waiter(
     loop {
         let next: Result<Option<usize>, ExecError> =
             heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
-        let Some(buffer_id) = next? else { break; };
+        let Some(buffer_id) = next? else {
+            break;
+        };
 
-        let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
-            .expect("pinned buffer must be valid");
+        let page =
+            unsafe { ctx.pool.page_unlocked(buffer_id) }.expect("pinned buffer must be valid");
 
-        let pin = scan.pinned_buffer_rc().expect("buffer must be pinned after prepare_next_page");
+        let pin = scan
+            .pinned_buffer_rc()
+            .expect("buffer must be pinned after prepare_next_page");
 
         let mut page_rows = Vec::new();
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
@@ -486,7 +535,9 @@ pub fn execute_delete_with_waiter(
         for (tid, values) in page_rows {
             let mut slot = TupleSlot::virtual_row(values);
             if let Some(q) = &qual {
-                if !q(&mut slot, ctx)? { continue; }
+                if !q(&mut slot, ctx)? {
+                    continue;
+                }
             }
             targets.push(tid);
         }
@@ -502,21 +553,38 @@ pub fn execute_delete_with_waiter(
     for tid in &targets {
         let mut current_tid = *tid;
         loop {
-            match heap_delete_with_waiter(&*ctx.pool, ctx.client_id, stmt.rel, &ctx.txns, xid, current_tid, &snapshot, waiter) {
+            match heap_delete_with_waiter(
+                &*ctx.pool,
+                ctx.client_id,
+                stmt.rel,
+                &ctx.txns,
+                xid,
+                current_tid,
+                &snapshot,
+                waiter,
+            ) {
                 Ok(()) => {
                     affected_rows += 1;
                     break;
                 }
                 // Row was concurrently deleted — skip it.
-                Err(HeapError::TupleAlreadyModified(_)) => { break; }
+                Err(HeapError::TupleAlreadyModified(_)) => {
+                    break;
+                }
                 // Row was concurrently updated — follow ctid chain, recheck
                 // predicate, and retry. Matches PostgreSQL's ExecDelete.
                 Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
                     let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
                     let mut new_slot = TupleSlot::from_heap_tuple(
-                        Rc::clone(&desc), Rc::clone(&attr_descs), new_ctid, new_tuple,
+                        Rc::clone(&desc),
+                        Rc::clone(&attr_descs),
+                        new_ctid,
+                        new_tuple,
                     );
-                    let passes = match &qual { Some(q) => q(&mut new_slot, ctx)?, None => true };
+                    let passes = match &qual {
+                        Some(q) => q(&mut new_slot, ctx)?,
+                        None => true,
+                    };
                     if !passes {
                         // Concurrent update changed the row so it no longer
                         // matches our WHERE — skip it.

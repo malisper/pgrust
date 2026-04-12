@@ -1,13 +1,13 @@
+use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use rustc_hash::FxHashMap;
 
-use crate::include::storage::buf_internals::*;
-use crate::backend::storage::smgr::RelFileLocator;
-use crate::backend::access::transam::xlog::{INVALID_LSN, Lsn, WalWriter};
 use super::storage_backend::StorageBackend;
+use crate::backend::access::transam::xlog::{INVALID_LSN, Lsn, WalWriter};
+use crate::backend::storage::smgr::RelFileLocator;
+use crate::include::storage::buf_internals::*;
 
 struct BufferFrame {
     state: BufferState,
@@ -235,7 +235,11 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
     /// Mutably borrow the page in-place and pass it to a closure.
     /// Marks the buffer as dirty.
-    pub fn with_page_mut<T>(&self, buffer_id: BufferId, f: impl FnOnce(&mut Page) -> T) -> Option<T> {
+    pub fn with_page_mut<T>(
+        &self,
+        buffer_id: BufferId,
+        f: impl FnOnce(&mut Page) -> T,
+    ) -> Option<T> {
         let frame = self.frames.get(buffer_id)?;
         if !frame.state.is_valid() {
             return None;
@@ -255,7 +259,11 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     /// Slow path: get a clean victim via get_victim_buffer (which handles
     /// dirty flushing and old-tag eviction internally), then exclusive-lock
     /// the new partition and install the new tag.
-    pub fn request_page(&self, _client_id: ClientId, tag: BufferTag) -> Result<RequestPageResult, Error> {
+    pub fn request_page(
+        &self,
+        _client_id: ClientId,
+        tag: BufferTag,
+    ) -> Result<RequestPageResult, Error> {
         let partition = self.lookup.partition(&tag);
 
         // ---- fast path: see if the block is in the buffer pool already ----
@@ -302,7 +310,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
             // Pin the existing buffer instead. (PG: PinBuffer, line 2107)
             let existing_frame = &self.frames[existing_id];
-            existing_frame.state.pin_and_bump_usage(self.max_usage_count);
+            existing_frame
+                .state
+                .pin_and_bump_usage(self.max_usage_count);
             let valid = existing_frame.state.is_valid();
             drop(lookup);
 
@@ -380,7 +390,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
                     let write_result = {
                         let mut storage = self.storage.lock();
-                        storage.write_page(old_tag, &page, skip_fsync).map_err(Error::Storage)
+                        storage
+                            .write_page(old_tag, &page, skip_fsync)
+                            .map_err(Error::Storage)
                     };
                     if let Err(e) = write_result {
                         frame.state.decrement_pin();
@@ -392,7 +404,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
             // Evict the old tag from the hash table. This is only hit if the
             // buffer was previously in use. We do not need to invalidate a
-            // buffer we got off the free list. 
+            // buffer we got off the free list.
             // (PG: InvalidateVictimBuffer, lines 2276-2342)
             if frame.tag.lock().is_some() {
                 if !self.invalidate_victim(buffer_id) {
@@ -454,7 +466,11 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         let tag = (*frame.tag.lock())?;
         Some(PendingIo {
             buffer_id,
-            op: if frame.state.is_valid() { IoOp::Write } else { IoOp::Read },
+            op: if frame.state.is_valid() {
+                IoOp::Write
+            } else {
+                IoOp::Read
+            },
             tag,
         })
     }
@@ -539,12 +555,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(())
     }
 
-    pub fn write_byte(
-        &self,
-        buffer_id: BufferId,
-        offset: usize,
-        value: u8,
-    ) -> Result<(), Error> {
+    pub fn write_byte(&self, buffer_id: BufferId, offset: usize, value: u8) -> Result<(), Error> {
         let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
         if !frame.state.is_valid() {
             return Err(Error::InvalidBuffer);
@@ -602,7 +613,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             frame.state.set_dirty();
             {
                 let mut storage = self.storage.lock();
-                storage.write_page(tag, &page_to_store, false).map_err(Error::Storage)?;
+                storage
+                    .write_page(tag, &page_to_store, false)
+                    .map_err(Error::Storage)?;
             }
             self.stats_written.fetch_add(1, Ordering::Relaxed);
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
@@ -643,7 +656,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             frame.state.set_dirty();
             {
                 let mut storage = self.storage.lock();
-                storage.write_page(tag, &page_to_store, false).map_err(Error::Storage)?;
+                storage
+                    .write_page(tag, &page_to_store, false)
+                    .map_err(Error::Storage)?;
             }
             self.stats_written.fetch_add(1, Ordering::Relaxed);
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
@@ -653,7 +668,12 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(())
     }
 
-    pub fn write_page_image(&self, buffer_id: BufferId, xid: u32, page: &Page) -> Result<(), Error> {
+    pub fn write_page_image(
+        &self,
+        buffer_id: BufferId,
+        xid: u32,
+        page: &Page,
+    ) -> Result<(), Error> {
         let tag = {
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
             if !frame.state.is_valid() {
@@ -690,7 +710,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             }
             {
                 let mut storage = self.storage.lock();
-                storage.write_page(tag, &page_to_store, false).map_err(Error::Storage)?;
+                storage
+                    .write_page(tag, &page_to_store, false)
+                    .map_err(Error::Storage)?;
             }
             self.stats_written.fetch_add(1, Ordering::Relaxed);
             {
@@ -731,7 +753,9 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             // When WAL is present, skip_fsync is true: the page can be recovered
             // from WAL after a crash. WAL flush is enforced at commit time and
             // in the eviction path (where losing the in-memory copy is permanent).
-            storage.write_page(tag, &page, skip_fsync).map_err(Error::Storage)?;
+            storage
+                .write_page(tag, &page, skip_fsync)
+                .map_err(Error::Storage)?;
         }
 
         // Terminate IO under the header spinlock, matching PostgreSQL's
@@ -819,7 +843,10 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     /// `PrivateRefCount`, but for now the shared atomic is sufficient.)
     pub fn increment_buffer_pin(&self, buffer_id: BufferId) {
         let frame = &self.frames[buffer_id];
-        debug_assert!(frame.state.pin_count() > 0, "increment_buffer_pin: buffer must already be pinned");
+        debug_assert!(
+            frame.state.pin_count() > 0,
+            "increment_buffer_pin: buffer must already be pinned"
+        );
         frame.state.increment_pin();
     }
 
@@ -1033,9 +1060,11 @@ impl<S: StorageBackend + Send> std::fmt::Debug for OwnedBufferPin<S> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::storage_backend::{FakeStorage, SmgrStorageBackend};
-    use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+    use super::*;
+    use crate::backend::storage::smgr::{
+        ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -1120,7 +1149,10 @@ mod tests {
         let state = pool.buffer_state(0).unwrap();
         assert!(state.valid);
         assert!(!state.dirty);
-        assert_eq!(pool.with_storage(|s: &FakeStorage| s.get_page(tag).unwrap()[0]), 99);
+        assert_eq!(
+            pool.with_storage(|s: &FakeStorage| s.get_page(tag).unwrap()[0]),
+            99
+        );
     }
 
     #[test]
@@ -1337,7 +1369,10 @@ mod tests {
         }
 
         let t = smgr_tag(4, 2);
-        assert_eq!(pool.request_page(1, t).unwrap(), RequestPageResult::AllBuffersPinned);
+        assert_eq!(
+            pool.request_page(1, t).unwrap(),
+            RequestPageResult::AllBuffersPinned
+        );
     }
 
     #[test]
@@ -1406,7 +1441,9 @@ mod tests {
         // Open a fresh smgr and verify block 0 has the written value.
         let mut smgr2 = MdStorageManager::new(&base);
         let mut buf = [0u8; PAGE_SIZE];
-        smgr2.read_block(smgr_rel(15), ForkNumber::Main, 0, &mut buf).unwrap();
+        smgr2
+            .read_block(smgr_rel(15), ForkNumber::Main, 0, &mut buf)
+            .unwrap();
         assert_eq!(
             buf[0], 0xCD,
             "eviction must flush dirty page even without explicit heap_flush"
@@ -1481,7 +1518,8 @@ mod tests {
         smgr.immedsync(rel, ForkNumber::Main).unwrap();
 
         let wal_dir = base.join("pg_wal");
-        let wal = Arc::new(crate::backend::access::transam::xlog::WalWriter::new(&wal_dir).unwrap());
+        let wal =
+            Arc::new(crate::backend::access::transam::xlog::WalWriter::new(&wal_dir).unwrap());
         BufferPool::new_with_wal(SmgrStorageBackend::new(smgr), capacity, wal)
     }
 
@@ -1517,7 +1555,10 @@ mod tests {
         pool.write_page_image(0, 1, &new_page).unwrap();
 
         // Frame should be dirty -- write was deferred.
-        assert!(pool.buffer_state(0).unwrap().dirty, "page should still be dirty after WAL write");
+        assert!(
+            pool.buffer_state(0).unwrap().dirty,
+            "page should still be dirty after WAL write"
+        );
 
         // On-disk file must still have the original content.
         let on_disk = read_block_from_disk(&base, rel_number, 0);
@@ -1552,8 +1593,10 @@ mod tests {
         assert_ne!(lsn_after, 0, "pd_lsn should be stamped with the WAL LSN");
         // The first (and only) record lands at offset WAL_RECORD_LEN.
         use crate::backend::access::transam::xlog::WAL_RECORD_LEN;
-        assert_eq!(lsn_after, WAL_RECORD_LEN as u64,
-            "first WAL record LSN should equal WAL_RECORD_LEN");
+        assert_eq!(
+            lsn_after, WAL_RECORD_LEN as u64,
+            "first WAL record LSN should equal WAL_RECORD_LEN"
+        );
     }
 
     /// After eviction from a WAL-backed pool, the data page reaches disk
@@ -1661,14 +1704,12 @@ mod tests {
         // Step 3: Evictor requests page C in a separate thread.
         // This will evict page A (dirty), write to disk, then sleep 50ms.
         let pool2 = pool.clone();
-        let evictor = std::thread::spawn(move || {
-            match pool2.request_page(2, page_c).unwrap() {
-                RequestPageResult::ReadIssued { buffer_id } => {
-                    pool2.complete_read(buffer_id).unwrap();
-                    pool2.unpin(2, buffer_id).unwrap();
-                }
-                other => panic!("expected ReadIssued for C, got {other:?}"),
+        let evictor = std::thread::spawn(move || match pool2.request_page(2, page_c).unwrap() {
+            RequestPageResult::ReadIssued { buffer_id } => {
+                pool2.complete_read(buffer_id).unwrap();
+                pool2.unpin(2, buffer_id).unwrap();
             }
+            other => panic!("expected ReadIssued for C, got {other:?}"),
         });
 
         // Step 4: While evictor sleeps, writer loads page A and writes V2.

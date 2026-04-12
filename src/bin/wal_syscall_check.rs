@@ -16,8 +16,8 @@
 //!
 //! Run with:  cargo run --bin wal_syscall_check
 
-use pgrust::pgrust::database::Database;
 use pgrust::ClientId;
+use pgrust::pgrust::database::Database;
 
 const CLIENT: ClientId = 1;
 
@@ -29,10 +29,7 @@ fn exec(db: &Database, sql: &str) {
 }
 
 fn main() {
-    let base = std::env::temp_dir().join(format!(
-        "pgrust_syscall_check_{}",
-        std::process::id()
-    ));
+    let base = std::env::temp_dir().join(format!("pgrust_syscall_check_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
 
     eprintln!("DB_PATH: {}", base.display());
@@ -55,9 +52,15 @@ fn main() {
 
     // SELECT — read-only, no WAL flush, no fsync.
     eprintln!("--- SELECT (0 additional fdatasync expected) ---");
-    let result = db.execute(CLIENT, "SELECT id, name FROM t ORDER BY id").unwrap();
+    let result = db
+        .execute(CLIENT, "SELECT id, name FROM t ORDER BY id")
+        .unwrap();
     match result {
-        pgrust::executor::StatementResult::Query { column_names: _, rows, .. } => {
+        pgrust::executor::StatementResult::Query {
+            column_names: _,
+            rows,
+            ..
+        } => {
             for row in &rows {
                 let cols: Vec<String> = row.iter().map(|v| format!("{v:?}")).collect();
                 eprintln!("  row: {}", cols.join(", "));

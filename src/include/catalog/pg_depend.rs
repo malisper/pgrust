@@ -42,7 +42,11 @@ mod tests {
     #[test]
     fn pg_depend_desc_contains_dependency_columns() {
         let desc = pg_depend_desc();
-        let names: Vec<_> = desc.columns.iter().map(|column| column.name.as_str()).collect();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec![

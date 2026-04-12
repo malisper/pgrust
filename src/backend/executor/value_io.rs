@@ -1,15 +1,20 @@
+use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
-use super::expr_casts::{cast_numeric_value, cast_text_value, cast_value, render_internal_char_text};
+use super::expr_casts::{
+    cast_numeric_value, cast_text_value, cast_value, render_internal_char_text,
+};
 use super::node_types::*;
-use super::ExecError;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::pgrust::compact_string::CompactString;
 
-pub(crate) fn tuple_from_values(desc: &RelationDesc, values: &[Value]) -> Result<HeapTuple, ExecError> {
+pub(crate) fn tuple_from_values(
+    desc: &RelationDesc,
+    values: &[Value],
+) -> Result<HeapTuple, ExecError> {
     let tuple_values = desc
         .columns
         .iter()
@@ -32,7 +37,9 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
     match (&column.ty, coerced) {
         (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Int32, Value::Int64(v)) if matches!(column.sql_type.kind, SqlTypeKind::Oid) => {
+        (ScalarType::Int32, Value::Int64(v))
+            if matches!(column.sql_type.kind, SqlTypeKind::Oid) =>
+        {
             let oid = u32::try_from(v).map_err(|_| ExecError::OidOutOfRange)?;
             Ok(TupleValue::Bytes(oid.to_le_bytes().to_vec()))
         }
@@ -44,21 +51,34 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(bytes))
         }
         (ScalarType::Bytea, Value::Bytea(v)) => Ok(TupleValue::Bytes(v)),
-        (ScalarType::Float32, Value::Float64(v)) => Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec())),
+        (ScalarType::Float32, Value::Float64(v)) => {
+            Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec()))
+        }
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
-        (ScalarType::Numeric, Value::Numeric(numeric)) => Ok(TupleValue::Bytes(numeric.render().into_bytes())),
+        (ScalarType::Numeric, Value::Numeric(numeric)) => {
+            Ok(TupleValue::Bytes(numeric.render().into_bytes()))
+        }
         (ScalarType::Json, Value::Json(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
         (ScalarType::Jsonb, Value::Jsonb(bytes)) => Ok(TupleValue::Bytes(bytes)),
-        (ScalarType::JsonPath, Value::JsonPath(text)) => Ok(TupleValue::Bytes(text.as_bytes().to_vec())),
+        (ScalarType::JsonPath, Value::JsonPath(text)) => {
+            Ok(TupleValue::Bytes(text.as_bytes().to_vec()))
+        }
         (ScalarType::Text, Value::InternalChar(v)) => {
             Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
         }
-        (ScalarType::Text, value) => Ok(TupleValue::Bytes(value.as_text().unwrap().as_bytes().to_vec())),
+        (ScalarType::Text, value) => Ok(TupleValue::Bytes(
+            value.as_text().unwrap().as_bytes().to_vec(),
+        )),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
-        (ScalarType::Array(_), Value::Array(items)) => {
-            Ok(TupleValue::Bytes(encode_array_bytes(column.sql_type.element_type(), &items)?))
-        }
-        (_, other) => Err(ExecError::TypeMismatch { op: "assignment", left: Value::Null, right: other }),
+        (ScalarType::Array(_), Value::Array(items)) => Ok(TupleValue::Bytes(encode_array_bytes(
+            column.sql_type.element_type(),
+            &items,
+        )?)),
+        (_, other) => Err(ExecError::TypeMismatch {
+            op: "assignment",
+            left: Value::Null,
+            right: other,
+        }),
     }
 }
 
@@ -124,20 +144,32 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
     match column.ty {
         ScalarType::Int16 => {
             if column.storage.attlen != 2 || bytes.len() != 2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
-            Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "int2 must be exactly 2 bytes".into(),
-            })?)))
+            Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "int2 must be exactly 2 bytes".into(),
+                },
+            )?)))
         }
         ScalarType::Int32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
-            let raw = i32::from_le_bytes(bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "int4 must be exactly 4 bytes".into(),
+            let raw = i32::from_le_bytes(bytes.try_into().map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "int4 must be exactly 4 bytes".into(),
+                }
             })?);
             if matches!(column.sql_type.kind, SqlTypeKind::Oid) {
                 Ok(Value::Int64(raw as u32 as i64))
@@ -147,16 +179,26 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
         }
         ScalarType::Int64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
-            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "int8 must be exactly 8 bytes".into(),
-            })?)))
+            Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "int8 must be exactly 8 bytes".into(),
+                },
+            )?)))
         }
         ScalarType::BitString => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
             if bytes.len() < 4 {
                 return Err(ExecError::InvalidStorageValue {
@@ -172,40 +214,72 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
         }
         ScalarType::Bytea => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
             Ok(Value::Bytea(bytes.to_vec()))
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
-            Ok(Value::Float64(f32::from_le_bytes(bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "float4 must be exactly 4 bytes".into(),
-            })?) as f64))
+            Ok(Value::Float64(
+                f32::from_le_bytes(bytes.try_into().map_err(|_| {
+                    ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "float4 must be exactly 4 bytes".into(),
+                    }
+                })?) as f64,
+            ))
         }
         ScalarType::Float64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
-            Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().map_err(|_| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "float8 must be exactly 8 bytes".into(),
-            })?)))
+            Ok(Value::Float64(f64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "float8 must be exactly 8 bytes".into(),
+                    })?,
+            )))
         }
         ScalarType::Numeric => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
-            Ok(Value::Numeric(parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(|| ExecError::InvalidStorageValue {
-                column: column.name.clone(),
-                details: "invalid numeric text".into(),
-            })?))
+            Ok(Value::Numeric(
+                parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(
+                    || ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "invalid numeric text".into(),
+                    },
+                )?,
+            ))
         }
         ScalarType::Json => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             validate_json_text(text)?;
@@ -213,27 +287,45 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
         }
         ScalarType::Jsonb => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
             decode_jsonb(bytes)?;
             Ok(Value::Jsonb(bytes.to_vec()))
         }
         ScalarType::JsonPath => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
-            Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
+            Ok(Value::Text(CompactString::new(unsafe {
+                std::str::from_utf8_unchecked(bytes)
+            })))
         }
         ScalarType::Bool => {
             if column.storage.attlen != 1 || bytes.len() != 1 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
             match bytes[0] {
                 0 => Ok(Value::Bool(false)),
@@ -246,7 +338,11 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
         }
         ScalarType::Array(_) => {
             if column.storage.attlen != -1 {
-                return Err(ExecError::UnsupportedStorageType { column: column.name.clone(), ty: column.ty.clone(), attlen: column.storage.attlen });
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
             }
             decode_array_bytes(column.sql_type.element_type(), bytes)
         }
@@ -291,21 +387,31 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::InternalChar(v) => Ok(vec![v]),
         Value::Float64(v) => Ok(v.to_string().into_bytes()),
         Value::JsonPath(text) => Ok(text.as_bytes().to_vec()),
-        Value::Array(_) => Err(ExecError::TypeMismatch { op: "array element", left: coerced, right: Value::Null }),
+        Value::Array(_) => Err(ExecError::TypeMismatch {
+            op: "array element",
+            left: coerced,
+            right: Value::Null,
+        }),
         Value::Jsonb(bytes) => Ok(bytes),
     }
 }
 
 fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
     if bytes.len() < 4 {
-        return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "array payload too short".into() });
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array payload too short".into(),
+        });
     }
     let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let mut offset = 4usize;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         if offset + 4 > bytes.len() {
-            return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "array length header truncated".into() });
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array length header truncated".into(),
+            });
         }
         let len = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
         offset += 4;
@@ -315,9 +421,15 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
         }
         let len = len as usize;
         if offset + len > bytes.len() {
-            return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "array element payload truncated".into() });
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array element payload truncated".into(),
+            });
         }
-        items.push(decode_array_element(element_type, &bytes[offset..offset + len])?);
+        items.push(decode_array_element(
+            element_type,
+            &bytes[offset..offset + len],
+        )?);
         offset += len;
     }
     Ok(Value::Array(items))
@@ -327,40 +439,67 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
     match element_type.kind {
         SqlTypeKind::Int2 => {
             if bytes.len() != 2 {
-                return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "int2 array element must be 2 bytes".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int2 array element must be 2 bytes".into(),
+                });
             }
             Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().unwrap())))
         }
         SqlTypeKind::Int4 | SqlTypeKind::Oid => {
             if bytes.len() != 4 {
-                return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "int4 array element must be 4 bytes".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int4 array element must be 4 bytes".into(),
+                });
             }
             Ok(Value::Int32(i32::from_le_bytes(bytes.try_into().unwrap())))
         }
         SqlTypeKind::Int8 => {
             if bytes.len() != 8 {
-                return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "int8 array element must be 8 bytes".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "int8 array element must be 8 bytes".into(),
+                });
             }
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
         }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-            let width = if matches!(element_type.kind, SqlTypeKind::Float4) { 4 } else { 8 };
+            let width = if matches!(element_type.kind, SqlTypeKind::Float4) {
+                4
+            } else {
+                8
+            };
             if bytes.len() != width {
-                return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "float array element has wrong width".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "float array element has wrong width".into(),
+                });
             }
             if matches!(element_type.kind, SqlTypeKind::Float4) {
-                Ok(Value::Float64(f32::from_le_bytes(bytes.try_into().unwrap()) as f64))
+                Ok(Value::Float64(
+                    f32::from_le_bytes(bytes.try_into().unwrap()) as f64,
+                ))
             } else {
-                Ok(Value::Float64(f64::from_le_bytes(bytes.try_into().unwrap())))
+                Ok(Value::Float64(f64::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )))
             }
         }
-        SqlTypeKind::Numeric => Ok(Value::Numeric(parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(|| ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "invalid numeric array element".into(),
-        })?)),
+        SqlTypeKind::Numeric => Ok(Value::Numeric(
+            parse_numeric_text(unsafe { std::str::from_utf8_unchecked(bytes) }).ok_or_else(
+                || ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "invalid numeric array element".into(),
+                },
+            )?,
+        )),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => {
             if bytes.len() < 4 {
-                return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "bit array element payload too short".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "bit array element payload too short".into(),
+                });
             }
             let bit_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as i32;
             Ok(Value::Bit(crate::include::nodes::datum::BitString::new(
@@ -384,7 +523,10 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
         }
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
-                return Err(ExecError::InvalidStorageValue { column: "<array>".into(), details: "bool array element must be 1 byte".into() });
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "bool array element must be 1 byte".into(),
+                });
             }
             Ok(Value::Bool(bytes[0] != 0))
         }
@@ -392,9 +534,9 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
         | SqlTypeKind::Timestamp
         | SqlTypeKind::InternalChar
         | SqlTypeKind::Char
-        | SqlTypeKind::Varchar => {
-            Ok(Value::Text(CompactString::new(unsafe { std::str::from_utf8_unchecked(bytes) })))
-        }
+        | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::new(unsafe {
+            std::str::from_utf8_unchecked(bytes)
+        }))),
     }
 }
 

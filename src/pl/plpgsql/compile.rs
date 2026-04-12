@@ -89,7 +89,10 @@ impl CompileEnv {
             .map(|(name, var)| (var.slot, name.clone(), var.ty))
             .collect::<Vec<_>>();
         ordered.sort_by_key(|(slot, _, _)| *slot);
-        ordered.into_iter().map(|(_, name, ty)| (name, ty)).collect()
+        ordered
+            .into_iter()
+            .map(|(_, name, ty)| (name, ty))
+            .collect()
     }
 }
 

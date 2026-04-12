@@ -1,7 +1,7 @@
 use super::ExecError;
 use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
-use super::node_types::Value;
 use super::expr_ops::parse_numeric_text;
+use super::node_types::Value;
 use crate::pgrust::compact_string::CompactString;
 use encoding_rs::Encoding;
 use md5::{Digest, Md5};
@@ -24,11 +24,12 @@ pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError
         Value::Int64(v) => to_char_int(*v as i128, fmt)?,
         Value::Numeric(v) => to_char_numeric(v, fmt)?,
         Value::Float64(v) => {
-            let numeric = parse_numeric_text(&v.to_string()).ok_or_else(|| ExecError::TypeMismatch {
-                op: "to_char",
-                left: value.clone(),
-                right: Value::Text("".into()),
-            })?;
+            let numeric =
+                parse_numeric_text(&v.to_string()).ok_or_else(|| ExecError::TypeMismatch {
+                    op: "to_char",
+                    left: value.clone(),
+                    right: Value::Text("".into()),
+                })?;
             to_char_numeric(&numeric, fmt)?
         }
         _ => {
@@ -52,16 +53,20 @@ pub(super) fn eval_to_number_function(values: &[Value]) -> Result<Value, ExecErr
     if matches!(text_value, Value::Null) || matches!(format_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "to_number",
-        left: text_value.clone(),
-        right: format_value.clone(),
-    })?;
-    let format = format_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "to_number",
-        left: text_value.clone(),
-        right: format_value.clone(),
-    })?;
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "to_number",
+            left: text_value.clone(),
+            right: format_value.clone(),
+        })?;
+    let format = format_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "to_number",
+            left: text_value.clone(),
+            right: format_value.clone(),
+        })?;
     Ok(Value::Numeric(to_number_numeric(text, format)?))
 }
 
@@ -75,11 +80,13 @@ pub(super) fn eval_left_function(values: &[Value]) -> Result<Value, ExecError> {
     if matches!(text_value, Value::Null) || matches!(count_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "left",
-        left: text_value.clone(),
-        right: count_value.clone(),
-    })?;
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "left",
+            left: text_value.clone(),
+            right: count_value.clone(),
+        })?;
     let count = match count_value {
         Value::Int32(v) => *v,
         other => {
@@ -126,11 +133,13 @@ pub(super) fn eval_repeat_function(values: &[Value]) -> Result<Value, ExecError>
     if matches!(text_value, Value::Null) || matches!(count_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "repeat",
-        left: text_value.clone(),
-        right: count_value.clone(),
-    })?;
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "repeat",
+            left: text_value.clone(),
+            right: count_value.clone(),
+        })?;
     let count = match count_value {
         Value::Int32(v) => *v,
         other => {
@@ -164,11 +173,13 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
     if matches!(text_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "lower",
-        left: text_value.clone(),
-        right: Value::Text("".into()),
-    })?;
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "lower",
+            left: text_value.clone(),
+            right: Value::Text("".into()),
+        })?;
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
 }
 
@@ -192,7 +203,9 @@ pub(super) fn eval_md5_function(values: &[Value]) -> Result<Value, ExecError> {
         }
     };
     let digest = Md5::digest(bytes);
-    Ok(Value::Text(CompactString::from_owned(format!("{digest:x}"))))
+    Ok(Value::Text(CompactString::from_owned(format!(
+        "{digest:x}"
+    ))))
 }
 
 pub(super) fn eval_bpchar_to_text_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -202,11 +215,13 @@ pub(super) fn eval_bpchar_to_text_function(values: &[Value]) -> Result<Value, Ex
     if matches!(text_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "::text",
-        left: text_value.clone(),
-        right: Value::Text("".into()),
-    })?;
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "::text",
+            left: text_value.clone(),
+            right: Value::Text("".into()),
+        })?;
     Ok(Value::Text(CompactString::from_owned(
         text.trim_end_matches(' ').to_string(),
     )))
@@ -222,16 +237,20 @@ pub(super) fn eval_position_function(values: &[Value]) -> Result<Value, ExecErro
     if matches!(needle_value, Value::Null) || matches!(haystack_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let needle = needle_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "position",
-        left: needle_value.clone(),
-        right: haystack_value.clone(),
-    })?;
-    let haystack = haystack_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "position",
-        left: needle_value.clone(),
-        right: haystack_value.clone(),
-    })?;
+    let needle = needle_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "position",
+            left: needle_value.clone(),
+            right: haystack_value.clone(),
+        })?;
+    let haystack = haystack_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "position",
+            left: needle_value.clone(),
+            right: haystack_value.clone(),
+        })?;
     if needle.is_empty() {
         return Ok(Value::Int32(1));
     }
@@ -252,27 +271,32 @@ pub(super) fn eval_convert_from_function(values: &[Value]) -> Result<Value, Exec
     if matches!(bytes_value, Value::Null) || matches!(encoding_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let raw = bytes_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "convert_from",
-        left: bytes_value.clone(),
-        right: encoding_value.clone(),
-    })?;
-    let encoding_name = encoding_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "convert_from",
-        left: bytes_value.clone(),
-        right: encoding_value.clone(),
-    })?;
+    let raw = bytes_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "convert_from",
+            left: bytes_value.clone(),
+            right: encoding_value.clone(),
+        })?;
+    let encoding_name = encoding_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "convert_from",
+            left: bytes_value.clone(),
+            right: encoding_value.clone(),
+        })?;
     let bytes = decode_hex_text_bytes(raw).ok_or_else(|| ExecError::TypeMismatch {
         op: "convert_from",
         left: bytes_value.clone(),
         right: encoding_value.clone(),
     })?;
     let normalized = normalize_encoding_label(encoding_name);
-    let encoding = Encoding::for_label(normalized.as_bytes()).ok_or_else(|| ExecError::TypeMismatch {
-        op: "convert_from",
-        left: bytes_value.clone(),
-        right: encoding_value.clone(),
-    })?;
+    let encoding =
+        Encoding::for_label(normalized.as_bytes()).ok_or_else(|| ExecError::TypeMismatch {
+            op: "convert_from",
+            left: bytes_value.clone(),
+            right: encoding_value.clone(),
+        })?;
     let (decoded, _, had_errors) = encoding.decode(&bytes);
     if had_errors {
         return Err(ExecError::TypeMismatch {

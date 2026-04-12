@@ -16,12 +16,16 @@ use pgrust::backend::access::heap::heapam::{
     heap_delete, heap_flush, heap_insert_mvcc, heap_scan_begin_visible, heap_scan_next_visible,
     heap_update,
 };
-use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
-use pgrust::include::access::htup::{AttributeAlign, AttributeDesc, HeapTuple, TupleValue};
+use pgrust::backend::access::transam::xact::{
+    INVALID_TRANSACTION_ID, Snapshot, TransactionManager,
+};
 use pgrust::backend::storage::page::bufpage::{
     ItemIdFlags, page_get_item_id, page_get_max_offset_number, page_header,
 };
-use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+use pgrust::backend::storage::smgr::{
+    ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
+};
+use pgrust::include::access::htup::{AttributeAlign, AttributeDesc, HeapTuple, TupleValue};
 use pgrust::{BufferPool, SmgrStorageBackend};
 use std::collections::BTreeSet;
 use std::fs;
@@ -295,10 +299,7 @@ fn main() {
         &tuple(&desc, 1, "alice", Some("updated")),
     )
     .unwrap();
-    flush_blocks(
-        &pool,
-        [insert_tid.block_number, update_tid.block_number],
-    );
+    flush_blocks(&pool, [insert_tid.block_number, update_tid.block_number]);
     inspect_relation(
         &base_dir,
         &desc,

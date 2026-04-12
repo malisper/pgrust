@@ -523,18 +523,19 @@ impl PlanNode for GenerateSeriesState {
 
             if matches!(self.output_type.kind, SqlTypeKind::Numeric) {
                 use crate::include::nodes::datum::NumericValue;
-                let to_numeric = |v: Value, label: &'static str| -> Result<NumericValue, ExecError> {
-                    match v {
-                        Value::Numeric(n) => Ok(n),
-                        Value::Int32(i) => Ok(NumericValue::from_i64(i64::from(i))),
-                        Value::Int64(i) => Ok(NumericValue::from_i64(i)),
-                        other => Err(ExecError::TypeMismatch {
-                            op: label,
-                            left: other,
-                            right: Value::Null,
-                        }),
-                    }
-                };
+                let to_numeric =
+                    |v: Value, label: &'static str| -> Result<NumericValue, ExecError> {
+                        match v {
+                            Value::Numeric(n) => Ok(n),
+                            Value::Int32(i) => Ok(NumericValue::from_i64(i64::from(i))),
+                            Value::Int64(i) => Ok(NumericValue::from_i64(i)),
+                            other => Err(ExecError::TypeMismatch {
+                                op: label,
+                                left: other,
+                                right: Value::Null,
+                            }),
+                        }
+                    };
                 let start = to_numeric(start_val, "generate_series start")?;
                 let stop = to_numeric(stop_val, "generate_series stop")?;
                 let step = to_numeric(step_val, "generate_series step")?;
@@ -764,7 +765,9 @@ impl PlanNode for JsonTableFunctionState {
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
-            self.rows = Some(eval_json_table_function(self.kind, &self.arg, &mut dummy, ctx)?);
+            self.rows = Some(eval_json_table_function(
+                self.kind, &self.arg, &mut dummy, ctx,
+            )?);
         }
 
         let rows = self.rows.as_mut().unwrap();

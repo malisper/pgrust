@@ -1,5 +1,5 @@
-use super::*;
 use super::agg_output_special::*;
+use super::*;
 
 pub(super) fn bind_agg_output_expr(
     expr: &SqlExpr,
@@ -79,7 +79,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 }
             }
             Err(build_ungrouped_column_error(
-                input_scope, col_index, name, clause,
+                input_scope,
+                col_index,
+                name,
+                clause,
             ))
         }
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
@@ -307,19 +310,17 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 n_keys,
             )?),
         )),
-        SqlExpr::Concat(l, r) => {
-            bind_grouped_concat_expr(
-                l,
-                r,
-                group_by_exprs,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                agg_list,
-                n_keys,
-            )
-        }
+        SqlExpr::Concat(l, r) => bind_grouped_concat_expr(
+            l,
+            r,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        ),
         SqlExpr::UnaryPlus(inner) => Ok(Expr::UnaryPlus(Box::new(bind_agg_output_expr(
             inner,
             group_by_exprs,

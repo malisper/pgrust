@@ -1,8 +1,6 @@
 use super::exec_expr::eval_expr;
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
-use crate::backend::executor::render_bit_text;
-use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value, parse_jsonb_text,
@@ -12,9 +10,11 @@ use crate::backend::executor::jsonpath::{
     EvaluationContext as JsonPathEvaluationContext, canonicalize_jsonpath, evaluate_jsonpath,
     parse_jsonpath, validate_jsonpath,
 };
+use crate::backend::executor::render_bit_text;
+use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::include::nodes::plannodes::BuiltinScalarFunction;
-use crate::pgrust::session::ByteaOutputFormat;
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::session::ByteaOutputFormat;
 use serde_json::Value as SerdeJsonValue;
 
 pub(crate) fn validate_json_text(text: &str) -> Result<(), ExecError> {
@@ -97,162 +97,166 @@ pub(crate) fn eval_json_builtin_function(
 ) -> Option<Result<Value, ExecError>> {
     let eval = || -> Result<Value, ExecError> {
         match func {
-        BuiltinScalarFunction::ToJson => {
-            let value = values.first().cloned().unwrap_or(Value::Null);
-            Ok(Value::Json(CompactString::from_owned(value_to_json_text(
-                &value, false,
-            ))))
-        }
-        BuiltinScalarFunction::ToJsonb => {
-            let value = values.first().cloned().unwrap_or(Value::Null);
-            Ok(Value::Jsonb(encode_jsonb(&jsonb_from_value(&value)?)))
-        }
-        BuiltinScalarFunction::ArrayToJson => {
-            let value = values.first().cloned().unwrap_or(Value::Null);
-            let pretty = values
-                .get(1)
-                .and_then(|value| match value {
-                    Value::Bool(v) => Some(*v),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            Ok(Value::Json(CompactString::from_owned(value_to_json_text(
-                &value, pretty,
-            ))))
-        }
-        BuiltinScalarFunction::JsonBuildArray => Ok(Value::Json(CompactString::from_owned(
-            render_json_builder_array(values),
-        ))),
-        BuiltinScalarFunction::JsonBuildObject => Ok(Value::Json(CompactString::from_owned(
-            render_json_builder_object(values)?,
-        ))),
-        BuiltinScalarFunction::JsonObject => Ok(Value::Json(CompactString::from_owned(
-            render_json_object_function(values)?,
-        ))),
-        BuiltinScalarFunction::JsonTypeof => {
-            let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
-            Ok(Value::Text(CompactString::new(json.typeof_name())))
-        }
-        BuiltinScalarFunction::JsonbTypeof => {
-            let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
-            Ok(Value::Text(CompactString::new(json.typeof_name())))
-        }
-        BuiltinScalarFunction::JsonArrayLength => {
-            match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
-                ParsedJsonValue::Json(SerdeJsonValue::Array(items)) => {
-                    Ok(Value::Int32(items.len() as i32))
-                }
-                ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
-                    Ok(Value::Int32(items.len() as i32))
-                }
-                ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
-                    op: "json_array_length",
-                    left: json_value_to_value(&other, false),
-                    right: Value::Null,
-                }),
-                ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
-                    op: "json_array_length",
-                    left: jsonb_to_value(&other),
-                    right: Value::Null,
-                }),
+            BuiltinScalarFunction::ToJson => {
+                let value = values.first().cloned().unwrap_or(Value::Null);
+                Ok(Value::Json(CompactString::from_owned(value_to_json_text(
+                    &value, false,
+                ))))
             }
-        }
-        BuiltinScalarFunction::JsonbArrayLength => {
-            match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
-                ParsedJsonValue::Json(SerdeJsonValue::Array(items)) => {
-                    Ok(Value::Int32(items.len() as i32))
-                }
-                ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
-                    Ok(Value::Int32(items.len() as i32))
-                }
-                ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
-                    op: "jsonb_array_length",
-                    left: json_value_to_value(&other, false),
-                    right: Value::Null,
-                }),
-                ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
-                    op: "jsonb_array_length",
-                    left: jsonb_to_value(&other),
-                    right: Value::Null,
-                }),
+            BuiltinScalarFunction::ToJsonb => {
+                let value = values.first().cloned().unwrap_or(Value::Null);
+                Ok(Value::Jsonb(encode_jsonb(&jsonb_from_value(&value)?)))
             }
-        }
-        BuiltinScalarFunction::JsonExtractPath => {
-            let path = parse_json_path_args(&values[1..])?;
-            Ok(
-                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
-                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                        .map(|value| json_value_to_value(value, false))
-                        .unwrap_or(Value::Null),
-                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
-                        .map(jsonb_to_value)
-                        .unwrap_or(Value::Null),
-                },
-            )
-        }
-        BuiltinScalarFunction::JsonExtractPathText => {
-            let path = parse_json_path_args(&values[1..])?;
-            Ok(
-                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
-                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                        .map(|value| json_value_to_value(value, true))
-                        .unwrap_or(Value::Null),
-                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
-                        .map(jsonb_to_text_value)
-                        .unwrap_or(Value::Null),
-                },
-            )
-        }
-        BuiltinScalarFunction::JsonbExtractPath => {
-            let path = parse_json_path_args(&values[1..])?;
-            Ok(
-                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
-                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                        .map(|value| Value::Jsonb(parse_jsonb_text(&value.to_string()).unwrap()))
-                        .unwrap_or(Value::Null),
-                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
-                        .map(jsonb_to_value)
-                        .unwrap_or(Value::Null),
-                },
-            )
-        }
-        BuiltinScalarFunction::JsonbExtractPathText => {
-            let path = parse_json_path_args(&values[1..])?;
-            Ok(
-                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
-                    ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
-                        .map(|value| json_value_to_value(value, true))
-                        .unwrap_or(Value::Null),
-                    ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
-                        .map(jsonb_to_text_value)
-                        .unwrap_or(Value::Null),
-                },
-            )
-        }
-        BuiltinScalarFunction::JsonbBuildArray => {
-            let mut items = Vec::with_capacity(values.len());
-            for value in values {
-                items.push(jsonb_from_value(value)?);
+            BuiltinScalarFunction::ArrayToJson => {
+                let value = values.first().cloned().unwrap_or(Value::Null);
+                let pretty = values
+                    .get(1)
+                    .and_then(|value| match value {
+                        Value::Bool(v) => Some(*v),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                Ok(Value::Json(CompactString::from_owned(value_to_json_text(
+                    &value, pretty,
+                ))))
             }
-            Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items))))
-        }
-        BuiltinScalarFunction::JsonbBuildObject => {
-            let pairs = json_builder_pairs(values, "jsonb_build_object")?;
-            Ok(Value::Jsonb(encode_jsonb(&jsonb_object_from_pairs(&pairs)?)))
-        }
-        BuiltinScalarFunction::JsonbPathExists => {
-            eval_jsonpath_function(values, JsonPathFunctionKind::Exists)
-        }
-        BuiltinScalarFunction::JsonbPathMatch => {
-            eval_jsonpath_function(values, JsonPathFunctionKind::Match)
-        }
-        BuiltinScalarFunction::JsonbPathQueryArray => {
-            eval_jsonpath_function(values, JsonPathFunctionKind::QueryArray)
-        }
-        BuiltinScalarFunction::JsonbPathQueryFirst => {
-            eval_jsonpath_function(values, JsonPathFunctionKind::QueryFirst)
-        }
-        _ => unreachable!(),
+            BuiltinScalarFunction::JsonBuildArray => Ok(Value::Json(CompactString::from_owned(
+                render_json_builder_array(values),
+            ))),
+            BuiltinScalarFunction::JsonBuildObject => Ok(Value::Json(CompactString::from_owned(
+                render_json_builder_object(values)?,
+            ))),
+            BuiltinScalarFunction::JsonObject => Ok(Value::Json(CompactString::from_owned(
+                render_json_object_function(values)?,
+            ))),
+            BuiltinScalarFunction::JsonTypeof => {
+                let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
+                Ok(Value::Text(CompactString::new(json.typeof_name())))
+            }
+            BuiltinScalarFunction::JsonbTypeof => {
+                let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
+                Ok(Value::Text(CompactString::new(json.typeof_name())))
+            }
+            BuiltinScalarFunction::JsonArrayLength => {
+                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                    ParsedJsonValue::Json(SerdeJsonValue::Array(items)) => {
+                        Ok(Value::Int32(items.len() as i32))
+                    }
+                    ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
+                        Ok(Value::Int32(items.len() as i32))
+                    }
+                    ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
+                        op: "json_array_length",
+                        left: json_value_to_value(&other, false),
+                        right: Value::Null,
+                    }),
+                    ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
+                        op: "json_array_length",
+                        left: jsonb_to_value(&other),
+                        right: Value::Null,
+                    }),
+                }
+            }
+            BuiltinScalarFunction::JsonbArrayLength => {
+                match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                    ParsedJsonValue::Json(SerdeJsonValue::Array(items)) => {
+                        Ok(Value::Int32(items.len() as i32))
+                    }
+                    ParsedJsonValue::Jsonb(JsonbValue::Array(items)) => {
+                        Ok(Value::Int32(items.len() as i32))
+                    }
+                    ParsedJsonValue::Json(other) => Err(ExecError::TypeMismatch {
+                        op: "jsonb_array_length",
+                        left: json_value_to_value(&other, false),
+                        right: Value::Null,
+                    }),
+                    ParsedJsonValue::Jsonb(other) => Err(ExecError::TypeMismatch {
+                        op: "jsonb_array_length",
+                        left: jsonb_to_value(&other),
+                        right: Value::Null,
+                    }),
+                }
+            }
+            BuiltinScalarFunction::JsonExtractPath => {
+                let path = parse_json_path_args(&values[1..])?;
+                Ok(
+                    match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                        ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                            .map(|value| json_value_to_value(value, false))
+                            .unwrap_or(Value::Null),
+                        ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                            .map(jsonb_to_value)
+                            .unwrap_or(Value::Null),
+                    },
+                )
+            }
+            BuiltinScalarFunction::JsonExtractPathText => {
+                let path = parse_json_path_args(&values[1..])?;
+                Ok(
+                    match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                        ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                            .map(|value| json_value_to_value(value, true))
+                            .unwrap_or(Value::Null),
+                        ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                            .map(jsonb_to_text_value)
+                            .unwrap_or(Value::Null),
+                    },
+                )
+            }
+            BuiltinScalarFunction::JsonbExtractPath => {
+                let path = parse_json_path_args(&values[1..])?;
+                Ok(
+                    match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                        ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                            .map(|value| {
+                                Value::Jsonb(parse_jsonb_text(&value.to_string()).unwrap())
+                            })
+                            .unwrap_or(Value::Null),
+                        ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                            .map(jsonb_to_value)
+                            .unwrap_or(Value::Null),
+                    },
+                )
+            }
+            BuiltinScalarFunction::JsonbExtractPathText => {
+                let path = parse_json_path_args(&values[1..])?;
+                Ok(
+                    match ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))? {
+                        ParsedJsonValue::Json(json) => json_lookup_path(&json, &path)
+                            .map(|value| json_value_to_value(value, true))
+                            .unwrap_or(Value::Null),
+                        ParsedJsonValue::Jsonb(jsonb) => jsonb_path(&jsonb, &path)
+                            .map(jsonb_to_text_value)
+                            .unwrap_or(Value::Null),
+                    },
+                )
+            }
+            BuiltinScalarFunction::JsonbBuildArray => {
+                let mut items = Vec::with_capacity(values.len());
+                for value in values {
+                    items.push(jsonb_from_value(value)?);
+                }
+                Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items))))
+            }
+            BuiltinScalarFunction::JsonbBuildObject => {
+                let pairs = json_builder_pairs(values, "jsonb_build_object")?;
+                Ok(Value::Jsonb(encode_jsonb(&jsonb_object_from_pairs(
+                    &pairs,
+                )?)))
+            }
+            BuiltinScalarFunction::JsonbPathExists => {
+                eval_jsonpath_function(values, JsonPathFunctionKind::Exists)
+            }
+            BuiltinScalarFunction::JsonbPathMatch => {
+                eval_jsonpath_function(values, JsonPathFunctionKind::Match)
+            }
+            BuiltinScalarFunction::JsonbPathQueryArray => {
+                eval_jsonpath_function(values, JsonPathFunctionKind::QueryArray)
+            }
+            BuiltinScalarFunction::JsonbPathQueryFirst => {
+                eval_jsonpath_function(values, JsonPathFunctionKind::QueryFirst)
+            }
+            _ => unreachable!(),
         }
     };
 
@@ -531,11 +535,16 @@ pub(crate) fn eval_jsonpath_operator(
     if as_match {
         jsonpath_match_result(result, true)
     } else {
-        Ok(Value::Bool(result.map(|items| !items.is_empty()).unwrap_or(false)))
+        Ok(Value::Bool(
+            result.map(|items| !items.is_empty()).unwrap_or(false),
+        ))
     }
 }
 
-fn eval_jsonpath_function(values: &[Value], kind: JsonPathFunctionKind) -> Result<Value, ExecError> {
+fn eval_jsonpath_function(
+    values: &[Value],
+    kind: JsonPathFunctionKind,
+) -> Result<Value, ExecError> {
     let target = values.first().unwrap_or(&Value::Null);
     let path = values.get(1).unwrap_or(&Value::Null);
     if matches!(target, Value::Null) || matches!(path, Value::Null) {
@@ -567,9 +576,9 @@ fn eval_jsonpath_function(values: &[Value], kind: JsonPathFunctionKind) -> Resul
     };
     let result = evaluate_jsonpath(&parsed, &eval_ctx);
     match kind {
-        JsonPathFunctionKind::Exists => {
-            Ok(Value::Bool(result.map(|items| !items.is_empty()).unwrap_or(false)))
-        }
+        JsonPathFunctionKind::Exists => Ok(Value::Bool(
+            result.map(|items| !items.is_empty()).unwrap_or(false),
+        )),
         JsonPathFunctionKind::Match => jsonpath_match_result(result, silent),
         JsonPathFunctionKind::QueryArray => match result {
             Ok(items) => Ok(Value::Jsonb(encode_jsonb(&JsonbValue::Array(items)))),
@@ -762,7 +771,9 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         Value::InternalChar(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
-        Value::Array(items) => SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect()),
+        Value::Array(items) => {
+            SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect())
+        }
     }
 }
 
@@ -800,7 +811,9 @@ pub(crate) fn eval_json_table_function(
                 }
             };
             for (key, _) in map {
-                rows.push(TupleSlot::virtual_row(vec![Value::Text(CompactString::from_owned(key))]));
+                rows.push(TupleSlot::virtual_row(vec![Value::Text(
+                    CompactString::from_owned(key),
+                )]));
             }
         }
         (JsonTableFunction::JsonbObjectKeys, ParsedJsonValue::Jsonb(json)) => {
@@ -815,7 +828,9 @@ pub(crate) fn eval_json_table_function(
                 }
             };
             for (key, _) in items {
-                rows.push(TupleSlot::virtual_row(vec![Value::Text(CompactString::from_owned(key))]));
+                rows.push(TupleSlot::virtual_row(vec![Value::Text(
+                    CompactString::from_owned(key),
+                )]));
             }
         }
         (JsonTableFunction::Each, ParsedJsonValue::Json(json)) => {
@@ -902,7 +917,9 @@ pub(crate) fn eval_json_table_function(
                 }
             };
             for value in items {
-                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(&value, false)]));
+                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(
+                    &value, false,
+                )]));
             }
         }
         (JsonTableFunction::JsonbArrayElements, ParsedJsonValue::Jsonb(json)) => {
@@ -932,7 +949,9 @@ pub(crate) fn eval_json_table_function(
                 }
             };
             for value in items {
-                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(&value, true)]));
+                rows.push(TupleSlot::virtual_row(vec![json_value_to_value(
+                    &value, true,
+                )]));
             }
         }
         (JsonTableFunction::JsonbArrayElementsText, ParsedJsonValue::Jsonb(json)) => {
