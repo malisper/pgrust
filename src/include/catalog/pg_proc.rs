@@ -2,10 +2,21 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, JSONB_TYPE_OID,
-    JSON_TYPE_OID, NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
-    TEXT_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID,
+    INT8_TYPE_OID, JSONB_TYPE_OID, JSON_TYPE_OID, NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID,
 };
+
+pub const CAST_PROC_INT4_INT2_OID: u32 = 6228;
+pub const CAST_PROC_INT8_INT2_OID: u32 = 6229;
+pub const CAST_PROC_NUMERIC_INT2_OID: u32 = 6230;
+pub const CAST_PROC_INT2_INT4_OID: u32 = 6231;
+pub const CAST_PROC_INT8_INT4_OID: u32 = 6232;
+pub const CAST_PROC_NUMERIC_INT4_OID: u32 = 6233;
+pub const CAST_PROC_INT2_INT8_OID: u32 = 6234;
+pub const CAST_PROC_INT4_INT8_OID: u32 = 6235;
+pub const CAST_PROC_NUMERIC_INT8_OID: u32 = 6236;
+pub const CAST_PROC_TEXT_BPCHAR_OID: u32 = 6237;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -289,6 +300,34 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
             2,
         ),
+        cast_proc_row(CAST_PROC_INT4_INT2_OID, "int4", INT4_TYPE_OID, &[INT2_TYPE_OID]),
+        cast_proc_row(CAST_PROC_INT8_INT2_OID, "int8", INT8_TYPE_OID, &[INT2_TYPE_OID]),
+        cast_proc_row(
+            CAST_PROC_NUMERIC_INT2_OID,
+            "numeric",
+            NUMERIC_TYPE_OID,
+            &[INT2_TYPE_OID],
+        ),
+        cast_proc_row(CAST_PROC_INT2_INT4_OID, "int2", INT2_TYPE_OID, &[INT4_TYPE_OID]),
+        cast_proc_row(CAST_PROC_INT8_INT4_OID, "int8", INT8_TYPE_OID, &[INT4_TYPE_OID]),
+        cast_proc_row(
+            CAST_PROC_NUMERIC_INT4_OID,
+            "numeric",
+            NUMERIC_TYPE_OID,
+            &[INT4_TYPE_OID],
+        ),
+        cast_proc_row(CAST_PROC_INT2_INT8_OID, "int2", INT2_TYPE_OID, &[INT8_TYPE_OID]),
+        cast_proc_row(CAST_PROC_INT4_INT8_OID, "int4", INT4_TYPE_OID, &[INT8_TYPE_OID]),
+        cast_proc_row(
+            CAST_PROC_NUMERIC_INT8_OID,
+            "numeric",
+            NUMERIC_TYPE_OID,
+            &[INT8_TYPE_OID],
+        ),
+        PgProcRow {
+            prosrc: "bpchartotext".into(),
+            ..cast_proc_row(CAST_PROC_TEXT_BPCHAR_OID, "text", TEXT_TYPE_OID, &[BPCHAR_TYPE_OID])
+        },
     ]
 }
 
@@ -368,6 +407,21 @@ fn aggregate_row(
         false,
         false,
         'a',
+        'i',
+    )
+}
+
+fn cast_proc_row(oid: u32, proname: &str, prorettype: u32, arg_oids: &[u32]) -> PgProcRow {
+    proc_row(
+        oid,
+        proname,
+        prorettype,
+        &oid_argtypes(arg_oids),
+        proname,
+        arg_oids.len() as i16,
+        false,
+        true,
+        'f',
         'i',
     )
 }

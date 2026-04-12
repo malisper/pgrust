@@ -1844,6 +1844,11 @@ mod tests {
                 && row.prokind == 'a'
         }));
         assert!(rows.procs.iter().any(|row| {
+            row.proname == "numeric"
+                && row.proargtypes == INT4_TYPE_OID.to_string()
+                && row.prorettype == crate::include::catalog::NUMERIC_TYPE_OID
+        }));
+        assert!(rows.procs.iter().any(|row| {
             row.proname == "json_array_elements"
                 && row.proretset
                 && row.prorettype == JSON_TYPE_OID
@@ -1886,6 +1891,13 @@ mod tests {
                 && row.castfunc == 0
                 && row.castcontext == 'i'
                 && row.castmethod == 'b'
+        }));
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == INT4_TYPE_OID
+                && row.casttarget == crate::include::catalog::NUMERIC_TYPE_OID
+                && row.castfunc != 0
+                && row.castcontext == 'i'
+                && row.castmethod == 'f'
         }));
         assert!(rows.casts.iter().any(|row| {
             row.castsource == VARCHAR_TYPE_OID

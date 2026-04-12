@@ -652,6 +652,12 @@ mod tests {
                 && row.castmethod == 'b'
         }));
         assert!(cache.cast_rows().iter().any(|row| {
+            row.castsource == INT4_TYPE_OID
+                && row.casttarget == crate::include::catalog::NUMERIC_TYPE_OID
+                && row.castfunc != 0
+                && row.castmethod == 'f'
+        }));
+        assert!(cache.cast_rows().iter().any(|row| {
             row.castsource == VARCHAR_TYPE_OID
                 && row.casttarget == TEXT_TYPE_OID
                 && row.castcontext == 'i'
