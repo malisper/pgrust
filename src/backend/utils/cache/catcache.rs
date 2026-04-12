@@ -430,12 +430,48 @@ impl CatCache {
         self.operator_rows.clone()
     }
 
+    pub fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<&PgOperatorRow> {
+        let normalized = normalize_catalog_name(name);
+        self.operator_rows.iter().find(|row| {
+            row.oprname.eq_ignore_ascii_case(normalized)
+                && row.oprleft == left_type_oid
+                && row.oprright == right_type_oid
+        })
+    }
+
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
         self.proc_rows.clone()
     }
 
+    pub fn proc_by_oid(&self, oid: u32) -> Option<&PgProcRow> {
+        self.proc_rows.iter().find(|row| row.oid == oid)
+    }
+
+    pub fn proc_rows_by_name(&self, name: &str) -> Vec<&PgProcRow> {
+        let normalized = normalize_catalog_name(name);
+        self.proc_rows
+            .iter()
+            .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
+            .collect()
+    }
+
     pub fn cast_rows(&self) -> Vec<PgCastRow> {
         self.cast_rows.clone()
+    }
+
+    pub fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<&PgCastRow> {
+        self.cast_rows
+            .iter()
+            .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
     }
 
     pub fn collation_rows(&self) -> Vec<PgCollationRow> {
@@ -781,5 +817,33 @@ mod tests {
                 .iter()
                 .any(|row| row.oid == BTREE_AM_OID && row.amname == "btree")
         );
+    }
+
+    #[test]
+    fn catcache_supports_direct_proc_operator_and_cast_lookups() {
+        let cache = CatCache::from_catalog(&Catalog::default());
+
+        let lower = cache.proc_rows_by_name("pg_catalog.lower");
+        assert_eq!(lower.len(), 1);
+        assert_eq!(lower[0].proname, "lower");
+        assert_eq!(lower[0].pronargs, 1);
+
+        assert_eq!(
+            cache.proc_by_oid(TEXT_STARTS_WITH_PROC_OID).map(|row| row.proname.as_str()),
+            Some("starts_with")
+        );
+        assert_eq!(
+            cache
+                .operator_by_name_left_right("=", INT4_TYPE_OID, INT4_TYPE_OID)
+                .map(|row| row.oprcode),
+            Some(INT4_CMP_EQ_PROC_OID)
+        );
+        assert_eq!(
+            cache
+                .cast_by_source_target(INT4_TYPE_OID, OID_TYPE_OID)
+                .map(|row| row.castmethod),
+            Some('b')
+        );
+        assert!(cache.proc_rows_by_name("pg_catalog.no_such_proc").is_empty());
     }
 }
