@@ -1,8 +1,9 @@
 pub mod amapi;
 pub mod genam;
 pub mod htup;
-pub mod itup;
 pub mod itemptr;
+pub mod itup;
+pub mod nbtree;
 pub mod relscan;
 pub mod scankey;
 pub mod tupdesc;
