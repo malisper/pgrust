@@ -1334,7 +1334,6 @@ fn describe_sql(
         Statement::Select(stmt) => crate::backend::parser::build_plan(&stmt, &visible_catalog)
             .ok()
             .map(|plan| plan.columns()),
-        Statement::ShowTables => Some(vec![QueryColumn::text("table_name")]),
         Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
         _ => None,
     }

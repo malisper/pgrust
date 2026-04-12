@@ -343,10 +343,7 @@ impl Session {
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
-            Statement::Select(_)
-            | Statement::Values(_)
-            | Statement::Explain(_)
-            | Statement::ShowTables => {
+            Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 if super::database::statement_needs_temp_catalog_sync(&stmt) {
                     db.sync_visible_catalog_heaps(client_id);
                 }

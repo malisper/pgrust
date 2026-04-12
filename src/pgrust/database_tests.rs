@@ -645,13 +645,6 @@ fn create_index_and_alter_table_set_are_noops() {
             other => panic!("expected query result, got {:?}", other),
         }
 
-    match db.execute(1, "show tables").unwrap() {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("num_exp_add".into())]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-
     assert!(matches!(
         db.execute(1, "select * from num_exp_add_idx"),
         Err(ExecError::Parse(ParseError::UnknownTable(name)))
@@ -1151,38 +1144,6 @@ fn temp_catalog_sync_marks_namespace_clean_until_temp_state_changes() {
 }
 
 #[test]
-fn temp_show_tables_uses_cached_visible_catalog_without_sync() {
-    let base = temp_dir("temp_show_tables_cached_visible");
-    let db = Database::open(&base, 16).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create temp table temp_items (id int4 not null)")
-        .unwrap();
-
-    session.execute(&db, "show tables").unwrap();
-
-    assert!(db.client_visible_caches.read().contains_key(&1));
-    {
-        let namespaces = db.temp_relations.read();
-        let namespace = namespaces.get(&1).unwrap();
-        assert_eq!(namespace.synced_generation, 0);
-        assert!(namespace.generation > 0);
-    }
-
-    let cache = db.client_visible_caches.read().get(&1).cloned().unwrap();
-    let visible = db
-        .cached_visible_catalog_for_autocommit(1, None)
-        .expect("cached visible catalog");
-    assert!(visible.relcache().get_by_name("temp_items").is_some());
-
-    session.execute(&db, "show tables").unwrap();
-    let cache_again = db.client_visible_caches.read().get(&1).cloned().unwrap();
-    assert_eq!(cache_again.generation, cache.generation);
-}
-
-
-#[test]
 fn pg_constraint_lists_not_null_columns_for_permanent_and_temp_tables() {
     let base = temp_dir("pg_constraint_not_null_rows");
     let db = Database::open(&base, 16).unwrap();
@@ -1235,54 +1196,6 @@ fn pg_constraint_lists_not_null_columns_for_permanent_and_temp_tables() {
 }
 
 #[test]
-fn show_tables_does_not_duplicate_catalog_aliases_under_temp_shadowing() {
-    let base = temp_dir("show_tables_temp_shadow");
-    let db = Database::open(&base, 16).unwrap();
-    let mut session = Session::new(1);
-
-    db.execute(1, "create table items (id int4 not null)")
-        .unwrap();
-    session
-        .execute(&db, "create temp table items (id int4 not null)")
-        .unwrap();
-
-    match session.execute(&db, "show tables").unwrap() {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("items".into())]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn public_schema_tables_remain_visible_even_with_pg_prefix() {
-    let base = temp_dir("show_tables_public_pg_prefix");
-    let db = Database::open(&base, 16).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create table public.pg_visible (id int4 not null)")
-        .unwrap();
-
-    match session.execute(&db, "show tables").unwrap() {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("pg_visible".into())]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-
-    session
-        .execute(&db, "insert into public.pg_visible (id) values (1)")
-        .unwrap();
-    match session.execute(&db, "select id from pg_visible").unwrap() {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
 fn search_path_can_hide_public_tables_from_unqualified_lookup() {
     let base = temp_dir("search_path_hides_public");
     let db = Database::open(&base, 16).unwrap();
@@ -1303,11 +1216,6 @@ fn search_path_can_hide_public_tables_from_unqualified_lookup() {
         err,
         ExecError::Parse(ParseError::UnknownTable(name)) if name == "items"
     ));
-
-    match session.execute(&db, "show tables").unwrap() {
-        StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
-        other => panic!("expected query result, got {:?}", other),
-    }
 
     match session.execute(&db, "select id from public.items").unwrap() {
         StatementResult::Query { rows, .. } => {

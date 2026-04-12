@@ -3,8 +3,8 @@ use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::include::catalog::{
-    PG_CATALOG_NAMESPACE_OID, PgCastRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgTypeRow,
-    bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    PgCastRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -76,21 +76,6 @@ impl CatalogLookup for VisibleCatalog {
                 desc: entry.desc.clone(),
             })
         })
-    }
-
-    fn visible_table_names(&self) -> Vec<String> {
-        let mut names = self
-            .relcache
-            .entries()
-            .filter(|(_, entry)| entry.relkind == 'r')
-            .filter(|(_, entry)| entry.namespace_oid != PG_CATALOG_NAMESPACE_OID)
-            .map(|(name, _)| name)
-            .filter(|name| !name.contains('.'))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        names.sort();
-        names.dedup();
-        names
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {

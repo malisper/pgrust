@@ -2,8 +2,8 @@ use super::{
     Catalog, ExecError, ExecutorContext, ParseError, Plan, Statement, StatementResult,
     TransactionId, Value, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,
     execute_analyze, execute_create_index, execute_create_table, execute_delete,
-    execute_drop_table, execute_explain, execute_insert, execute_show_tables,
-    execute_truncate_table, execute_update, execute_vacuum, executor_start, parse_statement,
+    execute_drop_table, execute_explain, execute_insert, execute_truncate_table, execute_update,
+    execute_vacuum, executor_start, parse_statement,
 };
 use crate::backend::parser::CatalogLookup;
 use crate::pl::plpgsql::execute_do;
@@ -55,7 +55,6 @@ pub fn execute_statement(
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
-        Statement::ShowTables => execute_show_tables(catalog),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "create table handled by database/session layer",
@@ -96,7 +95,6 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
         })),
-        Statement::ShowTables => execute_show_tables(catalog),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

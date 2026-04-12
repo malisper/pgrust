@@ -89,7 +89,6 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
-        Rule::show_tables_stmt => Ok(Statement::ShowTables),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::create_table_stmt => build_create_table(inner),
