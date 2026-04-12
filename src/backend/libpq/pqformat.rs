@@ -85,6 +85,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::RequestedLengthTooLarge => "requested length too large".to_string(),
         ExecError::DivisionByZero(_) => "division by zero".to_string(),
         ExecError::GenerateSeriesZeroStep => "step size cannot equal zero".to_string(),
+        ExecError::GenerateSeriesInvalidArg(arg, issue) => {
+            format!("{arg} value cannot be {issue}")
+        }
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { size, max_size })) => {
             format!("row is too big: size {size}, maximum size {max_size}")
         }

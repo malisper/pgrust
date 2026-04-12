@@ -535,9 +535,24 @@ impl PlanNode for GenerateSeriesState {
                         }),
                     }
                 };
-                self.num_current = Some(to_numeric(start_val, "generate_series start")?);
-                self.num_end = Some(to_numeric(stop_val, "generate_series stop")?);
-                self.num_step = Some(to_numeric(step_val, "generate_series step")?);
+                let start = to_numeric(start_val, "generate_series start")?;
+                let stop = to_numeric(stop_val, "generate_series stop")?;
+                let step = to_numeric(step_val, "generate_series step")?;
+                let validate = |value: &NumericValue, arg: &'static str| -> Result<(), ExecError> {
+                    match value {
+                        NumericValue::NaN => Err(ExecError::GenerateSeriesInvalidArg(arg, "NaN")),
+                        NumericValue::PosInf | NumericValue::NegInf => {
+                            Err(ExecError::GenerateSeriesInvalidArg(arg, "infinity"))
+                        }
+                        NumericValue::Finite { .. } => Ok(()),
+                    }
+                };
+                validate(&start, "start")?;
+                validate(&stop, "stop")?;
+                validate(&step, "step size")?;
+                self.num_current = Some(start);
+                self.num_end = Some(stop);
+                self.num_step = Some(step);
             } else {
                 let to_i64 = |v: Value, label: &'static str| -> Result<i64, ExecError> {
                     match v {

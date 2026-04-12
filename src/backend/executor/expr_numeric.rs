@@ -40,6 +40,9 @@ fn trailing_decimal_zeros(coeff: &BigInt, max: u32) -> u32 {
 }
 
 fn align_coeff(coeff: &BigInt, from_scale: u32, to_scale: u32) -> BigInt {
+    if from_scale == to_scale {
+        return coeff.clone();
+    }
     coeff * pow10_bigint(to_scale - from_scale)
 }
 
@@ -91,6 +94,9 @@ fn round_numeric_to_scale(value: &NumericValue, target_scale: i32) -> NumericVal
             .unwrap_or_else(|| value.clone()),
         NumericValue::Finite { coeff, scale } => {
             let shift = target_scale.unsigned_abs();
+            if negative_scale_rounds_to_zero(coeff, *scale, shift) {
+                return NumericValue::zero();
+            }
             let factor = pow10_bigint(scale.saturating_add(shift));
             let (quotient, remainder) = coeff.div_rem(&factor);
             let twice = remainder.abs() * 2u8;
@@ -132,6 +138,9 @@ fn trunc_numeric_to_scale(value: &NumericValue, target_scale: i32) -> NumericVal
         },
         NumericValue::Finite { coeff, scale } => {
             let shift = target_scale.unsigned_abs();
+            if negative_scale_rounds_to_zero(coeff, *scale, shift) {
+                return NumericValue::zero();
+            }
             let factor = pow10_bigint(scale.saturating_add(shift));
             let quotient = coeff / &factor;
             NumericValue::Finite {
@@ -155,6 +164,19 @@ fn numeric_digits_before_decimal(value: &NumericValue) -> u32 {
         }
         _ => 0,
     }
+}
+
+fn negative_scale_rounds_to_zero(coeff: &BigInt, scale: u32, shift: u32) -> bool {
+    if coeff.is_zero() {
+        return true;
+    }
+    let digits = coeff
+        .to_str_radix(10)
+        .trim_start_matches('-')
+        .trim_start_matches('0')
+        .len()
+        .max(1) as u32;
+    digits.saturating_sub(scale) < shift
 }
 
 fn ensure_numeric_range(value: NumericValue) -> Result<NumericValue, ExecError> {

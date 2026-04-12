@@ -708,6 +708,7 @@ fn bind_order_by_items(
 pub struct BoundInsertStatement {
     pub rel: RelFileLocator,
     pub desc: RelationDesc,
+    pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<usize>,
     pub source: BoundInsertSource,
 }
@@ -725,8 +726,37 @@ pub enum BoundInsertSource {
 pub struct PreparedInsert {
     pub rel: RelFileLocator,
     pub desc: RelationDesc,
+    pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<usize>,
     pub num_params: usize,
+}
+
+fn bind_insert_column_defaults(
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+) -> Result<Vec<Expr>, ParseError> {
+    desc.columns
+        .iter()
+        .map(|column| {
+            column
+                .default_expr
+                .as_ref()
+                .map(|sql| {
+                    let expr = crate::backend::parser::parse_expr(sql)?;
+                    bind_expr_with_outer_and_ctes(
+                        &expr,
+                        &empty_scope(),
+                        catalog,
+                        &[],
+                        None,
+                        local_ctes,
+                    )
+                })
+                .transpose()
+                .map(|expr| expr.unwrap_or(Expr::Const(Value::Null)))
+        })
+        .collect()
 }
 
 pub fn bind_insert_prepared(
@@ -736,6 +766,7 @@ pub fn bind_insert_prepared(
     catalog: &dyn CatalogLookup,
 ) -> Result<PreparedInsert, ParseError> {
     let entry = lookup_relation(catalog, table_name)?;
+    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &[])?;
 
     let target_columns = if let Some(columns) = columns {
         let scope = scope_for_relation(Some(table_name), &entry.desc);
@@ -744,7 +775,13 @@ pub fn bind_insert_prepared(
             .map(|column| resolve_column(&scope, column))
             .collect::<Result<Vec<_>, _>>()?
     } else {
-        (0..entry.desc.columns.len()).collect()
+        if num_params > entry.desc.columns.len() {
+            return Err(ParseError::InvalidInsertTargetCount {
+                expected: entry.desc.columns.len(),
+                actual: num_params,
+            });
+        }
+        (0..num_params).collect()
     };
 
     if target_columns.len() != num_params {
@@ -757,6 +794,7 @@ pub fn bind_insert_prepared(
     Ok(PreparedInsert {
         rel: entry.rel,
         desc: entry.desc.clone(),
+        column_defaults,
         target_columns,
         num_params,
     })
@@ -789,19 +827,26 @@ pub fn bind_insert(
 ) -> Result<BoundInsertStatement, ParseError> {
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
+    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
-
-    let target_columns = if let Some(columns) = &stmt.columns {
-        columns
-            .iter()
-            .map(|column| resolve_column(&scope, column))
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        (0..entry.desc.columns.len()).collect()
-    };
 
     let source = match &stmt.source {
         InsertSource::Values(rows) => {
+            let target_columns = if let Some(columns) = &stmt.columns {
+                columns
+                    .iter()
+                    .map(|column| resolve_column(&scope, column))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                let width = rows.first().map(Vec::len).unwrap_or(0);
+                if width > entry.desc.columns.len() {
+                    return Err(ParseError::InvalidInsertTargetCount {
+                        expected: entry.desc.columns.len(),
+                        actual: width,
+                    });
+                }
+                (0..width).collect()
+            };
             for row in rows {
                 if target_columns.len() != row.len() {
                     return Err(ParseError::InvalidInsertTargetCount {
@@ -810,68 +855,63 @@ pub fn bind_insert(
                     });
                 }
             }
-            BoundInsertSource::Values(
-                rows.iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|expr| {
-                                bind_expr_with_outer_and_ctes(
-                                    expr,
-                                    &scope,
-                                    catalog,
-                                    &[],
-                                    None,
-                                    &local_ctes,
-                                )
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-        InsertSource::DefaultValues => BoundInsertSource::DefaultValues(
-            entry.desc
-                .columns
+            let bound_rows = rows
                 .iter()
-                .map(|column| {
-                    column
-                        .default_expr
-                        .as_ref()
-                        .map(|sql| {
-                            let expr = crate::backend::parser::parse_expr(sql)?;
-                            bind_expr_with_outer_and_ctes(
-                                &expr,
-                                &empty_scope(),
+                .map(|row| {
+                    row.iter()
+                        .zip(target_columns.iter())
+                        .map(|(expr, column_index)| match expr {
+                            SqlExpr::Default => Ok(column_defaults[*column_index].clone()),
+                            _ => bind_expr_with_outer_and_ctes(
+                                expr,
+                                &scope,
                                 catalog,
                                 &[],
                                 None,
                                 &local_ctes,
-                            )
+                            ),
                         })
-                        .transpose()
-                        // :HACK: DEFAULT VALUES currently falls back to NULL by
-                        // descriptor inspection instead of using PostgreSQL's
-                        // richer default metadata/rules machinery.
-                        .map(|expr| expr.unwrap_or(Expr::Const(Value::Null)))
+                        .collect::<Result<Vec<_>, _>>()
                 })
-                .collect::<Result<Vec<_>, _>>()?,
+                .collect::<Result<Vec<_>, _>>()?;
+            (target_columns, BoundInsertSource::Values(bound_rows))
+        }
+        InsertSource::DefaultValues => (
+            (0..entry.desc.columns.len()).collect(),
+            BoundInsertSource::DefaultValues(column_defaults.clone()),
         ),
         InsertSource::Select(select) => {
             let plan = build_plan_with_outer(select, catalog, &[], None, &local_ctes)?;
             let actual = plan.columns().len();
+            let target_columns = if let Some(columns) = &stmt.columns {
+                columns
+                    .iter()
+                    .map(|column| resolve_column(&scope, column))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                if actual > entry.desc.columns.len() {
+                    return Err(ParseError::InvalidInsertTargetCount {
+                        expected: entry.desc.columns.len(),
+                        actual,
+                    });
+                }
+                (0..actual).collect()
+            };
             if target_columns.len() != actual {
                 return Err(ParseError::InvalidInsertTargetCount {
                     expected: target_columns.len(),
                     actual,
                 });
             }
-            BoundInsertSource::Select(Box::new(plan))
+            (target_columns, BoundInsertSource::Select(Box::new(plan)))
         }
     };
+    let (target_columns, source) = source;
 
     Ok(BoundInsertStatement {
         rel: entry.rel,
         desc: entry.desc.clone(),
+        column_defaults,
         target_columns,
         source,
     })

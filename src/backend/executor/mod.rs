@@ -103,6 +103,7 @@ pub enum ExecError {
     RaiseException(String),
     DivisionByZero(&'static str),
     GenerateSeriesZeroStep,
+    GenerateSeriesInvalidArg(&'static str, &'static str),
     InvalidIntegerInput {
         ty: &'static str,
         value: String,

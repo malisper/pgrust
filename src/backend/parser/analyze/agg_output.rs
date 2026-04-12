@@ -42,6 +42,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
     }
 
     match expr {
+        SqlExpr::Default => Err(ParseError::UnexpectedToken {
+            expected: "expression",
+            actual: "DEFAULT".into(),
+        }),
         SqlExpr::AggCall {
             func,
             args,

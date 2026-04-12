@@ -178,12 +178,25 @@ pub fn execute_insert(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
+    fn eval_insert_defaults(
+        defaults: &[crate::backend::executor::Expr],
+        width: usize,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Vec<Value>, ExecError> {
+        let mut slot = TupleSlot::virtual_row(vec![Value::Null; width]);
+        defaults
+            .iter()
+            .map(|expr| eval_expr(expr, &mut slot, ctx))
+            .collect()
+    }
+
     let values = match &stmt.source {
         BoundInsertSource::Values(rows) => rows
             .iter()
             .map(|row| {
                 let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
-                let mut values = vec![Value::Null; stmt.desc.columns.len()];
+                let mut values =
+                    eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
                 for (column_index, expr) in stmt.target_columns.iter().zip(row.iter()) {
                     values[*column_index] = eval_expr(expr, &mut slot, ctx)?;
                 }
@@ -192,7 +205,8 @@ pub fn execute_insert(
             .collect::<Result<Vec<_>, ExecError>>()?,
         BoundInsertSource::DefaultValues(defaults) => {
             let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
-            let mut values = vec![Value::Null; stmt.desc.columns.len()];
+            let mut values =
+                eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
             for (column_index, expr) in stmt.target_columns.iter().zip(defaults.iter()) {
                 values[*column_index] = eval_expr(expr, &mut slot, ctx)?;
             }
@@ -203,7 +217,8 @@ pub fn execute_insert(
             let mut rows = Vec::new();
             while let Some(slot) = state.exec_proc_node(ctx)? {
                 let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                let mut values = vec![Value::Null; stmt.desc.columns.len()];
+                let mut values =
+                    eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
                 for (column_index, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
                     values[*column_index] = value;
                 }
@@ -242,7 +257,12 @@ pub fn execute_prepared_insert_row(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<(), ExecError> {
-    let mut values = vec![Value::Null; prepared.desc.columns.len()];
+    let mut slot = TupleSlot::virtual_row(vec![Value::Null; prepared.desc.columns.len()]);
+    let mut values = prepared
+        .column_defaults
+        .iter()
+        .map(|expr| eval_expr(expr, &mut slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
     for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
         values[*column_index] = param.clone();
     }
