@@ -260,7 +260,8 @@ fn matches_dollar_end(bytes: &[u8], start: usize, tag: &[u8]) -> bool {
 
 fn starts_position_call(bytes: &[u8], i: usize) -> bool {
     let keyword = b"position";
-    if i + keyword.len() > bytes.len() || !bytes[i..i + keyword.len()].eq_ignore_ascii_case(keyword) {
+    if i + keyword.len() > bytes.len() || !bytes[i..i + keyword.len()].eq_ignore_ascii_case(keyword)
+    {
         return false;
     }
     if i > 0 && is_identifier_continue(bytes[i - 1]) {

@@ -426,5 +426,4 @@ impl TupleSlot {
             _ => None,
         }
     }
-
 }

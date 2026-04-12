@@ -20,6 +20,5 @@ pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
     }
 }
 
-
 #[cfg(test)]
 mod tests;
