@@ -1,16 +1,16 @@
-use super::*;
 use super::functions::*;
 use super::infer::*;
+use super::*;
 
 mod ops;
 mod targets;
 
 pub(crate) use self::ops::bind_concat_operands;
-pub(crate) use self::targets::bind_select_targets;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
     bind_shift_expr,
 };
+pub(crate) use self::targets::bind_select_targets;
 
 #[allow(dead_code)]
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
@@ -212,6 +212,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?))
         }
         SqlExpr::Cast(inner, ty) => {
+            let source_type = infer_sql_expr_type_with_ctes(
+                inner,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let bound_inner = if let SqlExpr::ArrayLiteral(elements) = inner.as_ref() {
                 Expr::ArrayLiteral {
                     elements: elements
@@ -239,6 +247,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             };
+            validate_catalog_backed_explicit_cast(source_type, *ty)?;
             Expr::Cast(Box::new(bound_inner), *ty)
         }
         SqlExpr::Eq(left, right) => bind_comparison_expr(
@@ -816,15 +825,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 );
+                let bound_arg = bind_expr_with_outer_and_ctes(
+                    &args[0],
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                validate_catalog_backed_explicit_cast(arg_type, target_type)?;
                 return Ok(Expr::Cast(
-                    Box::new(bind_expr_with_outer_and_ctes(
-                        &args[0],
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    Box::new(bound_arg),
                     if arg_type == target_type {
                         arg_type
                     } else {
@@ -832,14 +843,46 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     },
                 ));
             }
-            let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "supported builtin function",
-                actual: name.clone(),
-            })?;
+            let func =
+                resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "supported builtin function",
+                    actual: name.clone(),
+                })?;
             validate_scalar_function_arity(func, args)?;
-            bind_scalar_function_call(func, args, scope, catalog, outer_scopes, grouped_outer, ctes)?
+            bind_scalar_function_call(
+                func,
+                args,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?
         }
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
+    })
+}
+
+fn validate_catalog_backed_explicit_cast(
+    source_type: SqlType,
+    target_type: SqlType,
+) -> Result<(), ParseError> {
+    if source_type.element_type() == target_type.element_type() {
+        return Ok(());
+    }
+    if source_type.is_array || !is_text_like_type(source_type) {
+        return Ok(());
+    }
+    if explicit_text_input_cast_exists(target_type) {
+        return Ok(());
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "supported explicit cast",
+        actual: format!(
+            "cannot cast type {} to {}",
+            sql_type_name(source_type),
+            sql_type_name(target_type)
+        ),
     })
 }
 
@@ -891,8 +934,16 @@ fn bind_scalar_function_call(
             Ok(Expr::FuncCall {
                 func,
                 args: vec![
-                    coerce_bound_expr(bound_args[0].clone(), left_type, SqlType::new(SqlTypeKind::Text)),
-                    coerce_bound_expr(bound_args[1].clone(), right_type, SqlType::new(SqlTypeKind::Int4)),
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        left_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        right_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
                 ],
             })
         }
@@ -905,7 +956,9 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(arg_type) && !should_use_text_concat(&args[0], arg_type, &args[0], arg_type) {
+            if !is_bit_string_type(arg_type)
+                && !should_use_text_concat(&args[0], arg_type, &args[0], arg_type)
+            {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text or bit argument",
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
@@ -989,7 +1042,11 @@ fn bind_scalar_function_call(
             }
             let mut coerced = vec![
                 bound_args[0].clone(),
-                coerce_bound_expr(bound_args[1].clone(), start_type, SqlType::new(SqlTypeKind::Int4)),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    start_type,
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
             ];
             if let Some(len_arg) = args.get(2) {
                 let len_type = infer_sql_expr_type_with_ctes(
@@ -1012,7 +1069,10 @@ fn bind_scalar_function_call(
                     SqlType::new(SqlTypeKind::Int4),
                 ));
             }
-            Ok(Expr::FuncCall { func, args: coerced })
+            Ok(Expr::FuncCall {
+                func,
+                args: coerced,
+            })
         }
         BuiltinScalarFunction::Overlay => {
             let raw_value_type = infer_sql_expr_type_with_ctes(
@@ -1031,8 +1091,10 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            let value_type = coerce_unknown_string_literal_type(&args[0], raw_value_type, raw_place_type);
-            let place_type = coerce_unknown_string_literal_type(&args[1], raw_place_type, value_type);
+            let value_type =
+                coerce_unknown_string_literal_type(&args[0], raw_value_type, raw_place_type);
+            let place_type =
+                coerce_unknown_string_literal_type(&args[1], raw_place_type, value_type);
             let start_type = infer_sql_expr_type_with_ctes(
                 &args[2],
                 scope,
@@ -1060,7 +1122,11 @@ fn bind_scalar_function_call(
             let mut coerced = vec![
                 coerce_bound_expr(bound_args[0].clone(), raw_value_type, common),
                 coerce_bound_expr(bound_args[1].clone(), raw_place_type, common),
-                coerce_bound_expr(bound_args[2].clone(), start_type, SqlType::new(SqlTypeKind::Int4)),
+                coerce_bound_expr(
+                    bound_args[2].clone(),
+                    start_type,
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
             ];
             if let Some(len_arg) = args.get(3) {
                 let len_type = infer_sql_expr_type_with_ctes(
@@ -1083,7 +1149,10 @@ fn bind_scalar_function_call(
                     SqlType::new(SqlTypeKind::Int4),
                 ));
             }
-            Ok(Expr::FuncCall { func, args: coerced })
+            Ok(Expr::FuncCall {
+                func,
+                args: coerced,
+            })
         }
         BuiltinScalarFunction::GetBit => {
             let value_type = infer_sql_expr_type_with_ctes(
@@ -1105,14 +1174,22 @@ fn bind_scalar_function_call(
             if !is_bit_string_type(value_type) || !is_integer_family(index_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "get_bit(bit, int4)",
-                    actual: format!("{func:?}({}, {})", sql_type_name(value_type), sql_type_name(index_type)),
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(value_type),
+                        sql_type_name(index_type)
+                    ),
                 });
             }
             Ok(Expr::FuncCall {
                 func,
                 args: vec![
                     bound_args[0].clone(),
-                    coerce_bound_expr(bound_args[1].clone(), index_type, SqlType::new(SqlTypeKind::Int4)),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        index_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
                 ],
             })
         }
@@ -1141,7 +1218,10 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(value_type) || !is_integer_family(index_type) || !is_integer_family(bit_type) {
+            if !is_bit_string_type(value_type)
+                || !is_integer_family(index_type)
+                || !is_integer_family(bit_type)
+            {
                 return Err(ParseError::UnexpectedToken {
                     expected: "set_bit(bit, int4, int4)",
                     actual: format!(
@@ -1156,8 +1236,16 @@ fn bind_scalar_function_call(
                 func,
                 args: vec![
                     bound_args[0].clone(),
-                    coerce_bound_expr(bound_args[1].clone(), index_type, SqlType::new(SqlTypeKind::Int4)),
-                    coerce_bound_expr(bound_args[2].clone(), bit_type, SqlType::new(SqlTypeKind::Int4)),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        index_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[2].clone(),
+                        bit_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
                 ],
             })
         }
@@ -1241,7 +1329,8 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !matches!(arg_type.kind, SqlTypeKind::Text | SqlTypeKind::Bytea) || arg_type.is_array {
+            if !matches!(arg_type.kind, SqlTypeKind::Text | SqlTypeKind::Bytea) || arg_type.is_array
+            {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text or bytea argument",
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
@@ -1338,7 +1427,10 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            let target = if matches!(arg_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+            let target = if matches!(
+                arg_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) {
                 SqlType::new(SqlTypeKind::Float8)
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
@@ -1370,11 +1462,8 @@ fn bind_scalar_function_call(
                 raw_left_type,
                 SqlType::new(SqlTypeKind::Numeric),
             );
-            let right_type = coerce_unknown_string_literal_type(
-                &args[1],
-                raw_right_type,
-                left_type,
-            );
+            let right_type =
+                coerce_unknown_string_literal_type(&args[1], raw_right_type, left_type);
             if !is_numeric_family(left_type) || !is_numeric_family(right_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "numeric arguments",
@@ -1385,9 +1474,13 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            let target = if matches!(left_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
-                || matches!(right_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
-            {
+            let target = if matches!(
+                left_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) || matches!(
+                right_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) {
                 SqlType::new(SqlTypeKind::Float8)
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
@@ -1559,7 +1652,8 @@ fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::Numeric),
             );
             let low_type = coerce_unknown_string_literal_type(&args[1], raw_low_type, operand_type);
-            let high_type = coerce_unknown_string_literal_type(&args[2], raw_high_type, operand_type);
+            let high_type =
+                coerce_unknown_string_literal_type(&args[2], raw_high_type, operand_type);
             if !is_numeric_family(operand_type)
                 || !is_numeric_family(low_type)
                 || !is_numeric_family(high_type)
@@ -1674,7 +1768,10 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            let target = if matches!(arg_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+            let target = if matches!(
+                arg_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) {
                 SqlType::new(SqlTypeKind::Float8)
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
@@ -1709,7 +1806,10 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            let target = if matches!(arg_type.element_type().kind, SqlTypeKind::Float4 | SqlTypeKind::Float8) {
+            let target = if matches!(
+                arg_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) {
                 SqlType::new(SqlTypeKind::Float8)
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
@@ -1887,7 +1987,11 @@ fn bind_scalar_function_call(
             }
             Ok(Expr::FuncCall {
                 func,
-                args: vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target_type)],
+                args: vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    target_type,
+                )],
             })
         }
         BuiltinScalarFunction::PgInputIsValid

@@ -939,6 +939,29 @@ fn build_plan_rejects_missing_catalog_comparison_operator() {
 }
 
 #[test]
+fn build_plan_accepts_catalog_backed_text_input_casts() {
+    assert!(build_plan(
+        &parse_select(
+            "select jsonb('{\"a\":1}'), '$.a'::jsonpath, cast('0101' as bit varying(8)), timestamp('2024-01-02 03:04:05')"
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
+}
+
+#[test]
+fn build_plan_rejects_missing_catalog_text_input_cast() {
+    let err = build_plan(&parse_select("select cast('1' as int4[])").unwrap(), &catalog())
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. }
+            if actual == "cannot cast type text to integer[]"
+    ));
+}
+
+#[test]
 fn parse_select_with_order_limit_offset() {
     let stmt = parse_select("select name from people order by id desc limit 2 offset 1").unwrap();
     assert_eq!(stmt.order_by.len(), 1);

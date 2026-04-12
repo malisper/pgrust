@@ -59,7 +59,7 @@ pub(super) fn resolve_numeric_binary_type(
 }
 
 pub(super) fn sql_type_name(ty: SqlType) -> String {
-    match ty.kind {
+    let base = match ty.kind {
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int4 => "integer",
         SqlTypeKind::Int8 => "bigint",
@@ -79,8 +79,12 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::InternalChar => "\"char\"",
         SqlTypeKind::Char => "character",
         SqlTypeKind::Varchar => "character varying",
+    };
+    if ty.is_array {
+        format!("{base}[]")
+    } else {
+        base.to_string()
     }
-    .to_string()
 }
 
 pub(super) fn is_numeric_family(ty: SqlType) -> bool {
@@ -107,7 +111,7 @@ pub(super) fn is_bit_string_type(ty: SqlType) -> bool {
     !ty.is_array && matches!(ty.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
 }
 
-fn is_text_like_type(ty: SqlType) -> bool {
+pub(super) fn is_text_like_type(ty: SqlType) -> bool {
     matches!(
         ty.element_type().kind,
         SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
@@ -183,25 +187,31 @@ pub(super) fn resolve_array_concat_element_type(
     let left_elem = left.element_type();
     let right_elem = right.element_type();
     if left.is_array && right.is_array {
-        return resolve_common_scalar_type(left_elem, right_elem).ok_or(ParseError::UndefinedOperator {
-            op: "||",
-            left_type: sql_type_name(left),
-            right_type: sql_type_name(right),
-        });
+        return resolve_common_scalar_type(left_elem, right_elem).ok_or(
+            ParseError::UndefinedOperator {
+                op: "||",
+                left_type: sql_type_name(left),
+                right_type: sql_type_name(right),
+            },
+        );
     }
     if left.is_array {
-        return resolve_common_scalar_type(left_elem, right_elem).ok_or(ParseError::UndefinedOperator {
-            op: "||",
-            left_type: sql_type_name(left),
-            right_type: sql_type_name(right),
-        });
+        return resolve_common_scalar_type(left_elem, right_elem).ok_or(
+            ParseError::UndefinedOperator {
+                op: "||",
+                left_type: sql_type_name(left),
+                right_type: sql_type_name(right),
+            },
+        );
     }
     if right.is_array {
-        return resolve_common_scalar_type(left_elem, right_elem).ok_or(ParseError::UndefinedOperator {
-            op: "||",
-            left_type: sql_type_name(left),
-            right_type: sql_type_name(right),
-        });
+        return resolve_common_scalar_type(left_elem, right_elem).ok_or(
+            ParseError::UndefinedOperator {
+                op: "||",
+                left_type: sql_type_name(left),
+                right_type: sql_type_name(right),
+            },
+        );
     }
     Err(ParseError::UndefinedOperator {
         op: "||",
@@ -266,11 +276,16 @@ pub(super) fn infer_arithmetic_sql_type(expr: &SqlExpr, left: SqlType, right: Sq
 
 pub(super) fn infer_concat_sql_type(expr: &SqlExpr, left: SqlType, right: SqlType) -> SqlType {
     let _ = expr;
-    if left.kind == SqlTypeKind::Jsonb && !left.is_array && right.kind == SqlTypeKind::Jsonb && !right.is_array {
+    if left.kind == SqlTypeKind::Jsonb
+        && !left.is_array
+        && right.kind == SqlTypeKind::Jsonb
+        && !right.is_array
+    {
         return SqlType::new(SqlTypeKind::Jsonb);
     }
     if is_bit_string_type(left) && is_bit_string_type(right) {
-        return resolve_common_scalar_type(left, right).unwrap_or(SqlType::new(SqlTypeKind::VarBit));
+        return resolve_common_scalar_type(left, right)
+            .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
     }
     if left.is_array || right.is_array {
         if let Ok(element_type) = resolve_array_concat_element_type(left, right) {
