@@ -29,7 +29,8 @@ use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageMan
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow,
+    PgNamespaceRow, PgTypeRow,
 };
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -232,6 +233,7 @@ impl Database {
                 rows.namespaces.push(PgNamespaceRow {
                     oid: temp_namespace_oid,
                     nspname: "pg_temp".into(),
+                    nspowner: BOOTSTRAP_SUPERUSER_OID,
                 });
 
                 if let Some(namespace) = self.temp_relations.read().get(&client_id) {
@@ -241,6 +243,7 @@ impl Database {
                             relname: name.clone(),
                             relnamespace: temp.entry.namespace_oid,
                             reltype: temp.entry.row_type_oid,
+                            relowner: BOOTSTRAP_SUPERUSER_OID,
                             relam: crate::include::catalog::relam_for_relkind(temp.entry.relkind),
                             relfilenode: temp.entry.rel.rel_number,
                             relpersistence: temp.entry.relpersistence,
@@ -250,6 +253,7 @@ impl Database {
                             oid: temp.entry.row_type_oid,
                             typname: name.clone(),
                             typnamespace: temp.entry.namespace_oid,
+                            typowner: BOOTSTRAP_SUPERUSER_OID,
                             typrelid: temp.entry.relation_oid,
                             sql_type: crate::backend::parser::SqlType::new(
                                 crate::backend::parser::SqlTypeKind::Text,

@@ -16,20 +16,20 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
-    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
     BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
     FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
     INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
-    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
-    PgDatabaseRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow, PgTypeRow,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_tablespace_rows, builtin_type_rows,
+    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PgAmRow,
+    PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgDatabaseRow,
+    PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows,
+    bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_namespace_rows, bootstrap_pg_tablespace_rows,
+    builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -97,6 +97,7 @@ impl CatCache {
                 let namespace_row = PgNamespaceRow {
                     oid: entry.namespace_oid,
                     nspname: namespace.to_string(),
+                    nspowner: BOOTSTRAP_SUPERUSER_OID,
                 };
                 cache.namespaces_by_name.insert(
                     namespace_row.nspname.to_ascii_lowercase(),
@@ -111,6 +112,7 @@ impl CatCache {
                 relname: relname.to_string(),
                 relnamespace: entry.namespace_oid,
                 reltype: entry.row_type_oid,
+                relowner: BOOTSTRAP_SUPERUSER_OID,
                 relam: crate::include::catalog::relam_for_relkind(entry.relkind),
                 relfilenode: entry.rel.rel_number,
                 relpersistence: 'p',
@@ -126,6 +128,7 @@ impl CatCache {
                     oid: entry.row_type_oid,
                     typname: relname.to_string(),
                     typnamespace: entry.namespace_oid,
+                    typowner: BOOTSTRAP_SUPERUSER_OID,
                     typrelid: entry.relation_oid,
                     sql_type: SqlType::new(SqlTypeKind::Text),
                 };
@@ -549,6 +552,10 @@ mod tests {
             Some('p')
         );
         assert_eq!(
+            cache.class_by_name("people").map(|row| row.relowner),
+            Some(BOOTSTRAP_SUPERUSER_OID)
+        );
+        assert_eq!(
             cache.class_by_name("people").map(|row| row.relam),
             Some(HEAP_TABLE_AM_OID)
         );
@@ -564,7 +571,9 @@ mod tests {
         }));
         assert!(cache.auth_members_rows().is_empty());
         assert!(cache.tablespace_rows().iter().any(|row| {
-            row.oid == DEFAULT_TABLESPACE_OID && row.spcname == "pg_default"
+            row.oid == DEFAULT_TABLESPACE_OID
+                && row.spcname == "pg_default"
+                && row.spcowner == BOOTSTRAP_SUPERUSER_OID
         }));
         assert!(cache.index_rows().iter().any(|row| {
             row.indexrelid == index.relation_oid

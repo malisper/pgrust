@@ -4,7 +4,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
-    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
     BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
     FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
     INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
@@ -24,6 +24,7 @@ pub struct PgTypeRow {
     pub oid: u32,
     pub typname: String,
     pub typnamespace: u32,
+    pub typowner: u32,
     pub typrelid: u32,
     pub sql_type: SqlType,
 }
@@ -34,6 +35,7 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typname", SqlType::new(SqlTypeKind::Text), false),
             column_desc("typnamespace", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typrelid", SqlType::new(SqlTypeKind::Oid), false),
         ],
     }
@@ -97,6 +99,7 @@ fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
         oid,
         typname: name.to_string(),
         typnamespace: PG_CATALOG_NAMESPACE_OID,
+        typowner: BOOTSTRAP_SUPERUSER_OID,
         typrelid: 0,
         sql_type,
     }
@@ -107,6 +110,7 @@ fn composite_type_row(name: &str, oid: u32, relid: u32) -> PgTypeRow {
         oid,
         typname: name.to_string(),
         typnamespace: PG_CATALOG_NAMESPACE_OID,
+        typowner: BOOTSTRAP_SUPERUSER_OID,
         typrelid: relid,
         sql_type: SqlType::new(SqlTypeKind::Text),
     }

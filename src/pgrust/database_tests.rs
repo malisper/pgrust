@@ -172,6 +172,19 @@
         match db
             .execute(
                 1,
+                "select a.rolname from pg_database d join pg_authid a on a.oid = d.datdba",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match db
+            .execute(
+                1,
                 "select rolname, rolsuper, rolcreatedb from pg_authid order by oid",
             )
             .unwrap()
@@ -198,6 +211,19 @@
 
         db.execute(1, "create table num_exp_add (id1 int4, id2 int4)")
             .unwrap();
+
+        match db
+            .execute(
+                1,
+                "select a.rolname from pg_class c join pg_authid a on a.oid = c.relowner where c.relname = 'num_exp_add'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
 
         assert_eq!(
             db.execute(
