@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod catalog;
+pub mod state;
 pub mod namespace;
 pub mod pg_am;
 pub mod pg_attrdef;
@@ -23,6 +24,7 @@ pub mod store;
 pub use bootstrap::*;
 pub use catalog::*;
 pub use namespace::*;
+pub use state::*;
 pub use pg_am::*;
 pub use pg_attrdef::*;
 pub use pg_attribute::*;
