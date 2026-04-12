@@ -22,6 +22,7 @@ use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
+use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID};
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::include::access::htup::TupleError;
 use crate::include::nodes::datum::Value;
@@ -611,14 +612,16 @@ fn psql_describe_lookup_query(
     let rows = relation_name
         .and_then(|name| relcache.get_by_name(name))
         .map(|entry| {
+            let nspname = visible_relation_namespace_name(relcache, entry.relation_oid)
+                .unwrap_or_else(|| "public".to_string());
+            let relname = visible_relation_unqualified_name(relcache, entry.relation_oid)
+                .unwrap_or_else(|| {
+                    unqualified_relation_name(sql).unwrap_or_else(|| "bit_defaults".into())
+                });
             vec![vec![
                 Value::Int32(entry.relation_oid as i32),
-                Value::Text("public".into()),
-                Value::Text(
-                    unqualified_relation_name(sql)
-                        .unwrap_or_else(|| "bit_defaults".into())
-                        .into(),
-                ),
+                Value::Text(nspname.into()),
+                Value::Text(relname.into()),
             ]]
         })
         .unwrap_or_default();
@@ -771,11 +774,7 @@ fn psql_describe_constraints_query(
     let oid = extract_constraint_relid(sql)?;
     let relcache = catalog.relcache();
     relcache.get_by_oid(oid)?;
-    let relname = relcache
-        .entries()
-        .find_map(|(name, candidate)| {
-            (candidate.relation_oid == oid && !name.contains('.')).then(|| name.to_string())
-        })
+    let relname = visible_relation_display_name(relcache, oid)
         .unwrap_or_else(|| oid.to_string());
     let rows = catalog
         .constraint_rows_for_relation(oid)
@@ -798,6 +797,42 @@ fn psql_describe_constraints_query(
         ],
         rows,
     ))
+}
+
+fn visible_relation_display_name(relcache: &RelCache, oid: u32) -> Option<String> {
+    relcache
+        .entries()
+        .find_map(|(name, candidate)| {
+            (candidate.relation_oid == oid && !name.contains('.')).then(|| name.to_string())
+        })
+        .or_else(|| {
+            relcache
+                .entries()
+                .find_map(|(name, candidate)| (candidate.relation_oid == oid).then(|| name.to_string()))
+        })
+}
+
+fn visible_relation_unqualified_name(relcache: &RelCache, oid: u32) -> Option<String> {
+    visible_relation_display_name(relcache, oid)
+        .map(|name| name.rsplit('.').next().unwrap_or(name.as_str()).to_string())
+}
+
+fn visible_relation_namespace_name(relcache: &RelCache, oid: u32) -> Option<String> {
+    relcache
+        .entries()
+        .find_map(|(name, candidate)| {
+            (candidate.relation_oid == oid)
+                .then(|| name.split_once('.').map(|(schema, _)| schema.to_string()))
+                .flatten()
+        })
+        .or_else(|| {
+            let entry = relcache.get_by_oid(oid)?;
+            match entry.namespace_oid {
+                PG_CATALOG_NAMESPACE_OID => Some("pg_catalog".to_string()),
+                PUBLIC_NAMESPACE_OID => Some("public".to_string()),
+                _ => None,
+            }
+        })
 }
 
 fn extract_psql_pattern_name(sql: &str) -> Option<&str> {
@@ -1348,7 +1383,7 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::backend::utils::cache::relcache::RelCache;
+    use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 
     #[test]
     fn substitute_params_resolves_regclass_parameters_to_relation_oids() {
@@ -1463,5 +1498,93 @@ mod tests {
         );
         let (_, rows) = psql_describe_constraints_query(&visible, &sql).unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn psql_describe_lookup_query_uses_visible_namespace_name() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let temp_entry = RelCacheEntry {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: 4242,
+            row_type_oid: entry.row_type_oid,
+            relpersistence: 't',
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
+        };
+        let mut relcache = RelCache::default();
+        relcache.insert("widgets", temp_entry.clone());
+        relcache.insert("pg_temp.widgets", temp_entry);
+
+        let sql = "select c.oid, n.nspname, c.relname \
+             from pg_catalog.pg_class c \
+             left join pg_catalog.pg_namespace n on n.oid = c.relnamespace \
+             where c.relkind in ('r','p','v','m','S','f','') \
+             and pg_catalog.pg_table_is_visible(c.oid) \
+             and c.relname operator(pg_catalog.~) '^(widgets)$'";
+        let (_, rows) = psql_describe_lookup_query(&relcache, sql);
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Int32(entry.relation_oid as i32),
+                Value::Text("pg_temp".into()),
+                Value::Text("widgets".into()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn psql_describe_constraint_query_uses_qualified_visible_name_when_needed() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+
+        let temp_entry = RelCacheEntry {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: 4242,
+            row_type_oid: entry.row_type_oid,
+            relpersistence: 't',
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
+        };
+        let mut relcache = RelCache::default();
+        relcache.insert("pg_temp.widgets", temp_entry);
+        let visible = VisibleCatalog::new(relcache, Some(CatCache::from_catalog(&catalog)));
+
+        let sql = format!(
+            "select conname, conrelid::pg_catalog.regclass as ontable, \
+                 pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}'",
+            entry.relation_oid
+        );
+        let (_, rows) = psql_describe_constraints_query(&visible, &sql).unwrap();
+        assert_eq!(
+            rows,
+            vec![vec![
+                Value::Text("widgets_id_not_null".into()),
+                Value::Text("pg_temp.widgets".into()),
+                Value::Text("NOT NULL".into()),
+            ]]
+        );
     }
 }
