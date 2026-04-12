@@ -36,6 +36,18 @@ impl VisibleCatalog {
         let relname = name.rsplit('.').next().unwrap_or(name);
         derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
     }
+
+    pub fn has_index_on_relation(&self, relation_oid: u32) -> bool {
+        self.catcache
+            .as_ref()
+            .map(|catcache| {
+                catcache
+                    .index_rows()
+                    .into_iter()
+                    .any(|row| row.indrelid == relation_oid)
+            })
+            .unwrap_or(false)
+    }
 }
 
 impl CatalogLookup for VisibleCatalog {

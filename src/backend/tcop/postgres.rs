@@ -542,7 +542,7 @@ fn execute_psql_describe_query(
         && lower.contains("from pg_catalog.pg_class c")
         && lower.contains("where c.oid = '")
     {
-        return psql_describe_tableinfo_query(catalog.relcache(), sql);
+        return psql_describe_tableinfo_query(catalog, sql);
     }
     if lower.starts_with("select a.attname")
         && lower.contains("pg_catalog.format_type(a.atttypid, a.atttypmod)")
@@ -639,11 +639,12 @@ fn psql_describe_lookup_query(
 }
 
 fn psql_describe_tableinfo_query(
-    relcache: &RelCache,
+    catalog: &VisibleCatalog,
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let oid = extract_quoted_oid(sql)?;
-    let entry = relcache.get_by_oid(oid)?;
+    let entry = catalog.relcache().get_by_oid(oid)?;
+    let relhasindex = catalog.has_index_on_relation(oid);
     Some((
         vec![
             QueryColumn {
@@ -701,7 +702,7 @@ fn psql_describe_tableinfo_query(
         vec![vec![
             Value::Int32(0),
             Value::InternalChar(entry.relkind as u8),
-            Value::Bool(false),
+            Value::Bool(relhasindex),
             Value::Bool(false),
             Value::Bool(false),
             Value::Bool(false),
@@ -1586,5 +1587,34 @@ mod tests {
                 Value::Text("NOT NULL".into()),
             ]]
         );
+    }
+
+    #[test]
+    fn psql_describe_tableinfo_query_reports_visible_indexes() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        catalog
+            .create_index_for_relation("widgets_id_idx", entry.relation_oid, false, &["id".into()])
+            .unwrap();
+        let visible = VisibleCatalog::new(
+            RelCache::from_catalog(&catalog),
+            Some(CatCache::from_catalog(&catalog)),
+        );
+
+        let sql = format!(
+            "select c.relchecks, c.relkind, c.relhasindex \
+                 from pg_catalog.pg_class c \
+                 where c.oid = '{}'",
+            entry.relation_oid
+        );
+        let (_, rows) = psql_describe_tableinfo_query(&visible, &sql).unwrap();
+        assert_eq!(rows[0][2], Value::Bool(true));
     }
 }
