@@ -426,6 +426,14 @@ impl CatCache {
         self.constraint_rows.clone()
     }
 
+    pub fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
+        self.constraint_rows
+            .iter()
+            .filter(|row| row.conrelid == relation_oid)
+            .cloned()
+            .collect()
+    }
+
     pub fn operator_rows(&self) -> Vec<PgOperatorRow> {
         self.operator_rows.clone()
     }
