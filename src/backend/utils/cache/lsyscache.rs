@@ -2,12 +2,16 @@ use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
-use crate::backend::utils::cache::relcache::RelCacheEntry;
+use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
-    ensure_am_rows, ensure_attrdef_rows, ensure_attribute_rows, ensure_class_rows,
-    ensure_index_rows, ensure_namespace_rows, ensure_type_rows,
+    ensure_am_rows, ensure_amop_rows, ensure_amproc_rows, ensure_attrdef_rows,
+    ensure_attribute_rows, ensure_class_rows, ensure_collation_rows, ensure_index_rows,
+    ensure_namespace_rows, ensure_opclass_rows, ensure_opfamily_rows, ensure_type_rows,
 };
-use crate::include::catalog::{PgConstraintRow, PgTypeRow};
+use crate::include::catalog::{
+    PgAmRow, PgAmopRow, PgAmprocRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgOpclassRow,
+    PgOpfamilyRow, PgTypeRow,
+};
 use crate::pgrust::database::{Database, TempNamespace};
 use crate::ClientId;
 use crate::{backend::utils::cache::catcache::normalize_catalog_name, RelFileLocator};
@@ -45,6 +49,110 @@ fn type_for_oid(
     ensure_type_rows(db, client_id, txn_ctx)
         .into_iter()
         .find(|row| row.oid == oid)
+}
+
+pub fn access_method_row_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    amname: &str,
+) -> Option<PgAmRow> {
+    ensure_am_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .find(|row| row.amname.eq_ignore_ascii_case(amname))
+}
+
+pub fn access_method_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    am_oid: u32,
+) -> Option<PgAmRow> {
+    ensure_am_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .find(|row| row.oid == am_oid)
+}
+
+pub fn default_opclass_for_am_and_type(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    am_oid: u32,
+    input_type_oid: u32,
+) -> Option<PgOpclassRow> {
+    ensure_opclass_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .find(|row| row.opcmethod == am_oid && row.opcdefault && row.opcintype == input_type_oid)
+}
+
+pub fn opfamily_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    family_oid: u32,
+) -> Option<PgOpfamilyRow> {
+    ensure_opfamily_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .find(|row| row.oid == family_oid)
+}
+
+pub fn collation_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    collation_oid: u32,
+) -> Option<PgCollationRow> {
+    ensure_collation_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .find(|row| row.oid == collation_oid)
+}
+
+pub fn amop_rows_for_family(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    family_oid: u32,
+) -> Vec<PgAmopRow> {
+    ensure_amop_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| row.amopfamily == family_oid)
+        .collect()
+}
+
+pub fn amproc_rows_for_family(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    family_oid: u32,
+) -> Vec<PgAmprocRow> {
+    ensure_amproc_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| row.amprocfamily == family_oid)
+        .collect()
+}
+
+pub fn index_row_by_indexrelid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Option<PgIndexRow> {
+    ensure_index_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .find(|row| row.indexrelid == relation_oid)
+}
+
+pub fn index_relation_oids_for_heap(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<u32> {
+    ensure_index_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| row.indrelid == relation_oid)
+        .map(|row| row.indexrelid)
+        .collect()
 }
 
 pub fn relation_entry_by_oid(
@@ -109,6 +217,46 @@ pub fn relation_entry_by_oid(
         })
         .collect::<Option<Vec<_>>>()?;
 
+    let index = if class.relkind == 'i' {
+        index_row_by_indexrelid(db, client_id, txn_ctx, relation_oid).map(|index_row| {
+            let am_row = access_method_row_by_oid(db, client_id, txn_ctx, class.relam);
+            let opclass_rows = ensure_opclass_rows(db, client_id, txn_ctx);
+            let indclass = index_row.indclass.clone();
+            let resolved_opclasses = indclass
+                .iter()
+                .filter_map(|oid| opclass_rows.iter().find(|row| row.oid == *oid))
+                .collect::<Vec<_>>();
+            IndexRelCacheEntry {
+                indrelid: index_row.indrelid,
+                indnatts: index_row.indnatts,
+                indnkeyatts: index_row.indnkeyatts,
+                indisunique: index_row.indisunique,
+                indnullsnotdistinct: index_row.indnullsnotdistinct,
+                indisprimary: index_row.indisprimary,
+                indisexclusion: index_row.indisexclusion,
+                indimmediate: index_row.indimmediate,
+                indisclustered: index_row.indisclustered,
+                indisvalid: index_row.indisvalid,
+                indcheckxmin: index_row.indcheckxmin,
+                indisready: index_row.indisready,
+                indislive: index_row.indislive,
+                indisreplident: index_row.indisreplident,
+                am_oid: class.relam,
+                am_handler_oid: am_row.as_ref().map(|row| row.amhandler),
+                indkey: index_row.indkey.clone(),
+                indclass,
+                indcollation: index_row.indcollation.clone(),
+                indoption: index_row.indoption.clone(),
+                opfamily_oids: resolved_opclasses.iter().map(|row| row.opcfamily).collect(),
+                opcintype_oids: resolved_opclasses.iter().map(|row| row.opcintype).collect(),
+                indexprs: index_row.indexprs.clone(),
+                indpred: index_row.indpred.clone(),
+            }
+        })
+    } else {
+        None
+    };
+
     let entry = RelCacheEntry {
         rel: RelFileLocator {
             spc_oid: 0,
@@ -121,6 +269,7 @@ pub fn relation_entry_by_oid(
         relpersistence: class.relpersistence,
         relkind: class.relkind,
         desc: crate::backend::executor::RelationDesc { columns },
+        index,
     };
 
     db.session_catalog_states

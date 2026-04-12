@@ -16,12 +16,14 @@ use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_constraint::not_null_constraint_name;
 use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::rowcodec::{
-    namespace_row_from_values, parse_indkey, pg_am_row_from_values, pg_attrdef_row_from_values,
-    pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
-    pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
-    pg_constraint_row_from_values, pg_database_row_from_values, pg_depend_row_from_values,
-    pg_index_row_from_values, pg_language_row_from_values, pg_operator_row_from_values,
-    pg_proc_row_from_values, pg_tablespace_row_from_values, pg_type_row_from_values,
+    namespace_row_from_values, parse_indkey, pg_am_row_from_values, pg_amop_row_from_values,
+    pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
+    pg_auth_members_row_from_values, pg_authid_row_from_values, pg_cast_row_from_values,
+    pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
+    pg_database_row_from_values, pg_depend_row_from_values, pg_index_row_from_values,
+    pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
+    pg_opfamily_row_from_values, pg_proc_row_from_values, pg_tablespace_row_from_values,
+    pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -30,8 +32,9 @@ use crate::backend::parser::SqlType;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgIndexRow,
-    PgNamespaceRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_relation_desc,
+    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
+    PgClassRow, PgCollationRow, PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
+    PgTypeRow, bootstrap_catalog_kinds, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
 
@@ -205,20 +208,14 @@ pub(crate) fn catalog_from_physical_rows(
                     .get(&row.oid)
                     .map(|index| CatalogIndexMeta {
                         indrelid: index.indrelid,
-                        indkey: parse_indkey(&index.indkey),
+                        indkey: index.indkey.clone(),
                         indisunique: index.indisunique,
                         indisvalid: index.indisvalid,
                         indisready: index.indisready,
                         indislive: index.indislive,
-                        indclass: parse_indkey(&index.indclass)
-                            .into_iter()
-                            .map(|v| v as u32)
-                            .collect(),
-                        indcollation: parse_indkey(&index.indcollation)
-                            .into_iter()
-                            .map(|v| v as u32)
-                            .collect(),
-                        indoption: parse_indkey(&index.indoption),
+                        indclass: index.indclass.clone(),
+                        indcollation: index.indcollation.clone(),
+                        indoption: index.indoption.clone(),
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
                     }),
@@ -1091,6 +1088,106 @@ pub(crate) fn load_visible_am_rows(
         .into_iter()
         .map(pg_am_row_from_values)
         .collect()
+}
+
+pub(crate) fn load_visible_amop_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgAmopRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgAmop,
+    )?
+    .into_iter()
+    .map(pg_amop_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_amproc_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgAmprocRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgAmproc,
+    )?
+    .into_iter()
+    .map(pg_amproc_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_opclass_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgOpclassRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgOpclass,
+    )?
+    .into_iter()
+    .map(pg_opclass_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_opfamily_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgOpfamilyRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgOpfamily,
+    )?
+    .into_iter()
+    .map(pg_opfamily_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_collation_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgCollationRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgCollation,
+    )?
+    .into_iter()
+    .map(pg_collation_row_from_values)
+    .collect()
 }
 
 fn load_visible_catalog_kind(

@@ -404,9 +404,11 @@ pub struct ColumnDef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlTypeKind {
     Int2,
+    Int2Vector,
     Int4,
     Int8,
     Oid,
+    OidVector,
     Bit,
     VarBit,
     Bytea,

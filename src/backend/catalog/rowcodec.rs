@@ -1,5 +1,6 @@
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
+use crate::backend::utils::cache::catcache::format_indkey;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -425,10 +426,16 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
         indisready: expect_bool(&values[12])?,
         indislive: expect_bool(&values[13])?,
         indisreplident: expect_bool(&values[14])?,
-        indkey: expect_text(&values[15])?,
-        indcollation: expect_text(&values[16])?,
-        indclass: expect_text(&values[17])?,
-        indoption: expect_text(&values[18])?,
+        indkey: parse_indkey(&expect_text(&values[15])?),
+        indcollation: parse_indkey(&expect_text(&values[16])?)
+            .into_iter()
+            .map(|value| value as u32)
+            .collect(),
+        indclass: parse_indkey(&expect_text(&values[17])?)
+            .into_iter()
+            .map(|value| value as u32)
+            .collect(),
+        indoption: parse_indkey(&expect_text(&values[18])?),
         indexprs: expect_nullable_text(&values[19])?,
         indpred: expect_nullable_text(&values[20])?,
     })
@@ -714,10 +721,24 @@ fn pg_index_row_values(row: PgIndexRow) -> Vec<Value> {
         Value::Bool(row.indisready),
         Value::Bool(row.indislive),
         Value::Bool(row.indisreplident),
-        Value::Text(row.indkey.into()),
-        Value::Text(row.indcollation.into()),
-        Value::Text(row.indclass.into()),
-        Value::Text(row.indoption.into()),
+        Value::Text(format_indkey(&row.indkey).into()),
+        Value::Text(
+            row.indcollation
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+        ),
+        Value::Text(
+            row.indclass
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+        ),
+        Value::Text(format_indkey(&row.indoption).into()),
         row.indexprs.map_or(Value::Null, |v| Value::Text(v.into())),
         row.indpred.map_or(Value::Null, |v| Value::Text(v.into())),
     ]

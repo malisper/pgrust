@@ -7,7 +7,35 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
-use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, relam_for_relkind};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRelCacheEntry {
+    pub indrelid: u32,
+    pub indnatts: i16,
+    pub indnkeyatts: i16,
+    pub indisunique: bool,
+    pub indnullsnotdistinct: bool,
+    pub indisprimary: bool,
+    pub indisexclusion: bool,
+    pub indimmediate: bool,
+    pub indisclustered: bool,
+    pub indisvalid: bool,
+    pub indcheckxmin: bool,
+    pub indisready: bool,
+    pub indislive: bool,
+    pub indisreplident: bool,
+    pub am_oid: u32,
+    pub am_handler_oid: Option<u32>,
+    pub indkey: Vec<i16>,
+    pub indclass: Vec<u32>,
+    pub indcollation: Vec<u32>,
+    pub indoption: Vec<i16>,
+    pub opfamily_oids: Vec<u32>,
+    pub opcintype_oids: Vec<u32>,
+    pub indexprs: Option<String>,
+    pub indpred: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelCacheEntry {
@@ -18,6 +46,7 @@ pub struct RelCacheEntry {
     pub relpersistence: char,
     pub relkind: char,
     pub desc: RelationDesc,
+    pub index: Option<IndexRelCacheEntry>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +114,85 @@ impl RelCache {
                 relpersistence: class.relpersistence,
                 relkind: class.relkind,
                 desc: RelationDesc { columns },
+                index: class.relkind.eq(&'i').then(|| {
+                    let Some(index) = catcache
+                        .index_rows()
+                        .into_iter()
+                        .find(|row| row.indexrelid == class.oid) else {
+                        return IndexRelCacheEntry {
+                            indrelid: 0,
+                            indnatts: 0,
+                            indnkeyatts: 0,
+                            indisunique: false,
+                            indnullsnotdistinct: false,
+                            indisprimary: false,
+                            indisexclusion: false,
+                            indimmediate: false,
+                            indisclustered: false,
+                            indisvalid: false,
+                            indcheckxmin: false,
+                            indisready: false,
+                            indislive: false,
+                            indisreplident: false,
+                            am_oid: class.relam,
+                            am_handler_oid: catcache
+                                .am_rows()
+                                .into_iter()
+                                .find(|am| am.oid == class.relam)
+                                .map(|am| am.amhandler),
+                            indkey: Vec::new(),
+                            indclass: Vec::new(),
+                            indcollation: Vec::new(),
+                            indoption: Vec::new(),
+                            opfamily_oids: Vec::new(),
+                            opcintype_oids: Vec::new(),
+                            indexprs: None,
+                            indpred: None,
+                        };
+                    };
+                    let indclass = index.indclass.clone();
+                    let opclass_rows = catcache.opclass_rows();
+                    let resolved_opclasses = indclass
+                        .iter()
+                        .filter_map(|oid| opclass_rows.iter().find(|row| row.oid == *oid))
+                        .collect::<Vec<_>>();
+                    IndexRelCacheEntry {
+                        indrelid: index.indrelid,
+                        indnatts: index.indnatts,
+                        indnkeyatts: index.indnkeyatts,
+                        indisunique: index.indisunique,
+                        indnullsnotdistinct: index.indnullsnotdistinct,
+                        indisprimary: index.indisprimary,
+                        indisexclusion: index.indisexclusion,
+                        indimmediate: index.indimmediate,
+                        indisclustered: index.indisclustered,
+                        indisvalid: index.indisvalid,
+                        indcheckxmin: index.indcheckxmin,
+                        indisready: index.indisready,
+                        indislive: index.indislive,
+                        indisreplident: index.indisreplident,
+                        am_oid: class.relam,
+                        am_handler_oid: catcache
+                            .am_rows()
+                            .into_iter()
+                            .find(|am| am.oid == class.relam)
+                            .map(|am| am.amhandler),
+                        indkey: index.indkey.clone(),
+                        indclass,
+                        indcollation: index.indcollation.clone(),
+                        indoption: index.indoption.clone(),
+                        opfamily_oids: resolved_opclasses
+                            .iter()
+                            .map(|row| row.opcfamily)
+                            .collect(),
+                        opcintype_oids: resolved_opclasses
+                            .iter()
+                            .map(|row| row.opcintype)
+                            .collect(),
+                        indexprs: index.indexprs.clone(),
+                        indpred: index.indpred.clone(),
+                    }
+                }),
             };
             let relname = class.relname.to_ascii_lowercase();
             cache.by_name.insert(relname.clone(), entry.clone());
@@ -166,6 +274,32 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         desc: entry.desc.clone(),
+        index: entry.index_meta.as_ref().map(|index| IndexRelCacheEntry {
+            indrelid: index.indrelid,
+            indnatts: index.indkey.len() as i16,
+            indnkeyatts: index.indkey.len() as i16,
+            indisunique: index.indisunique,
+            indnullsnotdistinct: false,
+            indisprimary: false,
+            indisexclusion: false,
+            indimmediate: true,
+            indisclustered: false,
+            indisvalid: index.indisvalid,
+            indcheckxmin: false,
+            indisready: index.indisready,
+            indislive: index.indislive,
+            indisreplident: false,
+            am_oid: relam_for_relkind(entry.relkind),
+            am_handler_oid: None,
+            indkey: index.indkey.clone(),
+            indclass: index.indclass.clone(),
+            indcollation: index.indcollation.clone(),
+            indoption: index.indoption.clone(),
+            opfamily_oids: Vec::new(),
+            opcintype_oids: Vec::new(),
+            indexprs: index.indexprs.clone(),
+            indpred: index.indpred.clone(),
+        }),
     }
 }
 

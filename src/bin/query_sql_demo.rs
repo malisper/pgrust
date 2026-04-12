@@ -131,6 +131,7 @@ fn main() -> Result<(), ExecError> {
             relpersistence: 'p',
             relkind: 'r',
             desc: desc(),
+            index: None,
         },
     );
 

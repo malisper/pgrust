@@ -2,7 +2,7 @@ use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::AttributeAlign;
 pub use crate::backend::catalog::state::{
-    Catalog, CatalogEntry, CatalogError, CatalogIndexMeta,
+    Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions, CatalogIndexMeta,
 };
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
@@ -57,9 +57,11 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     }
     match sql_type.kind {
         SqlTypeKind::Int2 => ScalarType::Int16,
+        SqlTypeKind::Int2Vector => ScalarType::Text,
         SqlTypeKind::Int4 => ScalarType::Int32,
         SqlTypeKind::Int8 => ScalarType::Int64,
         SqlTypeKind::Oid => ScalarType::Int32,
+        SqlTypeKind::OidVector => ScalarType::Text,
         SqlTypeKind::Bit | SqlTypeKind::VarBit => ScalarType::BitString,
         SqlTypeKind::Bytea => ScalarType::Bytea,
         SqlTypeKind::Float4 => ScalarType::Float32,

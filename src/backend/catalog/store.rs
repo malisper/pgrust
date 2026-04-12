@@ -9,7 +9,7 @@ use crate::backend::access::transam::xact::{
     CommandId, Snapshot, TransactionId, TransactionManager,
 };
 use crate::backend::catalog::catalog::{
-    Catalog, CatalogEntry, CatalogError,
+    Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions,
 };
 use crate::backend::catalog::loader::{
     load_catalog_from_physical, load_catalog_from_visible_physical, load_physical_catalog_rows_visible,
@@ -226,10 +226,39 @@ impl CatalogStore {
         unique: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
+        let options = CatalogIndexBuildOptions {
+            am_oid: crate::include::catalog::BTREE_AM_OID,
+            indclass: Vec::new(),
+            indcollation: Vec::new(),
+            indoption: Vec::new(),
+        };
+        self.create_index_for_relation_with_options(index_name, relation_oid, unique, columns, &options)
+    }
+
+    pub fn create_index_for_relation_with_options(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+        options: &CatalogIndexBuildOptions,
+    ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry =
-            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?;
+        let entry = if options.indclass.is_empty()
+            && options.indcollation.is_empty()
+            && options.indoption.is_empty()
+        {
+            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?
+        } else {
+            catalog.create_index_for_relation_with_options(
+                index_name.clone(),
+                relation_oid,
+                unique,
+                columns,
+                options,
+            )?
+        };
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
         append_catalog_entry_rows(&self.base_dir, &catalog, &index_name, &entry, &kinds)?;
@@ -359,10 +388,47 @@ impl CatalogStore {
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         ctx: &CatalogWriteContext<'_>,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        let options = CatalogIndexBuildOptions {
+            am_oid: crate::include::catalog::BTREE_AM_OID,
+            indclass: Vec::new(),
+            indcollation: Vec::new(),
+            indoption: Vec::new(),
+        };
+        self.create_index_for_relation_mvcc_with_options(
+            index_name,
+            relation_oid,
+            unique,
+            columns,
+            &options,
+            ctx,
+        )
+    }
+
+    pub fn create_index_for_relation_mvcc_with_options(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+        options: &CatalogIndexBuildOptions,
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
-        let entry =
-            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?;
+        let entry = if options.indclass.is_empty()
+            && options.indcollation.is_empty()
+            && options.indoption.is_empty()
+        {
+            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?
+        } else {
+            catalog.create_index_for_relation_with_options(
+                index_name.clone(),
+                relation_oid,
+                unique,
+                columns,
+                options,
+            )?
+        };
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
         let rows = physical_catalog_rows_for_catalog_entry(&catalog, &index_name, &entry);
@@ -800,7 +866,7 @@ mod tests {
         assert_eq!(index_row.indnatts, 2);
         assert_eq!(index_row.indnkeyatts, 2);
         assert!(index_row.indisunique);
-        assert_eq!(index_row.indkey, "1 2");
+        assert_eq!(index_row.indkey, vec![1, 2]);
 
         let class_row = rows
             .classes

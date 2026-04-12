@@ -623,6 +623,22 @@ fn create_index_and_alter_table_set_are_noops() {
         let visible = db.lazy_catalog_lookup(1, None, None);
         let entry = visible.lookup_any_relation("num_exp_add_idx").unwrap();
         assert_eq!(entry.relkind, 'i');
+        let described = crate::backend::utils::cache::lsyscache::describe_relation_by_oid(
+            &db,
+            1,
+            None,
+            entry.relation_oid,
+        )
+        .unwrap();
+        let index = described.index.unwrap();
+        assert_eq!(index.am_oid, crate::include::catalog::BTREE_AM_OID);
+        assert!(index.indisunique);
+        assert!(!index.indisvalid);
+        assert!(!index.indisready);
+        assert_eq!(index.indkey, vec![1, 2]);
+        assert_eq!(index.indclass.len(), 2);
+        assert_eq!(index.opfamily_oids.len(), 2);
+        assert_eq!(index.opcintype_oids.len(), 2);
     }
 
     match db
@@ -760,6 +776,48 @@ fn copy_from_rows_inserts_typed_rows() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
+    let base = temp_dir("lazy_index_catalog_helpers");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items(id int4, name text)")
+        .unwrap();
+
+    let btree = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
+        &db,
+        1,
+        None,
+        "btree",
+    )
+    .unwrap();
+    assert_eq!(btree.oid, crate::include::catalog::BTREE_AM_OID);
+
+    let int4_opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
+        &db,
+        1,
+        None,
+        btree.oid,
+        crate::include::catalog::INT4_TYPE_OID,
+    )
+    .unwrap();
+    assert_eq!(
+        int4_opclass.oid,
+        crate::include::catalog::INT4_BTREE_OPCLASS_OID
+    );
+
+    db.execute(1, "create index items_idx on items (id)")
+        .unwrap();
+    let heap_rel = db.lazy_catalog_lookup(1, None, None).lookup_any_relation("items").unwrap();
+    let index_oids = crate::backend::utils::cache::lsyscache::index_relation_oids_for_heap(
+        &db,
+        1,
+        None,
+        heap_rel.relation_oid,
+    );
+    assert_eq!(index_oids.len(), 1);
 }
 
 #[test]

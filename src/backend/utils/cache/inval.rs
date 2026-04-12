@@ -112,6 +112,46 @@ pub fn apply_session_catalog_invalidation(
         state.am_rows = None;
         state.catalog_snapshot = None;
     }
+    if invalidation
+        .touched_catalogs
+        .iter()
+        .any(|kind| matches!(kind, BootstrapCatalogKind::PgAmop))
+    {
+        state.amop_rows = None;
+        state.catalog_snapshot = None;
+    }
+    if invalidation
+        .touched_catalogs
+        .iter()
+        .any(|kind| matches!(kind, BootstrapCatalogKind::PgAmproc))
+    {
+        state.amproc_rows = None;
+        state.catalog_snapshot = None;
+    }
+    if invalidation
+        .touched_catalogs
+        .iter()
+        .any(|kind| matches!(kind, BootstrapCatalogKind::PgOpclass))
+    {
+        state.opclass_rows = None;
+        state.catalog_snapshot = None;
+    }
+    if invalidation
+        .touched_catalogs
+        .iter()
+        .any(|kind| matches!(kind, BootstrapCatalogKind::PgOpfamily))
+    {
+        state.opfamily_rows = None;
+        state.catalog_snapshot = None;
+    }
+    if invalidation
+        .touched_catalogs
+        .iter()
+        .any(|kind| matches!(kind, BootstrapCatalogKind::PgCollation))
+    {
+        state.collation_rows = None;
+        state.catalog_snapshot = None;
+    }
 
     for oid in &invalidation.relation_oids {
         state.relation_entries_by_oid.remove(oid);

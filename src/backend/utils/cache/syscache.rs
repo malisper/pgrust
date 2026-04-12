@@ -4,13 +4,15 @@ use crate::backend::access::transam::xact::{
     CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
 };
 use crate::backend::catalog::loader::{
-    load_visible_am_rows, load_visible_attrdef_rows, load_visible_attribute_rows,
-    load_visible_class_rows, load_visible_index_rows, load_visible_namespace_rows,
-    load_visible_type_rows,
+    load_visible_am_rows, load_visible_amop_rows, load_visible_amproc_rows,
+    load_visible_attrdef_rows, load_visible_attribute_rows, load_visible_class_rows,
+    load_visible_collation_rows, load_visible_index_rows, load_visible_namespace_rows,
+    load_visible_opclass_rows, load_visible_opfamily_rows, load_visible_type_rows,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::include::catalog::{
-    PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgIndexRow, PgNamespaceRow, PgTypeRow,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow,
+    PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow,
 };
 use crate::pgrust::database::Database;
 use crate::ClientId;
@@ -25,6 +27,11 @@ pub struct SessionCatalogState {
     pub type_rows: Option<Vec<PgTypeRow>>,
     pub index_rows: Option<Vec<PgIndexRow>>,
     pub am_rows: Option<Vec<PgAmRow>>,
+    pub amop_rows: Option<Vec<PgAmopRow>>,
+    pub amproc_rows: Option<Vec<PgAmprocRow>>,
+    pub opclass_rows: Option<Vec<PgOpclassRow>>,
+    pub opfamily_rows: Option<Vec<PgOpfamilyRow>>,
+    pub collation_rows: Option<Vec<PgCollationRow>>,
     pub relation_entries_by_oid: HashMap<u32, RelCacheEntry>,
 }
 
@@ -269,5 +276,155 @@ pub fn ensure_am_rows(
         .entry(client_id)
         .or_default()
         .am_rows = Some(rows.clone());
+    rows
+}
+
+pub fn ensure_amop_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgAmopRow> {
+    if let Some(rows) = db
+        .session_catalog_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.amop_rows.clone())
+    {
+        return rows;
+    }
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    let rows = {
+        let catalog = db.catalog.read();
+        let txns = db.txns.read();
+        load_visible_amop_rows(catalog.base_dir(), &db.pool, &txns, &snapshot, client_id)
+            .unwrap_or_default()
+    };
+    db.session_catalog_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .amop_rows = Some(rows.clone());
+    rows
+}
+
+pub fn ensure_amproc_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgAmprocRow> {
+    if let Some(rows) = db
+        .session_catalog_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.amproc_rows.clone())
+    {
+        return rows;
+    }
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    let rows = {
+        let catalog = db.catalog.read();
+        let txns = db.txns.read();
+        load_visible_amproc_rows(catalog.base_dir(), &db.pool, &txns, &snapshot, client_id)
+            .unwrap_or_default()
+    };
+    db.session_catalog_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .amproc_rows = Some(rows.clone());
+    rows
+}
+
+pub fn ensure_opclass_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgOpclassRow> {
+    if let Some(rows) = db
+        .session_catalog_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.opclass_rows.clone())
+    {
+        return rows;
+    }
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    let rows = {
+        let catalog = db.catalog.read();
+        let txns = db.txns.read();
+        load_visible_opclass_rows(catalog.base_dir(), &db.pool, &txns, &snapshot, client_id)
+            .unwrap_or_default()
+    };
+    db.session_catalog_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .opclass_rows = Some(rows.clone());
+    rows
+}
+
+pub fn ensure_opfamily_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgOpfamilyRow> {
+    if let Some(rows) = db
+        .session_catalog_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.opfamily_rows.clone())
+    {
+        return rows;
+    }
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    let rows = {
+        let catalog = db.catalog.read();
+        let txns = db.txns.read();
+        load_visible_opfamily_rows(catalog.base_dir(), &db.pool, &txns, &snapshot, client_id)
+            .unwrap_or_default()
+    };
+    db.session_catalog_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .opfamily_rows = Some(rows.clone());
+    rows
+}
+
+pub fn ensure_collation_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgCollationRow> {
+    if let Some(rows) = db
+        .session_catalog_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.collation_rows.clone())
+    {
+        return rows;
+    }
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    let rows = {
+        let catalog = db.catalog.read();
+        let txns = db.txns.read();
+        load_visible_collation_rows(catalog.base_dir(), &db.pool, &txns, &snapshot, client_id)
+            .unwrap_or_default()
+    };
+    db.session_catalog_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .collation_rows = Some(rows.clone());
     rows
 }

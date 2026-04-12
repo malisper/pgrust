@@ -7,10 +7,10 @@ use crate::include::catalog::{
     BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
     FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
     INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID,
-    INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID,
-    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
-    JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PG_NODE_TREE_TYPE_OID,
+    INT8_TYPE_OID, INT2VECTOR_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
+    JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
+    JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
+    OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PG_NODE_TREE_TYPE_OID,
     PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
     PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID,
@@ -85,6 +85,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
         ),
         builtin_type_row("int2", INT2_TYPE_OID, SqlType::new(SqlTypeKind::Int2)),
         builtin_type_row(
+            "int2vector",
+            INT2VECTOR_TYPE_OID,
+            SqlType::new(SqlTypeKind::Int2Vector),
+        ),
+        builtin_type_row(
             "_int2",
             INT2_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Int2)),
@@ -102,6 +107,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         ),
         builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
+        builtin_type_row(
+            "oidvector",
+            OIDVECTOR_TYPE_OID,
+            SqlType::new(SqlTypeKind::OidVector),
+        ),
         builtin_type_row(
             "_oid",
             OID_ARRAY_TYPE_OID,

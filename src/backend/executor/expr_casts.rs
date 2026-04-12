@@ -548,6 +548,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -609,6 +611,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -642,6 +646,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -774,6 +780,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -818,6 +826,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Int2Vector
+                    | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -883,7 +893,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
     match ty.kind {
-        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::PgNodeTree => {
+        SqlTypeKind::Text
+        | SqlTypeKind::Int2Vector
+        | SqlTypeKind::OidVector
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::PgNodeTree => {
             Ok(Value::Text(CompactString::new(text)))
         }
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
@@ -929,7 +943,11 @@ pub(super) fn cast_numeric_value(
 ) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
-        SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::PgNodeTree => {
+        SqlTypeKind::Text
+        | SqlTypeKind::Int2Vector
+        | SqlTypeKind::OidVector
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::PgNodeTree => {
             Ok(Value::Text(CompactString::from_owned(value.render())))
         }
         SqlTypeKind::Json => {
