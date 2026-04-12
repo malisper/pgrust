@@ -1,5 +1,5 @@
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -121,11 +121,21 @@ struct SessionCatalogState {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CatalogInvalidation {
-    pub touched_catalogs: Vec<BootstrapCatalogKind>,
-    pub relation_oids: Vec<u32>,
-    pub namespace_oids: Vec<u32>,
-    pub type_oids: Vec<u32>,
+    pub touched_catalogs: BTreeSet<BootstrapCatalogKind>,
+    pub relation_oids: BTreeSet<u32>,
+    pub namespace_oids: BTreeSet<u32>,
+    pub type_oids: BTreeSet<u32>,
     pub full_reset: bool,
+}
+
+impl CatalogInvalidation {
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.full_reset
+            && self.touched_catalogs.is_empty()
+            && self.relation_oids.is_empty()
+            && self.namespace_oids.is_empty()
+            && self.type_oids.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -362,23 +372,48 @@ impl Database {
         client_id: ClientId,
         invalidation: &CatalogInvalidation,
     ) {
+        if invalidation.is_empty() {
+            return;
+        }
         self.invalidate_session_catalog_entry(client_id, invalidation);
         self.invalidate_client_visible_cache(client_id);
     }
 
-    fn publish_session_catalog_invalidation(&self, invalidation: &CatalogInvalidation) {
-        if invalidation.full_reset {
-            self.session_catalog_states.write().clear();
+    fn publish_session_catalog_invalidation(
+        &self,
+        source_client_id: Option<ClientId>,
+        invalidation: &CatalogInvalidation,
+    ) {
+        if invalidation.is_empty() {
             return;
         }
-        let client_ids = self
+        if invalidation.full_reset {
+            self.session_catalog_states.write().clear();
+            self.invalidate_visible_caches();
+            return;
+        }
+        let mut client_ids = self
             .session_catalog_states
             .read()
             .keys()
             .copied()
             .collect::<Vec<_>>();
+        let visible_client_ids = self
+            .client_visible_caches
+            .read()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for client_id in visible_client_ids {
+            if !client_ids.contains(&client_id) {
+                client_ids.push(client_id);
+            }
+        }
         for client_id in client_ids {
-            self.invalidate_session_catalog_entry(client_id, invalidation);
+            if Some(client_id) == source_client_id {
+                continue;
+            }
+            self.apply_session_catalog_invalidation(client_id, invalidation);
         }
     }
 
@@ -2415,11 +2450,21 @@ fn collect_rels_from_plan(
 impl Database {
     pub(crate) fn catalog_invalidation_from_effect(effect: &CatalogMutationEffect) -> CatalogInvalidation {
         CatalogInvalidation {
-            touched_catalogs: effect.touched_catalogs.clone(),
-            relation_oids: effect.relation_oids.clone(),
-            namespace_oids: effect.namespace_oids.clone(),
-            type_oids: effect.type_oids.clone(),
+            touched_catalogs: effect.touched_catalogs.iter().copied().collect(),
+            relation_oids: effect.relation_oids.iter().copied().collect(),
+            namespace_oids: effect.namespace_oids.iter().copied().collect(),
+            type_oids: effect.type_oids.iter().copied().collect(),
             full_reset: effect.full_reset,
+        }
+    }
+
+    pub(crate) fn finalize_command_end_local_catalog_invalidations(
+        &self,
+        client_id: ClientId,
+        invalidations: &[CatalogInvalidation],
+    ) {
+        for invalidation in invalidations {
+            self.apply_session_catalog_invalidation(client_id, invalidation);
         }
     }
 
@@ -2440,7 +2485,12 @@ impl Database {
         Ok(())
     }
 
-    pub(crate) fn finalize_committed_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
+    pub(crate) fn finalize_committed_catalog_effects(
+        &self,
+        source_client_id: ClientId,
+        effects: &[CatalogMutationEffect],
+        invalidations: &[CatalogInvalidation],
+    ) {
         let catalog_changed = effects.iter().any(|effect| {
             !effect.touched_catalogs.is_empty()
                 || !effect.created_rels.is_empty()
@@ -2471,18 +2521,12 @@ impl Database {
                     .with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
             }
         }
-        for effect in effects {
-            self.publish_session_catalog_invalidation(&Self::catalog_invalidation_from_effect(effect));
+        for invalidation in invalidations {
+            self.publish_session_catalog_invalidation(Some(source_client_id), invalidation);
         }
-        if catalog_changed {
+        if catalog_changed && invalidations.iter().any(|invalidation| invalidation.full_reset) {
             self.invalidate_visible_caches();
         }
-    }
-
-    pub(crate) fn finalize_committed_local_catalog_invalidations(
-        &self,
-        _invalidations: &[CatalogInvalidation],
-    ) {
     }
 
     pub(crate) fn finalize_aborted_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
@@ -2498,9 +2542,13 @@ impl Database {
     pub(crate) fn finalize_aborted_local_catalog_invalidations(
         &self,
         client_id: ClientId,
-        invalidations: &[CatalogInvalidation],
+        prior_invalidations: &[CatalogInvalidation],
+        current_invalidations: &[CatalogInvalidation],
     ) {
-        for invalidation in invalidations {
+        for invalidation in prior_invalidations {
+            self.apply_session_catalog_invalidation(client_id, invalidation);
+        }
+        for invalidation in current_invalidations {
             self.apply_session_catalog_invalidation(client_id, invalidation);
         }
     }
@@ -2589,7 +2637,13 @@ impl Database {
                 self.txns.write().commit(xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
-                self.finalize_committed_catalog_effects(catalog_effects);
+                let invalidations = catalog_effects
+                    .iter()
+                    .map(Self::catalog_invalidation_from_effect)
+                    .filter(|invalidation| !invalidation.is_empty())
+                    .collect::<Vec<_>>();
+                self.finalize_command_end_local_catalog_invalidations(client_id, &invalidations);
+                self.finalize_committed_catalog_effects(client_id, catalog_effects, &invalidations);
                 self.finalize_committed_temp_effects(client_id, temp_effects);
                 self.apply_temp_on_commit(client_id)?;
                 self.txn_waiter.notify();

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::mem;
 use std::sync::Arc;
 
 use crate::backend::access::transam::xact::TransactionId;
@@ -48,7 +49,8 @@ struct ActiveTransaction {
     held_table_locks: Vec<RelFileLocator>,
     next_command_id: u32,
     catalog_effects: Vec<CatalogMutationEffect>,
-    catalog_invalidations: Vec<CatalogInvalidation>,
+    current_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
+    prior_cmd_catalog_invalidations: Vec<CatalogInvalidation>,
     temp_effects: Vec<TempMutationEffect>,
 }
 
@@ -177,6 +179,31 @@ impl Session {
         )
     }
 
+    fn process_catalog_command_end(
+        &mut self,
+        db: &Database,
+        effect_start: usize,
+    ) {
+        let client_id = self.client_id;
+        let Some(txn) = self.active_txn.as_mut() else {
+            return;
+        };
+        txn.current_cmd_catalog_invalidations = txn.catalog_effects[effect_start..]
+            .iter()
+            .map(Database::catalog_invalidation_from_effect)
+            .filter(|invalidation| !invalidation.is_empty())
+            .collect();
+        if txn.current_cmd_catalog_invalidations.is_empty() {
+            return;
+        }
+        db.finalize_command_end_local_catalog_invalidations(
+            client_id,
+            &txn.current_cmd_catalog_invalidations,
+        );
+        txn.prior_cmd_catalog_invalidations
+            .extend(mem::take(&mut txn.current_cmd_catalog_invalidations));
+    }
+
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let stmt = db.plan_cache.get_statement(sql)?;
 
@@ -207,7 +234,8 @@ impl Session {
                     held_table_locks: Vec::new(),
                     next_command_id: 0,
                     catalog_effects: Vec::new(),
-                    catalog_invalidations: Vec::new(),
+                    current_cmd_catalog_invalidations: Vec::new(),
+                    prior_cmd_catalog_invalidations: Vec::new(),
                     temp_effects: Vec::new(),
                 });
                 Ok(StatementResult::AffectedRows(0))
@@ -239,8 +267,11 @@ impl Session {
                 db.txns.write().commit(txn.xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
-                db.finalize_committed_catalog_effects(&txn.catalog_effects);
-                db.finalize_committed_local_catalog_invalidations(&txn.catalog_invalidations);
+                db.finalize_committed_catalog_effects(
+                    self.client_id,
+                    &txn.catalog_effects,
+                    &txn.prior_cmd_catalog_invalidations,
+                );
                 db.finalize_committed_temp_effects(self.client_id, &txn.temp_effects);
                 db.apply_temp_on_commit(self.client_id)?;
                 db.txn_waiter.notify();
@@ -257,7 +288,8 @@ impl Session {
                 let _ = db.txns.write().abort(txn.xid);
                 db.finalize_aborted_local_catalog_invalidations(
                     self.client_id,
-                    &txn.catalog_invalidations,
+                    &txn.prior_cmd_catalog_invalidations,
+                    &txn.current_cmd_catalog_invalidations,
                 );
                 db.finalize_aborted_catalog_effects(&txn.catalog_effects);
                 db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
@@ -537,24 +569,7 @@ impl Session {
         };
 
         if result.is_ok() {
-            let new_invalidations = self
-                .active_txn
-                .as_ref()
-                .map(|txn| {
-                    txn.catalog_effects[effect_start..]
-                        .iter()
-                        .map(Database::catalog_invalidation_from_effect)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !new_invalidations.is_empty() {
-                for invalidation in &new_invalidations {
-                    db.apply_session_catalog_invalidation(client_id, invalidation);
-                }
-                if let Some(txn) = self.active_txn.as_mut() {
-                    txn.catalog_invalidations.extend(new_invalidations);
-                }
-            }
+            self.process_catalog_command_end(db, effect_start);
         }
 
         result
@@ -670,7 +685,8 @@ impl Session {
                 held_table_locks: Vec::new(),
                 next_command_id: 0,
                 catalog_effects: Vec::new(),
-                catalog_invalidations: Vec::new(),
+                current_cmd_catalog_invalidations: Vec::new(),
+                prior_cmd_catalog_invalidations: Vec::new(),
                 temp_effects: Vec::new(),
             });
             true
