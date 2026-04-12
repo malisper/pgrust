@@ -14,6 +14,7 @@ pub struct RelCacheEntry {
     pub relation_oid: u32,
     pub namespace_oid: u32,
     pub row_type_oid: u32,
+    pub relpersistence: char,
     pub relkind: char,
     pub desc: RelationDesc,
 }
@@ -75,6 +76,7 @@ impl RelCache {
                 relation_oid: class.oid,
                 namespace_oid: class.relnamespace,
                 row_type_oid: class.reltype,
+                relpersistence: class.relpersistence,
                 relkind: class.relkind,
                 desc: RelationDesc { columns },
             };
@@ -115,6 +117,7 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         relation_oid: entry.relation_oid,
         namespace_oid: entry.namespace_oid,
         row_type_oid: entry.row_type_oid,
+        relpersistence: 'p',
         relkind: entry.relkind,
         desc: entry.desc.clone(),
     }

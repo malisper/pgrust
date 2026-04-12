@@ -180,6 +180,19 @@
         match db
             .execute(
                 1,
+                "select relpersistence from pg_class where relname = 'num_exp_add_idx'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("p".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match db
+            .execute(
+                1,
                 "select a.amname from pg_class c join pg_am a on a.oid = c.relam where c.relname = 'num_exp_add'",
             )
             .unwrap()
@@ -512,14 +525,18 @@
         match session_a
             .execute(
                 &db,
-                "select n.nspname, c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'temp_items'",
+                "select n.nspname, c.relname, c.relpersistence from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'temp_items'",
             )
             .unwrap()
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![Value::Text("pg_temp".into()), Value::Text("temp_items".into())]]
+                    vec![vec![
+                        Value::Text("pg_temp".into()),
+                        Value::Text("temp_items".into()),
+                        Value::Text("t".into()),
+                    ]]
                 );
             }
             other => panic!("expected query result, got {:?}", other),

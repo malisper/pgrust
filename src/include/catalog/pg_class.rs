@@ -13,6 +13,7 @@ pub struct PgClassRow {
     pub reltype: u32,
     pub relam: u32,
     pub relfilenode: u32,
+    pub relpersistence: char,
     pub relkind: char,
 }
 
@@ -25,6 +26,7 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("reltype", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("relam", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("relfilenode", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("relpersistence", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("relkind", SqlType::new(SqlTypeKind::InternalChar), false),
         ],
     }
@@ -58,6 +60,7 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         reltype: kind.row_type_oid(),
         relam: relam_for_relkind('r'),
         relfilenode: kind.relation_oid(),
+        relpersistence: 'p',
         relkind: 'r',
     }
 }

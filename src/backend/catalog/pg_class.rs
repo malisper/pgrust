@@ -8,6 +8,7 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         reltype: 0,
         relam: relam_for_relkind('r'),
         relfilenode: 0,
+        relpersistence: 'p',
         relkind: 'r',
     }
 }

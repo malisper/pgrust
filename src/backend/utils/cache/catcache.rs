@@ -94,6 +94,7 @@ impl CatCache {
                 reltype: entry.row_type_oid,
                 relam: crate::include::catalog::relam_for_relkind(entry.relkind),
                 relfilenode: entry.rel.rel_number,
+                relpersistence: 'p',
                 relkind: entry.relkind,
             };
             cache
@@ -490,6 +491,10 @@ mod tests {
         assert_eq!(
             cache.class_by_name("people_name_idx").map(|row| row.relam),
             Some(BTREE_AM_OID)
+        );
+        assert_eq!(
+            cache.class_by_name("people_name_idx").map(|row| row.relpersistence),
+            Some('p')
         );
         assert_eq!(
             cache.class_by_name("people").map(|row| row.relam),
