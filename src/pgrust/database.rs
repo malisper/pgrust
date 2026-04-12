@@ -255,6 +255,76 @@ impl Database {
         path
     }
 
+    fn resolve_unqualified_create_persistence(
+        &self,
+        table_name: &str,
+        persistence: TablePersistence,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<TablePersistence, ParseError> {
+        if persistence == TablePersistence::Temporary {
+            return Ok(TablePersistence::Temporary);
+        }
+
+        let Some(search_path) = configured_search_path else {
+            return Ok(TablePersistence::Permanent);
+        };
+
+        for schema in search_path {
+            let schema = schema.trim().to_ascii_lowercase();
+            match schema.as_str() {
+                "" | "$user" => continue,
+                "public" => return Ok(TablePersistence::Permanent),
+                "pg_temp" => return Ok(TablePersistence::Temporary),
+                "pg_catalog" => {
+                    return Err(ParseError::UnsupportedQualifiedName(format!(
+                        "pg_catalog.{table_name}"
+                    )));
+                }
+                _ => continue,
+            }
+        }
+
+        Err(ParseError::NoSchemaSelectedForCreate)
+    }
+
+    fn normalize_create_table_stmt_with_search_path(
+        &self,
+        stmt: &CreateTableStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, TablePersistence), ParseError> {
+        let (table_name, persistence) = normalize_create_table_name(stmt)?;
+        if stmt.schema_name.is_some() {
+            return Ok((table_name, persistence));
+        }
+        Ok((
+            table_name.clone(),
+            self.resolve_unqualified_create_persistence(
+                &table_name,
+                persistence,
+                configured_search_path,
+            )?,
+        ))
+    }
+
+    fn normalize_create_table_as_stmt_with_search_path(
+        &self,
+        stmt: &CreateTableAsStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, TablePersistence), ParseError> {
+        let (table_name, persistence) = normalize_create_table_as_name(stmt)?;
+        if stmt.schema_name.is_some() {
+            return Ok((table_name, persistence));
+        }
+        Ok((
+            table_name.clone(),
+            self.resolve_unqualified_create_persistence(
+                &table_name,
+                persistence,
+                configured_search_path,
+            )?,
+        ))
+    }
+
     pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
         self.visible_relcache_with_search_path(client_id, None)
     }
@@ -508,7 +578,17 @@ impl Database {
         client_id: ClientId,
         create_stmt: &CreateTableStatement,
     ) -> Result<StatementResult, ExecError> {
-        let (table_name, persistence) = normalize_create_table_name(create_stmt)?;
+        self.execute_create_table_stmt_with_search_path(client_id, create_stmt, None)
+    }
+
+    pub(crate) fn execute_create_table_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let (table_name, persistence) =
+            self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
         let desc = create_relation_desc(create_stmt);
         match persistence {
             TablePersistence::Permanent => {
@@ -663,7 +743,8 @@ impl Database {
         cid: u32,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let (table_name, persistence) = normalize_create_table_as_name(create_stmt)?;
+        let (table_name, persistence) = self
+            .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
         self.sync_visible_catalog_heaps(client_id);
         let visible_relcache =
             self.visible_relcache_with_search_path(client_id, configured_search_path);
@@ -1026,7 +1107,11 @@ impl Database {
             }
 
             Statement::CreateTable(ref create_stmt) => {
-                self.execute_create_table_stmt(client_id, create_stmt)
+                self.execute_create_table_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                )
             }
 
             Statement::CreateTableAs(ref create_stmt) => {

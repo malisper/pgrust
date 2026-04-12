@@ -380,7 +380,12 @@ impl Session {
                 execute_delete_with_waiter(bound, &mut ctx, xid, Some((&db.txns, &db.txn_waiter)))
             }
             Statement::CreateTable(ref create_stmt) => {
-                db.execute_create_table_stmt(client_id, create_stmt)
+                let search_path = self.configured_search_path();
+                db.execute_create_table_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
             }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
