@@ -237,16 +237,9 @@ fn drop_relation_oids_by_oid(catalog: &Catalog, relation_oid: u32) -> Result<Vec
     if entry.relkind != 'r' {
         return Err(CatalogError::UnknownTable(relation_oid.to_string()));
     }
-    let depend_rows = CatCache::from_catalog(catalog).depend_rows();
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
-    collect_relation_drop_oids(
-        catalog,
-        &depend_rows,
-        relation_oid,
-        &mut seen,
-        &mut order,
-    );
+    collect_relation_drop_oids(catalog, catalog.depend_rows(), relation_oid, &mut seen, &mut order);
     Ok(order)
 }
 
@@ -2605,6 +2598,52 @@ mod tests {
                 .iter()
                 .any(|row| row.objid == index.relation_oid)
         );
+    }
+
+    #[test]
+    fn catalog_store_drop_table_removes_constraint_and_depend_rows() {
+        let base = temp_dir("drop_constraint_depend_cleanup");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let mut desc = RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+            ],
+        };
+        desc.columns[1].default_expr = Some("'hello'".into());
+        let entry = store.create_table("notes", desc).unwrap();
+        let attrdef_oid = entry.desc.columns[1].attrdef_oid.unwrap();
+        let constraint_oid = entry.desc.columns[0].not_null_constraint_oid.unwrap();
+
+        let dropped = store.drop_table("notes").unwrap();
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].relation_oid, entry.relation_oid);
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("notes").is_none());
+        assert!(reopened_catalog
+            .constraint_rows()
+            .iter()
+            .all(|row| row.conrelid != entry.relation_oid));
+        assert!(reopened_catalog.depend_rows().iter().all(|row| {
+            row.objid != entry.relation_oid
+                && row.refobjid != entry.relation_oid
+                && row.objid != attrdef_oid
+                && row.objid != constraint_oid
+        }));
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows
+            .constraints
+            .iter()
+            .all(|row| row.conrelid != entry.relation_oid));
+        assert!(rows.depends.iter().all(|row| {
+            row.objid != entry.relation_oid
+                && row.refobjid != entry.relation_oid
+                && row.objid != attrdef_oid
+                && row.objid != constraint_oid
+        }));
     }
 
     #[test]
