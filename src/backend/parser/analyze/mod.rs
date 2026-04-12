@@ -31,7 +31,12 @@ pub use scope::BoundRelation;
 use scope::*;
 
 pub trait CatalogLookup {
-    fn lookup_relation(&self, name: &str) -> Option<BoundRelation>;
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
+
+    fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.lookup_any_relation(name)
+            .filter(|entry| entry.relkind == 'r')
+    }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         let normalized = normalize_catalog_lookup_name(name);
@@ -85,26 +90,28 @@ pub trait CatalogLookup {
 }
 
 impl CatalogLookup for Catalog {
-    fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         let relcache = RelCache::from_catalog(self);
-        relcache.get_by_name(name).and_then(|entry| {
-            (entry.relkind == 'r').then(|| BoundRelation {
-                rel: entry.rel,
-                relation_oid: entry.relation_oid,
-                desc: entry.desc.clone(),
-            })
+        relcache.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
         })
     }
 }
 
 impl CatalogLookup for RelCache {
-    fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
-        self.get_by_name(name).and_then(|entry| {
-            (entry.relkind == 'r').then(|| BoundRelation {
-                rel: entry.rel,
-                relation_oid: entry.relation_oid,
-                desc: entry.desc.clone(),
-            })
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
         })
     }
 }

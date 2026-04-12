@@ -68,13 +68,14 @@ impl VisibleCatalog {
 }
 
 impl CatalogLookup for VisibleCatalog {
-    fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
-        self.relcache.get_by_name(name).and_then(|entry| {
-            (entry.relkind == 'r').then(|| BoundRelation {
-                rel: entry.rel,
-                relation_oid: entry.relation_oid,
-                desc: entry.desc.clone(),
-            })
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.relcache.get_by_name(name).map(|entry| BoundRelation {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: entry.namespace_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc.clone(),
         })
     }
 

@@ -2481,6 +2481,32 @@ pub(crate) fn load_visible_attrdef_rows(
         .collect()
 }
 
+pub(crate) fn load_visible_index_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgIndexRow>, CatalogError> {
+    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgIndex)?
+        .into_iter()
+        .map(pg_index_row_from_values)
+        .collect()
+}
+
+pub(crate) fn load_visible_am_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgAmRow>, CatalogError> {
+    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAm)?
+        .into_iter()
+        .map(pg_am_row_from_values)
+        .collect()
+}
+
 fn load_visible_catalog_kind(
     base_dir: &Path,
     pool: &BufferPool<SmgrStorageBackend>,
