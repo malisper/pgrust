@@ -4,6 +4,8 @@ use std::path::Path;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
+use crate::backend::catalog::pg_auth_members::sort_pg_auth_members_rows;
+use crate::backend::catalog::pg_authid::sort_pg_authid_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
@@ -21,12 +23,13 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDatabaseRow, PgDependRow, PgIndexRow,
-    PgNamespaceRow, PgTablespaceRow, PgTypeRow,
+    PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+    PgDatabaseRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow, PgTypeRow,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
+    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_tablespace_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +43,8 @@ pub struct CatCache {
     depend_rows: Vec<PgDependRow>,
     index_rows: Vec<PgIndexRow>,
     am_rows: Vec<PgAmRow>,
+    authid_rows: Vec<PgAuthIdRow>,
+    auth_members_rows: Vec<PgAuthMembersRow>,
     database_rows: Vec<PgDatabaseRow>,
     tablespace_rows: Vec<PgTablespaceRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
@@ -72,6 +77,12 @@ impl CatCache {
         }
         cache.am_rows.extend(bootstrap_pg_am_rows());
         sort_pg_am_rows(&mut cache.am_rows);
+        cache.authid_rows.extend(bootstrap_pg_authid_rows());
+        sort_pg_authid_rows(&mut cache.authid_rows);
+        cache
+            .auth_members_rows
+            .extend(bootstrap_pg_auth_members_rows());
+        sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.database_rows.extend(bootstrap_pg_database_rows());
         sort_pg_database_rows(&mut cache.database_rows);
         cache.tablespace_rows.extend(bootstrap_pg_tablespace_rows());
@@ -196,6 +207,8 @@ impl CatCache {
             rows.depends,
             rows.indexes,
             rows.ams,
+            rows.authids,
+            rows.auth_members,
             rows.databases,
             rows.tablespaces,
             rows.types,
@@ -210,6 +223,8 @@ impl CatCache {
         depend_rows: Vec<PgDependRow>,
         index_rows: Vec<PgIndexRow>,
         am_rows: Vec<PgAmRow>,
+        authid_rows: Vec<PgAuthIdRow>,
+        auth_members_rows: Vec<PgAuthMembersRow>,
         database_rows: Vec<PgDatabaseRow>,
         tablespace_rows: Vec<PgTablespaceRow>,
         type_rows: Vec<PgTypeRow>,
@@ -252,6 +267,10 @@ impl CatCache {
         sort_pg_index_rows(&mut cache.index_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
+        cache.authid_rows = authid_rows;
+        sort_pg_authid_rows(&mut cache.authid_rows);
+        cache.auth_members_rows = auth_members_rows;
+        sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.database_rows = database_rows;
         sort_pg_database_rows(&mut cache.database_rows);
         cache.tablespace_rows = tablespace_rows;
@@ -329,6 +348,14 @@ impl CatCache {
         self.am_rows.clone()
     }
 
+    pub fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        self.authid_rows.clone()
+    }
+
+    pub fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        self.auth_members_rows.clone()
+    }
+
     pub fn database_rows(&self) -> Vec<PgDatabaseRow> {
         self.database_rows.clone()
     }
@@ -403,10 +430,10 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::include::catalog::{
-        BTREE_AM_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
-        CURRENT_DATABASE_NAME, DEFAULT_TABLESPACE_OID, HEAP_TABLE_AM_OID,
-        PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-        PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
+        BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, CURRENT_DATABASE_NAME,
+        DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+        HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -530,6 +557,12 @@ mod tests {
                 && row.datname == CURRENT_DATABASE_NAME
                 && row.dattablespace == DEFAULT_TABLESPACE_OID
         }));
+        assert!(cache.authid_rows().iter().any(|row| {
+            row.oid == BOOTSTRAP_SUPERUSER_OID
+                && row.rolname == BOOTSTRAP_SUPERUSER_NAME
+                && row.rolsuper
+        }));
+        assert!(cache.auth_members_rows().is_empty());
         assert!(cache.tablespace_rows().iter().any(|row| {
             row.oid == DEFAULT_TABLESPACE_OID && row.spcname == "pg_default"
         }));
