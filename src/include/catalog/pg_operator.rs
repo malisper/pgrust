@@ -6,7 +6,8 @@ use crate::include::catalog::{
     BOOL_CMP_LT_PROC_OID, BOOL_CMP_NE_PROC_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
     INT4_CMP_EQ_PROC_OID, INT4_CMP_GE_PROC_OID, INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID,
     INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID, INT4_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    TEXT_CMP_EQ_PROC_OID, TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
+    TEXT_CMP_EQ_PROC_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID,
+    TEXT_CMP_LT_PROC_OID, TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +51,7 @@ pub fn pg_operator_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_operator_rows() -> [PgOperatorRow; 15] {
+pub fn bootstrap_pg_operator_rows() -> [PgOperatorRow; 19] {
     [
         operator_row(
             58,
@@ -181,6 +182,50 @@ pub fn bootstrap_pg_operator_rows() -> [PgOperatorRow; 15] {
             531,
             98,
             TEXT_CMP_NE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            664,
+            "<",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            666,
+            667,
+            TEXT_CMP_LT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            665,
+            "<=",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            667,
+            666,
+            TEXT_CMP_LE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            666,
+            ">",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            664,
+            665,
+            TEXT_CMP_GT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            667,
+            ">=",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            665,
+            664,
+            TEXT_CMP_GE_PROC_OID,
             false,
             false,
         ),

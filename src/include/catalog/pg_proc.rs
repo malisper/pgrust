@@ -29,6 +29,10 @@ pub const INT4_CMP_GT_PROC_OID: u32 = 147;
 pub const INT4_CMP_LE_PROC_OID: u32 = 149;
 pub const INT4_CMP_GE_PROC_OID: u32 = 150;
 pub const TEXT_CMP_NE_PROC_OID: u32 = 157;
+pub const TEXT_CMP_LT_PROC_OID: u32 = 740;
+pub const TEXT_CMP_LE_PROC_OID: u32 = 741;
+pub const TEXT_CMP_GT_PROC_OID: u32 = 742;
+pub const TEXT_CMP_GE_PROC_OID: u32 = 743;
 pub const BOOL_CMP_LE_PROC_OID: u32 = 1691;
 pub const BOOL_CMP_GE_PROC_OID: u32 = 1692;
 pub const TEXT_STARTS_WITH_PROC_OID: u32 = 3696;
@@ -427,6 +431,26 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         comparison_proc_row(
             TEXT_CMP_NE_PROC_OID,
             "textne",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            TEXT_CMP_LT_PROC_OID,
+            "text_lt",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            TEXT_CMP_LE_PROC_OID,
+            "text_le",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            TEXT_CMP_GT_PROC_OID,
+            "text_gt",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            TEXT_CMP_GE_PROC_OID,
+            "text_ge",
             &[TEXT_TYPE_OID, TEXT_TYPE_OID],
         ),
         comparison_proc_row(
