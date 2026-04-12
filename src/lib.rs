@@ -1,7 +1,7 @@
 pub mod backend;
 pub mod include;
-pub mod pl;
 pub mod pgrust;
+pub mod pl;
 
 pub use backend::executor;
 pub use backend::parser;
