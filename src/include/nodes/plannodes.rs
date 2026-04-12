@@ -1,7 +1,7 @@
+use crate::RelFileLocator;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::nodes::datum::Value;
-use crate::RelFileLocator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarType {
@@ -27,6 +27,7 @@ pub struct ColumnDesc {
     pub storage: AttributeDesc,
     pub ty: ScalarType,
     pub sql_type: SqlType,
+    pub not_null_constraint_oid: Option<u32>,
     pub attrdef_oid: Option<u32>,
     pub default_expr: Option<String>,
 }

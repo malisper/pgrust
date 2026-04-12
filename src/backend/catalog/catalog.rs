@@ -78,11 +78,20 @@ impl Catalog {
             .max()
             .map(|oid| oid.saturating_add(1))
             .unwrap_or(self.next_oid);
+        let next_constraint_oid = entry
+            .desc
+            .columns
+            .iter()
+            .filter_map(|column| column.not_null_constraint_oid)
+            .max()
+            .map(|oid| oid.saturating_add(1))
+            .unwrap_or(self.next_oid);
         self.next_oid = self
             .next_oid
             .max(entry.relation_oid.saturating_add(1))
             .max(entry.row_type_oid.saturating_add(1))
-            .max(next_attrdef_oid);
+            .max(next_attrdef_oid)
+            .max(next_constraint_oid);
         self.tables.insert(name, entry);
     }
 
@@ -123,12 +132,7 @@ impl Catalog {
         let relation_oid = self.next_oid;
         let row_type_oid = relation_oid.saturating_add(1);
         let mut next_oid = row_type_oid.saturating_add(1);
-        for column in &mut desc.columns {
-            if column.default_expr.is_some() {
-                column.attrdef_oid = Some(next_oid);
-                next_oid = next_oid.saturating_add(1);
-            }
-        }
+        allocate_relation_object_oids(&mut desc, &mut next_oid);
 
         let entry = CatalogEntry {
             rel: RelFileLocator {
@@ -193,6 +197,7 @@ impl Catalog {
                 .ok_or_else(|| CatalogError::UnknownColumn(column_name.clone()))?;
             indkey.push(attnum.saturating_add(1) as i16);
             let mut column = column.clone();
+            column.not_null_constraint_oid = None;
             column.attrdef_oid = None;
             column.default_expr = None;
             index_columns.push(column);
@@ -270,8 +275,22 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         },
         ty,
         sql_type,
+        not_null_constraint_oid: None,
         attrdef_oid: None,
         default_expr: None,
+    }
+}
+
+pub fn allocate_relation_object_oids(desc: &mut RelationDesc, next_oid: &mut u32) {
+    for column in &mut desc.columns {
+        if !column.storage.nullable && column.not_null_constraint_oid.is_none() {
+            column.not_null_constraint_oid = Some(*next_oid);
+            *next_oid = next_oid.saturating_add(1);
+        }
+        if column.default_expr.is_some() && column.attrdef_oid.is_none() {
+            column.attrdef_oid = Some(*next_oid);
+            *next_oid = next_oid.saturating_add(1);
+        }
     }
 }
 

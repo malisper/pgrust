@@ -12,6 +12,7 @@ use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, column_desc,
 };
+use crate::backend::catalog::pg_constraint::not_null_constraint_name;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
 use crate::backend::executor::value_io::tuple_from_values;
@@ -879,7 +880,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
     let _language_rows = rows.languages;
-    let _constraint_rows = rows.constraints;
+    let constraint_rows = rows.constraints;
     let _operator_rows = rows.operators;
     let _proc_rows = rows.procs;
     let _cast_rows = rows.casts;
@@ -905,6 +906,11 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let attrdefs_by_key = attrdef_rows
         .into_iter()
         .map(|row| ((row.adrelid, row.adnum), row))
+        .collect::<BTreeMap<_, _>>();
+    let not_null_constraint_oids = constraint_rows
+        .iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_NOTNULL)
+        .map(|row| ((row.conrelid, row.conname.clone()), row.oid))
         .collect::<BTreeMap<_, _>>();
     let indexes_by_relid = index_rows
         .into_iter()
@@ -932,6 +938,13 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
         .max(
             attrdefs_by_key
                 .values()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
+            constraint_rows
+                .iter()
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
                     next_oid.max(row.oid.saturating_add(1))
                 }),
@@ -967,6 +980,11 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
                     desc.default_expr = Some(expr.clone());
                     desc.attrdef_oid = Some(catalog.next_oid);
                     catalog.next_oid = catalog.next_oid.saturating_add(1);
+                }
+                if let Some(constraint_oid) = not_null_constraint_oids
+                    .get(&(row.oid, not_null_constraint_name(&row.relname, &attr.attname)))
+                {
+                    desc.not_null_constraint_oid = Some(*constraint_oid);
                 }
                 Ok(desc)
             })
@@ -2235,9 +2253,47 @@ mod tests {
                 },
             )
             .unwrap();
+        let constraint_oid = entry.desc.columns[0].not_null_constraint_oid.unwrap();
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.constraints.iter().any(|row| {
-            row.conname == "people_id_not_null"
+            row.oid == constraint_oid
+                && row.conname == "people_id_not_null"
+                && row.contype == 'n'
+                && row.conrelid == entry.relation_oid
+                && row.connamespace == PUBLIC_NAMESPACE_OID
+                && row.convalidated
+        }));
+    }
+
+    #[test]
+    fn catalog_store_loads_not_null_constraint_oids_from_pg_constraint() {
+        let base = temp_dir("constraint_oid_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+        let constraint_oid = entry.desc.columns[0].not_null_constraint_oid.unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        let reopened_entry = reopened_catalog.get("people").unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert_eq!(
+            reopened_entry.desc.columns[0].not_null_constraint_oid,
+            Some(constraint_oid)
+        );
+        assert_eq!(reopened_catalog.next_oid(), constraint_oid.saturating_add(1));
+        assert!(rows.constraints.iter().any(|row| {
+            row.oid == constraint_oid
+                && row.conname == "people_id_not_null"
                 && row.contype == 'n'
                 && row.conrelid == entry.relation_oid
                 && row.connamespace == PUBLIC_NAMESPACE_OID

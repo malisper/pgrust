@@ -25,10 +25,12 @@ pub fn derived_pg_constraint_rows(
             let attnum = index.saturating_add(1) as i16;
             PgConstraintRow {
                 // :HACK: NOT NULL constraints are still derived from column metadata rather than
-                // stored as first-class catalog objects, so use a stable synthetic OID until DDL
-                // allocates and persists pg_constraint rows directly.
-                oid: synthetic_not_null_constraint_oid(relation_oid, attnum),
-                conname: format!("{relation_name}_{}_not_null", column.name),
+                // stored as first-class catalog objects. Prefer the persisted OID when the DDL
+                // path allocated one, but keep a deterministic fallback for older catalogs.
+                oid: column
+                    .not_null_constraint_oid
+                    .unwrap_or_else(|| synthetic_not_null_constraint_oid(relation_oid, attnum)),
+                conname: not_null_constraint_name(relation_name, &column.name),
                 connamespace: namespace_oid,
                 contype: CONSTRAINT_NOTNULL,
                 condeferrable: false,
@@ -50,6 +52,10 @@ pub fn derived_pg_constraint_rows(
             }
         })
         .collect()
+}
+
+pub fn not_null_constraint_name(relation_name: &str, column_name: &str) -> String {
+    format!("{relation_name}_{column_name}_not_null")
 }
 
 fn synthetic_not_null_constraint_oid(relation_oid: u32, attnum: i16) -> u32 {
