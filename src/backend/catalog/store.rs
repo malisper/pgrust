@@ -2174,6 +2174,15 @@ mod tests {
                 && row.oprright == TEXT_TYPE_OID
                 && row.oprcode == crate::include::catalog::TEXT_CMP_GE_PROC_OID
         }));
+        assert!(rows.operators.iter().any(|row| {
+            row.oid == 3240
+                && row.oprname == "="
+                && row.oprleft == crate::include::catalog::JSONB_TYPE_OID
+                && row.oprright == crate::include::catalog::JSONB_TYPE_OID
+                && row.oprcode == crate::include::catalog::JSONB_CMP_EQ_PROC_OID
+                && row.oprcanmerge
+                && row.oprcanhash
+        }));
     }
 
     #[test]
@@ -2224,6 +2233,18 @@ mod tests {
             row.proname == "numeric"
                 && row.proargtypes == INT4_TYPE_OID.to_string()
                 && row.prorettype == crate::include::catalog::NUMERIC_TYPE_OID
+        }));
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "jsonb_eq"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::JSONB_TYPE_OID,
+                        crate::include::catalog::JSONB_TYPE_OID
+                    )
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+                && row.prokind == 'f'
+                && row.prosrc == "jsonb_eq"
         }));
         assert!(rows.procs.iter().any(|row| {
             row.proname == "json_array_elements" && row.proretset && row.prorettype == JSON_TYPE_OID

@@ -770,6 +770,15 @@ mod tests {
                 && row.oprleft == TEXT_TYPE_OID
                 && row.oprright == TEXT_TYPE_OID
         }));
+        assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 3240
+                && row.oprname == "="
+                && row.oprcode == crate::include::catalog::JSONB_CMP_EQ_PROC_OID
+                && row.oprleft == crate::include::catalog::JSONB_TYPE_OID
+                && row.oprright == crate::include::catalog::JSONB_TYPE_OID
+                && row.oprcanmerge
+                && row.oprcanhash
+        }));
         assert!(cache.proc_rows().iter().any(|row| {
             row.proname == "lower"
                 && row.pronargs == 1
@@ -795,6 +804,17 @@ mod tests {
             row.oid == crate::include::catalog::TEXT_CMP_GE_PROC_OID
                 && row.proname == "text_ge"
                 && row.proargtypes == format!("{TEXT_TYPE_OID} {TEXT_TYPE_OID}")
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+        }));
+        assert!(cache.proc_rows().iter().any(|row| {
+            row.oid == crate::include::catalog::JSONB_CMP_EQ_PROC_OID
+                && row.proname == "jsonb_eq"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::JSONB_TYPE_OID,
+                        crate::include::catalog::JSONB_TYPE_OID
+                    )
                 && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
         }));
         assert!(cache.cast_rows().iter().any(|row| {

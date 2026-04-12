@@ -922,7 +922,10 @@ fn float_mod_is_rejected_at_bind_time() {
 #[test]
 fn build_plan_accepts_catalog_backed_text_and_bool_comparisons() {
     assert!(build_plan(
-        &parse_select("select 'a' < 'b', 'a' >= 'b', true = false").unwrap(),
+        &parse_select(
+            "select 'a' < 'b', 'a' >= 'b', true = false, '{\"a\":1}'::jsonb = '{\"a\":1}'::jsonb"
+        )
+        .unwrap(),
         &catalog(),
     )
     .is_ok());
@@ -931,7 +934,7 @@ fn build_plan_accepts_catalog_backed_text_and_bool_comparisons() {
 #[test]
 fn build_plan_rejects_missing_catalog_comparison_operator() {
     let err = build_plan(
-        &parse_select("select '{\"a\":1}'::jsonb = '{\"a\":1}'::jsonb").unwrap(),
+        &parse_select("select '{\"a\":1}'::json = '{\"a\":1}'::json").unwrap(),
         &catalog(),
     )
     .unwrap_err();
