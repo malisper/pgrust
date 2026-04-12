@@ -22,7 +22,7 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
-use crate::pgrust::database::{Database, TempMutationEffect};
+use crate::pgrust::database::{CatalogInvalidation, Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
 
@@ -48,6 +48,7 @@ struct ActiveTransaction {
     held_table_locks: Vec<RelFileLocator>,
     next_command_id: u32,
     catalog_effects: Vec<CatalogMutationEffect>,
+    catalog_invalidations: Vec<CatalogInvalidation>,
     temp_effects: Vec<TempMutationEffect>,
 }
 
@@ -206,6 +207,7 @@ impl Session {
                     held_table_locks: Vec::new(),
                     next_command_id: 0,
                     catalog_effects: Vec::new(),
+                    catalog_invalidations: Vec::new(),
                     temp_effects: Vec::new(),
                 });
                 Ok(StatementResult::AffectedRows(0))
@@ -238,6 +240,7 @@ impl Session {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
                 db.finalize_committed_catalog_effects(&txn.catalog_effects);
+                db.finalize_committed_local_catalog_invalidations(&txn.catalog_invalidations);
                 db.finalize_committed_temp_effects(self.client_id, &txn.temp_effects);
                 db.apply_temp_on_commit(self.client_id)?;
                 db.txn_waiter.notify();
@@ -252,6 +255,10 @@ impl Session {
                     db.table_locks.unlock_table(*rel, self.client_id);
                 }
                 let _ = db.txns.write().abort(txn.xid);
+                db.finalize_aborted_local_catalog_invalidations(
+                    self.client_id,
+                    &txn.catalog_invalidations,
+                );
                 db.finalize_aborted_catalog_effects(&txn.catalog_effects);
                 db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
                 db.txn_waiter.notify();
@@ -314,6 +321,11 @@ impl Session {
         db: &Database,
         stmt: Statement,
     ) -> Result<StatementResult, ExecError> {
+        let effect_start = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.catalog_effects.len())
+            .unwrap_or(0);
         let (xid, cid) = {
             let txn = self.active_txn.as_mut().unwrap();
             let xid = txn.xid;
@@ -323,7 +335,7 @@ impl Session {
         };
         let client_id = self.client_id;
 
-        match stmt {
+        let result = match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
@@ -349,7 +361,9 @@ impl Session {
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let visible_catalog = self.visible_catalog_for_command(db, xid, cid);
+                let search_path = self.configured_search_path();
+                let visible_catalog =
+                    db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
@@ -520,7 +534,30 @@ impl Session {
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 unreachable!("handled in Session::execute")
             }
+        };
+
+        if result.is_ok() {
+            let new_invalidations = self
+                .active_txn
+                .as_ref()
+                .map(|txn| {
+                    txn.catalog_effects[effect_start..]
+                        .iter()
+                        .map(Database::catalog_invalidation_from_effect)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !new_invalidations.is_empty() {
+                for invalidation in &new_invalidations {
+                    db.apply_session_catalog_invalidation(client_id, invalidation);
+                }
+                if let Some(txn) = self.active_txn.as_mut() {
+                    txn.catalog_invalidations.extend(new_invalidations);
+                }
+            }
         }
+
+        result
     }
 
     fn apply_set(
@@ -633,6 +670,7 @@ impl Session {
                 held_table_locks: Vec::new(),
                 next_command_id: 0,
                 catalog_effects: Vec::new(),
+                catalog_invalidations: Vec::new(),
                 temp_effects: Vec::new(),
             });
             true
