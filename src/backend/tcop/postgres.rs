@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
 use crate::backend::access::heap::heapam::HeapError;
@@ -10,20 +10,19 @@ use crate::backend::executor::{ExecError, QueryColumn, StatementResult};
 use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
 };
-use crate::include::access::htup::TupleError;
 use crate::backend::libpq::pqformat::{
-    FloatFormatOptions,
-    format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
-    send_close_complete, send_command_complete, send_copy_in_response,
+    FloatFormatOptions, format_exec_error, infer_command_tag, send_auth_ok, send_backend_key_data,
+    send_bind_complete, send_close_complete, send_command_complete, send_copy_in_response,
     send_empty_query, send_error, send_no_data, send_notice, send_notice_with_severity,
     send_parameter_description, send_parameter_status, send_parse_complete, send_query_result,
     send_ready_for_query, send_row_description, send_typed_data_row,
 };
-use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
+use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::utils::cache::relcache::RelCache;
+use crate::include::access::htup::TupleError;
 use crate::include::nodes::datum::Value;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
@@ -75,12 +74,16 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         return None;
     }
     let value = match e {
-        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken { expected, .. })
-            if matches!(*expected, "valid binary digit" | "valid hexadecimal digit") =>
-        {
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected, ..
+        }) if matches!(*expected, "valid binary digit" | "valid hexadecimal digit") => {
             return find_bit_literal_position(sql);
         }
-        ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn { token, clause, .. }) => {
+        ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn {
+            token,
+            clause,
+            ..
+        }) => {
             return find_ungrouped_column_position(sql, token, clause);
         }
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
@@ -498,7 +501,7 @@ fn try_handle_psql_describe_query(
     state: &mut ConnectionState,
     sql: &str,
 ) -> io::Result<bool> {
-    let visible_relcache = db.visible_relcache(state.session.client_id);
+    let visible_relcache = state.session.visible_relcache(db);
     let Some((columns, rows)) = execute_psql_describe_query(&visible_relcache, sql) else {
         return Ok(false);
     };
@@ -558,9 +561,7 @@ fn execute_psql_describe_query(
             Vec::new(),
         ));
     }
-    if lower.contains("from pg_catalog.pg_policy pol")
-        && lower.contains("pol.polroles")
-    {
+    if lower.contains("from pg_catalog.pg_policy pol") && lower.contains("pol.polroles") {
         return Some((vec![QueryColumn::text("Policies")], Vec::new()));
     }
     if lower.contains("from pg_catalog.pg_statistic_ext")
@@ -618,7 +619,11 @@ fn psql_describe_lookup_query(
             vec![vec![
                 Value::Int32(entry.relation_oid as i32),
                 Value::Text("public".into()),
-                Value::Text(unqualified_relation_name(sql).unwrap_or_else(|| "bit_defaults".into()).into()),
+                Value::Text(
+                    unqualified_relation_name(sql)
+                        .unwrap_or_else(|| "bit_defaults".into())
+                        .into(),
+                ),
             ]]
         })
         .unwrap_or_default();
@@ -643,20 +648,56 @@ fn psql_describe_tableinfo_query(
     let entry = relcache.get_by_oid(oid)?;
     Some((
         vec![
-            QueryColumn { name: "relchecks".into(), sql_type: SqlType::new(SqlTypeKind::Int4) },
-            QueryColumn { name: "relkind".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
-            QueryColumn { name: "relhasindex".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
-            QueryColumn { name: "relhasrules".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
-            QueryColumn { name: "relhastriggers".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
-            QueryColumn { name: "relrowsecurity".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
-            QueryColumn { name: "relforcerowsecurity".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
-            QueryColumn { name: "relhasoids".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
-            QueryColumn { name: "relispartition".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn {
+                name: "relchecks".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+            },
+            QueryColumn {
+                name: "relkind".into(),
+                sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            },
+            QueryColumn {
+                name: "relhasindex".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
+            QueryColumn {
+                name: "relhasrules".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
+            QueryColumn {
+                name: "relhastriggers".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
+            QueryColumn {
+                name: "relrowsecurity".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
+            QueryColumn {
+                name: "relforcerowsecurity".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
+            QueryColumn {
+                name: "relhasoids".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
+            QueryColumn {
+                name: "relispartition".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
             QueryColumn::text("?column?"),
-            QueryColumn { name: "reltablespace".into(), sql_type: SqlType::new(SqlTypeKind::Oid) },
+            QueryColumn {
+                name: "reltablespace".into(),
+                sql_type: SqlType::new(SqlTypeKind::Oid),
+            },
             QueryColumn::text("reloftype"),
-            QueryColumn { name: "relpersistence".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
-            QueryColumn { name: "relreplident".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
+            QueryColumn {
+                name: "relpersistence".into(),
+                sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            },
+            QueryColumn {
+                name: "relreplident".into(),
+                sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            },
             QueryColumn::text("amname"),
         ],
         vec![vec![
@@ -710,10 +751,19 @@ fn psql_describe_columns_query(
             QueryColumn::text("attname"),
             QueryColumn::text("format_type"),
             QueryColumn::text("pg_get_expr"),
-            QueryColumn { name: "attnotnull".into(), sql_type: SqlType::new(SqlTypeKind::Bool) },
+            QueryColumn {
+                name: "attnotnull".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+            },
             QueryColumn::text("attcollation"),
-            QueryColumn { name: "attidentity".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
-            QueryColumn { name: "attgenerated".into(), sql_type: SqlType::new(SqlTypeKind::InternalChar) },
+            QueryColumn {
+                name: "attidentity".into(),
+                sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            },
+            QueryColumn {
+                name: "attgenerated".into(),
+                sql_type: SqlType::new(SqlTypeKind::InternalChar),
+            },
         ],
         rows,
     ))
@@ -949,15 +999,17 @@ fn handle_describe(
             match state
                 .prepared
                 .get(&name)
-                .and_then(|stmt| describe_sql(db, state.session.client_id, &stmt.sql, &[]))
+                .and_then(|stmt| describe_sql(db, &state.session, &stmt.sql, &[]))
             {
                 Some(cols) => send_row_description(stream, &cols),
                 None => send_no_data(stream),
             }
         }
-        b'P' => match state.portals.get(&name).and_then(|portal| {
-            describe_sql(db, state.session.client_id, &portal.sql, &portal.params)
-        }) {
+        b'P' => match state
+            .portals
+            .get(&name)
+            .and_then(|portal| describe_sql(db, &state.session, &portal.sql, &portal.params))
+        {
             Some(cols) => send_row_description(stream, &cols),
             None => send_no_data(stream),
         },
@@ -1015,10 +1067,13 @@ fn execute_portal(
     if try_handle_float_shell_ddl(stream, &portal.sql)? {
         return Ok(());
     }
-    let visible_relcache = db.visible_relcache(session.client_id);
-    let sql =
-        rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &visible_relcache))
-            .into_owned();
+    let visible_relcache = session.visible_relcache(db);
+    let sql = rewrite_regression_sql(&substitute_params(
+        &portal.sql,
+        &portal.params,
+        &visible_relcache,
+    ))
+    .into_owned();
     clear_notices();
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
@@ -1137,7 +1192,12 @@ fn try_handle_float_shell_ddl(stream: &mut impl Write, sql: &str) -> io::Result<
         || normalized.starts_with("create type xfloat8 (")
     {
         if normalized.contains("like = no_such_type") {
-            send_error(stream, "42704", "type \"no_such_type\" does not exist", sql.find("no_such_type").map(|idx| idx + 1))?;
+            send_error(
+                stream,
+                "42704",
+                "type \"no_such_type\" does not exist",
+                sql.find("no_such_type").map(|idx| idx + 1),
+            )?;
             return Ok(true);
         }
         send_command_complete(stream, "CREATE TYPE")?;
@@ -1175,18 +1235,17 @@ fn try_handle_float_shell_ddl(stream: &mut impl Write, sql: &str) -> io::Result<
 
 fn describe_sql(
     db: &Database,
-    client_id: ClientId,
+    session: &Session,
     sql: &str,
     params: &[Option<String>],
 ) -> Option<Vec<QueryColumn>> {
-    let visible_relcache = db.visible_relcache(client_id);
-    let sql = rewrite_regression_sql(&substitute_params(sql, params, &visible_relcache)).into_owned();
+    let visible_relcache = session.visible_relcache(db);
+    let sql =
+        rewrite_regression_sql(&substitute_params(sql, params, &visible_relcache)).into_owned();
     match parse_statement(&sql).ok()? {
-        Statement::Select(stmt) => {
-            crate::backend::parser::build_plan(&stmt, &visible_relcache)
-                .ok()
-                .map(|plan| plan.columns())
-        }
+        Statement::Select(stmt) => crate::backend::parser::build_plan(&stmt, &visible_relcache)
+            .ok()
+            .map(|plan| plan.columns()),
         Statement::ShowTables => Some(vec![QueryColumn::text("table_name")]),
         Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
         _ => None,
@@ -1201,7 +1260,10 @@ fn substitute_params(sql: &str, params: &[Option<String>], catalog: &dyn Catalog
             None => "null".to_string(),
             Some(v) => resolve_regclass_param(v, catalog),
         };
-        out = out.replace(&format!("{placeholder}::pg_catalog.regclass"), &regclass_value);
+        out = out.replace(
+            &format!("{placeholder}::pg_catalog.regclass"),
+            &regclass_value,
+        );
         out = out.replace(&format!("{placeholder}::regclass"), &regclass_value);
         let value = match param {
             None => "null".to_string(),
@@ -1250,7 +1312,10 @@ mod tests {
         );
         assert_eq!(
             sql,
-            format!("select relkind from pg_catalog.pg_class where oid={}", entry.relation_oid)
+            format!(
+                "select relkind from pg_catalog.pg_class where oid={}",
+                entry.relation_oid
+            )
         );
     }
 }

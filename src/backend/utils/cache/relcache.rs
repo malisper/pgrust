@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
 use crate::backend::executor::RelationDesc;
+use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
-use crate::backend::parser::SqlType;
+use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelCacheEntry {
@@ -29,9 +30,13 @@ impl RelCache {
     pub fn from_catalog(catalog: &Catalog) -> Self {
         let mut cache = Self::default();
         for (name, entry) in catalog.entries() {
-            cache.by_name
-                .insert(normalize_catalog_name(name).to_ascii_lowercase(), from_catalog_entry(entry));
-            cache.by_oid.insert(entry.relation_oid, from_catalog_entry(entry));
+            cache.by_name.insert(
+                normalize_catalog_name(name).to_ascii_lowercase(),
+                from_catalog_entry(entry),
+            );
+            cache
+                .by_oid
+                .insert(entry.relation_oid, from_catalog_entry(entry));
         }
         cache
     }
@@ -60,7 +65,8 @@ impl RelCache {
                         },
                         !attr.attnotnull,
                     );
-                    if let Some(attrdef) = catcache.attrdef_by_relid_attnum(class.oid, attr.attnum) {
+                    if let Some(attrdef) = catcache.attrdef_by_relid_attnum(class.oid, attr.attnum)
+                    {
                         desc.attrdef_oid = Some(attrdef.oid);
                         desc.default_expr = Some(attrdef.adbin.clone());
                     }
@@ -100,14 +106,54 @@ impl RelCache {
         self.by_oid.get(&oid)
     }
 
+    pub fn with_search_path(&self, search_path: &[String]) -> Self {
+        let mut cache = Self {
+            by_name: BTreeMap::new(),
+            by_oid: self.by_oid.clone(),
+        };
+
+        for (name, entry) in &self.by_name {
+            if name.contains('.') {
+                cache.by_name.insert(name.clone(), entry.clone());
+            }
+        }
+
+        for schema_name in search_path.iter().rev() {
+            let prefix = format!("{}.", schema_name.to_ascii_lowercase());
+            for (name, entry) in &self.by_name {
+                if !name.starts_with(&prefix) {
+                    continue;
+                }
+                if let Some((_, unqualified)) = name.rsplit_once('.') {
+                    cache.by_name.insert(unqualified.to_string(), entry.clone());
+                }
+            }
+        }
+
+        // :HACK: `get_by_name()` still normalizes `pg_catalog.foo` to `foo`,
+        // so keep catalog aliases visible even when rebuilding unqualified
+        // names from the current search path.
+        for (name, entry) in &self.by_name {
+            if !name.contains('.') && entry.namespace_oid == PG_CATALOG_NAMESPACE_OID {
+                cache.by_name.insert(name.clone(), entry.clone());
+            }
+        }
+
+        cache
+    }
+
     pub fn insert(&mut self, name: impl Into<String>, entry: RelCacheEntry) {
-        self.by_name
-            .insert(normalize_catalog_name(&name.into()).to_ascii_lowercase(), entry.clone());
+        self.by_name.insert(
+            normalize_catalog_name(&name.into()).to_ascii_lowercase(),
+            entry.clone(),
+        );
         self.by_oid.insert(entry.relation_oid, entry);
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&str, &RelCacheEntry)> {
-        self.by_name.iter().map(|(name, entry)| (name.as_str(), entry))
+        self.by_name
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry))
     }
 }
 
@@ -158,11 +204,15 @@ mod tests {
 
         let cache = RelCache::from_catalog(&catalog);
         assert_eq!(
-            cache.get_by_name("people").map(|entry| entry.rel.rel_number),
+            cache
+                .get_by_name("people")
+                .map(|entry| entry.rel.rel_number),
             Some(entry.rel.rel_number)
         );
         assert_eq!(
-            cache.get_by_oid(entry.relation_oid).map(|entry| entry.rel.rel_number),
+            cache
+                .get_by_oid(entry.relation_oid)
+                .map(|entry| entry.rel.rel_number),
             Some(entry.rel.rel_number)
         );
     }
@@ -186,7 +236,9 @@ mod tests {
             Some(entry.rel.rel_number)
         );
         assert_eq!(
-            cache.get_by_oid(entry.relation_oid).map(|rel| rel.desc.columns.len()),
+            cache
+                .get_by_oid(entry.relation_oid)
+                .map(|rel| rel.desc.columns.len()),
             Some(1)
         );
     }
@@ -206,7 +258,9 @@ mod tests {
 
         let cache = RelCache::from_physical(&base).unwrap();
         assert_eq!(
-            cache.get_by_oid(entry.relation_oid).map(|rel| rel.desc.columns.len()),
+            cache
+                .get_by_oid(entry.relation_oid)
+                .map(|rel| rel.desc.columns.len()),
             Some(0)
         );
         assert!(cache.get_by_name("zerocol").is_some());
