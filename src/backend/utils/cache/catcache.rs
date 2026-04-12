@@ -10,6 +10,7 @@ use crate::backend::catalog::pg_auth_members::sort_pg_auth_members_rows;
 use crate::backend::catalog::pg_authid::sort_pg_authid_rows;
 use crate::backend::catalog::pg_cast::sort_pg_cast_rows;
 use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
+use crate::backend::catalog::pg_constraint::sort_pg_constraint_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
@@ -28,14 +29,15 @@ use crate::include::catalog::{
     JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
     JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
     PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows,
-    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    bootstrap_pg_tablespace_rows, builtin_type_rows,
+    PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow,
+    PgNamespaceRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows,
+    bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
+    builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +54,7 @@ pub struct CatCache {
     authid_rows: Vec<PgAuthIdRow>,
     auth_members_rows: Vec<PgAuthMembersRow>,
     language_rows: Vec<PgLanguageRow>,
+    constraint_rows: Vec<PgConstraintRow>,
     operator_rows: Vec<PgOperatorRow>,
     proc_rows: Vec<PgProcRow>,
     cast_rows: Vec<PgCastRow>,
@@ -96,6 +99,8 @@ impl CatCache {
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.language_rows.extend(bootstrap_pg_language_rows());
         sort_pg_language_rows(&mut cache.language_rows);
+        cache.constraint_rows.extend(bootstrap_pg_constraint_rows());
+        sort_pg_constraint_rows(&mut cache.constraint_rows);
         cache.operator_rows.extend(bootstrap_pg_operator_rows());
         sort_pg_operator_rows(&mut cache.operator_rows);
         cache.proc_rows.extend(bootstrap_pg_proc_rows());
@@ -237,6 +242,7 @@ impl CatCache {
             rows.authids,
             rows.auth_members,
             rows.languages,
+            rows.constraints,
             rows.operators,
             rows.procs,
             rows.casts,
@@ -258,6 +264,7 @@ impl CatCache {
         authid_rows: Vec<PgAuthIdRow>,
         auth_members_rows: Vec<PgAuthMembersRow>,
         language_rows: Vec<PgLanguageRow>,
+        constraint_rows: Vec<PgConstraintRow>,
         operator_rows: Vec<PgOperatorRow>,
         proc_rows: Vec<PgProcRow>,
         cast_rows: Vec<PgCastRow>,
@@ -310,6 +317,8 @@ impl CatCache {
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.language_rows = language_rows;
         sort_pg_language_rows(&mut cache.language_rows);
+        cache.constraint_rows = constraint_rows;
+        sort_pg_constraint_rows(&mut cache.constraint_rows);
         cache.operator_rows = operator_rows;
         sort_pg_operator_rows(&mut cache.operator_rows);
         cache.proc_rows = proc_rows;
@@ -405,6 +414,10 @@ impl CatCache {
 
     pub fn language_rows(&self) -> Vec<PgLanguageRow> {
         self.language_rows.clone()
+    }
+
+    pub fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        self.constraint_rows.clone()
     }
 
     pub fn operator_rows(&self) -> Vec<PgOperatorRow> {
@@ -673,6 +686,7 @@ mod tests {
                 .iter()
                 .any(|row| { row.lanname == "sql" && row.lanpltrusted })
         );
+        assert!(cache.constraint_rows().is_empty());
         assert!(cache.operator_rows().iter().any(|row| {
             row.oid == 91
                 && row.oprname == "="
