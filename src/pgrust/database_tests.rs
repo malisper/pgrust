@@ -202,6 +202,32 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
+        match db
+            .execute(
+                1,
+                "select collname, collprovider from pg_collation order by oid",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![
+                            Value::Text("default".into()),
+                            Value::Text("d".into()),
+                        ],
+                        vec![Value::Text("C".into()), Value::Text("c".into())],
+                        vec![
+                            Value::Text("POSIX".into()),
+                            Value::Text("c".into()),
+                        ],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
         match db.execute(1, "select count(*) from pg_auth_members").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int64(0)]]);
