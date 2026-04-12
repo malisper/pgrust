@@ -920,6 +920,25 @@ fn float_mod_is_rejected_at_bind_time() {
 }
 
 #[test]
+fn build_plan_accepts_catalog_backed_text_and_bool_comparisons() {
+    assert!(build_plan(
+        &parse_select("select 'a' < 'b', 'a' >= 'b', true = false").unwrap(),
+        &catalog(),
+    )
+    .is_ok());
+}
+
+#[test]
+fn build_plan_rejects_missing_catalog_comparison_operator() {
+    let err = build_plan(
+        &parse_select("select '{\"a\":1}'::jsonb = '{\"a\":1}'::jsonb").unwrap(),
+        &catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ParseError::UndefinedOperator { op: "=", .. }));
+}
+
+#[test]
 fn parse_select_with_order_limit_offset() {
     let stmt = parse_select("select name from people order by id desc limit 2 offset 1").unwrap();
     assert_eq!(stmt.order_by.len(), 1);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::include::catalog::{bootstrap_pg_proc_rows, builtin_type_rows};
+use crate::include::catalog::{bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -155,6 +155,18 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             actual: format!("{}({} args)", func.name(), args.len()),
         })
     }
+}
+
+pub(super) fn comparison_operator_exists(op: &str, left: SqlType, right: SqlType) -> bool {
+    let Some(left_oid) = builtin_type_oid(left) else {
+        return false;
+    };
+    let Some(right_oid) = builtin_type_oid(right) else {
+        return false;
+    };
+    bootstrap_pg_operator_rows().iter().any(|row| {
+        row.oprname == op && row.oprleft == left_oid && row.oprright == right_oid
+    })
 }
 
 pub(super) fn fixed_aggregate_return_type(func: AggFunc) -> Option<SqlType> {
@@ -492,6 +504,15 @@ fn builtin_sql_type_for_oid(oid: u32) -> Option<SqlType> {
         .find_map(|row| (row.oid == oid).then_some(row.sql_type))
 }
 
+fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
+    if sql_type.is_array {
+        return None;
+    }
+    builtin_type_rows().into_iter().find_map(|row| {
+        (!row.sql_type.is_array && row.sql_type.kind == sql_type.kind).then_some(row.oid)
+    })
+}
+
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
@@ -617,5 +638,34 @@ mod tests {
         );
         assert_eq!(fixed_aggregate_return_type(AggFunc::Sum), None);
         assert_eq!(fixed_aggregate_return_type(AggFunc::Max), None);
+    }
+
+    #[test]
+    fn comparison_operator_exists_uses_pg_operator_catalog() {
+        assert!(comparison_operator_exists(
+            "<",
+            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Text)
+        ));
+        assert!(comparison_operator_exists(
+            ">=",
+            SqlType::new(SqlTypeKind::Text),
+            SqlType::new(SqlTypeKind::Text)
+        ));
+        assert!(comparison_operator_exists(
+            "=",
+            SqlType::new(SqlTypeKind::Bool),
+            SqlType::new(SqlTypeKind::Bool)
+        ));
+        assert!(!comparison_operator_exists(
+            "=",
+            SqlType::new(SqlTypeKind::Jsonb),
+            SqlType::new(SqlTypeKind::Jsonb)
+        ));
+        assert!(!comparison_operator_exists(
+            "=",
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+        ));
     }
 }
