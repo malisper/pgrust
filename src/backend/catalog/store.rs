@@ -2165,9 +2165,26 @@ mod tests {
     #[test]
     fn catalog_store_persists_pg_constraint_rows() {
         let base = temp_dir("constraint_rows");
-        let _store = CatalogStore::load(&base).unwrap();
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.constraints.is_empty());
+        assert!(rows.constraints.iter().any(|row| {
+            row.conname == "people_id_not_null"
+                && row.contype == 'n'
+                && row.conrelid == entry.relation_oid
+                && row.connamespace == PUBLIC_NAMESPACE_OID
+                && row.convalidated
+        }));
     }
 
     #[test]
@@ -3008,7 +3025,11 @@ mod tests {
         );
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.constraints.is_empty());
+        assert!(rows.constraints.iter().any(|row| {
+            row.conname == "people_id_not_null"
+                && row.contype == 'n'
+                && row.conrelid == entry.relation_oid
+        }));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
