@@ -22,9 +22,10 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgCastRow, PgClassRow, PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow,
-    PgNamespaceRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
-    bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
+    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow,
+    PgLanguageRow, PgNamespaceRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow,
+    bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_relation_desc,
+    builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 
@@ -44,6 +45,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
     pub languages: Vec<PgLanguageRow>,
+    pub constraints: Vec<PgConstraintRow>,
     pub operators: Vec<PgOperatorRow>,
     pub procs: Vec<PgProcRow>,
     pub casts: Vec<PgCastRow>,
@@ -412,6 +414,20 @@ pub(crate) fn sync_catalog_rows(
         RelFileLocator {
             spc_oid: 0,
             db_oid,
+            rel_number: BootstrapCatalogKind::PgConstraint.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgConstraint),
+        rows.constraints
+            .iter()
+            .cloned()
+            .map(pg_constraint_row_values)
+            .collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
             rel_number: BootstrapCatalogKind::PgDatabase.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgDatabase),
@@ -526,6 +542,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
         languages: catcache.language_rows(),
+        constraints: catcache.constraint_rows(),
         operators: catcache.operator_rows(),
         procs: catcache.proc_rows(),
         casts: catcache.cast_rows(),
@@ -698,6 +715,31 @@ fn pg_cast_row_values(row: PgCastRow) -> Vec<Value> {
     ]
 }
 
+fn pg_constraint_row_values(row: PgConstraintRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.conname.into()),
+        Value::Int32(row.connamespace as i32),
+        Value::Text(row.contype.to_string().into()),
+        Value::Bool(row.condeferrable),
+        Value::Bool(row.condeferred),
+        Value::Bool(row.conenforced),
+        Value::Bool(row.convalidated),
+        Value::Int32(row.conrelid as i32),
+        Value::Int32(row.contypid as i32),
+        Value::Int32(row.conindid as i32),
+        Value::Int32(row.conparentid as i32),
+        Value::Int32(row.confrelid as i32),
+        Value::Text(row.confupdtype.to_string().into()),
+        Value::Text(row.confdeltype.to_string().into()),
+        Value::Text(row.confmatchtype.to_string().into()),
+        Value::Bool(row.conislocal),
+        Value::Int16(row.coninhcount),
+        Value::Bool(row.connoinherit),
+        Value::Bool(row.conperiod),
+    ]
+}
+
 fn pg_database_row_values(row: PgDatabaseRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -795,6 +837,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
     let _language_rows = rows.languages;
+    let _constraint_rows = rows.constraints;
     let _operator_rows = rows.operators;
     let _proc_rows = rows.procs;
     let _cast_rows = rows.casts;
@@ -976,6 +1019,7 @@ pub(crate) fn load_physical_catalog_rows(
     let mut missing_authid = false;
     let mut missing_auth_members = false;
     let mut missing_language = false;
+    let mut missing_constraint = false;
     let mut missing_operator = false;
     let mut missing_proc = false;
     let mut missing_cast = false;
@@ -1015,6 +1059,10 @@ pub(crate) fn load_physical_catalog_rows(
             }
             if kind == BootstrapCatalogKind::PgLanguage {
                 missing_language = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgConstraint {
+                missing_constraint = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgOperator {
@@ -1127,6 +1175,18 @@ pub(crate) fn load_physical_catalog_rows(
         )?
         .into_iter()
         .map(pg_language_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let constraint_rows = if missing_constraint {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgConstraint],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgConstraint),
+        )?
+        .into_iter()
+        .map(pg_constraint_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
     let operator_rows = if missing_operator {
@@ -1249,6 +1309,7 @@ pub(crate) fn load_physical_catalog_rows(
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
+        constraints: constraint_rows,
         operators: operator_rows,
         procs: proc_rows,
         casts: cast_rows,
@@ -1557,6 +1618,63 @@ fn pg_cast_row_from_values(values: Vec<Value>) -> Result<PgCastRow, CatalogError
         castfunc: expect_oid(&values[3])?,
         castcontext,
         castmethod,
+    })
+}
+
+fn pg_constraint_row_from_values(values: Vec<Value>) -> Result<PgConstraintRow, CatalogError> {
+    let contype = match &values[3] {
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty contype"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected contype text")),
+    };
+    let confupdtype = match &values[13] {
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty confupdtype"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected confupdtype text")),
+    };
+    let confdeltype = match &values[14] {
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty confdeltype"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected confdeltype text")),
+    };
+    let confmatchtype = match &values[15] {
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty confmatchtype"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected confmatchtype text")),
+    };
+    Ok(PgConstraintRow {
+        oid: expect_oid(&values[0])?,
+        conname: expect_text(&values[1])?,
+        connamespace: expect_oid(&values[2])?,
+        contype,
+        condeferrable: expect_bool(&values[4])?,
+        condeferred: expect_bool(&values[5])?,
+        conenforced: expect_bool(&values[6])?,
+        convalidated: expect_bool(&values[7])?,
+        conrelid: expect_oid(&values[8])?,
+        contypid: expect_oid(&values[9])?,
+        conindid: expect_oid(&values[10])?,
+        conparentid: expect_oid(&values[11])?,
+        confrelid: expect_oid(&values[12])?,
+        confupdtype,
+        confdeltype,
+        confmatchtype,
+        conislocal: expect_bool(&values[16])?,
+        coninhcount: expect_int16(&values[17])?,
+        connoinherit: expect_bool(&values[18])?,
+        conperiod: expect_bool(&values[19])?,
     })
 }
 
@@ -2007,6 +2125,14 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_persists_pg_constraint_rows() {
+        let base = temp_dir("constraint_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.constraints.is_empty());
+    }
+
+    #[test]
     fn catalog_store_persists_pg_proc_rows() {
         let base = temp_dir("proc_rows");
         let _store = CatalogStore::load(&base).unwrap();
@@ -2230,6 +2356,12 @@ mod tests {
         let cast = catalog.get("pg_cast").unwrap();
         let cast_path = segment_path(&base, cast.rel, ForkNumber::Main, 0);
         assert!(cast_path.exists(), "pg_cast relfile should exist");
+        let constraint = catalog.get("pg_constraint").unwrap();
+        let constraint_path = segment_path(&base, constraint.rel, ForkNumber::Main, 0);
+        assert!(
+            constraint_path.exists(),
+            "pg_constraint relfile should exist"
+        );
         let am = catalog.get("pg_am").unwrap();
         let am_path = segment_path(&base, am.rel, ForkNumber::Main, 0);
         assert!(am_path.exists(), "pg_am relfile should exist");
@@ -2801,6 +2933,44 @@ mod tests {
                 && row.oprright == INT4_TYPE_OID
                 && row.oprcode == crate::include::catalog::INT4_CMP_EQ_PROC_OID
         }));
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_constraint_relation() {
+        let base = temp_dir("missing_constraint_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let constraint_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgConstraint.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&constraint_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(
+            constraint_path.exists(),
+            "pg_constraint relfile should be recreated"
+        );
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.constraints.is_empty());
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 

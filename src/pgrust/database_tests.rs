@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::ParseError;
@@ -512,6 +511,13 @@ fn create_index_and_alter_table_set_are_noops() {
         .execute(1, "select count(*) from pg_auth_members")
         .unwrap()
     {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match db.execute(1, "select count(*) from pg_constraint").unwrap() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
