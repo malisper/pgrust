@@ -162,7 +162,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             column_names: vec![output.name],
             stats: NodeExecStats::default(),
         }),
-        Plan::Values { rows, output_columns } => Box::new(ValuesState {
+        Plan::Values {
+            rows,
+            output_columns,
+        } => Box::new(ValuesState {
             rows,
             output_columns: output_columns.into_iter().map(|c| c.name).collect(),
             result_rows: None,
