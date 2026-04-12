@@ -1437,6 +1437,90 @@ fn temp_create_table_as_select_works() {
 }
 
 #[test]
+fn create_table_as_autocommit_publishes_permanent_catalog_rows() {
+    let base = temp_dir("autocommit_ctas_permanent");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table source_items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into source_items (id) values (1), (2)")
+        .unwrap();
+
+    assert_eq!(
+        db.execute(
+            1,
+            "create table copied_items as select id from source_items order by id",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(2)
+    );
+
+    match db.execute(1, "select count(*) from copied_items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match db
+        .execute(
+            1,
+            "select count(*) from pg_class where relname = 'copied_items'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_table_as_is_visible_in_same_txn_before_commit() {
+    let base = temp_dir("txn_ctas_visibility");
+    let db = Database::open(&base, 16).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer
+        .execute(&db, "create table source_items (id int4 not null)")
+        .unwrap();
+    writer
+        .execute(&db, "insert into source_items (id) values (1), (2)")
+        .unwrap();
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(
+            &db,
+            "create table copied_items as select id from source_items order by id",
+        )
+        .unwrap();
+
+    match writer.execute(&db, "select count(*) from copied_items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    assert!(
+        reader.execute(&db, "select count(*) from copied_items").is_err(),
+        "other sessions must not see uncommitted CTAS catalog rows"
+    );
+
+    writer.execute(&db, "commit").unwrap();
+
+    match reader.execute(&db, "select count(*) from copied_items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn streaming_select_uses_temp_table_shadowing() {
     let base = temp_dir("streaming_temp_shadowing");
     let db = Database::open(&base, 16).unwrap();

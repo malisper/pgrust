@@ -1137,187 +1137,20 @@ impl Database {
                 &mut catalog_effects,
             );
         }
-        let (table_name, persistence) = self
-            .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
-        self.sync_visible_catalog_heaps(client_id);
-        let visible_catalog =
-            self.visible_catalog_with_search_path(client_id, configured_search_path);
-        let plan = build_plan(&create_stmt.query, &visible_catalog)?;
-        let rels = {
-            let mut rels = std::collections::BTreeSet::new();
-            collect_rels_from_plan(&plan, &mut rels);
-            rels.into_iter().collect::<Vec<_>>()
-        };
-        if xid.is_none() {
-            lock_relations(&self.table_locks, client_id, &rels);
-        }
-
-        let snapshot = match xid {
-            Some(xid) => self.txns.read().snapshot_for_command(xid, cid)?,
-            None => self
-                .txns
-                .read()
-                .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)?,
-        };
-        let mut ctx = ExecutorContext {
-            pool: Arc::clone(&self.pool),
-            txns: self.txns.clone(),
-            snapshot,
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_table_as_stmt_in_transaction_with_search_path(
             client_id,
-            next_command_id: cid,
-            outer_rows: Vec::new(),
-            timed: false,
-        };
-        let query_result = execute_readonly_statement(
-            Statement::Select(create_stmt.query.clone()),
-            &visible_catalog,
-            &mut ctx,
+            create_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            &mut catalog_effects,
         );
-        if xid.is_none() {
-            unlock_relations(&self.table_locks, client_id, &rels);
-        }
-        let StatementResult::Query {
-            columns,
-            column_names,
-            rows,
-        } = query_result?
-        else {
-            unreachable!("ctas query should return rows");
-        };
-
-        if !create_stmt.column_names.is_empty() && create_stmt.column_names.len() != columns.len() {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "column alias count matching query column count",
-                actual: format!(
-                    "{} aliases for {} columns",
-                    create_stmt.column_names.len(),
-                    columns.len()
-                ),
-            }));
-        }
-
-        let desc = crate::backend::executor::RelationDesc {
-            columns: columns
-                .iter()
-                .enumerate()
-                .map(|(index, column)| {
-                    let name = create_stmt
-                        .column_names
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| column_names[index].clone());
-                    column_desc(name, column.sql_type, true)
-                })
-                .collect(),
-        };
-
-        let rel = match persistence {
-            TablePersistence::Permanent => {
-                let mut catalog_guard = self.catalog.write();
-                let stmt = CreateTableStatement {
-                    schema_name: None,
-                    table_name: table_name.clone(),
-                    persistence,
-                    on_commit: create_stmt.on_commit,
-                    columns: desc
-                        .columns
-                        .iter()
-                        .map(|column| crate::backend::parser::ColumnDef {
-                            name: column.name.clone(),
-                            ty: column.sql_type,
-                            nullable: true,
-                            default_expr: None,
-                        })
-                        .collect(),
-                    if_not_exists: create_stmt.if_not_exists,
-                };
-                let entry = catalog_guard
-                    .create_table(table_name.clone(), create_relation_desc(&stmt))
-                    .map_err(|err| match err {
-                        CatalogError::TableAlreadyExists(name) => {
-                            ExecError::Parse(ParseError::TableAlreadyExists(name))
-                        }
-                        CatalogError::UnknownTable(name) => {
-                            ExecError::Parse(ParseError::TableDoesNotExist(name))
-                        }
-                        CatalogError::UnknownColumn(name) => {
-                            ExecError::Parse(ParseError::UnknownColumn(name))
-                        }
-                        CatalogError::UnknownType(name) => {
-                            ExecError::Parse(ParseError::UnsupportedType(name))
-                        }
-                        CatalogError::Io(_) | CatalogError::Corrupt(_) => {
-                            ExecError::Parse(ParseError::UnexpectedToken {
-                                expected: "valid catalog state",
-                                actual: "catalog error".into(),
-                            })
-                        }
-                    })?;
-                drop(catalog_guard);
-                self.refresh_catalog_storage();
-                let _ = self.pool.with_storage_mut(|s| {
-                    use crate::backend::storage::smgr::StorageManager;
-                    let _ = s.smgr.open(entry.rel);
-                    let _ = s.smgr.create(
-                        entry.rel,
-                        crate::backend::storage::smgr::ForkNumber::Main,
-                        false,
-                    );
-                });
-                self.plan_cache.invalidate_all();
-                entry.rel
-            }
-            TablePersistence::Temporary => {
-                self.create_temp_relation(
-                    client_id,
-                    table_name.clone(),
-                    desc.clone(),
-                    create_stmt.on_commit,
-                )?
-                .rel
-            }
-        };
-
-        if rows.is_empty() {
-            return Ok(StatementResult::AffectedRows(0));
-        }
-
-        if let Some(xid) = xid {
-            let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
-            let mut ctx = ExecutorContext {
-                pool: Arc::clone(&self.pool),
-                txns: self.txns.clone(),
-                snapshot,
-                client_id,
-                next_command_id: cid,
-                outer_rows: Vec::new(),
-                timed: false,
-            };
-            let inserted = crate::backend::commands::tablecmds::execute_insert_values(
-                rel, &desc, &rows, &mut ctx, xid, cid,
-            )?;
-            Ok(StatementResult::AffectedRows(inserted))
-        } else {
-            let xid = self.txns.write().begin();
-            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
-            let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
-            let mut ctx = ExecutorContext {
-                pool: Arc::clone(&self.pool),
-                txns: self.txns.clone(),
-                snapshot,
-                client_id,
-                next_command_id: 0,
-                outer_rows: Vec::new(),
-                timed: false,
-            };
-            let result = crate::backend::commands::tablecmds::execute_insert_values(
-                rel, &desc, &rows, &mut ctx, xid, 0,
-            )
-            .map(StatementResult::AffectedRows);
-            let result = self.finish_txn(client_id, xid, result, &[]);
-            guard.disarm();
-            result
-        }
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+        guard.disarm();
+        result
     }
 
     /// Execute a single SQL statement inside an auto-commit transaction
