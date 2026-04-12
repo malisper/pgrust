@@ -2,9 +2,10 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, FLOAT8_TYPE_OID,
-    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, NUMERIC_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID, VARBIT_TYPE_OID,
+    BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID,
+    FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID,
+    NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID,
+    VARBIT_TYPE_OID,
 };
 
 pub const CAST_PROC_INT4_INT2_OID: u32 = 6228;
@@ -48,6 +49,12 @@ pub const VARBIT_CMP_GE_PROC_OID: u32 = 1668;
 pub const VARBIT_CMP_GT_PROC_OID: u32 = 1669;
 pub const VARBIT_CMP_LE_PROC_OID: u32 = 1670;
 pub const VARBIT_CMP_LT_PROC_OID: u32 = 1671;
+pub const BYTEA_CMP_EQ_PROC_OID: u32 = 1948;
+pub const BYTEA_CMP_LT_PROC_OID: u32 = 1949;
+pub const BYTEA_CMP_LE_PROC_OID: u32 = 1950;
+pub const BYTEA_CMP_GT_PROC_OID: u32 = 1951;
+pub const BYTEA_CMP_GE_PROC_OID: u32 = 1952;
+pub const BYTEA_CMP_NE_PROC_OID: u32 = 1953;
 pub const JSONB_CMP_NE_PROC_OID: u32 = 4038;
 pub const JSONB_CMP_LT_PROC_OID: u32 = 4039;
 pub const JSONB_CMP_GT_PROC_OID: u32 = 4040;
@@ -521,6 +528,36 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             VARBIT_CMP_GE_PROC_OID,
             "varbitge",
             &[VARBIT_TYPE_OID, VARBIT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BYTEA_CMP_EQ_PROC_OID,
+            "byteaeq",
+            &[BYTEA_TYPE_OID, BYTEA_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BYTEA_CMP_NE_PROC_OID,
+            "byteane",
+            &[BYTEA_TYPE_OID, BYTEA_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BYTEA_CMP_LT_PROC_OID,
+            "bytealt",
+            &[BYTEA_TYPE_OID, BYTEA_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BYTEA_CMP_GT_PROC_OID,
+            "byteagt",
+            &[BYTEA_TYPE_OID, BYTEA_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BYTEA_CMP_LE_PROC_OID,
+            "byteale",
+            &[BYTEA_TYPE_OID, BYTEA_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BYTEA_CMP_GE_PROC_OID,
+            "byteage",
+            &[BYTEA_TYPE_OID, BYTEA_TYPE_OID],
         ),
         comparison_proc_row(
             JSONB_CMP_NE_PROC_OID,
