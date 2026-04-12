@@ -261,6 +261,16 @@ pub fn page_add_item(page: &mut [u8; BLCKSZ], item: &[u8]) -> Result<OffsetNumbe
     Ok(offset)
 }
 
+pub fn page_special(page: &[u8; BLCKSZ]) -> Result<&[u8], PageError> {
+    let header = page_header(page)?;
+    Ok(&page[usize::from(header.pd_special)..BLCKSZ])
+}
+
+pub fn page_special_mut(page: &mut [u8; BLCKSZ]) -> Result<&mut [u8], PageError> {
+    let header = page_header(page)?;
+    Ok(&mut page[usize::from(header.pd_special)..BLCKSZ])
+}
+
 fn write_item_id(
     page: &mut [u8; BLCKSZ],
     offset: OffsetNumber,
