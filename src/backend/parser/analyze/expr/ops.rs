@@ -96,14 +96,17 @@ fn supports_comparison_operator(op: &str, left: SqlType, right: SqlType) -> bool
     if comparison_operator_exists(op, left, right) {
         return true;
     }
-    supports_array_equality_operator(op, left, right)
+    supports_array_comparison_operator(op, left, right)
 }
 
 // :HACK: PostgreSQL models array comparison via polymorphic catalog operators.
 // pgrust does not bootstrap that polymorphic operator surface yet, so allow the
-// exact same-type array equality operators that the executor already supports.
-fn supports_array_equality_operator(op: &str, left: SqlType, right: SqlType) -> bool {
-    left.is_array && right.is_array && left == right && matches!(op, "=" | "<>")
+// exact same-type array comparison operators that the executor already supports.
+fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -> bool {
+    left.is_array
+        && right.is_array
+        && left == right
+        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
 }
 
 fn comparison_operator_name(make: fn(Box<Expr>, Box<Expr>) -> Expr) -> &'static str {

@@ -978,10 +978,10 @@ fn build_plan_accepts_catalog_backed_bytea_comparisons() {
 }
 
 #[test]
-fn build_plan_accepts_same_type_array_equality_comparisons() {
+fn build_plan_accepts_same_type_array_comparisons() {
     assert!(build_plan(
         &parse_select(
-            "select ARRAY[1, 2] = ARRAY[1, 2], ARRAY['a']::varchar[] <> ARRAY['b']::varchar[]"
+            "select ARRAY[1, 2] = ARRAY[1, 2], ARRAY['a']::varchar[] <> ARRAY['b']::varchar[], ARRAY[1, 2] < ARRAY[2, 1], ARRAY['a']::varchar[] >= ARRAY['a']::varchar[]"
         )
         .unwrap(),
         &catalog(),
