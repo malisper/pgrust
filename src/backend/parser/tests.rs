@@ -954,6 +954,18 @@ fn build_plan_accepts_catalog_backed_text_input_casts() {
 }
 
 #[test]
+fn build_plan_accepts_catalog_backed_bit_comparisons() {
+    assert!(build_plan(
+        &parse_select(
+            "select '0101'::bit(4) = '0101'::bit(4), '0101'::bit(4) < '1111'::bit(4), cast('0101' as bit varying(8)) <= cast('1111' as bit varying(8))"
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
+}
+
+#[test]
 fn build_plan_rejects_missing_catalog_text_input_cast() {
     let err = build_plan(&parse_select("select cast('1' as int4[])").unwrap(), &catalog())
         .unwrap_err();

@@ -2175,6 +2175,21 @@ mod tests {
                 && row.oprcode == crate::include::catalog::TEXT_CMP_GE_PROC_OID
         }));
         assert!(rows.operators.iter().any(|row| {
+            row.oid == 1784
+                && row.oprname == "="
+                && row.oprleft == crate::include::catalog::BIT_TYPE_OID
+                && row.oprright == crate::include::catalog::BIT_TYPE_OID
+                && row.oprcode == crate::include::catalog::BIT_CMP_EQ_PROC_OID
+                && row.oprcanmerge
+        }));
+        assert!(rows.operators.iter().any(|row| {
+            row.oid == 1806
+                && row.oprname == "<"
+                && row.oprleft == crate::include::catalog::VARBIT_TYPE_OID
+                && row.oprright == crate::include::catalog::VARBIT_TYPE_OID
+                && row.oprcode == crate::include::catalog::VARBIT_CMP_LT_PROC_OID
+        }));
+        assert!(rows.operators.iter().any(|row| {
             row.oid == 3240
                 && row.oprname == "="
                 && row.oprleft == crate::include::catalog::JSONB_TYPE_OID
@@ -2233,6 +2248,28 @@ mod tests {
             row.proname == "numeric"
                 && row.proargtypes == INT4_TYPE_OID.to_string()
                 && row.prorettype == crate::include::catalog::NUMERIC_TYPE_OID
+        }));
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "biteq"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::BIT_TYPE_OID,
+                        crate::include::catalog::BIT_TYPE_OID
+                    )
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+                && row.prosrc == "biteq"
+        }));
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "varbitlt"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::VARBIT_TYPE_OID,
+                        crate::include::catalog::VARBIT_TYPE_OID
+                    )
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+                && row.prosrc == "varbitlt"
         }));
         assert!(rows.procs.iter().any(|row| {
             row.proname == "jsonb_eq"

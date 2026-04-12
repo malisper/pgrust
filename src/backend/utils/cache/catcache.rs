@@ -771,6 +771,21 @@ mod tests {
                 && row.oprright == TEXT_TYPE_OID
         }));
         assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 1784
+                && row.oprname == "="
+                && row.oprcode == crate::include::catalog::BIT_CMP_EQ_PROC_OID
+                && row.oprleft == crate::include::catalog::BIT_TYPE_OID
+                && row.oprright == crate::include::catalog::BIT_TYPE_OID
+                && row.oprcanmerge
+        }));
+        assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 1806
+                && row.oprname == "<"
+                && row.oprcode == crate::include::catalog::VARBIT_CMP_LT_PROC_OID
+                && row.oprleft == crate::include::catalog::VARBIT_TYPE_OID
+                && row.oprright == crate::include::catalog::VARBIT_TYPE_OID
+        }));
+        assert!(cache.operator_rows().iter().any(|row| {
             row.oid == 3240
                 && row.oprname == "="
                 && row.oprcode == crate::include::catalog::JSONB_CMP_EQ_PROC_OID
@@ -804,6 +819,28 @@ mod tests {
             row.oid == crate::include::catalog::TEXT_CMP_GE_PROC_OID
                 && row.proname == "text_ge"
                 && row.proargtypes == format!("{TEXT_TYPE_OID} {TEXT_TYPE_OID}")
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+        }));
+        assert!(cache.proc_rows().iter().any(|row| {
+            row.oid == crate::include::catalog::BIT_CMP_EQ_PROC_OID
+                && row.proname == "biteq"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::BIT_TYPE_OID,
+                        crate::include::catalog::BIT_TYPE_OID
+                    )
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+        }));
+        assert!(cache.proc_rows().iter().any(|row| {
+            row.oid == crate::include::catalog::VARBIT_CMP_LT_PROC_OID
+                && row.proname == "varbitlt"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::VARBIT_TYPE_OID,
+                        crate::include::catalog::VARBIT_TYPE_OID
+                    )
                 && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
         }));
         assert!(cache.proc_rows().iter().any(|row| {
