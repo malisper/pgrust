@@ -1063,6 +1063,64 @@ fn search_path_keeps_temp_tables_ahead_of_public_even_when_omitted() {
 }
 
 #[test]
+fn create_table_errors_when_search_path_selects_no_creatable_schema() {
+    let base = temp_dir("search_path_no_create_schema");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set search_path = ''").unwrap();
+    let err = session
+        .execute(&db, "create table nope (id int4 not null)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::NoSchemaSelectedForCreate)
+    ));
+}
+
+#[test]
+fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
+    let base = temp_dir("search_path_pg_temp_create");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set search_path = pg_temp").unwrap();
+    session
+        .execute(&db, "create table tempy (id int4 not null)")
+        .unwrap();
+
+    assert!(db.temp_entry(1, "tempy").is_some());
+    assert!(
+        db.catalog
+            .read()
+            .catalog_snapshot()
+            .unwrap()
+            .get("tempy")
+            .is_none()
+    );
+}
+
+#[test]
+fn create_table_as_uses_pg_temp_search_path_for_unqualified_creation() {
+    let base = temp_dir("search_path_pg_temp_ctas");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "set search_path = pg_temp").unwrap();
+    session
+        .execute(&db, "create table tempy as select 1 as id")
+        .unwrap();
+
+    assert!(db.temp_entry(1, "tempy").is_some());
+    match session.execute(&db, "select id from tempy").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_index_supports_qualified_public_target_under_temp_shadowing() {
     let base = temp_dir("qualified_create_index_public");
     let db = Database::open(&base, 16).unwrap();

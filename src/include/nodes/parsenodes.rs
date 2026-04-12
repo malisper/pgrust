@@ -48,6 +48,7 @@ pub enum ParseError {
     OnCommitOnlyForTempTables,
     TempTableInNonTempSchema(String),
     OnlyTemporaryRelationsInTemporarySchemas(String),
+    NoSchemaSelectedForCreate,
 }
 
 impl fmt::Display for ParseError {
@@ -118,6 +119,9 @@ impl fmt::Display for ParseError {
                     f,
                     "only temporary relations may be created in temporary schemas"
                 )
+            }
+            ParseError::NoSchemaSelectedForCreate => {
+                write!(f, "no schema has been selected to create in")
             }
         }
     }
