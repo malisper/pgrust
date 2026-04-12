@@ -32,6 +32,7 @@ pub(super) fn bind_arithmetic_expr(
 }
 
 pub(super) fn bind_comparison_expr(
+    op: &'static str,
     make: fn(Box<Expr>, Box<Expr>) -> Expr,
     left: &SqlExpr,
     right: &SqlExpr,
@@ -41,7 +42,6 @@ pub(super) fn bind_comparison_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let op = comparison_operator_name(make);
     let raw_left_type =
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
@@ -112,24 +112,6 @@ fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -
         && right.is_array
         && left == right
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
-}
-
-fn comparison_operator_name(make: fn(Box<Expr>, Box<Expr>) -> Expr) -> &'static str {
-    if std::ptr::fn_addr_eq(make, Expr::Eq as fn(Box<Expr>, Box<Expr>) -> Expr) {
-        "="
-    } else if std::ptr::fn_addr_eq(make, Expr::NotEq as fn(Box<Expr>, Box<Expr>) -> Expr) {
-        "<>"
-    } else if std::ptr::fn_addr_eq(make, Expr::Lt as fn(Box<Expr>, Box<Expr>) -> Expr) {
-        "<"
-    } else if std::ptr::fn_addr_eq(make, Expr::LtEq as fn(Box<Expr>, Box<Expr>) -> Expr) {
-        "<="
-    } else if std::ptr::fn_addr_eq(make, Expr::Gt as fn(Box<Expr>, Box<Expr>) -> Expr) {
-        ">"
-    } else if std::ptr::fn_addr_eq(make, Expr::GtEq as fn(Box<Expr>, Box<Expr>) -> Expr) {
-        ">="
-    } else {
-        unreachable!("unsupported comparison expression constructor")
-    }
 }
 
 fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {

@@ -251,6 +251,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             Expr::Cast(Box::new(bound_inner), *ty)
         }
         SqlExpr::Eq(left, right) => bind_comparison_expr(
+            "=",
             Expr::Eq,
             left,
             right,
@@ -261,6 +262,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::NotEq(left, right) => bind_comparison_expr(
+            "<>",
             Expr::NotEq,
             left,
             right,
@@ -271,6 +273,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::Lt(left, right) => bind_comparison_expr(
+            "<",
             Expr::Lt,
             left,
             right,
@@ -281,6 +284,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::LtEq(left, right) => bind_comparison_expr(
+            "<=",
             Expr::LtEq,
             left,
             right,
@@ -291,6 +295,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::Gt(left, right) => bind_comparison_expr(
+            ">",
             Expr::Gt,
             left,
             right,
@@ -301,6 +306,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ctes,
         )?,
         SqlExpr::GtEq(left, right) => bind_comparison_expr(
+            ">=",
             Expr::GtEq,
             left,
             right,
