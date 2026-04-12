@@ -347,7 +347,9 @@ impl Session {
             | Statement::Values(_)
             | Statement::Explain(_)
             | Statement::ShowTables => {
-                db.sync_visible_catalog_heaps(client_id);
+                if super::database::statement_needs_temp_catalog_sync(&stmt) {
+                    db.sync_visible_catalog_heaps(client_id);
+                }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let visible_catalog = self.visible_catalog_for_command(db, xid, cid);
                 let mut ctx = ExecutorContext {

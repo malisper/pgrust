@@ -1089,7 +1089,9 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
-        self.sync_visible_catalog_heaps(client_id);
+        if select_statement_needs_temp_catalog_sync(&create_stmt.query) {
+            self.sync_visible_catalog_heaps(client_id);
+        }
         let visible_catalog = self.visible_catalog_with_txn_search_path(
             client_id,
             Some((xid, cid)),
@@ -1300,7 +1302,9 @@ impl Database {
             // narrow ALTER TABLE form until table reloptions are represented properly.
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
-                self.sync_visible_catalog_heaps(client_id);
+                if statement_needs_temp_catalog_sync(&stmt) {
+                    self.sync_visible_catalog_heaps(client_id);
+                }
                 let visible_catalog =
                     self.visible_catalog_with_search_path(client_id, configured_search_path);
                 let (plan_or_stmt, rels) = {
@@ -1549,7 +1553,9 @@ impl Database {
         use crate::backend::parser::build_plan;
 
         let (plan, rels) = {
-            self.sync_visible_catalog_heaps(client_id);
+            if statement_needs_temp_catalog_sync(&Statement::Select(select_stmt.clone())) {
+                self.sync_visible_catalog_heaps(client_id);
+            }
             let visible_catalog = self.visible_catalog_with_txn_search_path(
                 client_id,
                 txn_ctx,
@@ -1629,6 +1635,48 @@ fn normalize_temp_lookup_name(table_name: &str) -> String {
         .strip_prefix("pg_temp.")
         .unwrap_or(table_name)
         .to_ascii_lowercase()
+}
+
+fn table_name_may_need_temp_catalog_sync(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    normalized.starts_with("pg_catalog.")
+        || normalized.starts_with("pg_temp.")
+        || normalized.starts_with("pg_")
+}
+
+fn from_item_needs_temp_catalog_sync(from: &crate::backend::parser::FromItem) -> bool {
+    use crate::backend::parser::FromItem;
+
+    match from {
+        FromItem::Table { name } => table_name_may_need_temp_catalog_sync(name),
+        FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
+        FromItem::DerivedTable(select) => select_statement_needs_temp_catalog_sync(select),
+        FromItem::Join { left, right, .. } => {
+            from_item_needs_temp_catalog_sync(left) || from_item_needs_temp_catalog_sync(right)
+        }
+        FromItem::Alias { source, .. } => from_item_needs_temp_catalog_sync(source),
+    }
+}
+
+fn select_statement_needs_temp_catalog_sync(stmt: &crate::backend::parser::SelectStatement) -> bool {
+    stmt.with.iter().any(|cte| match &cte.body {
+        crate::backend::parser::CteBody::Select(select) => {
+            select_statement_needs_temp_catalog_sync(select)
+        }
+        crate::backend::parser::CteBody::Values(_) => false,
+    }) || stmt
+        .from
+        .as_ref()
+        .is_some_and(from_item_needs_temp_catalog_sync)
+}
+
+pub(crate) fn statement_needs_temp_catalog_sync(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Select(select) => select_statement_needs_temp_catalog_sync(select),
+        Statement::Explain(explain) => statement_needs_temp_catalog_sync(explain.statement.as_ref()),
+        Statement::Values(_) | Statement::ShowTables => false,
+        _ => false,
+    }
 }
 
 fn collect_rels_from_expr(
