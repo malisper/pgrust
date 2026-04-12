@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod pg_am;
 pub mod pg_attrdef;
+pub mod pg_database;
 pub mod pg_depend;
 pub mod pg_attribute;
 pub mod pg_class;
@@ -11,6 +12,7 @@ pub mod pg_type;
 pub use bootstrap::*;
 pub use pg_am::*;
 pub use pg_attrdef::*;
+pub use pg_database::*;
 pub use pg_depend::*;
 pub use pg_attribute::*;
 pub use pg_class::*;

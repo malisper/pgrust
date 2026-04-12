@@ -12,10 +12,11 @@ use crate::include::catalog::{
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
     PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_NAMESPACE_RELATION_OID,
-    PG_NAMESPACE_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID,
+    PG_DATABASE_ROWTYPE_OID, PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID,
+    PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,12 +82,13 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
     ]
 }
 
-pub fn bootstrap_composite_type_rows() -> [PgTypeRow; 4] {
+pub fn bootstrap_composite_type_rows() -> [PgTypeRow; 5] {
     [
         composite_type_row("pg_namespace", PG_NAMESPACE_ROWTYPE_OID, PG_NAMESPACE_RELATION_OID),
         composite_type_row("pg_type", PG_TYPE_ROWTYPE_OID, PG_TYPE_RELATION_OID),
         composite_type_row("pg_attribute", PG_ATTRIBUTE_ROWTYPE_OID, PG_ATTRIBUTE_RELATION_OID),
         composite_type_row("pg_class", PG_CLASS_ROWTYPE_OID, PG_CLASS_RELATION_OID),
+        composite_type_row("pg_database", PG_DATABASE_ROWTYPE_OID, PG_DATABASE_RELATION_OID),
     ]
 }
 
@@ -118,8 +120,12 @@ mod tests {
     fn bootstrap_composite_types_match_core_catalogs() {
         let rows = bootstrap_composite_type_rows();
         let names: Vec<_> = rows.iter().map(|row| row.typname.as_str()).collect();
-        assert_eq!(names, vec!["pg_namespace", "pg_type", "pg_attribute", "pg_class"]);
+        assert_eq!(
+            names,
+            vec!["pg_namespace", "pg_type", "pg_attribute", "pg_class", "pg_database"]
+        );
         assert_eq!(rows[0].oid, PG_NAMESPACE_ROWTYPE_OID);
         assert_eq!(rows[3].oid, PG_CLASS_ROWTYPE_OID);
+        assert_eq!(rows[4].oid, PG_DATABASE_ROWTYPE_OID);
     }
 }
