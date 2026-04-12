@@ -36,6 +36,12 @@ pub const TEXT_CMP_GE_PROC_OID: u32 = 743;
 pub const BOOL_CMP_LE_PROC_OID: u32 = 1691;
 pub const BOOL_CMP_GE_PROC_OID: u32 = 1692;
 pub const TEXT_STARTS_WITH_PROC_OID: u32 = 3696;
+pub const JSONB_CMP_NE_PROC_OID: u32 = 4038;
+pub const JSONB_CMP_LT_PROC_OID: u32 = 4039;
+pub const JSONB_CMP_GT_PROC_OID: u32 = 4040;
+pub const JSONB_CMP_LE_PROC_OID: u32 = 4041;
+pub const JSONB_CMP_GE_PROC_OID: u32 = 4042;
+pub const JSONB_CMP_EQ_PROC_OID: u32 = 4043;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -467,6 +473,36 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             TEXT_STARTS_WITH_PROC_OID,
             "starts_with",
             &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            JSONB_CMP_NE_PROC_OID,
+            "jsonb_ne",
+            &[JSONB_TYPE_OID, JSONB_TYPE_OID],
+        ),
+        comparison_proc_row(
+            JSONB_CMP_LT_PROC_OID,
+            "jsonb_lt",
+            &[JSONB_TYPE_OID, JSONB_TYPE_OID],
+        ),
+        comparison_proc_row(
+            JSONB_CMP_GT_PROC_OID,
+            "jsonb_gt",
+            &[JSONB_TYPE_OID, JSONB_TYPE_OID],
+        ),
+        comparison_proc_row(
+            JSONB_CMP_LE_PROC_OID,
+            "jsonb_le",
+            &[JSONB_TYPE_OID, JSONB_TYPE_OID],
+        ),
+        comparison_proc_row(
+            JSONB_CMP_GE_PROC_OID,
+            "jsonb_ge",
+            &[JSONB_TYPE_OID, JSONB_TYPE_OID],
+        ),
+        comparison_proc_row(
+            JSONB_CMP_EQ_PROC_OID,
+            "jsonb_eq",
+            &[JSONB_TYPE_OID, JSONB_TYPE_OID],
         ),
         cast_proc_row(
             CAST_PROC_INT4_INT2_OID,

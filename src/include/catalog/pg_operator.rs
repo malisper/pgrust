@@ -5,9 +5,11 @@ use crate::include::catalog::{
     BOOL_CMP_EQ_PROC_OID, BOOL_CMP_GE_PROC_OID, BOOL_CMP_GT_PROC_OID, BOOL_CMP_LE_PROC_OID,
     BOOL_CMP_LT_PROC_OID, BOOL_CMP_NE_PROC_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
     INT4_CMP_EQ_PROC_OID, INT4_CMP_GE_PROC_OID, INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID,
-    INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID, INT4_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    TEXT_CMP_EQ_PROC_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID,
-    TEXT_CMP_LT_PROC_OID, TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
+    INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID, INT4_TYPE_OID, JSONB_CMP_EQ_PROC_OID,
+    JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID, JSONB_CMP_LE_PROC_OID, JSONB_CMP_LT_PROC_OID,
+    JSONB_CMP_NE_PROC_OID, JSONB_TYPE_OID, PG_CATALOG_NAMESPACE_OID, TEXT_CMP_EQ_PROC_OID,
+    TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID,
+    TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +53,7 @@ pub fn pg_operator_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_operator_rows() -> [PgOperatorRow; 19] {
+pub fn bootstrap_pg_operator_rows() -> [PgOperatorRow; 25] {
     [
         operator_row(
             58,
@@ -248,6 +250,72 @@ pub fn bootstrap_pg_operator_rows() -> [PgOperatorRow; 19] {
             1694,
             58,
             BOOL_CMP_GE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3240,
+            "=",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            3240,
+            3241,
+            JSONB_CMP_EQ_PROC_OID,
+            true,
+            true,
+        ),
+        operator_row(
+            3241,
+            "<>",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            3241,
+            3240,
+            JSONB_CMP_NE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3242,
+            "<",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            3243,
+            3245,
+            JSONB_CMP_LT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3243,
+            ">",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            3242,
+            3244,
+            JSONB_CMP_GT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3244,
+            "<=",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            3245,
+            3243,
+            JSONB_CMP_LE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3245,
+            ">=",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            3244,
+            3242,
+            JSONB_CMP_GE_PROC_OID,
             false,
             false,
         ),
