@@ -164,6 +164,19 @@ impl CatalogStore {
         Ok(entry)
     }
 
+    pub fn create_index_for_relation(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        columns: &[String],
+    ) -> Result<CatalogEntry, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let entry = catalog.create_index_for_relation(index_name, relation_oid, unique, columns)?;
+        self.persist_catalog(&catalog)?;
+        Ok(entry)
+    }
+
     pub fn drop_table(&mut self, name: &str) -> Result<Vec<CatalogEntry>, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
         let oids = drop_relation_oids(&catalog, name)?;

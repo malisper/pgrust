@@ -1063,6 +1063,66 @@ fn search_path_keeps_temp_tables_ahead_of_public_even_when_omitted() {
 }
 
 #[test]
+fn create_index_supports_qualified_public_target_under_temp_shadowing() {
+    let base = temp_dir("qualified_create_index_public");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    let public_items_oid = db
+        .catalog
+        .read()
+        .catalog_snapshot()
+        .unwrap()
+        .get("items")
+        .unwrap()
+        .relation_oid;
+
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "create index items_public_idx on public.items (id)")
+        .unwrap();
+
+    let catalog = db.catalog.read().catalog_snapshot().unwrap();
+    let index = catalog.get("items_public_idx").unwrap();
+    let index_meta = index.index_meta.as_ref().unwrap();
+    assert_eq!(index_meta.indrelid, public_items_oid);
+}
+
+#[test]
+fn create_index_still_rejects_temp_tables_when_temp_is_first_visible() {
+    let base = temp_dir("search_path_create_index_temp");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+
+    let err = session
+        .execute(&db, "create index items_temp_idx on items (id)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnexpectedToken { expected, actual })
+            if expected == "permanent table for CREATE INDEX" && actual == "temporary table"
+    ));
+    assert!(
+        db.catalog
+            .read()
+            .catalog_snapshot()
+            .unwrap()
+            .get("items_temp_idx")
+            .is_none()
+    );
+}
+
+#[test]
 fn temp_table_on_commit_actions_apply_at_commit() {
     let base = temp_dir("temp_table_on_commit");
     let db = Database::open(&base, 16).unwrap();

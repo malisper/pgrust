@@ -136,7 +136,12 @@ impl Session {
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CreateIndex(ref create_stmt) => {
-                db.execute_create_index_stmt(self.client_id, create_stmt)
+                let search_path = self.configured_search_path();
+                db.execute_create_index_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Begin => {
@@ -269,7 +274,12 @@ impl Session {
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CreateIndex(ref create_stmt) => {
-                db.execute_create_index_stmt(client_id, create_stmt)
+                let search_path = self.configured_search_path();
+                db.execute_create_index_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Analyze(ref analyze_stmt) => {
