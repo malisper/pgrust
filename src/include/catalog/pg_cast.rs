@@ -2,7 +2,10 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BPCHAR_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, NUMERIC_TYPE_OID,
+    BPCHAR_TYPE_OID, CAST_PROC_INT2_INT4_OID, CAST_PROC_INT2_INT8_OID, CAST_PROC_INT4_INT2_OID,
+    CAST_PROC_INT4_INT8_OID, CAST_PROC_INT8_INT2_OID, CAST_PROC_INT8_INT4_OID,
+    CAST_PROC_NUMERIC_INT2_OID, CAST_PROC_NUMERIC_INT4_OID, CAST_PROC_NUMERIC_INT8_OID,
+    CAST_PROC_TEXT_BPCHAR_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, NUMERIC_TYPE_OID,
     OID_TYPE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
@@ -30,23 +33,41 @@ pub fn pg_cast_desc() -> RelationDesc {
 }
 
 pub fn bootstrap_pg_cast_rows() -> [PgCastRow; 13] {
-    // :HACK: Until `pg_proc` exists, function-backed casts carry `castfunc = 0`
-    // even when PostgreSQL would point at a conversion function. The catalog is
-    // still useful for bootstrap visibility and later parity work.
     [
-        cast_row(4100, INT2_TYPE_OID, INT4_TYPE_OID, 0, 'i', 'f'),
-        cast_row(4101, INT2_TYPE_OID, INT8_TYPE_OID, 0, 'i', 'f'),
-        cast_row(4102, INT2_TYPE_OID, NUMERIC_TYPE_OID, 0, 'i', 'f'),
-        cast_row(4103, INT4_TYPE_OID, INT2_TYPE_OID, 0, 'a', 'f'),
-        cast_row(4104, INT4_TYPE_OID, INT8_TYPE_OID, 0, 'i', 'f'),
-        cast_row(4105, INT4_TYPE_OID, NUMERIC_TYPE_OID, 0, 'i', 'f'),
+        cast_row(4100, INT2_TYPE_OID, INT4_TYPE_OID, CAST_PROC_INT4_INT2_OID, 'i', 'f'),
+        cast_row(4101, INT2_TYPE_OID, INT8_TYPE_OID, CAST_PROC_INT8_INT2_OID, 'i', 'f'),
+        cast_row(
+            4102,
+            INT2_TYPE_OID,
+            NUMERIC_TYPE_OID,
+            CAST_PROC_NUMERIC_INT2_OID,
+            'i',
+            'f',
+        ),
+        cast_row(4103, INT4_TYPE_OID, INT2_TYPE_OID, CAST_PROC_INT2_INT4_OID, 'a', 'f'),
+        cast_row(4104, INT4_TYPE_OID, INT8_TYPE_OID, CAST_PROC_INT8_INT4_OID, 'i', 'f'),
+        cast_row(
+            4105,
+            INT4_TYPE_OID,
+            NUMERIC_TYPE_OID,
+            CAST_PROC_NUMERIC_INT4_OID,
+            'i',
+            'f',
+        ),
         cast_row(4106, INT4_TYPE_OID, OID_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4107, INT8_TYPE_OID, INT2_TYPE_OID, 0, 'a', 'f'),
-        cast_row(4108, INT8_TYPE_OID, INT4_TYPE_OID, 0, 'a', 'f'),
-        cast_row(4109, INT8_TYPE_OID, NUMERIC_TYPE_OID, 0, 'i', 'f'),
+        cast_row(4107, INT8_TYPE_OID, INT2_TYPE_OID, CAST_PROC_INT2_INT8_OID, 'a', 'f'),
+        cast_row(4108, INT8_TYPE_OID, INT4_TYPE_OID, CAST_PROC_INT4_INT8_OID, 'a', 'f'),
+        cast_row(
+            4109,
+            INT8_TYPE_OID,
+            NUMERIC_TYPE_OID,
+            CAST_PROC_NUMERIC_INT8_OID,
+            'i',
+            'f',
+        ),
         cast_row(4110, OID_TYPE_OID, INT4_TYPE_OID, 0, 'a', 'b'),
         cast_row(4111, VARCHAR_TYPE_OID, TEXT_TYPE_OID, 0, 'i', 'b'),
-        cast_row(4112, BPCHAR_TYPE_OID, TEXT_TYPE_OID, 0, 'i', 'f'),
+        cast_row(4112, BPCHAR_TYPE_OID, TEXT_TYPE_OID, CAST_PROC_TEXT_BPCHAR_OID, 'i', 'f'),
     ]
 }
 

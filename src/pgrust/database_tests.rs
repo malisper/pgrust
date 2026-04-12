@@ -381,6 +381,79 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
+        match db
+            .execute(
+                1,
+                "select s.typname, t.typname, p.proname \
+                 from pg_cast c \
+                 join pg_type s on s.oid = c.castsource \
+                 join pg_type t on t.oid = c.casttarget \
+                 join pg_proc p on p.oid = c.castfunc \
+                 where c.castfunc <> 0 \
+                 order by c.oid",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![
+                            Value::Text("int2".into()),
+                            Value::Text("int4".into()),
+                            Value::Text("int4".into()),
+                        ],
+                        vec![
+                            Value::Text("int2".into()),
+                            Value::Text("int8".into()),
+                            Value::Text("int8".into()),
+                        ],
+                        vec![
+                            Value::Text("int2".into()),
+                            Value::Text("numeric".into()),
+                            Value::Text("numeric".into()),
+                        ],
+                        vec![
+                            Value::Text("int4".into()),
+                            Value::Text("int2".into()),
+                            Value::Text("int2".into()),
+                        ],
+                        vec![
+                            Value::Text("int4".into()),
+                            Value::Text("int8".into()),
+                            Value::Text("int8".into()),
+                        ],
+                        vec![
+                            Value::Text("int4".into()),
+                            Value::Text("numeric".into()),
+                            Value::Text("numeric".into()),
+                        ],
+                        vec![
+                            Value::Text("int8".into()),
+                            Value::Text("int2".into()),
+                            Value::Text("int2".into()),
+                        ],
+                        vec![
+                            Value::Text("int8".into()),
+                            Value::Text("int4".into()),
+                            Value::Text("int4".into()),
+                        ],
+                        vec![
+                            Value::Text("int8".into()),
+                            Value::Text("numeric".into()),
+                            Value::Text("numeric".into()),
+                        ],
+                        vec![
+                            Value::Text("char".into()),
+                            Value::Text("text".into()),
+                            Value::Text("text".into()),
+                        ],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
         match db.execute(1, "select count(*) from pg_auth_members").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int64(0)]]);
