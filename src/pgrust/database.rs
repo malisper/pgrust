@@ -1,7 +1,6 @@
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,12 +8,14 @@ use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
-use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::store::{
     CatalogMutationEffect, CatalogWriteContext,
     load_visible_attrdef_rows, load_visible_attribute_rows, load_visible_class_rows,
-    load_visible_namespace_rows, load_visible_type_rows,
+    load_visible_am_rows, load_visible_index_rows, load_visible_namespace_rows,
+    load_visible_type_rows,
 };
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
@@ -22,20 +23,20 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError,
-    TablePersistence, bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
-    normalize_create_table_as_name, normalize_create_table_name,
+    CatalogLookup, CreateIndexStatement, CreateTableAsStatement, CreateTableStatement,
+    OnCommitAction, ParseError, TablePersistence, bind_delete, bind_insert, bind_update,
+    build_plan, create_relation_desc, normalize_create_table_as_name, normalize_create_table_name,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
 };
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
-use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
+use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::plancache::PlanCache;
-use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
+use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
+    BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow,
+    PgIndexRow, PgNamespaceRow, PgTypeRow,
 };
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -76,8 +77,6 @@ pub struct Database {
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
-    catalog_cache_generation: Arc<AtomicU64>,
-    client_visible_caches: Arc<RwLock<HashMap<ClientId, ClientVisibleCache>>>,
     session_catalog_states: Arc<RwLock<HashMap<ClientId, SessionCatalogState>>>,
     temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     /// Background WAL writer — flushes BufWriter to kernel periodically.
@@ -101,13 +100,6 @@ struct TempNamespace {
     generation: u64,
 }
 
-#[derive(Debug, Clone)]
-struct ClientVisibleCache {
-    generation: u64,
-    relcache: RelCache,
-    catcache: CatCache,
-}
-
 #[derive(Debug, Default, Clone)]
 struct SessionCatalogState {
     catalog_snapshot: Option<crate::backend::access::transam::xact::Snapshot>,
@@ -116,6 +108,8 @@ struct SessionCatalogState {
     attribute_rows: Option<Vec<PgAttributeRow>>,
     attrdef_rows: Option<Vec<PgAttrdefRow>>,
     type_rows: Option<Vec<PgTypeRow>>,
+    index_rows: Option<Vec<PgIndexRow>>,
+    am_rows: Option<Vec<PgAmRow>>,
     relation_entries_by_oid: HashMap<u32, RelCacheEntry>,
 }
 
@@ -233,8 +227,6 @@ impl Database {
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
-            catalog_cache_generation: Arc::new(AtomicU64::new(0)),
-            client_visible_caches: Arc::new(RwLock::new(HashMap::new())),
             session_catalog_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             _wal_bg_writer: Arc::new(wal_bg_writer),
@@ -253,18 +245,6 @@ impl Database {
         Self::temp_db_oid(client_id)
     }
 
-    pub(crate) fn refresh_catalog_storage(&self) {
-        for kind in bootstrap_catalog_kinds() {
-            let rel = bootstrap_catalog_entry(kind).rel;
-            let _ = self.pool.invalidate_relation(rel);
-            let _ = self.pool.with_storage_mut(|s| {
-                use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-                let _ = s.smgr.open(rel);
-                let _ = s.smgr.create(rel, ForkNumber::Main, true);
-            });
-        }
-    }
-
     fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
         self.temp_relations.read().contains_key(&client_id)
     }
@@ -275,19 +255,6 @@ impl Database {
 
     fn other_session_temp_namespace_oid(&self, client_id: ClientId, namespace_oid: u32) -> bool {
         namespace_oid >= TEMP_DB_OID_BASE && namespace_oid != Self::temp_namespace_oid(client_id)
-    }
-
-    fn catalog_cache_generation(&self) -> u64 {
-        self.catalog_cache_generation.load(Ordering::Acquire)
-    }
-
-    fn invalidate_visible_caches(&self) {
-        self.catalog_cache_generation.fetch_add(1, Ordering::AcqRel);
-        self.client_visible_caches.write().clear();
-    }
-
-    fn invalidate_client_visible_cache(&self, client_id: ClientId) {
-        self.client_visible_caches.write().remove(&client_id);
     }
 
     fn invalidate_session_catalog_state(&self, client_id: ClientId) {
@@ -349,6 +316,22 @@ impl Database {
             state.type_rows = None;
             state.catalog_snapshot = None;
         }
+        if invalidation
+            .touched_catalogs
+            .iter()
+            .any(|kind| matches!(kind, BootstrapCatalogKind::PgIndex))
+        {
+            state.index_rows = None;
+            state.catalog_snapshot = None;
+        }
+        if invalidation
+            .touched_catalogs
+            .iter()
+            .any(|kind| matches!(kind, BootstrapCatalogKind::PgAm))
+        {
+            state.am_rows = None;
+            state.catalog_snapshot = None;
+        }
 
         for oid in &invalidation.relation_oids {
             state.relation_entries_by_oid.remove(oid);
@@ -376,7 +359,6 @@ impl Database {
             return;
         }
         self.invalidate_session_catalog_entry(client_id, invalidation);
-        self.invalidate_client_visible_cache(client_id);
     }
 
     fn publish_session_catalog_invalidation(
@@ -389,90 +371,19 @@ impl Database {
         }
         if invalidation.full_reset {
             self.session_catalog_states.write().clear();
-            self.invalidate_visible_caches();
             return;
         }
-        let mut client_ids = self
+        let client_ids = self
             .session_catalog_states
             .read()
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        let visible_client_ids = self
-            .client_visible_caches
-            .read()
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        for client_id in visible_client_ids {
-            if !client_ids.contains(&client_id) {
-                client_ids.push(client_id);
-            }
-        }
         for client_id in client_ids {
             if Some(client_id) == source_client_id {
                 continue;
             }
             self.apply_session_catalog_invalidation(client_id, invalidation);
-        }
-    }
-
-    fn client_visible_cache_snapshot(&self, client_id: ClientId) -> Option<ClientVisibleCache> {
-        let generation = self.catalog_cache_generation();
-        if let Some(cache) = self.client_visible_caches.read().get(&client_id).cloned()
-            && cache.generation == generation
-        {
-            return Some(cache);
-        }
-
-        let rebuilt = {
-            let catalog_guard = self.catalog.read();
-            let txns = self.txns.read();
-            let snapshot = txns
-                .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
-                .ok();
-
-            snapshot
-                .and_then(|snapshot| {
-                    catalog_guard
-                        .catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
-                        .ok()
-                })
-                .and_then(|catcache| {
-                    RelCache::from_catcache(&catcache)
-                        .ok()
-                        .map(|relcache| ClientVisibleCache {
-                            generation,
-                            relcache,
-                            catcache,
-                        })
-                })
-                .or_else(|| {
-                    let relcache = catalog_guard.relcache().ok()?;
-                    let catcache = catalog_guard.catcache().ok()?;
-                    Some(ClientVisibleCache {
-                        generation,
-                        relcache,
-                        catcache,
-                    })
-                })
-        }?;
-
-        if self.catalog_cache_generation() == generation {
-            self.client_visible_caches
-                .write()
-                .insert(client_id, rebuilt.clone());
-        }
-
-        Some(rebuilt)
-    }
-
-    fn apply_temp_relcache_overlay(&self, client_id: ClientId, relcache: &mut RelCache) {
-        if let Some(namespace) = self.temp_relations.read().get(&client_id) {
-            for (name, temp) in &namespace.tables {
-                relcache.insert(format!("{}.{}", namespace.name, name), temp.entry.clone());
-                relcache.insert(format!("pg_temp.{name}"), temp.entry.clone());
-            }
         }
     }
 
@@ -650,6 +561,62 @@ impl Database {
         rows
     }
 
+    fn ensure_index_rows(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+    ) -> Vec<PgIndexRow> {
+        if let Some(rows) = self
+            .session_catalog_states
+            .read()
+            .get(&client_id)
+            .and_then(|state| state.index_rows.clone())
+        {
+            return rows;
+        }
+        let Some(snapshot) = self.catalog_snapshot_for_lookup(client_id, txn_ctx) else {
+            return Vec::new();
+        };
+        let rows = {
+            let catalog = self.catalog.read();
+            let txns = self.txns.read();
+            load_visible_index_rows(catalog.base_dir(), &self.pool, &txns, &snapshot, client_id)
+                .unwrap_or_default()
+        };
+        self.session_catalog_states
+            .write()
+            .entry(client_id)
+            .or_default()
+            .index_rows = Some(rows.clone());
+        rows
+    }
+
+    fn ensure_am_rows(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> Vec<PgAmRow> {
+        if let Some(rows) = self
+            .session_catalog_states
+            .read()
+            .get(&client_id)
+            .and_then(|state| state.am_rows.clone())
+        {
+            return rows;
+        }
+        let Some(snapshot) = self.catalog_snapshot_for_lookup(client_id, txn_ctx) else {
+            return Vec::new();
+        };
+        let rows = {
+            let catalog = self.catalog.read();
+            let txns = self.txns.read();
+            load_visible_am_rows(catalog.base_dir(), &self.pool, &txns, &snapshot, client_id)
+                .unwrap_or_default()
+        };
+        self.session_catalog_states
+            .write()
+            .entry(client_id)
+            .or_default()
+            .am_rows = Some(rows.clone());
+        rows
+    }
+
     fn namespace_oid_for_name(
         &self,
         client_id: ClientId,
@@ -674,7 +641,7 @@ impl Database {
             .find(|row| row.oid == oid)
     }
 
-    fn relation_entry_by_oid(
+    pub(crate) fn relation_entry_by_oid(
         &self,
         client_id: ClientId,
         txn_ctx: CatalogTxnContext,
@@ -761,7 +728,7 @@ impl Database {
         Some(entry)
     }
 
-    fn lazy_lookup_relation(
+    fn lazy_lookup_any_relation(
         &self,
         client_id: ClientId,
         txn_ctx: CatalogTxnContext,
@@ -783,9 +750,12 @@ impl Database {
                     row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(relname)
                 })?;
             let entry = self.relation_entry_by_oid(client_id, txn_ctx, class.oid)?;
-            return (entry.relkind == 'r').then_some(crate::backend::parser::BoundRelation {
+            return Some(crate::backend::parser::BoundRelation {
                 rel: entry.rel,
                 relation_oid: entry.relation_oid,
+                namespace_oid: entry.namespace_oid,
+                relpersistence: entry.relpersistence,
+                relkind: entry.relkind,
                 desc: entry.desc.clone(),
             });
         }
@@ -804,63 +774,17 @@ impl Database {
             let Some(entry) = self.relation_entry_by_oid(client_id, txn_ctx, class.oid) else {
                 continue;
             };
-            if entry.relkind == 'r' {
-                return Some(crate::backend::parser::BoundRelation {
-                    rel: entry.rel,
-                    relation_oid: entry.relation_oid,
-                    desc: entry.desc.clone(),
-                });
-            }
+            return Some(crate::backend::parser::BoundRelation {
+                rel: entry.rel,
+                relation_oid: entry.relation_oid,
+                namespace_oid: entry.namespace_oid,
+                relpersistence: entry.relpersistence,
+                relkind: entry.relkind,
+                desc: entry.desc.clone(),
+            });
         }
 
         None
-    }
-
-    fn cached_visible_catalog_for_autocommit(
-        &self,
-        client_id: ClientId,
-        configured_search_path: Option<&[String]>,
-    ) -> Option<VisibleCatalog> {
-        let cache = self.client_visible_cache_snapshot(client_id)?;
-        let mut relcache = filter_temp_relcache_for_client(client_id, cache.relcache);
-        self.apply_temp_relcache_overlay(client_id, &mut relcache);
-        let search_path = self.effective_search_path(client_id, configured_search_path);
-        Some(VisibleCatalog::new(
-            relcache.with_search_path(&search_path),
-            Some(cache.catcache),
-        ))
-    }
-
-    fn snapshot_visible_state(
-        &self,
-        client_id: ClientId,
-        txn_ctx: CatalogTxnContext,
-    ) -> (RelCache, Option<CatCache>) {
-        {
-            let catalog_guard = self.catalog.read();
-            let txns = self.txns.read();
-            let snapshot = match txn_ctx {
-                Some((xid, cid)) => txns.snapshot_for_command(xid, cid).ok(),
-                None => txns
-                    .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
-                    .ok(),
-            };
-            if let Some(snapshot) = snapshot
-                && let Ok(catcache) = catalog_guard
-                    .catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
-            {
-                let relcache = RelCache::from_catcache(&catcache).unwrap_or_default();
-                return (relcache, Some(catcache));
-            }
-            (catalog_guard.relcache().unwrap_or_default(), catalog_guard.catcache().ok())
-        }
-    }
-
-    fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
-        let (mut relcache, _) = self.snapshot_visible_state(client_id, txn_ctx);
-        relcache = filter_temp_relcache_for_client(client_id, relcache);
-        self.apply_temp_relcache_overlay(client_id, &mut relcache);
-        relcache
     }
 
     fn effective_search_path(
@@ -976,67 +900,6 @@ impl Database {
         ))
     }
 
-    pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
-        self.visible_relcache_with_txn_search_path(client_id, None, None)
-    }
-
-    pub(crate) fn visible_relcache_with_search_path(
-        &self,
-        client_id: ClientId,
-        configured_search_path: Option<&[String]>,
-    ) -> RelCache {
-        self.visible_relcache_with_txn_search_path(client_id, None, configured_search_path)
-    }
-
-    pub(crate) fn visible_relcache_with_txn_search_path(
-        &self,
-        client_id: ClientId,
-        txn_ctx: CatalogTxnContext,
-        configured_search_path: Option<&[String]>,
-    ) -> RelCache {
-        if txn_ctx.is_none() {
-            if let Some(cache) = self.client_visible_cache_snapshot(client_id) {
-                let mut relcache = filter_temp_relcache_for_client(client_id, cache.relcache);
-                self.apply_temp_relcache_overlay(client_id, &mut relcache);
-                let search_path = self.effective_search_path(client_id, configured_search_path);
-                return relcache.with_search_path(&search_path);
-            }
-        }
-        let relcache = self.raw_visible_relcache(client_id, txn_ctx);
-        let search_path = self.effective_search_path(client_id, configured_search_path);
-        relcache.with_search_path(&search_path)
-    }
-
-    pub(crate) fn visible_catalog_with_search_path(
-        &self,
-        client_id: ClientId,
-        configured_search_path: Option<&[String]>,
-    ) -> VisibleCatalog {
-        self.visible_catalog_with_txn_search_path(client_id, None, configured_search_path)
-    }
-
-    pub(crate) fn visible_catalog_with_txn_search_path(
-        &self,
-        client_id: ClientId,
-        txn_ctx: CatalogTxnContext,
-        configured_search_path: Option<&[String]>,
-    ) -> VisibleCatalog {
-        if txn_ctx.is_none() && !self.has_active_temp_namespace(client_id) {
-            if let Some(cache) = self.client_visible_cache_snapshot(client_id) {
-                let search_path = self.effective_search_path(client_id, configured_search_path);
-                return VisibleCatalog::new(
-                    filter_temp_relcache_for_client(client_id, cache.relcache).with_search_path(&search_path),
-                    Some(cache.catcache),
-                );
-            }
-        }
-
-        let relcache = self.raw_visible_relcache(client_id, txn_ctx);
-        let search_path = self.effective_search_path(client_id, configured_search_path);
-        let (_, catcache) = self.snapshot_visible_state(client_id, txn_ctx);
-        VisibleCatalog::new(relcache.with_search_path(&search_path), catcache)
-    }
-
     pub(crate) fn lazy_catalog_lookup(
         &self,
         client_id: ClientId,
@@ -1052,8 +915,116 @@ impl Database {
         }
     }
 
-    pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
-        let _ = client_id;
+    pub(crate) fn describe_relation_by_oid(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        relation_oid: u32,
+    ) -> Option<RelCacheEntry> {
+        self.relation_entry_by_oid(client_id, txn_ctx, relation_oid)
+    }
+
+    pub(crate) fn relation_namespace_name(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        relation_oid: u32,
+    ) -> Option<String> {
+        let entry = self.relation_entry_by_oid(client_id, txn_ctx, relation_oid)?;
+        self.ensure_namespace_rows(client_id, txn_ctx)
+            .into_iter()
+            .find(|row| row.oid == entry.namespace_oid)
+            .map(|row| row.nspname)
+    }
+
+    pub(crate) fn relation_display_name(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        configured_search_path: Option<&[String]>,
+        relation_oid: u32,
+    ) -> Option<String> {
+        let entry = self.relation_entry_by_oid(client_id, txn_ctx, relation_oid)?;
+        let class = self
+            .ensure_class_rows(client_id, txn_ctx)
+            .into_iter()
+            .find(|row| row.oid == relation_oid)?;
+        let namespace = self.relation_namespace_name(client_id, txn_ctx, relation_oid)?;
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let first_match = self
+            .ensure_class_rows(client_id, txn_ctx)
+            .into_iter()
+            .filter(|row| row.relname.eq_ignore_ascii_case(&class.relname))
+            .find_map(|row| {
+                self.relation_entry_by_oid(client_id, txn_ctx, row.oid)
+                    .filter(|candidate| candidate.relkind == entry.relkind)
+                    .and_then(|candidate| {
+                        search_path
+                            .iter()
+                            .position(|schema| {
+                                self.namespace_oid_for_name(client_id, txn_ctx, schema)
+                                    == Some(candidate.namespace_oid)
+                            })
+                            .map(|position| (position, candidate.namespace_oid))
+                    })
+            });
+        if let Some((_, visible_namespace_oid)) = first_match
+            && visible_namespace_oid == entry.namespace_oid
+        {
+            return Some(class.relname);
+        }
+        Some(format!("{namespace}.{}", class.relname))
+    }
+
+    pub(crate) fn has_index_on_relation(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        relation_oid: u32,
+    ) -> bool {
+        self.ensure_index_rows(client_id, txn_ctx)
+            .into_iter()
+            .any(|row| row.indrelid == relation_oid)
+    }
+
+    pub(crate) fn access_method_name_for_relation(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        relation_oid: u32,
+    ) -> Option<String> {
+        let class = self
+            .ensure_class_rows(client_id, txn_ctx)
+            .into_iter()
+            .find(|row| row.oid == relation_oid)?;
+        self.ensure_am_rows(client_id, txn_ctx)
+            .into_iter()
+            .find(|row| row.oid == class.relam)
+            .map(|row| row.amname)
+            .or_else(|| match class.relkind {
+                'r' => Some("heap".to_string()),
+                'i' => Some("btree".to_string()),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn constraint_rows_for_relation(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        relation_oid: u32,
+    ) -> Vec<PgConstraintRow> {
+        let Some(class) = self
+            .ensure_class_rows(client_id, txn_ctx)
+            .into_iter()
+            .find(|row| row.oid == relation_oid)
+        else {
+            return Vec::new();
+        };
+        let Some(entry) = self.relation_entry_by_oid(client_id, txn_ctx, relation_oid) else {
+            return Vec::new();
+        };
+        derived_pg_constraint_rows(relation_oid, &class.relname, entry.namespace_oid, &entry.desc)
     }
 
     pub(crate) fn temp_entry(
@@ -1122,7 +1093,6 @@ impl Database {
             on_commit: OnCommitAction::PreserveRows,
             namespace_created: true,
         });
-        self.invalidate_client_visible_cache(client_id);
         self.invalidate_session_catalog_state(client_id);
         Ok(namespace)
     }
@@ -1196,7 +1166,6 @@ impl Database {
             on_commit,
             namespace_created: false,
         });
-        self.invalidate_client_visible_cache(client_id);
         self.invalidate_session_catalog_state(client_id);
         Ok(rel_entry)
     }
@@ -1243,7 +1212,6 @@ impl Database {
             entry: removed.entry.clone(),
             on_commit: removed.on_commit,
         });
-        self.invalidate_client_visible_cache(client_id);
         self.invalidate_session_catalog_state(client_id);
         Ok(removed.entry)
     }
@@ -1346,14 +1314,6 @@ impl Database {
         }
     }
 
-    pub(crate) fn execute_create_table_stmt(
-        &self,
-        client_id: ClientId,
-        create_stmt: &CreateTableStatement,
-    ) -> Result<StatementResult, ExecError> {
-        self.execute_create_table_stmt_with_search_path(client_id, create_stmt, None)
-    }
-
     pub(crate) fn execute_create_table_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -1452,14 +1412,6 @@ impl Database {
         }
     }
 
-    pub(crate) fn execute_create_index_stmt(
-        &self,
-        client_id: ClientId,
-        create_stmt: &CreateIndexStatement,
-    ) -> Result<StatementResult, ExecError> {
-        self.execute_create_index_stmt_with_search_path(client_id, create_stmt, None)
-    }
-
     pub(crate) fn execute_create_index_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -1491,10 +1443,9 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let visible_relcache =
-            self.visible_relcache_with_txn_search_path(client_id, Some((xid, cid)), configured_search_path);
-        let entry = visible_relcache
-            .get_by_name(&create_stmt.table_name)
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let entry = catalog
+            .lookup_any_relation(&create_stmt.table_name)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(
                     create_stmt.table_name.clone(),
@@ -1570,12 +1521,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let relcache =
-            self.visible_relcache_with_txn_search_path(client_id, Some((xid, cid)), configured_search_path);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let rels = drop_stmt
             .table_names
             .iter()
-            .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
+            .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
             .collect::<Vec<_>>();
         for rel in &rels {
             self.table_locks
@@ -1585,14 +1535,7 @@ impl Database {
         let mut dropped = 0usize;
         let mut result = Ok(StatementResult::AffectedRows(0));
         for table_name in &drop_stmt.table_names {
-            let maybe_entry = self
-                .visible_relcache_with_txn_search_path(
-                    client_id,
-                    Some((xid, cid)),
-                    configured_search_path,
-                )
-                .get_by_name(table_name)
-                .cloned();
+            let maybe_entry = catalog.lookup_any_relation(table_name);
             if maybe_entry
                 .as_ref()
                 .is_some_and(|entry| entry.relpersistence == 't')
@@ -1670,16 +1613,6 @@ impl Database {
         }
     }
 
-    pub(crate) fn execute_create_table_as_stmt(
-        &self,
-        client_id: ClientId,
-        create_stmt: &CreateTableAsStatement,
-        xid: Option<TransactionId>,
-        cid: u32,
-    ) -> Result<StatementResult, ExecError> {
-        self.execute_create_table_as_stmt_with_search_path(client_id, create_stmt, xid, cid, None)
-    }
-
     pub(crate) fn execute_create_table_as_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -1692,12 +1625,8 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
-        let visible_catalog = self.visible_catalog_with_txn_search_path(
-            client_id,
-            Some((xid, cid)),
-            configured_search_path,
-        );
-        let plan = build_plan(&create_stmt.query, &visible_catalog)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let plan = build_plan(&create_stmt.query, &catalog)?;
         let mut rels = std::collections::BTreeSet::new();
         collect_rels_from_plan(&plan, &mut rels);
 
@@ -1713,7 +1642,7 @@ impl Database {
         };
         let query_result = execute_readonly_statement(
             Statement::Select(create_stmt.query.clone()),
-            &visible_catalog,
+            &catalog,
             &mut ctx,
         );
         let StatementResult::Query {
@@ -1893,9 +1822,8 @@ impl Database {
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Analyze(ref analyze_stmt) => {
-                let visible_relcache =
-                    self.visible_relcache_with_search_path(client_id, configured_search_path);
-                execute_analyze(analyze_stmt.clone(), &visible_relcache)
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                execute_analyze(analyze_stmt.clone(), &catalog)
             }
             Statement::CreateIndex(ref create_stmt) => {
                 self.execute_create_index_stmt_with_search_path(
@@ -1952,9 +1880,8 @@ impl Database {
             }
 
             Statement::Insert(ref insert_stmt) => {
-                let visible_relcache =
-                    self.visible_relcache_with_search_path(client_id, configured_search_path);
-                let bound = bind_insert(insert_stmt, &visible_relcache)?;
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let bound = bind_insert(insert_stmt, &catalog)?;
                 let rel = bound.rel;
                 self.table_locks
                     .lock_table(rel, TableLockMode::RowExclusive, client_id);
@@ -1980,9 +1907,8 @@ impl Database {
             }
 
             Statement::Update(ref update_stmt) => {
-                let visible_relcache =
-                    self.visible_relcache_with_search_path(client_id, configured_search_path);
-                let bound = bind_update(update_stmt, &visible_relcache)?;
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let bound = bind_update(update_stmt, &catalog)?;
                 let rel = bound.rel;
                 self.table_locks
                     .lock_table(rel, TableLockMode::RowExclusive, client_id);
@@ -2014,9 +1940,8 @@ impl Database {
             }
 
             Statement::Delete(ref delete_stmt) => {
-                let visible_relcache =
-                    self.visible_relcache_with_search_path(client_id, configured_search_path);
-                let bound = bind_delete(delete_stmt, &visible_relcache)?;
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                let bound = bind_delete(delete_stmt, &catalog)?;
                 let rel = bound.rel;
                 self.table_locks
                     .lock_table(rel, TableLockMode::RowExclusive, client_id);
@@ -2084,13 +2009,12 @@ impl Database {
             }
 
             Statement::TruncateTable(ref truncate_stmt) => {
-                let relcache =
-                    self.visible_relcache_with_search_path(client_id, configured_search_path);
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let rels = {
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
+                        .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in &rels {
@@ -2108,8 +2032,7 @@ impl Database {
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result =
-                    execute_truncate_table(truncate_stmt.clone(), &relcache, &mut ctx);
+                let result = execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx);
                 drop(ctx);
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
@@ -2118,9 +2041,8 @@ impl Database {
             }
 
             Statement::Vacuum(ref vacuum_stmt) => {
-                let visible_relcache =
-                    self.visible_relcache_with_search_path(client_id, configured_search_path);
-                execute_vacuum(vacuum_stmt.clone(), &visible_relcache)
+                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+                execute_vacuum(vacuum_stmt.clone(), &catalog)
             }
 
             Statement::Begin | Statement::Commit | Statement::Rollback => {
@@ -2197,9 +2119,9 @@ impl Database {
 }
 
 impl crate::backend::parser::CatalogLookup for LazyCatalogLookup<'_> {
-    fn lookup_relation(&self, name: &str) -> Option<crate::backend::parser::BoundRelation> {
+    fn lookup_any_relation(&self, name: &str) -> Option<crate::backend::parser::BoundRelation> {
         self.db
-            .lazy_lookup_relation(self.client_id, self.txn_ctx, &self.search_path, name)
+            .lazy_lookup_any_relation(self.client_id, self.txn_ctx, &self.search_path, name)
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
@@ -2207,85 +2129,11 @@ impl crate::backend::parser::CatalogLookup for LazyCatalogLookup<'_> {
     }
 }
 
-fn temp_catalog_sync_kinds(namespace: &TempNamespace) -> Vec<BootstrapCatalogKind> {
-    let mut kinds = vec![
-        BootstrapCatalogKind::PgNamespace,
-        BootstrapCatalogKind::PgClass,
-        BootstrapCatalogKind::PgType,
-        BootstrapCatalogKind::PgAttribute,
-        BootstrapCatalogKind::PgDepend,
-    ];
-
-    if namespace.tables.values().any(|temp| {
-        temp.entry
-            .desc
-            .columns
-            .iter()
-            .any(|column| column.default_expr.is_some())
-    }) {
-        kinds.push(BootstrapCatalogKind::PgAttrdef);
-    }
-
-    if namespace.tables.values().any(|temp| {
-        temp.entry
-            .desc
-            .columns
-            .iter()
-            .any(|column| !column.storage.nullable)
-    }) {
-        kinds.push(BootstrapCatalogKind::PgConstraint);
-    }
-
-    kinds
-}
-
 fn normalize_temp_lookup_name(table_name: &str) -> String {
     table_name
         .strip_prefix("pg_temp.")
         .unwrap_or(table_name)
         .to_ascii_lowercase()
-}
-
-fn table_name_may_need_temp_catalog_sync(name: &str) -> bool {
-    let normalized = name.to_ascii_lowercase();
-    normalized.starts_with("pg_catalog.")
-        || normalized.starts_with("pg_temp.")
-        || normalized.starts_with("pg_")
-}
-
-fn from_item_needs_temp_catalog_sync(from: &crate::backend::parser::FromItem) -> bool {
-    use crate::backend::parser::FromItem;
-
-    match from {
-        FromItem::Table { name } => table_name_may_need_temp_catalog_sync(name),
-        FromItem::Values { .. } | FromItem::FunctionCall { .. } => false,
-        FromItem::DerivedTable(select) => select_statement_needs_temp_catalog_sync(select),
-        FromItem::Join { left, right, .. } => {
-            from_item_needs_temp_catalog_sync(left) || from_item_needs_temp_catalog_sync(right)
-        }
-        FromItem::Alias { source, .. } => from_item_needs_temp_catalog_sync(source),
-    }
-}
-
-fn select_statement_needs_temp_catalog_sync(stmt: &crate::backend::parser::SelectStatement) -> bool {
-    stmt.with.iter().any(|cte| match &cte.body {
-        crate::backend::parser::CteBody::Select(select) => {
-            select_statement_needs_temp_catalog_sync(select)
-        }
-        crate::backend::parser::CteBody::Values(_) => false,
-    }) || stmt
-        .from
-        .as_ref()
-        .is_some_and(from_item_needs_temp_catalog_sync)
-}
-
-pub(crate) fn statement_needs_temp_catalog_sync(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::Select(select) => select_statement_needs_temp_catalog_sync(select),
-        Statement::Explain(explain) => statement_needs_temp_catalog_sync(explain.statement.as_ref()),
-        Statement::Values(_) => false,
-        _ => false,
-    }
 }
 
 fn collect_rels_from_expr(
@@ -2524,9 +2372,7 @@ impl Database {
         for invalidation in invalidations {
             self.publish_session_catalog_invalidation(Some(source_client_id), invalidation);
         }
-        if catalog_changed && invalidations.iter().any(|invalidation| invalidation.full_reset) {
-            self.invalidate_visible_caches();
-        }
+        let _ = catalog_changed;
     }
 
     pub(crate) fn finalize_aborted_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
@@ -2601,7 +2447,6 @@ impl Database {
             }
         }
         drop(namespaces);
-        self.invalidate_client_visible_cache(client_id);
         self.invalidate_session_catalog_state(client_id);
     }
 
@@ -2666,19 +2511,6 @@ impl Drop for Database {
     }
 }
 
-fn filter_temp_relcache_for_client(client_id: ClientId, relcache: RelCache) -> RelCache {
-    let mut filtered = RelCache::default();
-    for (name, entry) in relcache.entries() {
-        if entry.relpersistence == 't'
-            && entry.namespace_oid >= TEMP_DB_OID_BASE
-            && entry.namespace_oid != Database::temp_namespace_oid(client_id)
-        {
-            continue;
-        }
-        filtered.insert(name.to_string(), entry.clone());
-    }
-    filtered
-}
 
 fn map_catalog_error(err: CatalogError) -> ExecError {
     match err {

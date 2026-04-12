@@ -30,6 +30,9 @@ pub(crate) struct BoundCte {
 pub struct BoundRelation {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub namespace_oid: u32,
+    pub relpersistence: char,
+    pub relkind: char,
     pub desc: RelationDesc,
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::backend::executor::{ExecError, Value};
-use crate::backend::parser::ParseError;
+use crate::backend::parser::{CatalogLookup, ParseError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -150,19 +150,15 @@ fn client_visible_cache_refreshes_after_create_table() {
     let base = temp_dir("client_visible_cache_refresh");
     let db = Database::open(&base, 16).unwrap();
 
-    let visible = db.visible_catalog_with_search_path(1, None);
-    assert!(visible.relcache().get_by_name("cache_test").is_none());
-    assert!(db.client_visible_caches.read().contains_key(&1));
-    let initial_generation = db.catalog_cache_generation();
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    assert!(visible.lookup_any_relation("cache_test").is_none());
+    assert!(db.session_catalog_states.read().contains_key(&1));
 
     db.execute(1, "create table cache_test (id int4)").unwrap();
 
-    assert_eq!(db.catalog_cache_generation(), initial_generation);
-    assert!(!db.client_visible_caches.read().contains_key(&1));
-    let visible = db.visible_catalog_with_search_path(1, None);
-    assert!(visible.relcache().get_by_name("cache_test").is_some());
-    let cache = db.client_visible_caches.read().get(&1).cloned().unwrap();
-    assert_eq!(cache.generation, db.catalog_cache_generation());
+    assert!(db.session_catalog_states.read().contains_key(&1));
+    let visible = db.lazy_catalog_lookup(1, None, None);
+    assert!(visible.lookup_any_relation("cache_test").is_some());
 }
 
 #[test]
@@ -172,28 +168,16 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let mut writer = Session::new(1);
     let mut reader = Session::new(2);
 
-    assert!(
-        db.visible_catalog_with_search_path(1, None)
-            .relcache()
-            .get_by_name("fanout_test")
-            .is_none()
-    );
-    assert!(
-        db.visible_catalog_with_search_path(2, None)
-            .relcache()
-            .get_by_name("fanout_test")
-            .is_none()
-    );
-    let initial_generation = db.catalog_cache_generation();
+    assert!(db.lazy_catalog_lookup(1, None, None).lookup_any_relation("fanout_test").is_none());
+    assert!(db.lazy_catalog_lookup(2, None, None).lookup_any_relation("fanout_test").is_none());
 
     writer.execute(&db, "begin").unwrap();
     writer
         .execute(&db, "create table fanout_test (id int4 not null)")
         .unwrap();
 
-    assert_eq!(db.catalog_cache_generation(), initial_generation);
-    assert!(!db.client_visible_caches.read().contains_key(&1));
-    assert!(db.client_visible_caches.read().contains_key(&2));
+    assert!(db.session_catalog_states.read().contains_key(&1));
+    assert!(db.session_catalog_states.read().contains_key(&2));
     assert!(
         reader.execute(&db, "select count(*) from fanout_test").is_err(),
         "other sessions should keep their existing cache until commit"
@@ -201,8 +185,7 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
 
     writer.execute(&db, "commit").unwrap();
 
-    assert_eq!(db.catalog_cache_generation(), initial_generation);
-    assert!(!db.client_visible_caches.read().contains_key(&2));
+    assert!(db.session_catalog_states.read().contains_key(&2));
     match reader.execute(&db, "select count(*) from fanout_test").unwrap() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
@@ -637,8 +620,8 @@ fn create_index_and_alter_table_set_are_noops() {
         StatementResult::AffectedRows(0)
     );
     {
-        let visible = db.visible_catalog_with_search_path(1, None);
-        let entry = visible.relcache().get_by_name("num_exp_add_idx").unwrap();
+        let visible = db.lazy_catalog_lookup(1, None, None);
+        let entry = visible.lookup_any_relation("num_exp_add_idx").unwrap();
         assert_eq!(entry.relkind, 'i');
     }
 
@@ -712,9 +695,9 @@ fn create_index_and_alter_table_set_are_noops() {
         StatementResult::AffectedRows(1)
     );
     {
-        let visible = db.visible_catalog_with_search_path(1, None);
-        assert!(visible.relcache().get_by_name("num_exp_add").is_none());
-        assert!(visible.relcache().get_by_name("num_exp_add_idx").is_none());
+        let visible = db.lazy_catalog_lookup(1, None, None);
+        assert!(visible.lookup_any_relation("num_exp_add").is_none());
+        assert!(visible.lookup_any_relation("num_exp_add_idx").is_none());
     }
 
     match db
@@ -941,9 +924,9 @@ fn temp_tables_are_session_local_and_mask_permanent_tables() {
     session_a
         .execute(&db, "create temp table items (id int4 not null)")
         .unwrap();
-    let relcache = db.visible_relcache(1);
-    let unqualified = relcache.get_by_name("items").unwrap();
-    let qualified = relcache.get_by_name("public.items").unwrap();
+    let catalog = session_a.catalog_lookup(&db);
+    let unqualified = catalog.lookup_any_relation("items").unwrap();
+    let qualified = catalog.lookup_any_relation("public.items").unwrap();
     assert_ne!(unqualified.rel, qualified.rel);
     session_a
         .execute(&db, "insert into items (id) values (2)")

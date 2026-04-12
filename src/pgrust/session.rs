@@ -15,12 +15,10 @@ use crate::backend::executor::{
     parse_bytea_text,
 };
 use crate::backend::parser::{
-    ParseError, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
+    CatalogLookup, ParseError, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
     bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
-use crate::backend::utils::cache::relcache::RelCache;
-use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::{CatalogInvalidation, Database, TempMutationEffect};
@@ -109,6 +107,12 @@ impl Session {
         }
     }
 
+    pub(crate) fn catalog_txn_ctx(&self) -> Option<(TransactionId, u32)> {
+        self.active_txn
+            .as_ref()
+            .map(|txn| (txn.xid, txn.next_command_id))
+    }
+
     pub(crate) fn configured_search_path(&self) -> Option<Vec<String>> {
         let value = self.gucs.get("search_path")?;
         if value.trim().eq_ignore_ascii_case("default") {
@@ -129,9 +133,9 @@ impl Session {
         )
     }
 
-    pub(crate) fn visible_relcache(&self, db: &Database) -> RelCache {
+    pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> crate::pgrust::database::LazyCatalogLookup<'a> {
         let search_path = self.configured_search_path();
-        db.visible_relcache_with_txn_search_path(
+        db.lazy_catalog_lookup(
             self.client_id,
             self.active_txn
                 .as_ref()
@@ -140,39 +144,14 @@ impl Session {
         )
     }
 
-    pub(crate) fn visible_catalog(&self, db: &Database) -> VisibleCatalog {
-        let search_path = self.configured_search_path();
-        db.visible_catalog_with_txn_search_path(
-            self.client_id,
-            self.active_txn
-                .as_ref()
-                .map(|txn| (txn.xid, txn.next_command_id)),
-            search_path.as_deref(),
-        )
-    }
-
-    fn visible_relcache_for_command(
+    fn catalog_lookup_for_command<'a>(
         &self,
-        db: &Database,
+        db: &'a Database,
         xid: TransactionId,
         cid: u32,
-    ) -> RelCache {
+    ) -> crate::pgrust::database::LazyCatalogLookup<'a> {
         let search_path = self.configured_search_path();
-        db.visible_relcache_with_txn_search_path(
-            self.client_id,
-            Some((xid, cid)),
-            search_path.as_deref(),
-        )
-    }
-
-    fn visible_catalog_for_command(
-        &self,
-        db: &Database,
-        xid: TransactionId,
-        cid: u32,
-    ) -> VisibleCatalog {
-        let search_path = self.configured_search_path();
-        db.visible_catalog_with_txn_search_path(
+        db.lazy_catalog_lookup(
             self.client_id,
             Some((xid, cid)),
             search_path.as_deref(),
@@ -385,8 +364,8 @@ impl Session {
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Analyze(ref analyze_stmt) => {
-                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
-                execute_analyze(analyze_stmt.clone(), &visible_relcache)
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                execute_analyze(analyze_stmt.clone(), &catalog)
             }
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
@@ -394,7 +373,7 @@ impl Session {
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let search_path = self.configured_search_path();
-                let visible_catalog =
+                let catalog =
                     db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
@@ -405,11 +384,11 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_readonly_statement(stmt, &visible_catalog, &mut ctx)
+                execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
-                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
-                let bound = bind_insert(insert_stmt, &visible_relcache)?;
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let bound = bind_insert(insert_stmt, &catalog)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -430,8 +409,8 @@ impl Session {
                 execute_insert(bound, &mut ctx, xid, cid)
             }
             Statement::Update(ref update_stmt) => {
-                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
-                let bound = bind_update(update_stmt, &visible_relcache)?;
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let bound = bind_update(update_stmt, &catalog)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -458,8 +437,8 @@ impl Session {
                 )
             }
             Statement::Delete(ref delete_stmt) => {
-                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
-                let bound = bind_delete(delete_stmt, &visible_relcache)?;
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let bound = bind_delete(delete_stmt, &catalog)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&rel) {
@@ -506,12 +485,12 @@ impl Session {
                 )
             }
             Statement::DropTable(ref drop_stmt) => {
-                let relcache = self.visible_relcache_for_command(db, xid, cid);
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let rels = {
                     drop_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
+                        .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
@@ -535,12 +514,12 @@ impl Session {
                 )
             }
             Statement::TruncateTable(ref truncate_stmt) => {
-                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let rels = {
                     truncate_stmt
                         .table_names
                         .iter()
-                        .filter_map(|name| visible_relcache.get_by_name(name).map(|e| e.rel))
+                        .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
@@ -561,7 +540,7 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_truncate_table(truncate_stmt.clone(), &visible_relcache, &mut ctx)
+                execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx)
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 unreachable!("handled in Session::execute")
@@ -614,12 +593,12 @@ impl Session {
         columns: Option<&[String]>,
         num_params: usize,
     ) -> Result<PreparedInsert, ExecError> {
-        let visible_relcache = self.visible_relcache(db);
+        let catalog = self.catalog_lookup(db);
         Ok(bind_insert_prepared(
             table_name,
             columns,
             num_params,
-            &visible_relcache,
+            &catalog,
         )?)
     }
 
@@ -702,9 +681,9 @@ impl Session {
             (xid, cid)
         };
 
-        let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
         let (rel, desc) = {
-            let entry = visible_relcache.get_by_name(table_name).ok_or_else(|| {
+            let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
             })?;
             (entry.rel, entry.desc.clone())
