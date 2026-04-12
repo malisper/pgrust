@@ -128,9 +128,12 @@ impl CatalogStore {
         let mut names = self
             .relcache()?
             .entries()
+            .filter(|(_, entry)| {
+                entry.relkind == 'r'
+                    && entry.namespace_oid != crate::include::catalog::PG_CATALOG_NAMESPACE_OID
+            })
             .map(|(name, _)| name.to_string())
             .filter(|name| !name.contains('.'))
-            .filter(|name| !name.starts_with("pg_"))
             .collect::<Vec<_>>();
         names.sort();
         names.dedup();
