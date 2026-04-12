@@ -995,6 +995,74 @@ fn public_schema_tables_remain_visible_even_with_pg_prefix() {
 }
 
 #[test]
+fn search_path_can_hide_public_tables_from_unqualified_lookup() {
+    let base = temp_dir("search_path_hides_public");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items (id) values (1)")
+        .unwrap();
+    session
+        .execute(&db, "set search_path = pg_catalog")
+        .unwrap();
+
+    let err = session.execute(&db, "select id from items").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnknownTable(name)) if name == "items"
+    ));
+
+    match session.execute(&db, "show tables").unwrap() {
+        StatementResult::Query { rows, .. } => assert!(rows.is_empty()),
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "select id from public.items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn search_path_keeps_temp_tables_ahead_of_public_even_when_omitted() {
+    let base = temp_dir("search_path_temp_precedence");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into items (id) values (1)").unwrap();
+
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items (id) values (2)")
+        .unwrap();
+    session.execute(&db, "set search_path = public").unwrap();
+
+    match session.execute(&db, "select id from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "select id from public.items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn temp_table_on_commit_actions_apply_at_commit() {
     let base = temp_dir("temp_table_on_commit");
     let db = Database::open(&base, 16).unwrap();

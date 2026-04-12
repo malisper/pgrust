@@ -8,8 +8,8 @@ use crate::backend::access::transam::xact::{
     CommandId, MvccError, TransactionId, TransactionManager,
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
-use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_depend::derived_relation_depend_rows;
 use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows};
 use crate::backend::catalog::{CatalogError, CatalogStore};
@@ -18,9 +18,9 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction,
-    ParseError, TablePersistence, bind_delete, bind_insert, bind_update, build_plan,
-    create_relation_desc, normalize_create_table_as_name, normalize_create_table_name,
+    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError,
+    TablePersistence, bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
+    normalize_create_table_as_name, normalize_create_table_name,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
@@ -203,11 +203,9 @@ impl Database {
         }
     }
 
-    pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
+    fn raw_visible_relcache(&self, client_id: ClientId) -> RelCache {
         let catalog_guard = self.catalog.read();
-        let mut relcache = catalog_guard
-            .relcache()
-            .unwrap_or_default();
+        let mut relcache = catalog_guard.relcache().unwrap_or_default();
         drop(catalog_guard);
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {
@@ -221,6 +219,54 @@ impl Database {
             }
         }
         relcache
+    }
+
+    fn effective_search_path(
+        &self,
+        client_id: ClientId,
+        configured_search_path: Option<&[String]>,
+    ) -> Vec<String> {
+        let mut path = Vec::new();
+        let has_temp_namespace = self.temp_relations.read().contains_key(&client_id);
+        let explicit = configured_search_path
+            .map(|search_path| {
+                search_path
+                    .iter()
+                    .map(|schema| schema.trim().to_ascii_lowercase())
+                    .filter(|schema| !schema.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec!["public".into()]);
+
+        if has_temp_namespace && !explicit.iter().any(|schema| schema == "pg_temp") {
+            path.push("pg_temp".into());
+        }
+        if !explicit.iter().any(|schema| schema == "pg_catalog") {
+            path.push("pg_catalog".into());
+        }
+        for schema in explicit {
+            if schema == "pg_temp" && !has_temp_namespace {
+                continue;
+            }
+            if !path.iter().any(|existing| existing == &schema) {
+                path.push(schema);
+            }
+        }
+        path
+    }
+
+    pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
+        self.visible_relcache_with_search_path(client_id, None)
+    }
+
+    pub(crate) fn visible_relcache_with_search_path(
+        &self,
+        client_id: ClientId,
+        configured_search_path: Option<&[String]>,
+    ) -> RelCache {
+        let relcache = self.raw_visible_relcache(client_id);
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        relcache.with_search_path(&search_path)
     }
 
     pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
@@ -259,13 +305,9 @@ impl Database {
                                 crate::backend::parser::SqlTypeKind::Text,
                             ),
                         });
-                        rows.attributes.extend(
-                            temp.entry
-                                .desc
-                                .columns
-                                .iter()
-                                .enumerate()
-                                .map(|(idx, column)| PgAttributeRow {
+                        rows.attributes
+                            .extend(temp.entry.desc.columns.iter().enumerate().map(
+                                |(idx, column)| PgAttributeRow {
                                     attrelid: temp.entry.relation_oid,
                                     attname: column.name.clone(),
                                     atttypid: crate::backend::utils::cache::catcache::sql_type_oid(
@@ -275,22 +317,19 @@ impl Database {
                                     attnotnull: !column.storage.nullable,
                                     atttypmod: column.sql_type.typmod,
                                     sql_type: column.sql_type,
-                                }),
-                        );
+                                },
+                            ));
                         rows.attrdefs.extend(
-                            temp.entry
-                                .desc
-                                .columns
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(idx, column)| {
+                            temp.entry.desc.columns.iter().enumerate().filter_map(
+                                |(idx, column)| {
                                     Some(PgAttrdefRow {
                                         oid: column.attrdef_oid?,
                                         adrelid: temp.entry.relation_oid,
                                         adnum: idx.saturating_add(1) as i16,
                                         adbin: column.default_expr.clone()?,
                                     })
-                                }),
+                                },
+                            ),
                         );
                         rows.depends.extend(derived_relation_depend_rows(
                             temp.entry.relation_oid,
@@ -474,8 +513,7 @@ impl Database {
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
-                let result = catalog_guard
-                    .create_table(table_name.clone(), desc.clone());
+                let result = catalog_guard.create_table(table_name.clone(), desc.clone());
                 match result {
                     Err(CatalogError::TableAlreadyExists(name)) if create_stmt.if_not_exists => {
                         Ok(StatementResult::AffectedRows(0))
@@ -531,7 +569,10 @@ impl Database {
         client_id: ClientId,
         create_stmt: &CreateIndexStatement,
     ) -> Result<StatementResult, ExecError> {
-        if self.temp_entry(client_id, &create_stmt.table_name).is_some() {
+        if self
+            .temp_entry(client_id, &create_stmt.table_name)
+            .is_some()
+        {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for CREATE INDEX",
                 actual: "temporary table".into(),
@@ -553,11 +594,9 @@ impl Database {
                 let _ = self.pool.with_storage_mut(|s| {
                     use crate::backend::storage::smgr::StorageManager;
                     let _ = s.smgr.open(rel);
-                    let _ = s.smgr.create(
-                        rel,
-                        crate::backend::storage::smgr::ForkNumber::Main,
-                        false,
-                    );
+                    let _ =
+                        s.smgr
+                            .create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
                 });
                 self.plan_cache.invalidate_all();
                 Ok(StatementResult::AffectedRows(0))
@@ -592,9 +631,21 @@ impl Database {
         xid: Option<TransactionId>,
         cid: u32,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_create_table_as_stmt_with_search_path(client_id, create_stmt, xid, cid, None)
+    }
+
+    pub(crate) fn execute_create_table_as_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableAsStatement,
+        xid: Option<TransactionId>,
+        cid: u32,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) = normalize_create_table_as_name(create_stmt)?;
         self.sync_visible_catalog_heaps(client_id);
-        let visible_relcache = self.visible_relcache(client_id);
+        let visible_relcache =
+            self.visible_relcache_with_search_path(client_id, configured_search_path);
         let plan = build_plan(&create_stmt.query, &visible_relcache)?;
         let rels = {
             let mut rels = std::collections::BTreeSet::new();
@@ -776,10 +827,19 @@ impl Database {
     /// Execute a single SQL statement inside an auto-commit transaction
     /// (for DML) or without a transaction (for queries/DDL).
     pub fn execute(&self, client_id: ClientId, sql: &str) -> Result<StatementResult, ExecError> {
+        self.execute_with_search_path(client_id, sql, None)
+    }
+
+    pub(crate) fn execute_with_search_path(
+        &self,
+        client_id: ClientId,
+        sql: &str,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
-            execute_analyze, execute_delete_with_waiter, execute_insert,
-            execute_truncate_table, execute_update_with_waiter, execute_vacuum,
+            execute_analyze, execute_delete_with_waiter, execute_insert, execute_truncate_table,
+            execute_update_with_waiter, execute_vacuum,
         };
         use crate::backend::executor::execute_readonly_statement;
 
@@ -788,7 +848,8 @@ impl Database {
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Analyze(ref analyze_stmt) => {
-                let visible_relcache = self.visible_relcache(client_id);
+                let visible_relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 execute_analyze(analyze_stmt.clone(), &visible_relcache)
             }
             Statement::CreateIndex(ref create_stmt) => {
@@ -801,7 +862,8 @@ impl Database {
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
                 self.sync_visible_catalog_heaps(client_id);
-                let visible_relcache = self.visible_relcache(client_id);
+                let visible_relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 let (plan_or_stmt, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
@@ -844,7 +906,8 @@ impl Database {
             }
 
             Statement::Insert(ref insert_stmt) => {
-                let visible_relcache = self.visible_relcache(client_id);
+                let visible_relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 let bound = bind_insert(insert_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 self.table_locks
@@ -871,7 +934,8 @@ impl Database {
             }
 
             Statement::Update(ref update_stmt) => {
-                let visible_relcache = self.visible_relcache(client_id);
+                let visible_relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 let bound = bind_update(update_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 self.table_locks
@@ -904,7 +968,8 @@ impl Database {
             }
 
             Statement::Delete(ref delete_stmt) => {
-                let visible_relcache = self.visible_relcache(client_id);
+                let visible_relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 let bound = bind_delete(delete_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 self.table_locks
@@ -940,11 +1005,18 @@ impl Database {
             }
 
             Statement::CreateTableAs(ref create_stmt) => {
-                self.execute_create_table_as_stmt(client_id, create_stmt, None, 0)
+                self.execute_create_table_as_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    None,
+                    0,
+                    configured_search_path,
+                )
             }
 
             Statement::DropTable(ref drop_stmt) => {
-                let relcache = self.visible_relcache(client_id);
+                let relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 let rels = {
                     drop_stmt
                         .table_names
@@ -958,7 +1030,7 @@ impl Database {
                 }
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
-                let mut ctx = ExecutorContext {
+                let ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     snapshot,
@@ -1018,7 +1090,8 @@ impl Database {
             }
 
             Statement::TruncateTable(ref truncate_stmt) => {
-                let relcache = self.visible_relcache(client_id);
+                let relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 let rels = {
                     truncate_stmt
                         .table_names
@@ -1051,7 +1124,8 @@ impl Database {
             }
 
             Statement::Vacuum(ref vacuum_stmt) => {
-                let visible_relcache = self.visible_relcache(client_id);
+                let visible_relcache =
+                    self.visible_relcache_with_search_path(client_id, configured_search_path);
                 execute_vacuum(vacuum_stmt.clone(), &visible_relcache)
             }
 
@@ -1075,13 +1149,24 @@ impl Database {
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
     ) -> Result<SelectGuard<'_>, ExecError> {
+        self.execute_streaming_with_search_path(client_id, select_stmt, txn_ctx, None)
+    }
+
+    pub(crate) fn execute_streaming_with_search_path(
+        &self,
+        client_id: ClientId,
+        select_stmt: &crate::backend::parser::SelectStatement,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<SelectGuard<'_>, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
         use crate::backend::parser::build_plan;
 
         let (plan, rels) = {
             self.sync_visible_catalog_heaps(client_id);
-            let visible_relcache = self.visible_relcache(client_id);
+            let visible_relcache =
+                self.visible_relcache_with_search_path(client_id, configured_search_path);
             let plan = build_plan(select_stmt, &visible_relcache)?;
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
@@ -1372,7 +1457,6 @@ impl Drop for AutoCommitGuard<'_> {
         }
     }
 }
-
 
 #[cfg(test)]
 #[path = "database_tests.rs"]

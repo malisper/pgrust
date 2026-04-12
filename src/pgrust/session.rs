@@ -4,20 +4,21 @@ use std::sync::Arc;
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_analyze, execute_delete_with_waiter, execute_insert,
-    execute_prepared_insert_row, execute_truncate_table, execute_update_with_waiter,
-};
-use crate::backend::executor::{
-    ExecError, ExecutorContext, StatementResult, Value, execute_readonly_statement,
-    cast_value, parse_bytea_text,
+    execute_analyze, execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
+    execute_truncate_table, execute_update_with_waiter,
 };
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
+use crate::backend::executor::{
+    ExecError, ExecutorContext, StatementResult, Value, cast_value, execute_readonly_statement,
+    parse_bytea_text,
+};
 use crate::backend::parser::{
     ParseError, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
     bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::storage::smgr::StorageManager;
+use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::Database;
@@ -102,6 +103,31 @@ impl Session {
         }
     }
 
+    pub(crate) fn configured_search_path(&self) -> Option<Vec<String>> {
+        let value = self.gucs.get("search_path")?;
+        if value.trim().eq_ignore_ascii_case("default") {
+            return None;
+        }
+        Some(
+            value
+                .split(',')
+                .map(|schema| {
+                    schema
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_ascii_lowercase()
+                })
+                .filter(|schema| !schema.is_empty())
+                .collect(),
+        )
+    }
+
+    pub(crate) fn visible_relcache(&self, db: &Database) -> RelCache {
+        let search_path = self.configured_search_path();
+        db.visible_relcache_with_search_path(self.client_id, search_path.as_deref())
+    }
+
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let stmt = db.plan_cache.get_statement(sql)?;
 
@@ -112,9 +138,7 @@ impl Session {
             Statement::CreateIndex(ref create_stmt) => {
                 db.execute_create_index_stmt(self.client_id, create_stmt)
             }
-            Statement::AlterTableSet(_) => {
-                Ok(StatementResult::AffectedRows(0))
-            }
+            Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Begin => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -197,7 +221,8 @@ impl Session {
                     }
                     result
                 } else {
-                    db.execute(self.client_id, sql)
+                    let search_path = self.configured_search_path();
+                    db.execute_with_search_path(self.client_id, sql, search_path.as_deref())
                 }
             }
         }
@@ -216,7 +241,13 @@ impl Session {
         } else {
             None
         };
-        db.execute_streaming(self.client_id, select_stmt, txn_ctx)
+        let search_path = self.configured_search_path();
+        db.execute_streaming_with_search_path(
+            self.client_id,
+            select_stmt,
+            txn_ctx,
+            search_path.as_deref(),
+        )
     }
 
     fn execute_in_transaction(
@@ -224,10 +255,13 @@ impl Session {
         db: &Database,
         stmt: Statement,
     ) -> Result<StatementResult, ExecError> {
-        let txn = self.active_txn.as_mut().unwrap();
-        let xid = txn.xid;
-        let cid = txn.next_command_id;
-        txn.next_command_id = txn.next_command_id.saturating_add(1);
+        let (xid, cid) = {
+            let txn = self.active_txn.as_mut().unwrap();
+            let xid = txn.xid;
+            let cid = txn.next_command_id;
+            txn.next_command_id = txn.next_command_id.saturating_add(1);
+            (xid, cid)
+        };
         let client_id = self.client_id;
 
         match stmt {
@@ -237,20 +271,21 @@ impl Session {
             Statement::CreateIndex(ref create_stmt) => {
                 db.execute_create_index_stmt(client_id, create_stmt)
             }
-            Statement::AlterTableSet(_) => {
-                Ok(StatementResult::AffectedRows(0))
-            }
+            Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Analyze(ref analyze_stmt) => {
-                let visible_relcache = db.visible_relcache(client_id);
+                let visible_relcache = self.visible_relcache(db);
                 execute_analyze(analyze_stmt.clone(), &visible_relcache)
             }
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
-            Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
+            Statement::Select(_)
+            | Statement::Values(_)
+            | Statement::Explain(_)
+            | Statement::ShowTables => {
                 db.sync_visible_catalog_heaps(client_id);
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let visible_relcache = db.visible_relcache(client_id);
+                let visible_relcache = self.visible_relcache(db);
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
@@ -263,7 +298,7 @@ impl Session {
                 execute_readonly_statement(stmt, &visible_relcache, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
-                let visible_relcache = db.visible_relcache(client_id);
+                let visible_relcache = self.visible_relcache(db);
                 let bound = bind_insert(insert_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
@@ -285,7 +320,7 @@ impl Session {
                 execute_insert(bound, &mut ctx, xid, cid)
             }
             Statement::Update(ref update_stmt) => {
-                let visible_relcache = db.visible_relcache(client_id);
+                let visible_relcache = self.visible_relcache(db);
                 let bound = bind_update(update_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
@@ -313,7 +348,7 @@ impl Session {
                 )
             }
             Statement::Delete(ref delete_stmt) => {
-                let visible_relcache = db.visible_relcache(client_id);
+                let visible_relcache = self.visible_relcache(db);
                 let bound = bind_delete(delete_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
@@ -338,10 +373,17 @@ impl Session {
                 db.execute_create_table_stmt(client_id, create_stmt)
             }
             Statement::CreateTableAs(ref create_stmt) => {
-                db.execute_create_table_as_stmt(client_id, create_stmt, Some(xid), cid)
+                let search_path = self.configured_search_path();
+                db.execute_create_table_as_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    Some(xid),
+                    cid,
+                    search_path.as_deref(),
+                )
             }
             Statement::DropTable(ref drop_stmt) => {
-                let relcache = db.visible_relcache(client_id);
+                let relcache = self.visible_relcache(db);
                 let rels = {
                     drop_stmt
                         .table_names
@@ -358,7 +400,7 @@ impl Session {
                     }
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let mut ctx = ExecutorContext {
+                let ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     snapshot,
@@ -380,7 +422,9 @@ impl Session {
                                 db.refresh_catalog_storage();
                                 for entry in entries {
                                     let _ = ctx.pool.invalidate_relation(entry.rel);
-                                    ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+                                    ctx.pool.with_storage_mut(|s| {
+                                        s.smgr.unlink(entry.rel, None, false)
+                                    });
                                 }
                                 dropped += 1;
                                 db.plan_cache.invalidate_all();
@@ -402,7 +446,7 @@ impl Session {
                 Ok(StatementResult::AffectedRows(dropped))
             }
             Statement::TruncateTable(ref truncate_stmt) => {
-                let visible_relcache = db.visible_relcache(client_id);
+                let visible_relcache = self.visible_relcache(db);
                 let rels = {
                     truncate_stmt
                         .table_names
@@ -475,7 +519,7 @@ impl Session {
         columns: Option<&[String]>,
         num_params: usize,
     ) -> Result<PreparedInsert, ExecError> {
-        let visible_relcache = db.visible_relcache(self.client_id);
+        let visible_relcache = self.visible_relcache(db);
         Ok(bind_insert_prepared(
             table_name,
             columns,
@@ -551,12 +595,15 @@ impl Session {
             false
         };
 
-        let txn = self.active_txn.as_mut().unwrap();
-        let xid = txn.xid;
-        let cid = txn.next_command_id;
-        txn.next_command_id = txn.next_command_id.saturating_add(1);
+        let (xid, cid) = {
+            let txn = self.active_txn.as_mut().unwrap();
+            let xid = txn.xid;
+            let cid = txn.next_command_id;
+            txn.next_command_id = txn.next_command_id.saturating_add(1);
+            (xid, cid)
+        };
 
-        let visible_relcache = db.visible_relcache(self.client_id);
+        let visible_relcache = self.visible_relcache(db);
         let (rel, desc) = {
             let entry = visible_relcache.get_by_name(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
@@ -566,7 +613,8 @@ impl Session {
         let target_indexes = if let Some(columns) = target_columns {
             let mut indexes = Vec::with_capacity(columns.len());
             for name in columns {
-                let Some(index) = desc.columns.iter().position(|column| column.name == *name) else {
+                let Some(index) = desc.columns.iter().position(|column| column.name == *name)
+                else {
                     return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
                 };
                 indexes.push(index);
@@ -576,6 +624,7 @@ impl Session {
             (0..desc.columns.len()).collect()
         };
 
+        let txn = self.active_txn.as_mut().unwrap();
         if !txn.held_table_locks.contains(&rel) {
             db.table_locks
                 .lock_table(rel, TableLockMode::RowExclusive, self.client_id);
@@ -599,15 +648,21 @@ impl Session {
                         Value::Null
                     } else {
                         match column.ty {
-                            ScalarType::Int16 => raw.parse::<i16>().map(Value::Int16).map_err(|_| {
-                                ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                            })?,
-                            ScalarType::Int32 => raw.parse::<i32>().map(Value::Int32).map_err(|_| {
-                                ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                            })?,
-                            ScalarType::Int64 => raw.parse::<i64>().map(Value::Int64).map_err(|_| {
-                                ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                            })?,
+                            ScalarType::Int16 => {
+                                raw.parse::<i16>().map(Value::Int16).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })?
+                            }
+                            ScalarType::Int32 => {
+                                raw.parse::<i32>().map(Value::Int32).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })?
+                            }
+                            ScalarType::Int64 => {
+                                raw.parse::<i64>().map(Value::Int64).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })?
+                            }
                             ScalarType::BitString => {
                                 cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                             }
@@ -621,9 +676,9 @@ impl Session {
                                 })?,
                             ScalarType::Numeric => Value::Numeric(raw.as_str().into()),
                             ScalarType::Json => Value::Json(raw.clone().into()),
-                            ScalarType::Jsonb => {
-                                Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text(raw)?)
-                            }
+                            ScalarType::Jsonb => Value::Jsonb(
+                                crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
+                            ),
                             ScalarType::JsonPath => Value::JsonPath(
                                 canonicalize_jsonpath(raw)
                                     .map_err(|_| ExecError::InvalidStorageValue {
