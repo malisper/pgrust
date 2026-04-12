@@ -40,6 +40,20 @@ where
         .unwrap();
 }
 
+fn run_with_large_stack_result<F, T>(name: &str, f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    thread::Builder::new()
+        .name(name.into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
 fn rel() -> RelFileLocator {
     RelFileLocator {
         spc_oid: 0,
@@ -81,7 +95,7 @@ fn relation_desc() -> RelationDesc {
 fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
     CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel.rel_number),
-        namespace_oid: 11,
+        namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
         relkind: 'r',
         rel,
@@ -391,25 +405,30 @@ fn run_sql_with_catalog(
     sql: &str,
     mut catalog: Catalog,
 ) -> Result<StatementResult, ExecError> {
-    crate::backend::catalog::store::sync_catalog_heaps_for_tests(base, &catalog).unwrap();
-    let smgr = MdStorageManager::new(base);
-    let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
-    for name in catalog.table_names().collect::<Vec<_>>() {
-        if let Some(entry) = catalog.get(&name) {
-            create_fork(&*pool, entry.rel);
+    let base = base.clone();
+    let txns = txns.clone();
+    let sql = sql.to_string();
+    run_with_large_stack_result("executor-test-sql", move || {
+        crate::backend::catalog::store::sync_catalog_heaps_for_tests(&base, &catalog).unwrap();
+        let smgr = MdStorageManager::new(&base);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        for name in catalog.table_names().collect::<Vec<_>>() {
+            if let Some(entry) = catalog.get(&name) {
+                create_fork(&*pool, entry.rel);
+            }
         }
-    }
-    let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
-    let mut ctx = ExecutorContext {
-        pool,
-        txns: txns_arc,
-        snapshot: txns.snapshot(xid).unwrap(),
-        client_id: 77,
-        next_command_id: 0,
-        outer_rows: Vec::new(),
-        timed: false,
-    };
-    execute_sql(sql, &mut catalog, &mut ctx, xid)
+        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
+        let mut ctx = ExecutorContext {
+            pool,
+            txns: txns_arc,
+            snapshot: txns.snapshot(xid).unwrap(),
+            client_id: 77,
+            next_command_id: 0,
+            outer_rows: Vec::new(),
+            timed: false,
+        };
+        execute_sql(&sql, &mut catalog, &mut ctx, xid)
+    })
 }
 
 fn assert_query_rows(result: StatementResult, expected: Vec<Vec<Value>>) {
@@ -1989,7 +2008,10 @@ fn pg_attribute_exposes_bootstrap_columns() {
             vec![Value::Text("relname".into())],
             vec![Value::Text("relnamespace".into())],
             vec![Value::Text("reltype".into())],
+            vec![Value::Text("relowner".into())],
+            vec![Value::Text("relam".into())],
             vec![Value::Text("relfilenode".into())],
+            vec![Value::Text("relpersistence".into())],
             vec![Value::Text("relkind".into())],
         ],
     );

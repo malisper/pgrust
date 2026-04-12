@@ -40,6 +40,9 @@ pub(super) fn explicit_text_input_cast_exists(
     let Some(target_oid) = catalog_builtin_type_oid(catalog, target) else {
         return false;
     };
+    if target_oid == TEXT_TYPE_OID {
+        return true;
+    }
     catalog_text_input_cast_exists(catalog, target_oid)
 }
 
