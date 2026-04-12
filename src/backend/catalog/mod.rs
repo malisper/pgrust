@@ -1,7 +1,9 @@
 pub mod bootstrap;
 pub mod catalog;
-pub mod state;
 pub mod namespace;
+pub mod rowcodec;
+pub mod rows;
+pub mod state;
 pub mod pg_am;
 pub mod pg_attrdef;
 pub mod pg_attribute;
