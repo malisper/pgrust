@@ -619,11 +619,9 @@ fn builtin_sql_type_for_oid(oid: u32) -> Option<SqlType> {
 }
 
 fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
-    if sql_type.is_array {
-        return None;
-    }
     builtin_type_rows().into_iter().find_map(|row| {
-        (!row.sql_type.is_array && row.sql_type.kind == sql_type.kind).then_some(row.oid)
+        (row.sql_type.is_array == sql_type.is_array && row.sql_type.kind == sql_type.kind)
+            .then_some(row.oid)
     })
 }
 
@@ -740,8 +738,11 @@ mod tests {
             SqlTypeKind::Bit,
             4
         )));
-        assert!(!explicit_text_input_cast_exists(SqlType::array_of(
+        assert!(explicit_text_input_cast_exists(SqlType::array_of(
             SqlType::new(SqlTypeKind::Int4)
+        )));
+        assert!(explicit_text_input_cast_exists(SqlType::array_of(
+            SqlType::new(SqlTypeKind::Jsonb)
         )));
     }
 
