@@ -1150,6 +1150,37 @@ fn temp_catalog_sync_marks_namespace_clean_until_temp_state_changes() {
     }
 }
 
+#[test]
+fn temp_show_tables_uses_cached_visible_catalog_without_sync() {
+    let base = temp_dir("temp_show_tables_cached_visible");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_items (id int4 not null)")
+        .unwrap();
+
+    session.execute(&db, "show tables").unwrap();
+
+    assert!(db.client_visible_caches.read().contains_key(&1));
+    {
+        let namespaces = db.temp_relations.read();
+        let namespace = namespaces.get(&1).unwrap();
+        assert_eq!(namespace.synced_generation, 0);
+        assert!(namespace.generation > 0);
+    }
+
+    let cache = db.client_visible_caches.read().get(&1).cloned().unwrap();
+    let visible = db
+        .cached_visible_catalog_for_autocommit(1, None)
+        .expect("cached visible catalog");
+    assert!(visible.relcache().get_by_name("temp_items").is_some());
+
+    session.execute(&db, "show tables").unwrap();
+    let cache_again = db.client_visible_caches.read().get(&1).cloned().unwrap();
+    assert_eq!(cache_again.generation, cache.generation);
+}
+
 
 #[test]
 fn pg_constraint_lists_not_null_columns_for_permanent_and_temp_tables() {
