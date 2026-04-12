@@ -231,6 +231,55 @@
         match db
             .execute(
                 1,
+                "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname \
+                 from pg_proc p \
+                 join pg_type t on t.oid = p.prorettype \
+                 where p.proname in ('count', 'json_array_elements', 'lower', 'random') \
+                 order by p.proname",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![
+                            Value::Text("count".into()),
+                            Value::Text("a".into()),
+                            Value::Int16(1),
+                            Value::Bool(false),
+                            Value::Text("int8".into()),
+                        ],
+                        vec![
+                            Value::Text("json_array_elements".into()),
+                            Value::Text("f".into()),
+                            Value::Int16(1),
+                            Value::Bool(true),
+                            Value::Text("json".into()),
+                        ],
+                        vec![
+                            Value::Text("lower".into()),
+                            Value::Text("f".into()),
+                            Value::Int16(1),
+                            Value::Bool(false),
+                            Value::Text("text".into()),
+                        ],
+                        vec![
+                            Value::Text("random".into()),
+                            Value::Text("f".into()),
+                            Value::Int16(0),
+                            Value::Bool(false),
+                            Value::Text("float8".into()),
+                        ],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match db
+            .execute(
+                1,
                 "select s.typname, t.typname, c.castcontext, c.castmethod \
                  from pg_cast c \
                  join pg_type s on s.oid = c.castsource \

@@ -18,7 +18,7 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
     PgCastRow, PgClassRow, PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow,
-    PgNamespaceRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
+    PgNamespaceRow, PgProcRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
     bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
@@ -39,6 +39,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub ams: Vec<PgAmRow>,
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
+    pub procs: Vec<PgProcRow>,
     pub casts: Vec<PgCastRow>,
     pub collations: Vec<PgCollationRow>,
     pub databases: Vec<PgDatabaseRow>,
@@ -349,6 +350,16 @@ pub(crate) fn sync_catalog_rows(
         RelFileLocator {
             spc_oid: 0,
             db_oid,
+            rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgProc),
+        rows.procs.iter().cloned().map(pg_proc_row_values).collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
             rel_number: BootstrapCatalogKind::PgCast.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgCast),
@@ -472,6 +483,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         ams: catcache.am_rows(),
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
+        procs: catcache.proc_rows(),
         casts: catcache.cast_rows(),
         collations: catcache.collation_rows(),
         databases: catcache.database_rows(),
@@ -569,6 +581,32 @@ fn pg_collation_row_values(row: PgCollationRow) -> Vec<Value> {
         Value::Text(row.collprovider.to_string().into()),
         Value::Bool(row.collisdeterministic),
         Value::Int32(row.collencoding),
+    ]
+}
+
+fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.proname.into()),
+        Value::Int32(row.pronamespace as i32),
+        Value::Int32(row.proowner as i32),
+        Value::Int32(row.prolang as i32),
+        Value::Float64(row.procost),
+        Value::Float64(row.prorows),
+        Value::Int32(row.provariadic as i32),
+        Value::Int32(row.prosupport as i32),
+        Value::Text(row.prokind.to_string().into()),
+        Value::Bool(row.prosecdef),
+        Value::Bool(row.proleakproof),
+        Value::Bool(row.proisstrict),
+        Value::Bool(row.proretset),
+        Value::Text(row.provolatile.to_string().into()),
+        Value::Text(row.proparallel.to_string().into()),
+        Value::Int16(row.pronargs),
+        Value::Int16(row.pronargdefaults),
+        Value::Int32(row.prorettype as i32),
+        Value::Text(row.proargtypes.into()),
+        Value::Text(row.prosrc.into()),
     ]
 }
 
@@ -679,6 +717,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let _am_rows = rows.ams;
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
+    let _proc_rows = rows.procs;
     let _cast_rows = rows.casts;
     let _collation_rows = rows.collations;
     let _database_rows = rows.databases;
@@ -848,6 +887,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut missing_am = false;
     let mut missing_authid = false;
     let mut missing_auth_members = false;
+    let mut missing_proc = false;
     let mut missing_cast = false;
     let mut missing_collation = false;
     let mut missing_database = false;
@@ -881,6 +921,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             if kind == BootstrapCatalogKind::PgAuthMembers {
                 missing_auth_members = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgProc {
+                missing_proc = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgCollation {
@@ -972,6 +1016,18 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         )?
         .into_iter()
         .map(pg_auth_members_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let proc_rows = if missing_proc {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgProc],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgProc),
+        )?
+        .into_iter()
+        .map(pg_proc_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
     let collation_rows = if missing_collation {
@@ -1069,6 +1125,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         ams: am_rows,
         authids: authid_rows,
         auth_members: auth_members_rows,
+        procs: proc_rows,
         casts: cast_rows,
         collations: collation_rows,
         databases: database_rows,
@@ -1145,6 +1202,13 @@ fn expect_int32(value: &Value) -> Result<i32, CatalogError> {
     }
 }
 
+fn expect_float64(value: &Value) -> Result<f64, CatalogError> {
+    match value {
+        Value::Float64(v) => Ok(*v),
+        _ => Err(CatalogError::Corrupt("expected float value")),
+    }
+}
+
 fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespaceRow, CatalogError> {
     Ok(PgNamespaceRow {
         oid: expect_oid(&values[0])?,
@@ -1215,6 +1279,47 @@ fn pg_auth_members_row_from_values(values: Vec<Value>) -> Result<PgAuthMembersRo
         admin_option: expect_bool(&values[4])?,
         inherit_option: expect_bool(&values[5])?,
         set_option: expect_bool(&values[6])?,
+    })
+}
+
+fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, CatalogError> {
+    let prokind = match &values[9] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty prokind"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected prokind text")),
+    };
+    let provolatile = match &values[14] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty provolatile"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected provolatile text")),
+    };
+    let proparallel = match &values[15] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty proparallel"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected proparallel text")),
+    };
+    Ok(PgProcRow {
+        oid: expect_oid(&values[0])?,
+        proname: expect_text(&values[1])?,
+        pronamespace: expect_oid(&values[2])?,
+        proowner: expect_oid(&values[3])?,
+        prolang: expect_oid(&values[4])?,
+        procost: expect_float64(&values[5])?,
+        prorows: expect_float64(&values[6])?,
+        provariadic: expect_oid(&values[7])?,
+        prosupport: expect_oid(&values[8])?,
+        prokind,
+        prosecdef: expect_bool(&values[10])?,
+        proleakproof: expect_bool(&values[11])?,
+        proisstrict: expect_bool(&values[12])?,
+        proretset: expect_bool(&values[13])?,
+        provolatile,
+        proparallel,
+        pronargs: expect_int16(&values[16])?,
+        pronargdefaults: expect_int16(&values[17])?,
+        prorettype: expect_oid(&values[18])?,
+        proargtypes: expect_text(&values[19])?,
+        prosrc: expect_text(&values[20])?,
     })
 }
 
@@ -1379,10 +1484,10 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, CURRENT_DATABASE_NAME,
         C_COLLATION_OID, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
-        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, OID_TYPE_OID,
-        PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-        PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID,
-        VARCHAR_TYPE_OID,
+        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID,
+        JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID,
+        PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1641,6 +1746,32 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_persists_pg_proc_rows() {
+        let base = temp_dir("proc_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "lower"
+                && row.pronargs == 1
+                && row.prorettype == TEXT_TYPE_OID
+                && row.prokind == 'f'
+                && row.prosrc == "lower"
+        }));
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "count"
+                && row.pronargs == 1
+                && row.prorettype == INT8_TYPE_OID
+                && row.prokind == 'a'
+        }));
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "json_array_elements"
+                && row.proretset
+                && row.prorettype == JSON_TYPE_OID
+        }));
+    }
+
+    #[test]
     fn catalog_store_persists_pg_collation_rows() {
         let base = temp_dir("collation_rows");
         let _store = CatalogStore::load(&base).unwrap();
@@ -1792,6 +1923,9 @@ mod tests {
         let collation = catalog.get("pg_collation").unwrap();
         let collation_path = segment_path(&base, collation.rel, ForkNumber::Main, 0);
         assert!(collation_path.exists(), "pg_collation relfile should exist");
+        let proc = catalog.get("pg_proc").unwrap();
+        let proc_path = segment_path(&base, proc.rel, ForkNumber::Main, 0);
+        assert!(proc_path.exists(), "pg_proc relfile should exist");
         let cast = catalog.get("pg_cast").unwrap();
         let cast_path = segment_path(&base, cast.rel, ForkNumber::Main, 0);
         assert!(cast_path.exists(), "pg_cast relfile should exist");
@@ -2215,6 +2349,44 @@ mod tests {
         assert!(rows.casts.iter().any(|row| {
             row.castsource == INT4_TYPE_OID && row.casttarget == OID_TYPE_OID
         }));
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_proc_relation() {
+        let base = temp_dir("missing_proc_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let proc_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&proc_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(proc_path.exists(), "pg_proc relfile should be recreated");
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows
+            .procs
+            .iter()
+            .any(|row| row.proname == "lower" && row.prorettype == TEXT_TYPE_OID));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
