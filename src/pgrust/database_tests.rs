@@ -1091,6 +1091,52 @@ fn temp_catalog_sync_only_materializes_touched_catalog_relfiles() {
 }
 
 #[test]
+fn temp_catalog_sync_marks_namespace_clean_until_temp_state_changes() {
+    let base = temp_dir("temp_catalog_sync_generation");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_items (id int4 not null)")
+        .unwrap();
+
+    {
+        let namespaces = db.temp_relations.read();
+        let namespace = namespaces.get(&1).unwrap();
+        assert!(namespace.generation > namespace.synced_generation);
+    }
+
+    session.execute(&db, "show tables").unwrap();
+
+    let synced_generation = {
+        let namespaces = db.temp_relations.read();
+        let namespace = namespaces.get(&1).unwrap();
+        assert_eq!(namespace.synced_generation, namespace.generation);
+        namespace.synced_generation
+    };
+
+    session.execute(&db, "show tables").unwrap();
+
+    {
+        let namespaces = db.temp_relations.read();
+        let namespace = namespaces.get(&1).unwrap();
+        assert_eq!(namespace.synced_generation, synced_generation);
+        assert_eq!(namespace.synced_generation, namespace.generation);
+    }
+
+    session
+        .execute(&db, "create temp table temp_items_2 (id int4 not null)")
+        .unwrap();
+
+    {
+        let namespaces = db.temp_relations.read();
+        let namespace = namespaces.get(&1).unwrap();
+        assert!(namespace.generation > namespace.synced_generation);
+    }
+}
+
+
+#[test]
 fn pg_constraint_lists_not_null_columns_for_permanent_and_temp_tables() {
     let base = temp_dir("pg_constraint_not_null_rows");
     let db = Database::open(&base, 16).unwrap();
