@@ -221,7 +221,7 @@ impl CatalogStore {
         let entry = catalog.create_table(name.clone(), desc)?;
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_state(&catalog)?;
-        append_catalog_entry_rows(&self.base_dir, &name, &entry, &kinds)?;
+        append_catalog_entry_rows(&self.base_dir, &catalog, &name, &entry, &kinds)?;
         Ok(entry)
     }
 
@@ -237,7 +237,7 @@ impl CatalogStore {
         let entry = catalog.create_index(index_name.clone(), table_name, unique, columns)?;
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
-        append_catalog_entry_rows(&self.base_dir, &index_name, &entry, &kinds)?;
+        append_catalog_entry_rows(&self.base_dir, &catalog, &index_name, &entry, &kinds)?;
         Ok(entry)
     }
 
@@ -254,7 +254,7 @@ impl CatalogStore {
             catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?;
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
-        append_catalog_entry_rows(&self.base_dir, &index_name, &entry, &kinds)?;
+        append_catalog_entry_rows(&self.base_dir, &catalog, &index_name, &entry, &kinds)?;
         Ok(entry)
     }
 
@@ -304,7 +304,7 @@ impl CatalogStore {
         let entry = catalog.create_table(name.clone(), desc)?;
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_state(&catalog)?;
-        let rows = physical_catalog_rows_for_entry(&name, &entry);
+        let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
         insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
@@ -328,7 +328,7 @@ impl CatalogStore {
             catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?;
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
-        let rows = physical_catalog_rows_for_entry(&index_name, &entry);
+        let rows = physical_catalog_rows_for_catalog_entry(&catalog, &index_name, &entry);
         insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
@@ -355,7 +355,10 @@ impl CatalogStore {
             else {
                 continue;
             };
-            extend_physical_catalog_rows(&mut rows, physical_catalog_rows_for_entry(&name, &entry));
+            extend_physical_catalog_rows(
+                &mut rows,
+                physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry),
+            );
             dropped.push(entry);
         }
 
@@ -598,11 +601,12 @@ fn append_catalog_rows_subset(
 
 fn append_catalog_entry_rows(
     base_dir: &Path,
+    catalog: &Catalog,
     relation_name: &str,
     entry: &CatalogEntry,
     kinds: &[BootstrapCatalogKind],
 ) -> Result<(), CatalogError> {
-    let rows = physical_catalog_rows_for_entry(relation_name, entry);
+    let rows = physical_catalog_rows_for_catalog_entry(catalog, relation_name, entry);
     append_catalog_rows_subset(base_dir, &rows, 1, kinds)
 }
 
@@ -782,11 +786,32 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
     }
 }
 
-fn physical_catalog_rows_for_entry(relation_name: &str, entry: &CatalogEntry) -> PhysicalCatalogRows {
+fn entry_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {
+    let mut oids = BTreeSet::from([entry.relation_oid]);
+    if entry.row_type_oid != 0 {
+        oids.insert(entry.row_type_oid);
+    }
+    for column in &entry.desc.columns {
+        if let Some(oid) = column.attrdef_oid {
+            oids.insert(oid);
+        }
+        if let Some(oid) = column.not_null_constraint_oid {
+            oids.insert(oid);
+        }
+    }
+    oids
+}
+
+fn physical_catalog_rows_for_catalog_entry(
+    catalog: &Catalog,
+    relation_name: &str,
+    entry: &CatalogEntry,
+) -> PhysicalCatalogRows {
     let relname = relation_name
         .rsplit_once('.')
         .map(|(_, object)| object)
         .unwrap_or(relation_name);
+    let object_oids = entry_object_oids(entry);
     let mut rows = PhysicalCatalogRows::default();
     rows.classes.push(PgClassRow {
         oid: entry.relation_oid,
@@ -839,15 +864,22 @@ fn physical_catalog_rows_for_entry(relation_name: &str, entry: &CatalogEntry) ->
     );
 
     if entry.relkind == 'r' {
-        rows.constraints.extend(derived_pg_constraint_rows(
-            entry.relation_oid,
-            relname,
-            entry.namespace_oid,
-            &entry.desc,
-        ));
+        rows.constraints.extend(
+            catalog
+                .constraint_rows()
+                .iter()
+                .filter(|row| object_oids.contains(&row.oid))
+                .cloned(),
+        );
     }
 
-    rows.depends.extend(derived_pg_depend_rows(entry));
+    rows.depends.extend(
+        catalog
+            .depend_rows()
+            .iter()
+            .filter(|row| object_oids.contains(&row.objid))
+            .cloned(),
+    );
 
     if let Some(index_meta) = &entry.index_meta {
         rows.indexes.push(PgIndexRow {
@@ -3293,6 +3325,50 @@ mod tests {
                 && row.connamespace == PUBLIC_NAMESPACE_OID
                 && row.convalidated
         }));
+    }
+
+    #[test]
+    fn physical_catalog_rows_for_entry_use_first_class_constraint_and_depend_rows() {
+        let mut catalog = Catalog::default();
+        let entry = catalog
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+        let constraint_oid = entry.desc.columns[0].not_null_constraint_oid.unwrap();
+
+        let constraint = catalog
+            .constraints
+            .iter_mut()
+            .find(|row| row.oid == constraint_oid)
+            .unwrap();
+        constraint.conname = "people_id_custom_not_null".into();
+
+        let depend = catalog
+            .depends
+            .iter_mut()
+            .find(|row| row.objid == constraint_oid)
+            .unwrap();
+        depend.deptype = DEPENDENCY_INTERNAL;
+
+        let rows = physical_catalog_rows_for_catalog_entry(&catalog, "people", &entry);
+        assert!(rows.constraints.iter().any(|row| {
+            row.oid == constraint_oid && row.conname == "people_id_custom_not_null"
+        }));
+        assert!(rows
+            .constraints
+            .iter()
+            .all(|row| row.oid != constraint_oid || row.conname != "people_id_not_null"));
+        assert!(rows
+            .depends
+            .iter()
+            .any(|row| row.objid == constraint_oid && row.deptype == DEPENDENCY_INTERNAL));
     }
 
     #[test]
