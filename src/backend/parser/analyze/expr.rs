@@ -247,7 +247,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             };
-            validate_catalog_backed_explicit_cast(source_type, *ty)?;
+            validate_catalog_backed_explicit_cast(source_type, *ty, catalog)?;
             Expr::Cast(Box::new(bound_inner), *ty)
         }
         SqlExpr::Eq(left, right) => bind_comparison_expr(
@@ -810,7 +810,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?),
         ),
         SqlExpr::FuncCall { name, args } => {
-            if let Some(target_type) = resolve_function_cast_type(name) {
+            if let Some(target_type) = resolve_function_cast_type(catalog, name) {
                 if args.len() != 1 {
                     return Err(ParseError::UnexpectedToken {
                         expected: "single-argument cast function",
@@ -833,7 +833,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 )?;
-                validate_catalog_backed_explicit_cast(arg_type, target_type)?;
+                validate_catalog_backed_explicit_cast(arg_type, target_type, catalog)?;
                 return Ok(Expr::Cast(
                     Box::new(bound_arg),
                     if arg_type == target_type {
@@ -866,6 +866,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
 fn validate_catalog_backed_explicit_cast(
     source_type: SqlType,
     target_type: SqlType,
+    catalog: &dyn CatalogLookup,
 ) -> Result<(), ParseError> {
     if source_type.element_type() == target_type.element_type() {
         return Ok(());
@@ -873,7 +874,7 @@ fn validate_catalog_backed_explicit_cast(
     if source_type.is_array || !is_text_like_type(source_type) {
         return Ok(());
     }
-    if explicit_text_input_cast_exists(target_type) {
+    if explicit_text_input_cast_exists(catalog, target_type) {
         return Ok(());
     }
     Err(ParseError::UnexpectedToken {

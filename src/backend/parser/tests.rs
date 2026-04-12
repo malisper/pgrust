@@ -46,6 +46,40 @@ fn catalog() -> Catalog {
     catalog
 }
 
+fn visible_catalog_without_text_input_cast(target_oid: u32) -> crate::backend::utils::cache::visible_catalog::VisibleCatalog {
+    let catalog = catalog();
+    let relcache = crate::backend::utils::cache::relcache::RelCache::from_catalog(&catalog);
+    let base = crate::backend::utils::cache::catcache::CatCache::from_catalog(&catalog);
+    let filtered = crate::backend::utils::cache::catcache::CatCache::from_rows(
+        base.namespace_rows(),
+        base.class_rows(),
+        base.attribute_rows(),
+        base.attrdef_rows(),
+        base.depend_rows(),
+        base.index_rows(),
+        base.am_rows(),
+        base.authid_rows(),
+        base.auth_members_rows(),
+        base.language_rows(),
+        base.constraint_rows(),
+        base.operator_rows(),
+        base.proc_rows(),
+        base.cast_rows()
+            .into_iter()
+            .filter(|row| {
+                !(row.castsource == crate::include::catalog::TEXT_TYPE_OID
+                    && row.casttarget == target_oid
+                    && row.castmethod == 'i')
+            })
+            .collect(),
+        base.collation_rows(),
+        base.database_rows(),
+        base.tablespace_rows(),
+        base.type_rows(),
+    );
+    crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(relcache, Some(filtered))
+}
+
 #[test]
 fn pest_matches_basic_select_keyword() {
     let result = gram::pest_parse_keyword(gram::Rule::kw_select_atom, "select").unwrap();
@@ -999,6 +1033,20 @@ fn build_plan_accepts_catalog_backed_text_array_casts() {
         &catalog(),
     )
     .is_ok());
+}
+
+#[test]
+fn build_plan_rejects_missing_visible_catalog_text_input_cast() {
+    let visible = visible_catalog_without_text_input_cast(crate::include::catalog::JSONB_TYPE_OID);
+    let err = build_plan(
+        &parse_select("select cast('{\"a\":1}' as jsonb)").unwrap(),
+        &visible,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. } if actual == "cannot cast type text to jsonb"
+    ));
 }
 
 #[test]

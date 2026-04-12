@@ -69,36 +69,28 @@ impl CatalogLookup for VisibleCatalog {
         left_type_oid: u32,
         right_type_oid: u32,
     ) -> Option<PgOperatorRow> {
-        self.catcache
-            .as_ref()
-            .and_then(|catcache| {
-                catcache
-                    .operator_by_name_left_right(name, left_type_oid, right_type_oid)
-                    .cloned()
-            })
-            .or_else(|| {
-                let normalized = normalize_name(name);
-                bootstrap_pg_operator_rows().into_iter().find(|row| {
-                    row.oprname.eq_ignore_ascii_case(normalized)
-                        && row.oprleft == left_type_oid
-                        && row.oprright == right_type_oid
-                })
-            })
+        if let Some(catcache) = &self.catcache {
+            return catcache
+                .operator_by_name_left_right(name, left_type_oid, right_type_oid)
+                .cloned();
+        }
+        let normalized = normalize_name(name);
+        bootstrap_pg_operator_rows().into_iter().find(|row| {
+            row.oprname.eq_ignore_ascii_case(normalized)
+                && row.oprleft == left_type_oid
+                && row.oprright == right_type_oid
+        })
     }
 
     fn cast_by_source_target(&self, source_type_oid: u32, target_type_oid: u32) -> Option<PgCastRow> {
-        self.catcache
-            .as_ref()
-            .and_then(|catcache| {
-                catcache
-                    .cast_by_source_target(source_type_oid, target_type_oid)
-                    .cloned()
-            })
-            .or_else(|| {
-                bootstrap_pg_cast_rows()
-                    .into_iter()
-                    .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
-            })
+        if let Some(catcache) = &self.catcache {
+            return catcache
+                .cast_by_source_target(source_type_oid, target_type_oid)
+                .cloned();
+        }
+        bootstrap_pg_cast_rows()
+            .into_iter()
+            .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
