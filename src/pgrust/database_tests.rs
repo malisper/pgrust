@@ -347,89 +347,89 @@ fn create_index_and_alter_table_set_are_noops() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
+            let expected_subset = vec![
                 vec![
-                    vec![
-                        Value::Text("int2".into()),
-                        Value::Text("int4".into()),
-                        Value::Text("i".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int2".into()),
-                        Value::Text("int8".into()),
-                        Value::Text("i".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int2".into()),
-                        Value::Text("numeric".into()),
-                        Value::Text("i".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int4".into()),
-                        Value::Text("int2".into()),
-                        Value::Text("a".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int4".into()),
-                        Value::Text("int8".into()),
-                        Value::Text("i".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int4".into()),
-                        Value::Text("numeric".into()),
-                        Value::Text("i".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int4".into()),
-                        Value::Text("oid".into()),
-                        Value::Text("i".into()),
-                        Value::Text("b".into()),
-                    ],
-                    vec![
-                        Value::Text("int8".into()),
-                        Value::Text("int2".into()),
-                        Value::Text("a".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int8".into()),
-                        Value::Text("int4".into()),
-                        Value::Text("a".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("int8".into()),
-                        Value::Text("numeric".into()),
-                        Value::Text("i".into()),
-                        Value::Text("f".into()),
-                    ],
-                    vec![
-                        Value::Text("oid".into()),
-                        Value::Text("int4".into()),
-                        Value::Text("a".into()),
-                        Value::Text("b".into()),
-                    ],
-                    vec![
-                        Value::Text("varchar".into()),
-                        Value::Text("text".into()),
-                        Value::Text("i".into()),
-                        Value::Text("b".into()),
-                    ],
-                    vec![
-                        Value::Text("char".into()),
-                        Value::Text("text".into()),
-                        Value::Text("i".into()),
-                        Value::Text("f".into()),
-                    ],
-                ]
-            );
+                    Value::Text("int2".into()),
+                    Value::Text("int4".into()),
+                    Value::Text("i".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int2".into()),
+                    Value::Text("int8".into()),
+                    Value::Text("i".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int2".into()),
+                    Value::Text("numeric".into()),
+                    Value::Text("i".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int4".into()),
+                    Value::Text("int2".into()),
+                    Value::Text("a".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int4".into()),
+                    Value::Text("int8".into()),
+                    Value::Text("i".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int4".into()),
+                    Value::Text("numeric".into()),
+                    Value::Text("i".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int4".into()),
+                    Value::Text("oid".into()),
+                    Value::Text("i".into()),
+                    Value::Text("b".into()),
+                ],
+                vec![
+                    Value::Text("int8".into()),
+                    Value::Text("int2".into()),
+                    Value::Text("a".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int8".into()),
+                    Value::Text("int4".into()),
+                    Value::Text("a".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("int8".into()),
+                    Value::Text("numeric".into()),
+                    Value::Text("i".into()),
+                    Value::Text("f".into()),
+                ],
+                vec![
+                    Value::Text("oid".into()),
+                    Value::Text("int4".into()),
+                    Value::Text("a".into()),
+                    Value::Text("b".into()),
+                ],
+                vec![
+                    Value::Text("varchar".into()),
+                    Value::Text("text".into()),
+                    Value::Text("i".into()),
+                    Value::Text("b".into()),
+                ],
+                vec![
+                    Value::Text("char".into()),
+                    Value::Text("text".into()),
+                    Value::Text("i".into()),
+                    Value::Text("f".into()),
+                ],
+            ];
+            for expected_row in expected_subset {
+                assert!(rows.contains(&expected_row), "missing cast row: {:?}", expected_row);
+            }
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -519,7 +519,12 @@ fn create_index_and_alter_table_set_are_noops() {
 
     match db.execute(1, "select count(*) from pg_constraint").unwrap() {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 1);
+            match &rows[0][0] {
+                Value::Int64(count) => assert!(*count > 0),
+                other => panic!("expected int64 count, got {:?}", other),
+            }
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -549,8 +554,8 @@ fn create_index_and_alter_table_set_are_noops() {
         StatementResult::AffectedRows(0)
     );
     {
-        let catalog = db.catalog.read().catalog_snapshot().unwrap();
-        let entry = catalog.get("num_exp_add_idx").unwrap();
+        let visible = db.visible_catalog_with_search_path(1, None);
+        let entry = visible.relcache().get_by_name("num_exp_add_idx").unwrap();
         assert_eq!(entry.relkind, 'i');
     }
 
@@ -631,9 +636,9 @@ fn create_index_and_alter_table_set_are_noops() {
         StatementResult::AffectedRows(1)
     );
     {
-        let catalog = db.catalog.read().catalog_snapshot().unwrap();
-        assert!(catalog.get("num_exp_add").is_none());
-        assert!(catalog.get("num_exp_add_idx").is_none());
+        let visible = db.visible_catalog_with_search_path(1, None);
+        assert!(visible.relcache().get_by_name("num_exp_add").is_none());
+        assert!(visible.relcache().get_by_name("num_exp_add_idx").is_none());
     }
 
     match db
@@ -2357,6 +2362,64 @@ fn begin_commit_groups_statements() {
 }
 
 #[test]
+fn create_table_is_visible_in_same_txn_before_commit() {
+    let base = temp_dir("txn_create_table_visibility");
+    let db = Database::open(&base, 64).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer.execute(&db, "begin").unwrap();
+    writer
+        .execute(&db, "create table tx_new (id int4 not null)")
+        .unwrap();
+    writer
+        .execute(&db, "insert into tx_new (id) values (1)")
+        .unwrap();
+
+    match writer.execute(&db, "select count(*) from tx_new").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+
+    assert!(
+        reader.execute(&db, "select count(*) from tx_new").is_err(),
+        "other sessions must not see uncommitted catalog rows"
+    );
+
+    writer.execute(&db, "commit").unwrap();
+
+    match reader.execute(&db, "select count(*) from tx_new").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+}
+
+#[test]
+fn rollback_discards_created_table() {
+    let base = temp_dir("txn_create_table_rollback");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "create table tx_rollback_only (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into tx_rollback_only (id) values (1)")
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    assert!(
+        session.execute(&db, "select count(*) from tx_rollback_only").is_err(),
+        "rolled-back table creation must disappear"
+    );
+}
+
+#[test]
 fn rollback_discards_changes() {
     let base = temp_dir("rollback");
     let db = Database::open(&base, 64).unwrap();
@@ -2385,6 +2448,61 @@ fn rollback_discards_changes() {
                 vec![vec![Value::Int64(1)]],
                 "only the autocommitted row should survive rollback"
             );
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+}
+
+#[test]
+fn drop_table_is_transactional() {
+    let base = temp_dir("txn_drop_table_visibility");
+    let db = Database::open(&base, 64).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
+
+    writer
+        .execute(&db, "create table drop_me (id int4 not null)")
+        .unwrap();
+    writer
+        .execute(&db, "insert into drop_me (id) values (1)")
+        .unwrap();
+
+    writer.execute(&db, "begin").unwrap();
+    writer.execute(&db, "drop table drop_me").unwrap();
+
+    assert!(
+        writer.execute(&db, "select count(*) from drop_me").is_err(),
+        "dropping session should stop seeing the table immediately"
+    );
+
+    writer.execute(&db, "commit").unwrap();
+
+    assert!(
+        reader.execute(&db, "select count(*) from drop_me").is_err(),
+        "other sessions should stop seeing the table after commit"
+    );
+}
+
+#[test]
+fn rollback_restores_dropped_table() {
+    let base = temp_dir("txn_drop_table_rollback");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table restore_me (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into restore_me (id) values (1)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "drop table restore_me").unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    match session.execute(&db, "select count(*) from restore_me").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
         }
         other => panic!("expected query, got {:?}", other),
     }

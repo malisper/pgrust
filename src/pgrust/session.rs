@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::backend::access::transam::xact::TransactionId;
+use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
     execute_analyze, execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
@@ -17,7 +18,6 @@ use crate::backend::parser::{
     bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
-use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
@@ -47,6 +47,7 @@ struct ActiveTransaction {
     failed: bool,
     held_table_locks: Vec<RelFileLocator>,
     next_command_id: u32,
+    catalog_effects: Vec<CatalogMutationEffect>,
 }
 
 pub struct Session {
@@ -126,12 +127,52 @@ impl Session {
 
     pub(crate) fn visible_relcache(&self, db: &Database) -> RelCache {
         let search_path = self.configured_search_path();
-        db.visible_relcache_with_search_path(self.client_id, search_path.as_deref())
+        db.visible_relcache_with_txn_search_path(
+            self.client_id,
+            self.active_txn
+                .as_ref()
+                .map(|txn| (txn.xid, txn.next_command_id)),
+            search_path.as_deref(),
+        )
     }
 
     pub(crate) fn visible_catalog(&self, db: &Database) -> VisibleCatalog {
         let search_path = self.configured_search_path();
-        db.visible_catalog_with_search_path(self.client_id, search_path.as_deref())
+        db.visible_catalog_with_txn_search_path(
+            self.client_id,
+            self.active_txn
+                .as_ref()
+                .map(|txn| (txn.xid, txn.next_command_id)),
+            search_path.as_deref(),
+        )
+    }
+
+    fn visible_relcache_for_command(
+        &self,
+        db: &Database,
+        xid: TransactionId,
+        cid: u32,
+    ) -> RelCache {
+        let search_path = self.configured_search_path();
+        db.visible_relcache_with_txn_search_path(
+            self.client_id,
+            Some((xid, cid)),
+            search_path.as_deref(),
+        )
+    }
+
+    fn visible_catalog_for_command(
+        &self,
+        db: &Database,
+        xid: TransactionId,
+        cid: u32,
+    ) -> VisibleCatalog {
+        let search_path = self.configured_search_path();
+        db.visible_catalog_with_txn_search_path(
+            self.client_id,
+            Some((xid, cid)),
+            search_path.as_deref(),
+        )
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
@@ -163,6 +204,7 @@ impl Session {
                     failed: false,
                     held_table_locks: Vec::new(),
                     next_command_id: 0,
+                    catalog_effects: Vec::new(),
                 });
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -193,6 +235,7 @@ impl Session {
                 db.txns.write().commit(txn.xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
+                db.finalize_committed_catalog_effects(&txn.catalog_effects);
                 db.apply_temp_on_commit(self.client_id)?;
                 db.txn_waiter.notify();
                 Ok(StatementResult::AffectedRows(0))
@@ -206,6 +249,7 @@ impl Session {
                     db.table_locks.unlock_table(*rel, self.client_id);
                 }
                 let _ = db.txns.write().abort(txn.xid);
+                db.finalize_aborted_catalog_effects(&txn.catalog_effects);
                 db.txn_waiter.notify();
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -281,15 +325,19 @@ impl Session {
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
-                db.execute_create_index_stmt_with_search_path(
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_index_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
+                    xid,
+                    cid,
                     search_path.as_deref(),
+                    catalog_effects,
                 )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Analyze(ref analyze_stmt) => {
-                let visible_relcache = self.visible_relcache(db);
+                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
                 execute_analyze(analyze_stmt.clone(), &visible_relcache)
             }
             Statement::Vacuum(_) => {
@@ -301,7 +349,7 @@ impl Session {
             | Statement::ShowTables => {
                 db.sync_visible_catalog_heaps(client_id);
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let visible_catalog = self.visible_catalog(db);
+                let visible_catalog = self.visible_catalog_for_command(db, xid, cid);
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
@@ -314,7 +362,7 @@ impl Session {
                 execute_readonly_statement(stmt, &visible_catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
-                let visible_relcache = self.visible_relcache(db);
+                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
                 let bound = bind_insert(insert_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
@@ -336,7 +384,7 @@ impl Session {
                 execute_insert(bound, &mut ctx, xid, cid)
             }
             Statement::Update(ref update_stmt) => {
-                let visible_relcache = self.visible_relcache(db);
+                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
                 let bound = bind_update(update_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
@@ -364,7 +412,7 @@ impl Session {
                 )
             }
             Statement::Delete(ref delete_stmt) => {
-                let visible_relcache = self.visible_relcache(db);
+                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
                 let bound = bind_delete(delete_stmt, &visible_relcache)?;
                 let rel = bound.rel;
                 let txn = self.active_txn.as_mut().unwrap();
@@ -387,24 +435,30 @@ impl Session {
             }
             Statement::CreateTable(ref create_stmt) => {
                 let search_path = self.configured_search_path();
-                db.execute_create_table_stmt_with_search_path(
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_table_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
+                    xid,
+                    cid,
                     search_path.as_deref(),
+                    catalog_effects,
                 )
             }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
-                db.execute_create_table_as_stmt_with_search_path(
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_table_as_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
-                    Some(xid),
+                    xid,
                     cid,
                     search_path.as_deref(),
+                    catalog_effects,
                 )
             }
             Statement::DropTable(ref drop_stmt) => {
-                let relcache = self.visible_relcache(db);
+                let relcache = self.visible_relcache_for_command(db, xid, cid);
                 let rels = {
                     drop_stmt
                         .table_names
@@ -420,65 +474,19 @@ impl Session {
                         txn.held_table_locks.push(rel);
                     }
                 }
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let ctx = ExecutorContext {
-                    pool: Arc::clone(&db.pool),
-                    txns: db.txns.clone(),
-                    snapshot,
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_drop_table_stmt_in_transaction_with_search_path(
                     client_id,
-                    next_command_id: cid,
-                    timed: false,
-                    outer_rows: Vec::new(),
-                };
-                let mut dropped = 0usize;
-                for table_name in &drop_stmt.table_names {
-                    if db.temp_entry(client_id, table_name).is_some() {
-                        db.drop_temp_relation(client_id, table_name)?;
-                        dropped += 1;
-                    } else {
-                        let relation_oid = match self.visible_relcache(db).get_by_name(table_name) {
-                            Some(entry) if entry.relkind == 'r' => entry.relation_oid,
-                            Some(_) | None if drop_stmt.if_exists => continue,
-                            Some(_) | None => {
-                                return Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                                    table_name.clone(),
-                                )));
-                            }
-                        };
-                        let mut catalog_guard = db.catalog.write();
-                        match catalog_guard.drop_relation_by_oid(relation_oid) {
-                            Ok(entries) => {
-                                drop(catalog_guard);
-                                db.refresh_catalog_storage();
-                                for entry in entries {
-                                    let _ = ctx.pool.invalidate_relation(entry.rel);
-                                    ctx.pool.with_storage_mut(|s| {
-                                        s.smgr.unlink(entry.rel, None, false)
-                                    });
-                                }
-                                dropped += 1;
-                                db.plan_cache.invalidate_all();
-                            }
-                            Err(crate::backend::catalog::CatalogError::UnknownTable(_))
-                                if drop_stmt.if_exists => {}
-                            Err(crate::backend::catalog::CatalogError::UnknownTable(_)) => {
-                                return Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                                    table_name.clone(),
-                                )));
-                            }
-                            Err(other) => {
-                                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                                    expected: "droppable table",
-                                    actual: format!("{other:?}"),
-                                }));
-                            }
-                        }
-                    }
-                }
-                Ok(StatementResult::AffectedRows(dropped))
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
             }
             Statement::TruncateTable(ref truncate_stmt) => {
-                let visible_relcache = self.visible_relcache(db);
+                let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
                 let rels = {
                     truncate_stmt
                         .table_names
@@ -621,6 +629,7 @@ impl Session {
                 failed: false,
                 held_table_locks: Vec::new(),
                 next_command_id: 0,
+                catalog_effects: Vec::new(),
             });
             true
         } else {
@@ -635,7 +644,7 @@ impl Session {
             (xid, cid)
         };
 
-        let visible_relcache = self.visible_relcache(db);
+        let visible_relcache = self.visible_relcache_for_command(db, xid, cid);
         let (rel, desc) = {
             let entry = visible_relcache.get_by_name(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))

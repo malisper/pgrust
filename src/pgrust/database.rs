@@ -12,7 +12,10 @@ use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_cata
 use crate::backend::catalog::catalog::{allocate_relation_object_oids, column_desc};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::derived_relation_depend_rows;
-use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows_subset};
+use crate::backend::catalog::store::{
+    CatalogMutationEffect, CatalogWriteContext, load_physical_catalog_rows,
+    sync_catalog_rows_subset,
+};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
@@ -79,6 +82,7 @@ pub struct Database {
 }
 
 const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
+type CatalogTxnContext = Option<(TransactionId, CommandId)>;
 
 #[derive(Debug, Clone)]
 struct TempCatalogEntry {
@@ -205,10 +209,25 @@ impl Database {
         }
     }
 
-    fn raw_visible_relcache(&self, client_id: ClientId) -> RelCache {
-        let catalog_guard = self.catalog.read();
-        let mut relcache = catalog_guard.relcache().unwrap_or_default();
-        drop(catalog_guard);
+    fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
+        let mut relcache = {
+            let catalog_guard = self.catalog.read();
+            let txns = self.txns.read();
+            let snapshot = match txn_ctx {
+                Some((xid, cid)) => txns.snapshot_for_command(xid, cid).ok(),
+                None => txns
+                    .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+                    .ok(),
+            };
+            match snapshot.and_then(|snapshot| {
+                catalog_guard
+                    .relcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
+                    .ok()
+            }) {
+                Some(relcache) => relcache,
+                None => catalog_guard.relcache().unwrap_or_default(),
+            }
+        };
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {
                 relcache.insert(name.clone(), temp.entry.clone());
@@ -328,7 +347,7 @@ impl Database {
     }
 
     pub(crate) fn visible_relcache(&self, client_id: ClientId) -> RelCache {
-        self.visible_relcache_with_search_path(client_id, None)
+        self.visible_relcache_with_txn_search_path(client_id, None, None)
     }
 
     pub(crate) fn visible_relcache_with_search_path(
@@ -336,7 +355,16 @@ impl Database {
         client_id: ClientId,
         configured_search_path: Option<&[String]>,
     ) -> RelCache {
-        let relcache = self.raw_visible_relcache(client_id);
+        self.visible_relcache_with_txn_search_path(client_id, None, configured_search_path)
+    }
+
+    pub(crate) fn visible_relcache_with_txn_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        configured_search_path: Option<&[String]>,
+    ) -> RelCache {
+        let relcache = self.raw_visible_relcache(client_id, txn_ctx);
         let search_path = self.effective_search_path(client_id, configured_search_path);
         relcache.with_search_path(&search_path)
     }
@@ -346,8 +374,35 @@ impl Database {
         client_id: ClientId,
         configured_search_path: Option<&[String]>,
     ) -> VisibleCatalog {
-        let relcache = self.visible_relcache_with_search_path(client_id, configured_search_path);
-        let catcache = self.catalog.read().catcache().ok();
+        self.visible_catalog_with_txn_search_path(client_id, None, configured_search_path)
+    }
+
+    pub(crate) fn visible_catalog_with_txn_search_path(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        configured_search_path: Option<&[String]>,
+    ) -> VisibleCatalog {
+        let relcache =
+            self.visible_relcache_with_txn_search_path(client_id, txn_ctx, configured_search_path);
+        let catcache = {
+            let catalog_guard = self.catalog.read();
+            let txns = self.txns.read();
+            let snapshot = match txn_ctx {
+                Some((xid, cid)) => txns.snapshot_for_command(xid, cid).ok(),
+                None => txns
+                    .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+                    .ok(),
+            };
+            match snapshot.and_then(|snapshot| {
+                catalog_guard
+                    .catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
+                    .ok()
+            }) {
+                Some(catcache) => Some(catcache),
+                None => catalog_guard.catcache().ok(),
+            }
+        };
         VisibleCatalog::new(relcache, catcache)
     }
 
@@ -605,13 +660,61 @@ impl Database {
         create_stmt: &CreateTableStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let persistence = self
+            .normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?
+            .1;
+        if persistence == TablePersistence::Temporary {
+            let (table_name, _) = self
+                .normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
+            let _ = self.create_temp_relation(
+                client_id,
+                table_name,
+                create_relation_desc(create_stmt),
+                create_stmt.on_commit,
+            )?;
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_table_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_create_table_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) =
             self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
         let desc = create_relation_desc(create_stmt);
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
-                let result = catalog_guard.create_table(table_name.clone(), desc.clone());
+                let ctx = CatalogWriteContext {
+                    pool: &self.pool,
+                    txns: &self.txns,
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                };
+                let result = catalog_guard.create_table_mvcc(table_name.clone(), desc.clone(), &ctx);
                 match result {
                     Err(CatalogError::TableAlreadyExists(name)) if create_stmt.if_not_exists => {
                         Ok(StatementResult::AffectedRows(0))
@@ -636,20 +739,11 @@ impl Database {
                             })
                         }
                     }),
-                    Ok(entry) => {
+                    Ok((entry, effect)) => {
                         drop(catalog_guard);
-                        self.refresh_catalog_storage();
-                        let rel = entry.rel;
-                        let _ = self.pool.with_storage_mut(|s| {
-                            use crate::backend::storage::smgr::StorageManager;
-                            let _ = s.smgr.open(rel);
-                            let _ = s.smgr.create(
-                                rel,
-                                crate::backend::storage::smgr::ForkNumber::Main,
-                                false,
-                            );
-                        });
-                        self.plan_cache.invalidate_all();
+                        self.apply_catalog_mutation_effect_immediate(&effect)?;
+                        catalog_effects.push(effect);
+                        let _ = entry;
                         Ok(StatementResult::AffectedRows(0))
                     }
                 }
@@ -676,8 +770,33 @@ impl Database {
         create_stmt: &CreateIndexStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_index_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_create_index_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateIndexStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
         let visible_relcache =
-            self.visible_relcache_with_search_path(client_id, configured_search_path);
+            self.visible_relcache_with_txn_search_path(client_id, Some((xid, cid)), configured_search_path);
         let entry = visible_relcache
             .get_by_name(&create_stmt.table_name)
             .ok_or_else(|| {
@@ -699,25 +818,27 @@ impl Database {
         }
 
         let mut catalog_guard = self.catalog.write();
-        let result = catalog_guard.create_index_for_relation(
+        let ctx = CatalogWriteContext {
+            pool: &self.pool,
+            txns: &self.txns,
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let result = catalog_guard.create_index_for_relation_mvcc(
             create_stmt.index_name.clone(),
             entry.relation_oid,
             create_stmt.unique,
             &create_stmt.columns,
+            &ctx,
         );
         match result {
-            Ok(entry) => {
+            Ok((entry, effect)) => {
                 drop(catalog_guard);
-                self.refresh_catalog_storage();
-                let rel = entry.rel;
-                let _ = self.pool.with_storage_mut(|s| {
-                    use crate::backend::storage::smgr::StorageManager;
-                    let _ = s.smgr.open(rel);
-                    let _ =
-                        s.smgr
-                            .create(rel, crate::backend::storage::smgr::ForkNumber::Main, false);
-                });
-                self.plan_cache.invalidate_all();
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                let _ = entry;
                 Ok(StatementResult::AffectedRows(0))
             }
             Err(err) => Err(match err {
@@ -743,6 +864,104 @@ impl Database {
         }
     }
 
+    pub(crate) fn execute_drop_table_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &crate::backend::parser::DropTableStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let relcache =
+            self.visible_relcache_with_txn_search_path(client_id, Some((xid, cid)), configured_search_path);
+        let rels = drop_stmt
+            .table_names
+            .iter()
+            .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
+            .collect::<Vec<_>>();
+        for rel in &rels {
+            self.table_locks
+                .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
+        }
+
+        let mut dropped = 0usize;
+        let mut result = Ok(StatementResult::AffectedRows(0));
+        for table_name in &drop_stmt.table_names {
+            if self.temp_entry(client_id, table_name).is_some() {
+                match self.drop_temp_relation(client_id, table_name) {
+                    Ok(_) => dropped += 1,
+                    Err(_) if drop_stmt.if_exists => {}
+                    Err(err) => {
+                        result = Err(err);
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            let relation_oid = match self
+                .visible_relcache_with_txn_search_path(
+                    client_id,
+                    Some((xid, cid)),
+                    configured_search_path,
+                )
+                .get_by_name(table_name)
+            {
+                Some(entry) if entry.relkind == 'r' => entry.relation_oid,
+                Some(_) | None if drop_stmt.if_exists => continue,
+                Some(_) | None => {
+                    result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                        table_name.clone(),
+                    )));
+                    break;
+                }
+            };
+            let mut catalog_guard = self.catalog.write();
+            let ctx = CatalogWriteContext {
+                pool: &self.pool,
+                txns: &self.txns,
+                xid,
+                cid,
+                client_id,
+                waiter: Some(&self.txn_waiter),
+            };
+            match catalog_guard.drop_relation_by_oid_mvcc(relation_oid, &ctx) {
+                Ok((entries, effect)) => {
+                    drop(catalog_guard);
+                    self.apply_catalog_mutation_effect_immediate(&effect)?;
+                    catalog_effects.push(effect);
+                    let _ = entries;
+                    dropped += 1;
+                }
+                Err(CatalogError::UnknownTable(_)) if drop_stmt.if_exists => {}
+                Err(CatalogError::UnknownTable(_)) => {
+                    result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                        table_name.clone(),
+                    )));
+                    break;
+                }
+                Err(other) => {
+                    result = Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "droppable table",
+                        actual: format!("{other:?}"),
+                    }));
+                    break;
+                }
+            }
+        }
+
+        for rel in rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
+
+        if result.is_ok() {
+            Ok(StatementResult::AffectedRows(dropped))
+        } else {
+            result
+        }
+    }
+
     pub(crate) fn execute_create_table_as_stmt(
         &self,
         client_id: ClientId,
@@ -753,6 +972,152 @@ impl Database {
         self.execute_create_table_as_stmt_with_search_path(client_id, create_stmt, xid, cid, None)
     }
 
+    pub(crate) fn execute_create_table_as_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateTableAsStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let (table_name, persistence) = self
+            .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
+        self.sync_visible_catalog_heaps(client_id);
+        let visible_catalog = self.visible_catalog_with_txn_search_path(
+            client_id,
+            Some((xid, cid)),
+            configured_search_path,
+        );
+        let plan = build_plan(&create_stmt.query, &visible_catalog)?;
+        let mut rels = std::collections::BTreeSet::new();
+        collect_rels_from_plan(&plan, &mut rels);
+
+        let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        let mut ctx = ExecutorContext {
+            pool: Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            snapshot,
+            client_id,
+            next_command_id: cid,
+            outer_rows: Vec::new(),
+            timed: false,
+        };
+        let query_result = execute_readonly_statement(
+            Statement::Select(create_stmt.query.clone()),
+            &visible_catalog,
+            &mut ctx,
+        );
+        let StatementResult::Query {
+            columns,
+            column_names,
+            rows,
+        } = query_result?
+        else {
+            unreachable!("ctas query should return rows");
+        };
+
+        let desc = crate::backend::executor::RelationDesc {
+            columns: columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    let name = create_stmt
+                        .column_names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| column_names[index].clone());
+                    column_desc(name, column.sql_type, true)
+                })
+                .collect(),
+        };
+
+        let rel = match persistence {
+            TablePersistence::Permanent => {
+                let stmt = CreateTableStatement {
+                    schema_name: None,
+                    table_name: table_name.clone(),
+                    persistence,
+                    on_commit: create_stmt.on_commit,
+                    columns: desc
+                        .columns
+                        .iter()
+                        .map(|column| crate::backend::parser::ColumnDef {
+                            name: column.name.clone(),
+                            ty: column.sql_type,
+                            nullable: true,
+                            default_expr: None,
+                        })
+                        .collect(),
+                    if_not_exists: create_stmt.if_not_exists,
+                };
+                let mut catalog_guard = self.catalog.write();
+                let write_ctx = CatalogWriteContext {
+                    pool: &self.pool,
+                    txns: &self.txns,
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                };
+                let (entry, effect) = catalog_guard
+                    .create_table_mvcc(table_name.clone(), create_relation_desc(&stmt), &write_ctx)
+                    .map_err(|err| match err {
+                        CatalogError::TableAlreadyExists(name) => {
+                            ExecError::Parse(ParseError::TableAlreadyExists(name))
+                        }
+                        CatalogError::UnknownTable(name) => {
+                            ExecError::Parse(ParseError::TableDoesNotExist(name))
+                        }
+                        CatalogError::UnknownColumn(name) => {
+                            ExecError::Parse(ParseError::UnknownColumn(name))
+                        }
+                        CatalogError::UnknownType(name) => {
+                            ExecError::Parse(ParseError::UnsupportedType(name))
+                        }
+                        CatalogError::Io(_) | CatalogError::Corrupt(_) => {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "valid catalog state",
+                                actual: "catalog error".into(),
+                            })
+                        }
+                    })?;
+                drop(catalog_guard);
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                entry.rel
+            }
+            TablePersistence::Temporary => {
+                self.create_temp_relation(
+                    client_id,
+                    table_name.clone(),
+                    desc.clone(),
+                    create_stmt.on_commit,
+                )?
+                .rel
+            }
+        };
+
+        if rows.is_empty() {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        let mut insert_ctx = ExecutorContext {
+            pool: Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            snapshot,
+            client_id,
+            next_command_id: cid,
+            outer_rows: Vec::new(),
+            timed: false,
+        };
+        let inserted = crate::backend::commands::tablecmds::execute_insert_values(
+            rel, &desc, &rows, &mut insert_ctx, xid, cid,
+        )?;
+        Ok(StatementResult::AffectedRows(inserted))
+    }
+
     pub(crate) fn execute_create_table_as_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -761,6 +1126,17 @@ impl Database {
         cid: u32,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        if let Some(xid) = xid {
+            let mut catalog_effects = Vec::new();
+            return self.execute_create_table_as_stmt_in_transaction_with_search_path(
+                client_id,
+                create_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                &mut catalog_effects,
+            );
+        }
         let (table_name, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
         self.sync_visible_catalog_heaps(client_id);
@@ -938,7 +1314,7 @@ impl Database {
                 rel, &desc, &rows, &mut ctx, xid, 0,
             )
             .map(StatementResult::AffectedRows);
-            let result = self.finish_txn(client_id, xid, result);
+            let result = self.finish_txn(client_id, xid, result, &[]);
             guard.disarm();
             result
         }
@@ -1051,7 +1427,7 @@ impl Database {
                 };
                 let result = execute_insert(bound, &mut ctx, xid, 0);
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result);
+                let result = self.finish_txn(client_id, xid, result, &[]);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
@@ -1085,7 +1461,7 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter)),
                 );
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result);
+                let result = self.finish_txn(client_id, xid, result, &[]);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
@@ -1118,7 +1494,7 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter)),
                 );
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result);
+                let result = self.finish_txn(client_id, xid, result, &[]);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
@@ -1143,92 +1519,19 @@ impl Database {
             }
 
             Statement::DropTable(ref drop_stmt) => {
-                let relcache =
-                    self.visible_relcache_with_search_path(client_id, configured_search_path);
-                let rels = {
-                    drop_stmt
-                        .table_names
-                        .iter()
-                        .filter_map(|name| relcache.get_by_name(name).map(|e| e.rel))
-                        .collect::<Vec<_>>()
-                };
-                for rel in &rels {
-                    self.table_locks
-                        .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
-                }
-
-                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
-                let ctx = ExecutorContext {
-                    pool: std::sync::Arc::clone(&self.pool),
-                    txns: self.txns.clone(),
-                    snapshot,
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let mut catalog_effects = Vec::new();
+                let result = self.execute_drop_table_stmt_in_transaction_with_search_path(
                     client_id,
-                    next_command_id: 0,
-                    outer_rows: Vec::new(),
-                    timed: false,
-                };
-                let mut dropped = 0usize;
-                let mut result = Ok(StatementResult::AffectedRows(0));
-                for table_name in &drop_stmt.table_names {
-                    if self.temp_entry(client_id, table_name).is_some() {
-                        match self.drop_temp_relation(client_id, table_name) {
-                            Ok(_) => dropped += 1,
-                            Err(e) if drop_stmt.if_exists => {}
-                            Err(e) => {
-                                result = Err(e);
-                                break;
-                            }
-                        }
-                    } else {
-                        let relation_oid = match self
-                            .visible_relcache_with_search_path(client_id, configured_search_path)
-                            .get_by_name(table_name)
-                        {
-                            Some(entry) if entry.relkind == 'r' => entry.relation_oid,
-                            Some(_) | None if drop_stmt.if_exists => continue,
-                            Some(_) | None => {
-                                result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                                    table_name.clone(),
-                                )));
-                                break;
-                            }
-                        };
-                        let mut catalog_guard = self.catalog.write();
-                        match catalog_guard.drop_relation_by_oid(relation_oid) {
-                            Ok(entries) => {
-                                drop(catalog_guard);
-                                self.refresh_catalog_storage();
-                                for entry in entries {
-                                    let _ = ctx.pool.invalidate_relation(entry.rel);
-                                    ctx.pool.with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
-                                }
-                                dropped += 1;
-                                self.plan_cache.invalidate_all();
-                            }
-                            Err(CatalogError::UnknownTable(_)) if drop_stmt.if_exists => {}
-                            Err(CatalogError::UnknownTable(_)) => {
-                                result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                                    table_name.clone(),
-                                )));
-                                break;
-                            }
-                            Err(other) => {
-                                result = Err(ExecError::Parse(ParseError::UnexpectedToken {
-                                    expected: "droppable table",
-                                    actual: format!("{other:?}"),
-                                }));
-                                break;
-                            }
-                        }
-                    }
-                }
-                if result.is_ok() {
-                    result = Ok(StatementResult::AffectedRows(dropped));
-                }
-                drop(ctx);
-                for rel in rels {
-                    self.table_locks.unlock_table(rel, client_id);
-                }
+                    drop_stmt,
+                    xid,
+                    0,
+                    configured_search_path,
+                    &mut catalog_effects,
+                );
+                let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+                guard.disarm();
                 result
             }
 
@@ -1308,8 +1611,11 @@ impl Database {
 
         let (plan, rels) = {
             self.sync_visible_catalog_heaps(client_id);
-            let visible_catalog =
-                self.visible_catalog_with_search_path(client_id, configured_search_path);
+            let visible_catalog = self.visible_catalog_with_txn_search_path(
+                client_id,
+                txn_ctx,
+                configured_search_path,
+            );
             let plan = build_plan(select_stmt, &visible_catalog)?;
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
@@ -1546,11 +1852,73 @@ fn collect_rels_from_plan(
 }
 
 impl Database {
+    fn apply_catalog_mutation_effect_immediate(
+        &self,
+        effect: &CatalogMutationEffect,
+    ) -> Result<(), ExecError> {
+        for rel in &effect.created_rels {
+            self.pool.with_storage_mut(|s| {
+                let _ = s.smgr.open(*rel);
+                s.smgr
+                    .create(*rel, crate::backend::storage::smgr::ForkNumber::Main, true)
+            })
+            .map_err(|e| {
+                ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(e))
+            })?;
+        }
+        if !effect.touched_catalogs.is_empty()
+            || !effect.created_rels.is_empty()
+            || !effect.dropped_rels.is_empty()
+        {
+            self.plan_cache.invalidate_all();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finalize_committed_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
+        let mut touched_catalogs = Vec::new();
+        for effect in effects {
+            for &kind in &effect.touched_catalogs {
+                if !touched_catalogs.contains(&kind) {
+                    touched_catalogs.push(kind);
+                }
+            }
+        }
+        for kind in touched_catalogs {
+            let rel = bootstrap_catalog_entry(kind).rel;
+            let nblocks = self
+                .pool
+                .with_storage_mut(|s| s.smgr.nblocks(rel, crate::backend::storage::smgr::ForkNumber::Main))
+                .unwrap_or(0);
+            for block in 0..nblocks {
+                let _ = crate::backend::access::heap::heapam::heap_flush(&self.pool, 0, rel, block);
+            }
+        }
+        for effect in effects {
+            for rel in &effect.dropped_rels {
+                let _ = self.pool.invalidate_relation(*rel);
+                self.pool
+                    .with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
+            }
+        }
+    }
+
+    pub(crate) fn finalize_aborted_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
+        for effect in effects {
+            for rel in &effect.created_rels {
+                let _ = self.pool.invalidate_relation(*rel);
+                self.pool
+                    .with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
+            }
+        }
+    }
+
     fn finish_txn(
         &self,
         client_id: ClientId,
         xid: TransactionId,
         result: Result<StatementResult, ExecError>,
+        catalog_effects: &[CatalogMutationEffect],
     ) -> Result<StatementResult, ExecError> {
         match result {
             Ok(r) => {
@@ -1576,12 +1944,14 @@ impl Database {
                 self.txns.write().commit(xid).map_err(|e| {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
+                self.finalize_committed_catalog_effects(catalog_effects);
                 self.apply_temp_on_commit(client_id)?;
                 self.txn_waiter.notify();
                 Ok(r)
             }
             Err(e) => {
                 let _ = self.txns.write().abort(xid);
+                self.finalize_aborted_catalog_effects(catalog_effects);
                 self.txn_waiter.notify();
                 Err(e)
             }
