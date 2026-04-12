@@ -1370,10 +1370,6 @@ fn parse_insert_update_delete() {
     assert!(
         matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, .. }) if table_name == "people")
     );
-    assert!(matches!(
-        parse_statement("show tables").unwrap(),
-        Statement::ShowTables
-    ));
 }
 
 #[test]
@@ -1392,6 +1388,11 @@ fn parse_create_table_with_varchar_types() {
             }
             other => panic!("expected create table, got {other:?}"),
         }
+}
+
+#[test]
+fn parse_rejects_show_tables() {
+    assert!(parse_statement("show tables").is_err());
 }
 
 #[test]

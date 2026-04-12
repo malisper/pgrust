@@ -83,18 +83,6 @@ pub(crate) fn execute_explain(
     })
 }
 
-pub fn execute_show_tables(catalog: &dyn CatalogLookup) -> Result<StatementResult, ExecError> {
-    let names = catalog.visible_table_names();
-    Ok(StatementResult::Query {
-        columns: vec![QueryColumn::text("table_name")],
-        column_names: vec!["table_name".into()],
-        rows: names
-            .into_iter()
-            .map(|name| vec![Value::Text(name.into())])
-            .collect(),
-    })
-}
-
 fn validate_maintenance_targets(
     targets: &[MaintenanceTarget],
     catalog: &dyn CatalogLookup,

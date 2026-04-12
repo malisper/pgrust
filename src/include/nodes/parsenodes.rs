@@ -136,7 +136,6 @@ pub enum Statement {
     Analyze(AnalyzeStatement),
     Set(SetStatement),
     Reset(ResetStatement),
-    ShowTables,
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
     CreateIndex(CreateIndexStatement),

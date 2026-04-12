@@ -14,8 +14,8 @@ use crate::backend::executor::{
     RelationDesc, TargetEntry, Value,
 };
 use crate::include::catalog::{
-    PG_CATALOG_NAMESPACE_OID, PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 use super::parsenodes::*;
@@ -32,7 +32,6 @@ use scope::*;
 
 pub trait CatalogLookup {
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation>;
-    fn visible_table_names(&self) -> Vec<String>;
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         let normalized = normalize_catalog_lookup_name(name);
@@ -96,20 +95,6 @@ impl CatalogLookup for Catalog {
             })
         })
     }
-
-    fn visible_table_names(&self) -> Vec<String> {
-        let mut names = self
-            .entries()
-            .filter(|(_, entry)| entry.relkind == 'r')
-            .filter(|(_, entry)| entry.namespace_oid != PG_CATALOG_NAMESPACE_OID)
-            .map(|(name, _)| name)
-            .filter(|name| !name.contains('.'))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        names.sort();
-        names.dedup();
-        names
-    }
 }
 
 impl CatalogLookup for RelCache {
@@ -121,20 +106,6 @@ impl CatalogLookup for RelCache {
                 desc: entry.desc.clone(),
             })
         })
-    }
-
-    fn visible_table_names(&self) -> Vec<String> {
-        let mut names = self
-            .entries()
-            .filter(|(_, entry)| entry.relkind == 'r')
-            .filter(|(_, entry)| entry.namespace_oid != PG_CATALOG_NAMESPACE_OID)
-            .map(|(name, _)| name)
-            .filter(|name| !name.contains('.'))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        names.sort();
-        names.dedup();
-        names
     }
 }
 

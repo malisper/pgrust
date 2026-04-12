@@ -497,18 +497,6 @@ fn run_statement(
             };
             execute_readonly_statement(Statement::Values(stmt), &relcache, &mut ctx)
         }
-        Statement::ShowTables => {
-            let mut ctx = ExecutorContext {
-                pool: std::sync::Arc::clone(pool),
-                txns: txns.clone(),
-                snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
-                client_id: 21,
-                next_command_id: 0,
-                outer_rows: Vec::new(),
-                timed: false,
-            };
-            execute_readonly_statement(Statement::ShowTables, &relcache, &mut ctx)
-        }
         Statement::Analyze(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),

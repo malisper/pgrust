@@ -1274,20 +1274,6 @@ fn null_predicates_work_in_where_clause() {
     }
 }
 #[test]
-fn show_tables_lists_catalog_tables() {
-    let base = temp_dir("show_tables");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "show tables").unwrap() {
-        StatementResult::Query {
-            column_names, rows, ..
-        } => {
-            assert_eq!(column_names, vec!["table_name".to_string()]);
-            assert_eq!(rows, vec![vec![Value::Text("people".into())]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-#[test]
 fn explain_returns_plan_lines() {
     let base = temp_dir("explain_sql");
     let txns = TransactionManager::new_durable(&base).unwrap();

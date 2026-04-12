@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | show_tables_stmt | create_index_stmt | alter_table_set_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_set_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -33,7 +33,6 @@ set_value_list = { set_value_atom ~ ("," ~ set_value_atom)* }
 set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | quoted_string_literal | identifier | numeric_literal | integer }
 signed_set_value = { ("+" | "-") ~ (numeric_literal | integer | identifier) }
 
-show_tables_stmt = { kw_show ~ kw_tables }
 insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ (insert_values_source | insert_default_values_source | select_stmt) }
 insert_values_source = { kw_values ~ values_row ~ ("," ~ values_row)* }
 insert_default_values_source = { kw_default ~ kw_values }

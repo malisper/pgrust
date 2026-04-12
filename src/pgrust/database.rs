@@ -1322,7 +1322,7 @@ impl Database {
             // :HACK: numeric.sql also sets parallel_workers reloptions. Accept and ignore that
             // narrow ALTER TABLE form until table reloptions are represented properly.
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
-            Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
+            Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let needs_temp_sync = statement_needs_temp_catalog_sync(&stmt);
                 if needs_temp_sync {
                     self.sync_visible_catalog_heaps(client_id);
@@ -1351,7 +1351,6 @@ impl Database {
                                 collect_rels_from_plan(&plan, &mut rels);
                             }
                         }
-                        Statement::ShowTables => {}
                         _ => unreachable!(),
                     }
                     (stmt, rels.into_iter().collect::<Vec<_>>())
@@ -1714,7 +1713,7 @@ pub(crate) fn statement_needs_temp_catalog_sync(stmt: &Statement) -> bool {
     match stmt {
         Statement::Select(select) => select_statement_needs_temp_catalog_sync(select),
         Statement::Explain(explain) => statement_needs_temp_catalog_sync(explain.statement.as_ref()),
-        Statement::Values(_) | Statement::ShowTables => false,
+        Statement::Values(_) => false,
         _ => false,
     }
 }
