@@ -610,14 +610,13 @@ fn psql_describe_lookup_query(
 ) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
     let relation_name = extract_psql_pattern_name(sql);
     let rows = relation_name
-        .and_then(|name| relcache.get_by_name(name))
-        .map(|entry| {
+        .and_then(|name| relcache.get_by_name(name).map(|entry| (name, entry)))
+        .map(|(name, entry)| {
             let nspname = visible_relation_namespace_name(relcache, entry.relation_oid)
+                .or_else(|| name.split_once('.').map(|(schema, _)| schema.to_string()))
                 .unwrap_or_else(|| "public".to_string());
             let relname = visible_relation_unqualified_name(relcache, entry.relation_oid)
-                .unwrap_or_else(|| {
-                    unqualified_relation_name(sql).unwrap_or_else(|| "bit_defaults".into())
-                });
+                .unwrap_or_else(|| name.rsplit('.').next().unwrap_or(name).to_string());
             vec![vec![
                 Value::Int32(entry.relation_oid as i32),
                 Value::Text(nspname.into()),
@@ -882,10 +881,6 @@ fn extract_quoted_oid_with_markers(sql: &str, markers: &[&str]) -> Option<u32> {
     let rest = &sql[start..];
     let end = rest.find('\'')?;
     rest[..end].parse::<u32>().ok()
-}
-
-fn unqualified_relation_name(sql: &str) -> Option<String> {
-    extract_psql_pattern_name(sql).map(|name| name.rsplit('.').next().unwrap_or(name).to_string())
 }
 
 fn format_psql_type(sql_type: SqlType) -> String {
