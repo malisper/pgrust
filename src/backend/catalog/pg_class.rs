@@ -1,4 +1,4 @@
-use crate::include::catalog::{PgClassRow, relam_for_relkind};
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgClassRow, relam_for_relkind};
 
 pub fn relkind_for_plain_table() -> PgClassRow {
     PgClassRow {
@@ -6,6 +6,7 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         relname: String::new(),
         relnamespace: 0,
         reltype: 0,
+        relowner: BOOTSTRAP_SUPERUSER_OID,
         relam: relam_for_relkind('r'),
         relfilenode: 0,
         relpersistence: 'p',

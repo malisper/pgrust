@@ -475,7 +475,11 @@ fn insert_catalog_rows(
 }
 
 fn namespace_row_values(row: PgNamespaceRow) -> Vec<Value> {
-    vec![Value::Int32(row.oid as i32), Value::Text(row.nspname.into())]
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.nspname.into()),
+        Value::Int32(row.nspowner as i32),
+    ]
 }
 
 fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
@@ -484,6 +488,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Text(row.relname.into()),
         Value::Int32(row.relnamespace as i32),
         Value::Int32(row.reltype as i32),
+        Value::Int32(row.relowner as i32),
         Value::Int32(row.relam as i32),
         Value::Int32(row.relfilenode as i32),
         Value::Text(row.relpersistence.to_string().into()),
@@ -531,6 +536,7 @@ fn pg_database_row_values(row: PgDatabaseRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
         Value::Text(row.datname.into()),
+        Value::Int32(row.datdba as i32),
         Value::Int32(row.dattablespace as i32),
         Value::Bool(row.datistemplate),
         Value::Bool(row.datallowconn),
@@ -538,7 +544,11 @@ fn pg_database_row_values(row: PgDatabaseRow) -> Vec<Value> {
 }
 
 fn pg_tablespace_row_values(row: PgTablespaceRow) -> Vec<Value> {
-    vec![Value::Int32(row.oid as i32), Value::Text(row.spcname.into())]
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.spcname.into()),
+        Value::Int32(row.spcowner as i32),
+    ]
 }
 
 fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
@@ -557,6 +567,7 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Int32(row.oid as i32),
         Value::Text(row.typname.into()),
         Value::Int32(row.typnamespace as i32),
+        Value::Int32(row.typowner as i32),
         Value::Int32(row.typrelid as i32),
     ]
 }
@@ -1049,16 +1060,17 @@ fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespaceRow, Catal
     Ok(PgNamespaceRow {
         oid: expect_oid(&values[0])?,
         nspname: expect_text(&values[1])?,
+        nspowner: expect_oid(&values[2])?,
     })
 }
 
 fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
-    let relpersistence = match &values[6] {
+    let relpersistence = match &values[7] {
         Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relpersistence"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected relpersistence text")),
     };
-    let relkind = match &values[7] {
+    let relkind = match &values[8] {
         Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relkind"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected relkind text")),
@@ -1068,8 +1080,9 @@ fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogErr
         relname: expect_text(&values[1])?,
         relnamespace: expect_oid(&values[2])?,
         reltype: expect_oid(&values[3])?,
-        relam: expect_oid(&values[4])?,
-        relfilenode: expect_oid(&values[5])?,
+        relowner: expect_oid(&values[4])?,
+        relam: expect_oid(&values[5])?,
+        relfilenode: expect_oid(&values[6])?,
         relpersistence,
         relkind,
     })
@@ -1120,9 +1133,10 @@ fn pg_database_row_from_values(values: Vec<Value>) -> Result<PgDatabaseRow, Cata
     Ok(PgDatabaseRow {
         oid: expect_oid(&values[0])?,
         datname: expect_text(&values[1])?,
-        dattablespace: expect_oid(&values[2])?,
-        datistemplate: expect_bool(&values[3])?,
-        datallowconn: expect_bool(&values[4])?,
+        datdba: expect_oid(&values[2])?,
+        dattablespace: expect_oid(&values[3])?,
+        datistemplate: expect_bool(&values[4])?,
+        datallowconn: expect_bool(&values[5])?,
     })
 }
 
@@ -1130,6 +1144,7 @@ fn pg_tablespace_row_from_values(values: Vec<Value>) -> Result<PgTablespaceRow, 
     Ok(PgTablespaceRow {
         oid: expect_oid(&values[0])?,
         spcname: expect_text(&values[1])?,
+        spcowner: expect_oid(&values[2])?,
     })
 }
 
@@ -1187,12 +1202,12 @@ fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow, CatalogErr
 
 fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, CatalogError> {
     let oid = expect_oid(&values[0])?;
-    let typrelid = expect_oid(&values[3])?;
     Ok(PgTypeRow {
         oid,
         typname: expect_text(&values[1])?,
         typnamespace: expect_oid(&values[2])?,
-        typrelid,
+        typowner: expect_oid(&values[3])?,
+        typrelid: expect_oid(&values[4])?,
         sql_type: decode_builtin_sql_type(oid).unwrap_or(SqlType::new(SqlTypeKind::Text)),
     })
 }
@@ -1505,6 +1520,7 @@ mod tests {
         assert!(rows.databases.iter().any(|row| {
             row.oid == 1
                 && row.datname == CURRENT_DATABASE_NAME
+                && row.datdba == BOOTSTRAP_SUPERUSER_OID
                 && row.dattablespace == DEFAULT_TABLESPACE_OID
                 && !row.datistemplate
                 && row.datallowconn
@@ -1518,11 +1534,14 @@ mod tests {
         let rows = load_physical_catalog_rows(&base).unwrap();
 
         assert!(rows.tablespaces.iter().any(|row| {
-            row.oid == DEFAULT_TABLESPACE_OID && row.spcname == "pg_default"
+            row.oid == DEFAULT_TABLESPACE_OID
+                && row.spcname == "pg_default"
+                && row.spcowner == BOOTSTRAP_SUPERUSER_OID
         }));
         assert!(rows.tablespaces.iter().any(|row| {
             row.oid == crate::include::catalog::GLOBAL_TABLESPACE_OID
                 && row.spcname == "pg_global"
+                && row.spcowner == BOOTSTRAP_SUPERUSER_OID
         }));
     }
 
@@ -1977,7 +1996,9 @@ mod tests {
 
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.tablespaces.iter().any(|row| {
-            row.oid == DEFAULT_TABLESPACE_OID && row.spcname == "pg_default"
+            row.oid == DEFAULT_TABLESPACE_OID
+                && row.spcname == "pg_default"
+                && row.spcowner == BOOTSTRAP_SUPERUSER_OID
         }));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
