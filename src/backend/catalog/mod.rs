@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod catalog;
 pub mod namespace;
+pub mod persistence;
 pub mod rowcodec;
 pub mod rows;
 pub mod state;
