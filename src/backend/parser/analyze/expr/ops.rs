@@ -15,16 +15,8 @@ pub(super) fn bind_arithmetic_expr(
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let left_type = coerce_unknown_string_literal_type(
-        left,
-        raw_left_type,
-        raw_right_type,
-    );
-    let right_type = coerce_unknown_string_literal_type(
-        right,
-        raw_right_type,
-        left_type,
-    );
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
@@ -49,20 +41,13 @@ pub(super) fn bind_comparison_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
+    let op = comparison_operator_name(make);
     let raw_left_type =
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let left_type = coerce_unknown_string_literal_type(
-        left,
-        raw_left_type,
-        raw_right_type,
-    );
-    let right_type = coerce_unknown_string_literal_type(
-        right,
-        raw_right_type,
-        left_type,
-    );
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
     let left_bound =
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     let right_bound =
@@ -71,23 +56,71 @@ pub(super) fn bind_comparison_expr(
         let common = if is_oid_integer_comparison(left_type, right_type) {
             SqlType::new(SqlTypeKind::Oid)
         } else {
-            resolve_numeric_binary_type("=", left_type, right_type)?
+            resolve_numeric_binary_type(op, left_type, right_type)?
         };
         (
             coerce_bound_expr(left_bound, raw_left_type, common),
             coerce_bound_expr(right_bound, raw_right_type, common),
         )
     } else {
-        (left_bound, right_bound)
+        let (left, right, resolved_left_type, resolved_right_type) =
+            if !left_type.is_array && !right_type.is_array {
+                if let Some(common) =
+                    resolve_common_scalar_type(left_type, right_type).filter(|ty| !is_numeric_family(*ty))
+                {
+                    (
+                        coerce_bound_expr(left_bound, raw_left_type, common),
+                        coerce_bound_expr(right_bound, raw_right_type, common),
+                        common,
+                        common,
+                    )
+                } else {
+                    (left_bound, right_bound, left_type, right_type)
+                }
+            } else {
+                (left_bound, right_bound, left_type, right_type)
+            };
+        if !comparison_operator_exists(op, resolved_left_type, resolved_right_type) {
+            return Err(ParseError::UndefinedOperator {
+                op,
+                left_type: sql_type_name(resolved_left_type),
+                right_type: sql_type_name(resolved_right_type),
+            });
+        }
+        (left, right)
     };
     Ok(make(Box::new(left), Box::new(right)))
+}
+
+fn comparison_operator_name(make: fn(Box<Expr>, Box<Expr>) -> Expr) -> &'static str {
+    if std::ptr::fn_addr_eq(make, Expr::Eq as fn(Box<Expr>, Box<Expr>) -> Expr) {
+        "="
+    } else if std::ptr::fn_addr_eq(make, Expr::NotEq as fn(Box<Expr>, Box<Expr>) -> Expr) {
+        "<>"
+    } else if std::ptr::fn_addr_eq(make, Expr::Lt as fn(Box<Expr>, Box<Expr>) -> Expr) {
+        "<"
+    } else if std::ptr::fn_addr_eq(make, Expr::LtEq as fn(Box<Expr>, Box<Expr>) -> Expr) {
+        "<="
+    } else if std::ptr::fn_addr_eq(make, Expr::Gt as fn(Box<Expr>, Box<Expr>) -> Expr) {
+        ">"
+    } else if std::ptr::fn_addr_eq(make, Expr::GtEq as fn(Box<Expr>, Box<Expr>) -> Expr) {
+        ">="
+    } else {
+        unreachable!("unsupported comparison expression constructor")
+    }
 }
 
 fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
     !left.is_array
         && !right.is_array
-        && matches!(left.kind, SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8)
-        && matches!(right.kind, SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8)
+        && matches!(
+            left.kind,
+            SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+        )
+        && matches!(
+            right.kind,
+            SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+        )
         && (matches!(left.kind, SqlTypeKind::Oid) || matches!(right.kind, SqlTypeKind::Oid))
 }
 
@@ -117,7 +150,14 @@ pub(super) fn bind_shift_expr(
         let left =
             bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
         let right = coerce_bound_expr(
-            bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+            bind_expr_with_outer_and_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
             right_type,
             SqlType::new(SqlTypeKind::Int4),
         );
@@ -157,14 +197,22 @@ pub(super) fn bind_bitwise_expr(
     let right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     if is_bit_string_type(left_type) && is_bit_string_type(right_type) {
-        let common = resolve_common_scalar_type(left_type, right_type).unwrap_or(SqlType::new(SqlTypeKind::VarBit));
+        let common = resolve_common_scalar_type(left_type, right_type)
+            .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
         let left = coerce_bound_expr(
             bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
             left_type,
             common,
         );
         let right = coerce_bound_expr(
-            bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+            bind_expr_with_outer_and_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
             right_type,
             common,
         );
