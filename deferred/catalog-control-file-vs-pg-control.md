@@ -25,6 +25,9 @@ Remaining differences from PostgreSQL:
 - Cache/index machinery:
   - PostgreSQL relies heavily on system-catalog indexes plus syscache/invalidation machinery.
   - `pgrust` cache warming still depends on scanning the physical core catalogs; there are no physical system-catalog indexes yet.
+- Cache publication/coherency:
+  - PostgreSQL keeps syscache/relcache entries per backend and propagates precise invalidation messages at command end and commit, so other backends can drop or rebuild only the affected metadata.
+  - `pgrust` currently keeps one process-wide committed visible cache in [src/pgrust/database.rs](src/pgrust/database.rs:81) and invalidates it with a single `catalog_cache_epoch` bump in [src/pgrust/database.rs](src/pgrust/database.rs:236). The next non-transactional, non-temp lookup lazily rebuilds the full committed `RelCache`/`CatCache` snapshot instead of consuming targeted object-level invalidations.
 - Temp catalog visibility:
   - PostgreSQL integrates temp namespaces and temp catalog visibility directly into its namespace/catalog machinery.
   - `pgrust` projects temp catalog rows into session-specific core catalog heaps so catalog queries see them, which is simpler and more ad hoc.
@@ -39,7 +42,9 @@ Why this matters:
 - The durable source of truth is now much closer to PostgreSQL, but the implementation still mixes two models:
   - physical core catalogs for persisted data and query visibility
   - compatibility `Catalog` snapshots for mutation and some internal APIs
-- The biggest remaining gap is not catalog visibility anymore; it is making catalog tuples, relcache, and catcache the only real metadata path.
+- The biggest remaining gaps are:
+  - making catalog tuples, relcache, and catcache the only real metadata path
+  - deciding whether cache coherency should stay coarse-grained and epoch-based or move closer to PostgreSQL's targeted invalidation model
 
 Preferred follow-up:
 - remove `Catalog` / `CatalogEntry` from production mutation paths and replace them with direct catalog-tuple mutation helpers
