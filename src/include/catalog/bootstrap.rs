@@ -13,6 +13,7 @@ pub const PG_COLLATION_RELATION_OID: u32 = 3456;
 pub const PG_TABLESPACE_RELATION_OID: u32 = 1213;
 pub const PG_AM_RELATION_OID: u32 = 2601;
 pub const PG_ATTRDEF_RELATION_OID: u32 = 2604;
+pub const PG_CAST_RELATION_OID: u32 = 2605;
 pub const PG_DEPEND_RELATION_OID: u32 = 2608;
 pub const PG_INDEX_RELATION_OID: u32 = 2610;
 pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
@@ -84,6 +85,7 @@ pub enum BootstrapCatalogKind {
     PgTablespace,
     PgAm,
     PgAttrdef,
+    PgCast,
     PgDepend,
     PgIndex,
 }
@@ -102,6 +104,7 @@ impl BootstrapCatalogKind {
             Self::PgTablespace => PG_TABLESPACE_RELATION_OID,
             Self::PgAm => PG_AM_RELATION_OID,
             Self::PgAttrdef => PG_ATTRDEF_RELATION_OID,
+            Self::PgCast => PG_CAST_RELATION_OID,
             Self::PgDepend => PG_DEPEND_RELATION_OID,
             Self::PgIndex => PG_INDEX_RELATION_OID,
         }
@@ -120,6 +123,7 @@ impl BootstrapCatalogKind {
             Self::PgTablespace => "pg_tablespace",
             Self::PgAm => "pg_am",
             Self::PgAttrdef => "pg_attrdef",
+            Self::PgCast => "pg_cast",
             Self::PgDepend => "pg_depend",
             Self::PgIndex => "pg_index",
         }
@@ -138,13 +142,14 @@ impl BootstrapCatalogKind {
             Self::PgTablespace => 0,
             Self::PgAm => PG_AM_ROWTYPE_OID,
             Self::PgAttrdef => PG_ATTRDEF_ROWTYPE_OID,
+            Self::PgCast => 0,
             Self::PgDepend => PG_DEPEND_ROWTYPE_OID,
             Self::PgIndex => PG_INDEX_ROWTYPE_OID,
         }
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 13] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 14] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgAttribute,
@@ -156,11 +161,12 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 13] = [
     BootstrapCatalogKind::PgTablespace,
     BootstrapCatalogKind::PgAm,
     BootstrapCatalogKind::PgAttrdef,
+    BootstrapCatalogKind::PgCast,
     BootstrapCatalogKind::PgDepend,
     BootstrapCatalogKind::PgIndex,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 13] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 14] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -177,6 +183,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgTablespace => pg_tablespace_desc(),
         BootstrapCatalogKind::PgAm => pg_am_desc(),
         BootstrapCatalogKind::PgAttrdef => pg_attrdef_desc(),
+        BootstrapCatalogKind::PgCast => pg_cast_desc(),
         BootstrapCatalogKind::PgDepend => pg_depend_desc(),
         BootstrapCatalogKind::PgIndex => pg_index_desc(),
     }
@@ -186,7 +193,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 13] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 14] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -232,6 +239,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 13] = [
         name: "pg_attrdef",
     },
     BootstrapCatalogRelation {
+        oid: PG_CAST_RELATION_OID,
+        name: "pg_cast",
+    },
+    BootstrapCatalogRelation {
         oid: PG_DEPEND_RELATION_OID,
         name: "pg_depend",
     },
@@ -258,8 +269,9 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[8].oid, PG_TABLESPACE_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[9].oid, PG_AM_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[10].oid, PG_ATTRDEF_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[11].oid, PG_DEPEND_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[12].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[11].oid, PG_CAST_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[12].oid, PG_DEPEND_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[13].oid, PG_INDEX_RELATION_OID);
     }
 
     #[test]
@@ -279,6 +291,7 @@ mod tests {
                 "pg_tablespace",
                 "pg_am",
                 "pg_attrdef",
+                "pg_cast",
                 "pg_depend",
                 "pg_index",
             ]
@@ -301,6 +314,6 @@ mod tests {
 use crate::backend::executor::RelationDesc;
 use super::{
     pg_am_desc, pg_attrdef_desc, pg_attribute_desc, pg_auth_members_desc, pg_authid_desc,
-    pg_class_desc, pg_collation_desc, pg_database_desc, pg_depend_desc, pg_index_desc,
-    pg_namespace_desc, pg_tablespace_desc, pg_type_desc,
+    pg_cast_desc, pg_class_desc, pg_collation_desc, pg_database_desc, pg_depend_desc,
+    pg_index_desc, pg_namespace_desc, pg_tablespace_desc, pg_type_desc,
 };

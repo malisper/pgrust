@@ -6,6 +6,7 @@ use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
 use crate::backend::catalog::pg_auth_members::sort_pg_auth_members_rows;
 use crate::backend::catalog::pg_authid::sort_pg_authid_rows;
+use crate::backend::catalog::pg_cast::sort_pg_cast_rows;
 use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
@@ -24,13 +25,14 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PgAmRow,
-    PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
-    PgDatabaseRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow, PgTypeRow,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
+    PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow,
+    PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
+    bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_namespace_rows, bootstrap_pg_tablespace_rows,
+    builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +48,7 @@ pub struct CatCache {
     am_rows: Vec<PgAmRow>,
     authid_rows: Vec<PgAuthIdRow>,
     auth_members_rows: Vec<PgAuthMembersRow>,
+    cast_rows: Vec<PgCastRow>,
     collation_rows: Vec<PgCollationRow>,
     database_rows: Vec<PgDatabaseRow>,
     tablespace_rows: Vec<PgTablespaceRow>,
@@ -85,6 +88,8 @@ impl CatCache {
             .auth_members_rows
             .extend(bootstrap_pg_auth_members_rows());
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
+        cache.cast_rows.extend(bootstrap_pg_cast_rows());
+        sort_pg_cast_rows(&mut cache.cast_rows);
         cache.collation_rows.extend(bootstrap_pg_collation_rows());
         sort_pg_collation_rows(&mut cache.collation_rows);
         cache.database_rows.extend(bootstrap_pg_database_rows());
@@ -216,6 +221,7 @@ impl CatCache {
             rows.ams,
             rows.authids,
             rows.auth_members,
+            rows.casts,
             rows.collations,
             rows.databases,
             rows.tablespaces,
@@ -233,6 +239,7 @@ impl CatCache {
         am_rows: Vec<PgAmRow>,
         authid_rows: Vec<PgAuthIdRow>,
         auth_members_rows: Vec<PgAuthMembersRow>,
+        cast_rows: Vec<PgCastRow>,
         collation_rows: Vec<PgCollationRow>,
         database_rows: Vec<PgDatabaseRow>,
         tablespace_rows: Vec<PgTablespaceRow>,
@@ -280,6 +287,8 @@ impl CatCache {
         sort_pg_authid_rows(&mut cache.authid_rows);
         cache.auth_members_rows = auth_members_rows;
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
+        cache.cast_rows = cast_rows;
+        sort_pg_cast_rows(&mut cache.cast_rows);
         cache.collation_rows = collation_rows;
         sort_pg_collation_rows(&mut cache.collation_rows);
         cache.database_rows = database_rows;
@@ -367,6 +376,10 @@ impl CatCache {
         self.auth_members_rows.clone()
     }
 
+    pub fn cast_rows(&self) -> Vec<PgCastRow> {
+        self.cast_rows.clone()
+    }
+
     pub fn collation_rows(&self) -> Vec<PgCollationRow> {
         self.collation_rows.clone()
     }
@@ -447,9 +460,10 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
         CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
-        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
-        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID,
+        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID,
+        OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID,
+        VARCHAR_TYPE_OID,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -583,6 +597,17 @@ mod tests {
                 && row.rolsuper
         }));
         assert!(cache.auth_members_rows().is_empty());
+        assert!(cache.cast_rows().iter().any(|row| {
+            row.castsource == INT4_TYPE_OID
+                && row.casttarget == OID_TYPE_OID
+                && row.castcontext == 'i'
+                && row.castmethod == 'b'
+        }));
+        assert!(cache.cast_rows().iter().any(|row| {
+            row.castsource == VARCHAR_TYPE_OID
+                && row.casttarget == TEXT_TYPE_OID
+                && row.castcontext == 'i'
+        }));
         assert_eq!(
             cache
                 .collation_rows()
