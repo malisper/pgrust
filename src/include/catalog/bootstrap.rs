@@ -9,6 +9,7 @@ pub const PG_CLASS_RELATION_OID: u32 = 1259;
 pub const PG_AUTHID_RELATION_OID: u32 = 1260;
 pub const PG_AUTH_MEMBERS_RELATION_OID: u32 = 1261;
 pub const PG_DATABASE_RELATION_OID: u32 = 1262;
+pub const PG_COLLATION_RELATION_OID: u32 = 3456;
 pub const PG_TABLESPACE_RELATION_OID: u32 = 1213;
 pub const PG_AM_RELATION_OID: u32 = 2601;
 pub const PG_ATTRDEF_RELATION_OID: u32 = 2604;
@@ -79,6 +80,7 @@ pub enum BootstrapCatalogKind {
     PgDatabase,
     PgAuthId,
     PgAuthMembers,
+    PgCollation,
     PgTablespace,
     PgAm,
     PgAttrdef,
@@ -96,6 +98,7 @@ impl BootstrapCatalogKind {
             Self::PgDatabase => PG_DATABASE_RELATION_OID,
             Self::PgAuthId => PG_AUTHID_RELATION_OID,
             Self::PgAuthMembers => PG_AUTH_MEMBERS_RELATION_OID,
+            Self::PgCollation => PG_COLLATION_RELATION_OID,
             Self::PgTablespace => PG_TABLESPACE_RELATION_OID,
             Self::PgAm => PG_AM_RELATION_OID,
             Self::PgAttrdef => PG_ATTRDEF_RELATION_OID,
@@ -113,6 +116,7 @@ impl BootstrapCatalogKind {
             Self::PgDatabase => "pg_database",
             Self::PgAuthId => "pg_authid",
             Self::PgAuthMembers => "pg_auth_members",
+            Self::PgCollation => "pg_collation",
             Self::PgTablespace => "pg_tablespace",
             Self::PgAm => "pg_am",
             Self::PgAttrdef => "pg_attrdef",
@@ -130,6 +134,7 @@ impl BootstrapCatalogKind {
             Self::PgDatabase => PG_DATABASE_ROWTYPE_OID,
             Self::PgAuthId => 0,
             Self::PgAuthMembers => 0,
+            Self::PgCollation => 0,
             Self::PgTablespace => 0,
             Self::PgAm => PG_AM_ROWTYPE_OID,
             Self::PgAttrdef => PG_ATTRDEF_ROWTYPE_OID,
@@ -139,13 +144,14 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 12] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 13] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgAttribute,
     BootstrapCatalogKind::PgClass,
     BootstrapCatalogKind::PgAuthId,
     BootstrapCatalogKind::PgAuthMembers,
+    BootstrapCatalogKind::PgCollation,
     BootstrapCatalogKind::PgDatabase,
     BootstrapCatalogKind::PgTablespace,
     BootstrapCatalogKind::PgAm,
@@ -154,7 +160,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 12] = [
     BootstrapCatalogKind::PgIndex,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 12] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 13] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -167,6 +173,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgDatabase => pg_database_desc(),
         BootstrapCatalogKind::PgAuthId => pg_authid_desc(),
         BootstrapCatalogKind::PgAuthMembers => pg_auth_members_desc(),
+        BootstrapCatalogKind::PgCollation => pg_collation_desc(),
         BootstrapCatalogKind::PgTablespace => pg_tablespace_desc(),
         BootstrapCatalogKind::PgAm => pg_am_desc(),
         BootstrapCatalogKind::PgAttrdef => pg_attrdef_desc(),
@@ -179,7 +186,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 12] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 13] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -203,6 +210,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 12] = [
     BootstrapCatalogRelation {
         oid: PG_AUTH_MEMBERS_RELATION_OID,
         name: "pg_auth_members",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_COLLATION_RELATION_OID,
+        name: "pg_collation",
     },
     BootstrapCatalogRelation {
         oid: PG_DATABASE_RELATION_OID,
@@ -242,12 +253,13 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[3].oid, PG_CLASS_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[4].oid, PG_AUTHID_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[5].oid, PG_AUTH_MEMBERS_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[6].oid, PG_DATABASE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[7].oid, PG_TABLESPACE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[8].oid, PG_AM_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[9].oid, PG_ATTRDEF_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[10].oid, PG_DEPEND_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[11].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[6].oid, PG_COLLATION_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[7].oid, PG_DATABASE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[8].oid, PG_TABLESPACE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[9].oid, PG_AM_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[10].oid, PG_ATTRDEF_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[11].oid, PG_DEPEND_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[12].oid, PG_INDEX_RELATION_OID);
     }
 
     #[test]
@@ -262,6 +274,7 @@ mod tests {
                 "pg_class",
                 "pg_authid",
                 "pg_auth_members",
+                "pg_collation",
                 "pg_database",
                 "pg_tablespace",
                 "pg_am",
@@ -288,6 +301,6 @@ mod tests {
 use crate::backend::executor::RelationDesc;
 use super::{
     pg_am_desc, pg_attrdef_desc, pg_attribute_desc, pg_auth_members_desc, pg_authid_desc,
-    pg_class_desc, pg_database_desc, pg_depend_desc, pg_index_desc, pg_namespace_desc,
-    pg_tablespace_desc, pg_type_desc,
+    pg_class_desc, pg_collation_desc, pg_database_desc, pg_depend_desc, pg_index_desc,
+    pg_namespace_desc, pg_tablespace_desc, pg_type_desc,
 };
