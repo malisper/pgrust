@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde_json::Value as JsonValue;
+
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert, heap_scan_begin, heap_scan_next};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::catalog::catalog::{column_desc, Catalog, CatalogEntry, CatalogError};
-use crate::backend::catalog::defaults::{load_default_exprs, persist_default_exprs};
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::value_io::decode_value;
@@ -15,7 +16,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
+    BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
     bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_relation_desc,
     builtin_type_rows,
 };
@@ -31,6 +32,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub namespaces: Vec<PgNamespaceRow>,
     pub classes: Vec<PgClassRow>,
     pub attributes: Vec<PgAttributeRow>,
+    pub attrdefs: Vec<PgAttrdefRow>,
     pub types: Vec<PgTypeRow>,
 }
 
@@ -140,7 +142,6 @@ impl CatalogStore {
                 bootstrap_complete: true,
             },
         )?;
-        persist_default_exprs(&self.base_dir, catalog)?;
         sync_physical_catalogs(&self.base_dir, catalog)
     }
 }
@@ -246,6 +247,20 @@ pub(crate) fn sync_catalog_rows(
             .map(pg_attribute_row_values)
             .collect(),
     )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgAttrdef.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttrdef),
+        rows.attrdefs
+            .iter()
+            .cloned()
+            .map(pg_attrdef_row_values)
+            .collect(),
+    )?;
     Ok(())
 }
 
@@ -254,6 +269,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         namespaces: catcache.namespace_rows(),
         classes: catcache.class_rows(),
         attributes: catcache.attribute_rows(),
+        attrdefs: catcache.attrdef_rows(),
         types: catcache.type_rows(),
     }
 }
@@ -315,6 +331,15 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
     ]
 }
 
+fn pg_attrdef_row_values(row: PgAttrdefRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.adrelid as i32),
+        Value::Int16(row.adnum),
+        Value::Text(row.adbin.into()),
+    ]
+}
+
 fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), CatalogError> {
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&CONTROL_FILE_MAGIC.to_le_bytes());
@@ -325,14 +350,12 @@ fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), Cat
 }
 
 fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
-    // :HACK: Merge defaults from the temporary sidecar store until pg_attrdef or
-    // equivalent catalog-backed default metadata exists.
-    let default_exprs = load_default_exprs(base_dir)?;
     let rows = load_physical_catalog_rows(base_dir)?;
     let namespace_rows = rows.namespaces;
     let type_rows = rows.types;
     let class_rows = rows.classes;
     let attribute_rows = rows.attributes;
+    let attrdef_rows = rows.attrdefs;
 
     let namespace_names = namespace_rows
         .iter()
@@ -349,11 +372,40 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     for rows in attrs_by_relid.values_mut() {
         rows.sort_by_key(|row| row.attnum);
     }
+    let attrdefs_by_key = attrdef_rows
+        .into_iter()
+        .map(|row| ((row.adrelid, row.adnum), row))
+        .collect::<BTreeMap<_, _>>();
+    // :HACK: Keep a one-time compatibility path for stores created before `pg_attrdef`
+    // existed. Once old datadirs no longer need migration, delete this fallback and
+    // require defaults to come only from `pg_attrdef`.
+    let legacy_default_exprs = load_legacy_default_exprs(base_dir)?;
 
+    let next_oid = class_rows
+        .iter()
+        .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+            next_oid
+                .max(row.oid.saturating_add(1))
+                .max(row.reltype.saturating_add(1))
+        })
+        .max(
+            type_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
+            attrdefs_by_key
+                .values()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        );
     let mut catalog = Catalog {
         tables: BTreeMap::new(),
         next_rel_number: DEFAULT_FIRST_REL_NUMBER,
-        next_oid: DEFAULT_FIRST_USER_OID,
+        next_oid,
     };
     for row in class_rows {
         let attrs = attrs_by_relid.get(&row.oid).map(Vec::as_slice).unwrap_or(&[]);
@@ -371,7 +423,14 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
                     },
                     !attr.attnotnull,
                 );
-                desc.default_expr = default_exprs.get(&(row.oid, attr.attnum)).cloned();
+                if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
+                    desc.attrdef_oid = Some(attrdef.oid);
+                    desc.default_expr = Some(attrdef.adbin.clone());
+                } else if let Some(expr) = legacy_default_exprs.get(&(row.oid, attr.attnum)) {
+                    desc.default_expr = Some(expr.clone());
+                    desc.attrdef_oid = Some(catalog.next_oid);
+                    catalog.next_oid = catalog.next_oid.saturating_add(1);
+                }
                 Ok(desc)
             })
             .collect::<Result<Vec<_>, CatalogError>>()?;
@@ -409,9 +468,45 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     Ok(catalog)
 }
 
+fn load_legacy_default_exprs(base_dir: &Path) -> Result<BTreeMap<(u32, i16), String>, CatalogError> {
+    let path = base_dir.join("catalog").join("defaults.json");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let text = fs::read_to_string(&path).map_err(|e| CatalogError::Io(e.to_string()))?;
+    let json = serde_json::from_str::<JsonValue>(&text)
+        .map_err(|_| CatalogError::Corrupt("invalid legacy defaults json"))?;
+    let Some(entries) = json.as_array() else {
+        return Err(CatalogError::Corrupt("invalid legacy defaults json root"));
+    };
+
+    let mut defaults = BTreeMap::new();
+    for entry in entries {
+        let relation_oid = entry
+            .get("relation_oid")
+            .and_then(JsonValue::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(CatalogError::Corrupt("invalid legacy default relation oid"))?;
+        let attnum = entry
+            .get("attnum")
+            .and_then(JsonValue::as_i64)
+            .and_then(|v| i16::try_from(v).ok())
+            .ok_or(CatalogError::Corrupt("invalid legacy default attnum"))?;
+        let expr = entry
+            .get("expr")
+            .and_then(JsonValue::as_str)
+            .ok_or(CatalogError::Corrupt("invalid legacy default expr"))?;
+        defaults.insert((relation_oid, attnum), expr.to_string());
+    }
+
+    Ok(defaults)
+}
+
 pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCatalogRows, CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     let mut rels = BTreeMap::new();
+    let mut missing_attrdef = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -419,6 +514,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             rel_number: kind.relation_oid(),
         };
         if !smgr.exists(rel, ForkNumber::Main) {
+            if kind == BootstrapCatalogKind::PgAttrdef {
+                missing_attrdef = true;
+                continue;
+            }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
         }
         smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
@@ -458,11 +557,24 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     .into_iter()
     .map(pg_attribute_row_from_values)
     .collect::<Result<Vec<_>, _>>()?;
+    let attrdef_rows = if missing_attrdef {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgAttrdef],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAttrdef),
+        )?
+        .into_iter()
+        .map(pg_attrdef_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     Ok(PhysicalCatalogRows {
         namespaces: namespace_rows,
         classes: class_rows,
         attributes: attribute_rows,
+        attrdefs: attrdef_rows,
         types: type_rows,
     })
 }
@@ -560,6 +672,15 @@ fn pg_attribute_row_from_values(values: Vec<Value>) -> Result<PgAttributeRow, Ca
         attnotnull: expect_bool(&values[4])?,
         atttypmod: expect_int32(&values[5])?,
         sql_type: SqlType::new(SqlTypeKind::Text),
+    })
+}
+
+fn pg_attrdef_row_from_values(values: Vec<Value>) -> Result<PgAttrdefRow, CatalogError> {
+    Ok(PgAttrdefRow {
+        oid: expect_oid(&values[0])?,
+        adrelid: expect_oid(&values[1])?,
+        adnum: expect_int16(&values[2])?,
+        adbin: expect_text(&values[3])?,
     })
 }
 
@@ -671,6 +792,29 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_persists_pg_attrdef_rows() {
+        let base = temp_dir("attrdef_rows");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let mut desc = RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+            ],
+        };
+        desc.columns[1].default_expr = Some("'hello'".into());
+        let entry = store.create_table("notes", desc).unwrap();
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        let attrdef = rows
+            .attrdefs
+            .iter()
+            .find(|row| row.adrelid == entry.relation_oid && row.adnum == 2)
+            .unwrap();
+        assert_eq!(attrdef.adbin, "'hello'");
+        assert!(attrdef.oid >= DEFAULT_FIRST_USER_OID);
+    }
+
+    #[test]
     fn catalog_store_bootstraps_physical_core_catalog_relfiles() {
         let base = temp_dir("physical_bootstrap");
         let store = CatalogStore::load(&base).unwrap();
@@ -681,6 +825,10 @@ mod tests {
             let meta = fs::metadata(path).unwrap();
             assert!(meta.len() > 0, "{name} should have heap data");
         }
+
+        let attrdef = catalog.get("pg_attrdef").unwrap();
+        let attrdef_path = segment_path(&base, attrdef.rel, ForkNumber::Main, 0);
+        assert!(attrdef_path.exists(), "pg_attrdef relfile should exist");
     }
 
     #[test]
@@ -755,5 +903,56 @@ mod tests {
         assert!(second.rel.rel_number > first.rel.rel_number);
         assert!(second.relation_oid > first.relation_oid);
         assert!(second.row_type_oid > first.row_type_oid);
+    }
+
+    #[test]
+    fn catalog_store_migrates_legacy_defaults_json_into_pg_attrdef() {
+        let base = temp_dir("legacy_defaults_migration");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let mut desc = RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+            ],
+        };
+        desc.columns[1].default_expr = Some("'legacy'".into());
+        let entry = store.create_table("notes", desc).unwrap();
+
+        let attrdef_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgAttrdef.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&attrdef_path).unwrap();
+        let legacy_dir = base.join("catalog");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("defaults.json"),
+            format!(
+                r#"[{{"relation_oid":{},"attnum":2,"expr":"'legacy'"}}]"#,
+                entry.relation_oid
+            ),
+        )
+        .unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let relcache = reopened.relcache().unwrap();
+        let migrated = relcache.get_by_name("notes").unwrap();
+        assert_eq!(migrated.desc.columns[1].default_expr.as_deref(), Some("'legacy'"));
+        assert!(migrated.desc.columns[1].attrdef_oid.is_some());
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        let attrdef = rows
+            .attrdefs
+            .iter()
+            .find(|row| row.adrelid == entry.relation_oid && row.adnum == 2)
+            .unwrap();
+        assert_eq!(attrdef.adbin, "'legacy'");
+        assert!(attrdef.oid > entry.row_type_oid);
     }
 }

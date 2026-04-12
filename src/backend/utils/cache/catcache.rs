@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
 use crate::backend::catalog::store::load_physical_catalog_rows;
 use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::catalog::CatalogError;
@@ -15,9 +16,9 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_namespace_rows, builtin_type_rows,
 };
 
@@ -28,6 +29,7 @@ pub struct CatCache {
     classes_by_name: BTreeMap<String, PgClassRow>,
     classes_by_oid: BTreeMap<u32, PgClassRow>,
     attributes_by_relid: BTreeMap<u32, Vec<PgAttributeRow>>,
+    attrdefs_by_key: BTreeMap<(u32, i16), PgAttrdefRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
@@ -88,17 +90,19 @@ impl CatCache {
                 .insert(normalize_catalog_name(name).to_ascii_lowercase(), class_row.clone());
             cache.classes_by_oid.insert(class_row.oid, class_row);
 
-            let composite_type = PgTypeRow {
-                oid: entry.row_type_oid,
-                typname: relname.to_string(),
-                typnamespace: entry.namespace_oid,
-                typrelid: entry.relation_oid,
-                sql_type: SqlType::new(SqlTypeKind::Text),
-            };
-            cache
-                .types_by_name
-                .insert(relname.to_ascii_lowercase(), composite_type.clone());
-            cache.types_by_oid.insert(composite_type.oid, composite_type);
+            if entry.row_type_oid != 0 {
+                let composite_type = PgTypeRow {
+                    oid: entry.row_type_oid,
+                    typname: relname.to_string(),
+                    typnamespace: entry.namespace_oid,
+                    typrelid: entry.relation_oid,
+                    sql_type: SqlType::new(SqlTypeKind::Text),
+                };
+                cache
+                    .types_by_name
+                    .insert(relname.to_ascii_lowercase(), composite_type.clone());
+                cache.types_by_oid.insert(composite_type.oid, composite_type);
+            }
 
             let mut attrs = entry
                 .desc
@@ -117,6 +121,25 @@ impl CatCache {
                 .collect::<Vec<_>>();
             sort_pg_attribute_rows(&mut attrs);
             cache.attributes_by_relid.insert(entry.relation_oid, attrs);
+
+            let mut attrdefs = entry
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, column)| {
+                    Some(PgAttrdefRow {
+                        oid: column.attrdef_oid?,
+                        adrelid: entry.relation_oid,
+                        adnum: idx.saturating_add(1) as i16,
+                        adbin: column.default_expr.clone()?,
+                    })
+                })
+                .collect::<Vec<_>>();
+            sort_pg_attrdef_rows(&mut attrdefs);
+            for row in attrdefs {
+                cache.attrdefs_by_key.insert((row.adrelid, row.adnum), row);
+            }
         }
 
         cache
@@ -128,6 +151,7 @@ impl CatCache {
             rows.namespaces,
             rows.classes,
             rows.attributes,
+            rows.attrdefs,
             rows.types,
         ))
     }
@@ -136,6 +160,7 @@ impl CatCache {
         namespace_rows: Vec<PgNamespaceRow>,
         class_rows: Vec<PgClassRow>,
         attribute_rows: Vec<PgAttributeRow>,
+        attrdef_rows: Vec<PgAttrdefRow>,
         type_rows: Vec<PgTypeRow>,
     ) -> Self {
         let mut cache = Self::default();
@@ -165,6 +190,11 @@ impl CatCache {
             sort_pg_attribute_rows(rows);
         }
         cache.attributes_by_relid = attrs_by_relid;
+        let mut attrdefs = attrdef_rows;
+        sort_pg_attrdef_rows(&mut attrdefs);
+        for row in attrdefs {
+            cache.attrdefs_by_key.insert((row.adrelid, row.adnum), row);
+        }
         cache
     }
 
@@ -188,6 +218,10 @@ impl CatCache {
 
     pub fn attributes_by_relid(&self, relid: u32) -> Option<&[PgAttributeRow]> {
         self.attributes_by_relid.get(&relid).map(Vec::as_slice)
+    }
+
+    pub fn attrdef_by_relid_attnum(&self, relid: u32, attnum: i16) -> Option<&PgAttrdefRow> {
+        self.attrdefs_by_key.get(&(relid, attnum))
     }
 
     pub fn type_by_name(&self, name: &str) -> Option<&PgTypeRow> {
@@ -216,6 +250,10 @@ impl CatCache {
 
     pub fn type_rows(&self) -> Vec<PgTypeRow> {
         self.types_by_oid.values().cloned().collect()
+    }
+
+    pub fn attrdef_rows(&self) -> Vec<PgAttrdefRow> {
+        self.attrdefs_by_key.values().cloned().collect()
     }
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
@@ -327,15 +365,17 @@ mod tests {
     fn catcache_loads_rows_from_physical_catalogs() {
         let base = temp_dir("catcache_from_physical");
         let mut store = CatalogStore::load(&base).unwrap();
+        let mut desc = RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("name", SqlType::new(SqlTypeKind::Text), true),
+            ],
+        };
+        desc.columns[1].default_expr = Some("'anon'".into());
         let entry = store
             .create_table(
                 "people",
-                RelationDesc {
-                    columns: vec![
-                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
-                        column_desc("name", SqlType::new(SqlTypeKind::Text), true),
-                    ],
-                },
+                desc,
             )
             .unwrap();
 
@@ -343,5 +383,11 @@ mod tests {
         assert_eq!(cache.class_by_name("people").map(|row| row.oid), Some(entry.relation_oid));
         assert_eq!(cache.attributes_by_relid(entry.relation_oid).map(|rows| rows.len()), Some(2));
         assert_eq!(cache.type_by_oid(entry.row_type_oid).map(|row| row.typrelid), Some(entry.relation_oid));
+        assert_eq!(
+            cache
+                .attrdef_by_relid_attnum(entry.relation_oid, 2)
+                .map(|row| row.adbin.as_str()),
+            Some("'anon'")
+        );
     }
 }

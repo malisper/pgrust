@@ -28,7 +28,7 @@ use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageMan
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
+    BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow,
 };
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -86,6 +86,7 @@ struct TempCatalogEntry {
 struct TempNamespace {
     tables: BTreeMap<String, TempCatalogEntry>,
     next_rel_number: u32,
+    next_oid: u32,
 }
 
 impl Database {
@@ -203,6 +204,7 @@ impl Database {
                 BootstrapCatalogKind::PgClass,
                 BootstrapCatalogKind::PgAttribute,
                 BootstrapCatalogKind::PgType,
+                BootstrapCatalogKind::PgAttrdef,
             ] {
                 let entry = Self::temp_catalog_entry(client_id, kind);
                 relcache.insert(kind.relation_name(), entry.clone());
@@ -261,6 +263,21 @@ impl Database {
                                     sql_type: column.sql_type,
                                 }),
                         );
+                        rows.attrdefs.extend(
+                            temp.entry
+                                .desc
+                                .columns
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(idx, column)| {
+                                    Some(PgAttrdefRow {
+                                        oid: column.attrdef_oid?,
+                                        adrelid: temp.entry.relation_oid,
+                                        adnum: idx.saturating_add(1) as i16,
+                                        adbin: column.default_expr.clone()?,
+                                    })
+                                }),
+                        );
                     }
                 }
 
@@ -285,7 +302,7 @@ impl Database {
         &self,
         client_id: ClientId,
         table_name: String,
-        desc: crate::backend::executor::RelationDesc,
+        mut desc: crate::backend::executor::RelationDesc,
         on_commit: OnCommitAction,
     ) -> Result<RelCacheEntry, ExecError> {
         let normalized = normalize_temp_lookup_name(&table_name);
@@ -297,17 +314,26 @@ impl Database {
             }
             let rel_number = namespace.next_rel_number.max(1);
             namespace.next_rel_number = rel_number.saturating_add(1);
+            let base_oid = Self::temp_db_oid(client_id);
+            let relation_oid = namespace.next_oid.max(base_oid.saturating_add(1));
+            let row_type_oid = relation_oid.saturating_add(1);
+            let mut next_oid = row_type_oid.saturating_add(1);
+            for column in &mut desc.columns {
+                if column.default_expr.is_some() {
+                    column.attrdef_oid = Some(next_oid);
+                    next_oid = next_oid.saturating_add(1);
+                }
+            }
+            namespace.next_oid = next_oid;
             let entry = RelCacheEntry {
                 rel: RelFileLocator {
                     spc_oid: 0,
                     db_oid: Self::temp_db_oid(client_id),
                     rel_number,
                 },
-                relation_oid: Self::temp_db_oid(client_id).saturating_add(rel_number),
+                relation_oid,
                 namespace_oid: Self::temp_db_oid(client_id),
-                row_type_oid: Self::temp_db_oid(client_id)
-                    .saturating_add(rel_number)
-                    .saturating_add(1),
+                row_type_oid,
                 relkind: 'r',
                 desc,
             };
