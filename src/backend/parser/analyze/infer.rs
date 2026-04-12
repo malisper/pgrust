@@ -392,7 +392,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             | Some(BuiltinScalarFunction::PgInputErrorDetail)
             | Some(BuiltinScalarFunction::PgInputErrorHint)
             | Some(BuiltinScalarFunction::PgInputErrorSqlState) => SqlType::new(SqlTypeKind::Text),
-            None => resolve_function_cast_type(name).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            None => resolve_function_cast_type(catalog, name)
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         }
         }
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),

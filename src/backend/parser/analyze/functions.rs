@@ -1,9 +1,8 @@
 use super::*;
 use crate::include::catalog::{
-    TEXT_TYPE_OID, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_type_rows,
+    TEXT_TYPE_OID, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
@@ -12,17 +11,36 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         .copied()
 }
 
-pub(super) fn resolve_function_cast_type(name: &str) -> Option<SqlType> {
-    function_cast_types_by_name()
-        .get(&name.to_ascii_lowercase())
-        .copied()
+pub(super) fn resolve_function_cast_type(catalog: &dyn CatalogLookup, name: &str) -> Option<SqlType> {
+    let normalized = name.to_ascii_lowercase();
+    for row in catalog.type_rows() {
+        if row.typrelid != 0 || !row.typname.eq_ignore_ascii_case(&normalized) {
+            continue;
+        }
+        if row.oid != TEXT_TYPE_OID && !catalog_text_input_cast_exists(catalog, row.oid) {
+            continue;
+        }
+        return Some(match row.typname.as_str() {
+            "bit" => SqlType::with_bit_len(SqlTypeKind::Bit, 1),
+            _ => row.sql_type,
+        });
+    }
+    for (alias, canonical) in function_cast_type_aliases() {
+        if alias.eq_ignore_ascii_case(name) {
+            return resolve_function_cast_type(catalog, canonical);
+        }
+    }
+    None
 }
 
-pub(super) fn explicit_text_input_cast_exists(target: SqlType) -> bool {
-    let Some(target_oid) = builtin_type_oid(target) else {
+pub(super) fn explicit_text_input_cast_exists(
+    catalog: &dyn CatalogLookup,
+    target: SqlType,
+) -> bool {
+    let Some(target_oid) = catalog_builtin_type_oid(catalog, target) else {
         return false;
     };
-    text_input_cast_target_oids().contains(&target_oid)
+    catalog_text_input_cast_exists(catalog, target_oid)
 }
 
 pub(super) fn resolve_json_table_function(name: &str) -> Option<JsonTableFunction> {
@@ -374,34 +392,6 @@ fn legacy_json_table_function_entries() -> &'static [(&'static str, JsonTableFun
     ]
 }
 
-fn function_cast_types_by_name() -> &'static BTreeMap<String, SqlType> {
-    static TYPES: OnceLock<BTreeMap<String, SqlType>> = OnceLock::new();
-    TYPES.get_or_init(|| {
-        let mut by_name = BTreeMap::new();
-        for row in builtin_type_rows() {
-            if row.sql_type.is_array {
-                continue;
-            }
-            if row.oid != TEXT_TYPE_OID && !text_input_cast_target_oids().contains(&row.oid) {
-                continue;
-            }
-            let sql_type = match row.typname.as_str() {
-                "bit" => Some(SqlType::with_bit_len(SqlTypeKind::Bit, 1)),
-                _ => Some(row.sql_type),
-            };
-            if let Some(sql_type) = sql_type {
-                by_name.insert(row.typname.to_ascii_lowercase(), sql_type);
-            }
-        }
-        for (alias, canonical) in function_cast_type_aliases() {
-            if let Some(sql_type) = by_name.get(*canonical).copied() {
-                by_name.insert((*alias).into(), sql_type);
-            }
-        }
-        by_name
-    })
-}
-
 fn function_cast_type_aliases() -> &'static [(&'static str, &'static str)] {
     &[
         ("smallint", "int2"),
@@ -413,17 +403,6 @@ fn function_cast_type_aliases() -> &'static [(&'static str, &'static str)] {
         ("decimal", "numeric"),
         ("boolean", "bool"),
     ]
-}
-
-fn text_input_cast_target_oids() -> &'static BTreeSet<u32> {
-    static OIDS: OnceLock<BTreeSet<u32>> = OnceLock::new();
-    OIDS.get_or_init(|| {
-        bootstrap_pg_cast_rows()
-            .into_iter()
-            .filter(|row| row.castsource == TEXT_TYPE_OID && row.castmethod == 'i')
-            .map(|row| row.casttarget)
-            .collect()
-    })
 }
 
 fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, ScalarFunctionArity)> {
@@ -618,9 +597,21 @@ fn builtin_sql_type_for_oid(oid: u32) -> Option<SqlType> {
         .find_map(|row| (row.oid == oid).then_some(row.sql_type))
 }
 
+fn catalog_builtin_type_oid(catalog: &dyn CatalogLookup, sql_type: SqlType) -> Option<u32> {
+    catalog.type_oid_for_sql_type(sql_type)
+}
+
+fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) -> bool {
+    catalog
+        .cast_by_source_target(TEXT_TYPE_OID, target_oid)
+        .is_some_and(|row| row.castmethod == 'i')
+}
+
 fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
     builtin_type_rows().into_iter().find_map(|row| {
-        (row.sql_type.is_array == sql_type.is_array && row.sql_type.kind == sql_type.kind)
+        (row.typrelid == 0
+            && row.sql_type.kind == sql_type.kind
+            && row.sql_type.is_array == sql_type.is_array)
             .then_some(row.oid)
     })
 }
@@ -690,58 +681,58 @@ mod tests {
     #[test]
     fn resolve_function_cast_type_uses_pg_type_catalog_and_aliases() {
         assert_eq!(
-            resolve_function_cast_type("int4"),
+            resolve_function_cast_type(&Catalog::default(), "int4"),
             Some(SqlType::new(SqlTypeKind::Int4))
         );
         assert_eq!(
-            resolve_function_cast_type("smallint"),
+            resolve_function_cast_type(&Catalog::default(), "smallint"),
             Some(SqlType::new(SqlTypeKind::Int2))
         );
         assert_eq!(
-            resolve_function_cast_type("bit"),
+            resolve_function_cast_type(&Catalog::default(), "bit"),
             Some(SqlType::with_bit_len(SqlTypeKind::Bit, 1))
         );
         assert_eq!(
-            resolve_function_cast_type("boolean"),
+            resolve_function_cast_type(&Catalog::default(), "boolean"),
             Some(SqlType::new(SqlTypeKind::Bool))
         );
         assert_eq!(
-            resolve_function_cast_type("varchar"),
+            resolve_function_cast_type(&Catalog::default(), "varchar"),
             Some(SqlType::new(SqlTypeKind::Varchar))
         );
         assert_eq!(
-            resolve_function_cast_type("jsonb"),
+            resolve_function_cast_type(&Catalog::default(), "jsonb"),
             Some(SqlType::new(SqlTypeKind::Jsonb))
         );
         assert_eq!(
-            resolve_function_cast_type("jsonpath"),
+            resolve_function_cast_type(&Catalog::default(), "jsonpath"),
             Some(SqlType::new(SqlTypeKind::JsonPath))
         );
         assert_eq!(
-            resolve_function_cast_type("timestamp"),
+            resolve_function_cast_type(&Catalog::default(), "timestamp"),
             Some(SqlType::new(SqlTypeKind::Timestamp))
         );
     }
 
     #[test]
     fn explicit_text_input_cast_exists_uses_pg_cast_catalog() {
-        assert!(explicit_text_input_cast_exists(SqlType::new(
+        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::new(
             SqlTypeKind::Jsonb
         )));
-        assert!(explicit_text_input_cast_exists(SqlType::new(
+        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::new(
             SqlTypeKind::JsonPath
         )));
-        assert!(explicit_text_input_cast_exists(SqlType::new(
+        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::new(
             SqlTypeKind::Timestamp
         )));
-        assert!(explicit_text_input_cast_exists(SqlType::with_bit_len(
+        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::with_bit_len(
             SqlTypeKind::Bit,
             4
         )));
-        assert!(explicit_text_input_cast_exists(SqlType::array_of(
+        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::array_of(
             SqlType::new(SqlTypeKind::Int4)
         )));
-        assert!(explicit_text_input_cast_exists(SqlType::array_of(
+        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::array_of(
             SqlType::new(SqlTypeKind::Jsonb)
         )));
     }
