@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod catalog;
+pub mod loader;
 pub mod namespace;
 pub mod persistence;
 pub mod rowcodec;

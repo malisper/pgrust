@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::backend::access::transam::xact::{
     CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
 };
-use crate::backend::catalog::store::{
+use crate::backend::catalog::loader::{
     load_visible_am_rows, load_visible_attrdef_rows, load_visible_attribute_rows,
     load_visible_class_rows, load_visible_index_rows, load_visible_namespace_rows,
     load_visible_type_rows,
