@@ -11,6 +11,7 @@ use crate::backend::catalog::pg_collation::sort_pg_collation_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
+use crate::backend::catalog::pg_language::sort_pg_language_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_USER_OID, load_physical_catalog_rows};
@@ -27,14 +28,14 @@ use crate::include::catalog::{
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PgAmRow,
     PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgProcRow,
-    PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
-    TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID,
+    PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
+    PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows,
     bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_namespace_rows, bootstrap_pg_proc_rows,
-    bootstrap_pg_tablespace_rows, builtin_type_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -50,6 +51,7 @@ pub struct CatCache {
     am_rows: Vec<PgAmRow>,
     authid_rows: Vec<PgAuthIdRow>,
     auth_members_rows: Vec<PgAuthMembersRow>,
+    language_rows: Vec<PgLanguageRow>,
     proc_rows: Vec<PgProcRow>,
     cast_rows: Vec<PgCastRow>,
     collation_rows: Vec<PgCollationRow>,
@@ -91,6 +93,8 @@ impl CatCache {
             .auth_members_rows
             .extend(bootstrap_pg_auth_members_rows());
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
+        cache.language_rows.extend(bootstrap_pg_language_rows());
+        sort_pg_language_rows(&mut cache.language_rows);
         cache.proc_rows.extend(bootstrap_pg_proc_rows());
         sort_pg_proc_rows(&mut cache.proc_rows);
         cache.cast_rows.extend(bootstrap_pg_cast_rows());
@@ -226,6 +230,7 @@ impl CatCache {
             rows.ams,
             rows.authids,
             rows.auth_members,
+            rows.languages,
             rows.procs,
             rows.casts,
             rows.collations,
@@ -245,6 +250,7 @@ impl CatCache {
         am_rows: Vec<PgAmRow>,
         authid_rows: Vec<PgAuthIdRow>,
         auth_members_rows: Vec<PgAuthMembersRow>,
+        language_rows: Vec<PgLanguageRow>,
         proc_rows: Vec<PgProcRow>,
         cast_rows: Vec<PgCastRow>,
         collation_rows: Vec<PgCollationRow>,
@@ -294,6 +300,8 @@ impl CatCache {
         sort_pg_authid_rows(&mut cache.authid_rows);
         cache.auth_members_rows = auth_members_rows;
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
+        cache.language_rows = language_rows;
+        sort_pg_language_rows(&mut cache.language_rows);
         cache.proc_rows = proc_rows;
         sort_pg_proc_rows(&mut cache.proc_rows);
         cache.cast_rows = cast_rows;
@@ -383,6 +391,10 @@ impl CatCache {
 
     pub fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
         self.auth_members_rows.clone()
+    }
+
+    pub fn language_rows(&self) -> Vec<PgLanguageRow> {
+        self.language_rows.clone()
     }
 
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
@@ -610,6 +622,12 @@ mod tests {
                 && row.rolsuper
         }));
         assert!(cache.auth_members_rows().is_empty());
+        assert!(cache.language_rows().iter().any(|row| {
+            row.lanname == "internal" && row.lanowner == BOOTSTRAP_SUPERUSER_OID
+        }));
+        assert!(cache.language_rows().iter().any(|row| {
+            row.lanname == "sql" && row.lanpltrusted
+        }));
         assert!(cache.proc_rows().iter().any(|row| {
             row.proname == "lower"
                 && row.pronargs == 1

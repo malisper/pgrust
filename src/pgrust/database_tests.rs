@@ -231,9 +231,10 @@
         match db
             .execute(
                 1,
-                "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname \
+                "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname, l.lanname \
                  from pg_proc p \
                  join pg_type t on t.oid = p.prorettype \
+                 join pg_language l on l.oid = p.prolang \
                  where p.proname in ('count', 'json_array_elements', 'lower', 'random') \
                  order by p.proname",
             )
@@ -249,6 +250,7 @@
                             Value::Int16(1),
                             Value::Bool(false),
                             Value::Text("int8".into()),
+                            Value::Text("internal".into()),
                         ],
                         vec![
                             Value::Text("json_array_elements".into()),
@@ -256,6 +258,7 @@
                             Value::Int16(1),
                             Value::Bool(true),
                             Value::Text("json".into()),
+                            Value::Text("internal".into()),
                         ],
                         vec![
                             Value::Text("lower".into()),
@@ -263,6 +266,7 @@
                             Value::Int16(1),
                             Value::Bool(false),
                             Value::Text("text".into()),
+                            Value::Text("internal".into()),
                         ],
                         vec![
                             Value::Text("random".into()),
@@ -270,6 +274,7 @@
                             Value::Int16(0),
                             Value::Bool(false),
                             Value::Text("float8".into()),
+                            Value::Text("internal".into()),
                         ],
                     ]
                 );
