@@ -1,17 +1,17 @@
 mod agg;
+mod driver;
+pub mod exec_expr;
+pub(crate) mod exec_tuples;
 mod expr_bit;
-mod expr_casts;
 mod expr_bool;
+mod expr_casts;
 mod expr_compile;
 mod expr_format;
+mod expr_json;
 mod expr_math;
 mod expr_numeric;
 mod expr_ops;
 mod expr_string;
-mod driver;
-mod expr_json;
-pub mod exec_expr;
-pub(crate) mod exec_tuples;
 pub(crate) mod jsonb;
 pub(crate) mod jsonpath;
 mod nodes;
@@ -29,17 +29,18 @@ pub(crate) mod tuple_decoder {
     pub(crate) use super::exec_tuples::*;
 }
 
-pub(crate) use agg::{AccumState, AggGroup};
 pub use crate::include::nodes::datum::*;
 pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
+pub(crate) use agg::{AccumState, AggGroup};
 pub use driver::{
     exec_next, execute_plan, execute_readonly_statement, execute_sql, execute_statement,
 };
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
-pub(crate) use expr_casts::parse_bytea_text;
-pub(crate) use expr_casts::cast_value;
 pub(crate) use expr_bit::render_bit_text;
+pub(crate) use expr_casts::cast_value;
+pub(crate) use expr_casts::parse_bytea_text;
+pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
 pub use startup::executor_start;
 
@@ -190,7 +191,6 @@ pub enum StatementResult {
     },
     AffectedRows(usize),
 }
-
 
 #[cfg(test)]
 mod tests;

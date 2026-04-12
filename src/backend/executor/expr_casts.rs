@@ -256,6 +256,76 @@ pub fn render_internal_char_text(byte: u8) -> String {
     }
 }
 
+pub(crate) fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Value, ExecError> {
+    parse_text_array_literal_with_op(raw, element_type, "::array")
+}
+
+pub(crate) fn parse_text_array_literal_with_op(
+    raw: &str,
+    element_type: SqlType,
+    op: &'static str,
+) -> Result<Value, ExecError> {
+    if raw == "{}" {
+        return Ok(Value::Array(Vec::new()));
+    }
+    if !raw.starts_with('{') || !raw.ends_with('}') {
+        return Err(ExecError::TypeMismatch {
+            op,
+            left: Value::Null,
+            right: Value::Text(raw.into()),
+        });
+    }
+
+    let mut chars = raw[1..raw.len() - 1].chars().peekable();
+    let mut items = Vec::new();
+    while chars.peek().is_some() {
+        let mut quoted = false;
+        let value = if chars.peek() == Some(&'"') {
+            quoted = true;
+            chars.next();
+            let mut text = String::new();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '"' => break,
+                    '\\' => {
+                        let escaped = chars.next().ok_or_else(|| ExecError::TypeMismatch {
+                            op,
+                            left: Value::Null,
+                            right: Value::Text(raw.into()),
+                        })?;
+                        text.push(escaped);
+                    }
+                    other => text.push(other),
+                }
+            }
+            text
+        } else {
+            let mut text = String::new();
+            while let Some(&ch) = chars.peek() {
+                if ch == ',' {
+                    break;
+                }
+                text.push(ch);
+                chars.next();
+            }
+            text
+        };
+
+        let value = if !quoted && value == "NULL" {
+            Value::Null
+        } else {
+            cast_text_value(&value, element_type, true)?
+        };
+        items.push(value);
+
+        if chars.peek() == Some(&',') {
+            chars.next();
+        }
+    }
+
+    Ok(Value::Array(items))
+}
+
 fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
     let parsed = match parse_type_name(type_name.trim()) {
         Ok(ty) => ty,
@@ -279,7 +349,8 @@ fn input_type_name_supported(parsed: SqlType) -> bool {
 
 fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
     builtin_type_rows().into_iter().find_map(|row| {
-        (!row.sql_type.is_array && row.sql_type.kind == sql_type.kind).then_some(row.oid)
+        (row.sql_type.is_array == sql_type.is_array && row.sql_type.kind == sql_type.kind)
+            .then_some(row.oid)
     })
 }
 
@@ -423,11 +494,14 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 }
                 Ok(Value::Array(casted))
             }
-            other => Err(ExecError::TypeMismatch {
-                op: "::array",
-                left: other,
-                right: Value::Null,
-            }),
+            other => match other.as_text() {
+                Some(text) => parse_text_array_literal(text, ty.element_type()),
+                None => Err(ExecError::TypeMismatch {
+                    op: "::array",
+                    left: other,
+                    right: Value::Null,
+                }),
+            },
         };
     }
 
@@ -1209,7 +1283,10 @@ fn has_nonzero_digit(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cast_float_to_int, parse_input_type_name, parse_pg_float, soft_input_error_info};
+    use super::{
+        cast_float_to_int, cast_value, parse_input_type_name, parse_pg_float,
+        parse_text_array_literal, soft_input_error_info,
+    };
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
 
@@ -1264,6 +1341,42 @@ mod tests {
             Some(SqlType::with_char_len(SqlTypeKind::Varchar, 4))
         );
         assert_eq!(parse_input_type_name("int4[]").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_text_array_literal_uses_scalar_input_parsers() {
+        assert_eq!(
+            parse_text_array_literal("{1,2}", SqlType::new(SqlTypeKind::Int4)).unwrap(),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)])
+        );
+        assert_eq!(
+            parse_text_array_literal("{\"NULL\",NULL}", SqlType::new(SqlTypeKind::Text)).unwrap(),
+            Value::Array(vec![Value::Text("NULL".into()), Value::Null])
+        );
+        assert_eq!(
+            parse_text_array_literal("{true,false}", SqlType::new(SqlTypeKind::Bool)).unwrap(),
+            Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+        );
+    }
+
+    #[test]
+    fn cast_value_supports_text_input_array_targets() {
+        assert_eq!(
+            cast_value(
+                Value::Text("{1,2,3}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            )
+            .unwrap(),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)])
+        );
+        assert_eq!(
+            cast_value(
+                Value::Text("{\"a\",\"b\"}".into()),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
+            )
+            .unwrap(),
+            Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())])
+        );
     }
 
     #[test]

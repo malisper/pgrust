@@ -990,14 +990,15 @@ fn build_plan_accepts_same_type_array_equality_comparisons() {
 }
 
 #[test]
-fn build_plan_rejects_missing_catalog_text_input_cast() {
-    let err = build_plan(&parse_select("select cast('1' as int4[])").unwrap(), &catalog())
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::UnexpectedToken { actual, .. }
-            if actual == "cannot cast type text to integer[]"
-    ));
+fn build_plan_accepts_catalog_backed_text_array_casts() {
+    assert!(build_plan(
+        &parse_select(
+            "select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])"
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
