@@ -165,7 +165,7 @@ fn client_visible_cache_refreshes_after_create_table() {
 }
 
 #[test]
-fn dropping_last_temp_table_removes_temp_namespace() {
+fn dropping_last_temp_table_keeps_temp_namespace() {
     let base = temp_dir("drop_temp_namespace_cleanup");
     let db = Database::open(&base, 16).unwrap();
 
@@ -175,8 +175,10 @@ fn dropping_last_temp_table_removes_temp_namespace() {
 
     db.execute(1, "drop table temp_cleanup").unwrap();
 
-    assert!(!db.has_active_temp_namespace(1));
-    assert!(!db.temp_relations.read().contains_key(&1));
+    assert!(db.has_active_temp_namespace(1));
+    let namespace = db.temp_relations.read().get(&1).cloned().unwrap();
+    assert_eq!(namespace.name, "pg_temp_1");
+    assert!(namespace.tables.is_empty());
 }
 
 #[test]
@@ -1022,7 +1024,7 @@ fn temp_catalog_rows_appear_with_pg_temp_namespace() {
                 assert_eq!(
                     rows,
                     vec![vec![
-                        Value::Text("pg_temp".into()),
+                        Value::Text("pg_temp_1".into()),
                         Value::Text("temp_items".into()),
                         Value::Text("t".into()),
                     ]]
@@ -1039,15 +1041,15 @@ fn temp_catalog_rows_appear_with_pg_temp_namespace() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
 }
 
 #[test]
-fn temp_catalog_sync_only_materializes_touched_catalog_relfiles() {
-    let base = temp_dir("temp_catalog_selective_sync");
+fn temp_catalog_reads_do_not_materialize_temp_catalog_relfiles() {
+    let base = temp_dir("temp_catalog_no_read_sync");
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
@@ -1084,63 +1086,28 @@ fn temp_catalog_sync_only_materializes_touched_catalog_relfiles() {
         0,
     );
 
-    assert!(class_path.exists(), "temp pg_class relfile should exist");
+    assert!(
+        !class_path.exists(),
+        "temp pg_class relfile should stay absent on catalog reads"
+    );
     assert!(!proc_path.exists(), "temp pg_proc relfile should stay absent");
 }
 
 #[test]
-fn temp_catalog_sync_marks_namespace_clean_until_temp_state_changes() {
-    let base = temp_dir("temp_catalog_sync_generation");
+fn temp_namespace_persists_after_last_temp_table_is_dropped() {
+    let base = temp_dir("temp_namespace_persists");
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
     session
         .execute(&db, "create temp table temp_items (id int4 not null)")
         .unwrap();
+    session.execute(&db, "drop table temp_items").unwrap();
 
-    {
-        let namespaces = db.temp_relations.read();
-        let namespace = namespaces.get(&1).unwrap();
-        assert!(namespace.generation > namespace.synced_generation);
-    }
-
-    session
-        .execute(
-            &db,
-            "select count(*) from pg_class where relname = 'temp_items'",
-        )
-        .unwrap();
-
-    let synced_generation = {
-        let namespaces = db.temp_relations.read();
-        let namespace = namespaces.get(&1).unwrap();
-        assert_eq!(namespace.synced_generation, namespace.generation);
-        namespace.synced_generation
-    };
-
-    session
-        .execute(
-            &db,
-            "select count(*) from pg_class where relname = 'temp_items'",
-        )
-        .unwrap();
-
-    {
-        let namespaces = db.temp_relations.read();
-        let namespace = namespaces.get(&1).unwrap();
-        assert_eq!(namespace.synced_generation, synced_generation);
-        assert_eq!(namespace.synced_generation, namespace.generation);
-    }
-
-    session
-        .execute(&db, "create temp table temp_items_2 (id int4 not null)")
-        .unwrap();
-
-    {
-        let namespaces = db.temp_relations.read();
-        let namespace = namespaces.get(&1).unwrap();
-        assert!(namespace.generation > namespace.synced_generation);
-    }
+    let namespaces = db.temp_relations.read();
+    let namespace = namespaces.get(&1).unwrap();
+    assert_eq!(namespace.name, "pg_temp_1");
+    assert!(namespace.tables.is_empty());
 }
 
 #[test]
@@ -1415,13 +1382,13 @@ fn temp_table_on_commit_actions_apply_at_commit() {
         other => panic!("expected query result, got {:?}", other),
     }
 
+    session.execute(&db, "begin").unwrap();
     session
         .execute(
             &db,
             "create temp table drop_rows (id int4 not null) on commit drop",
         )
         .unwrap();
-    session.execute(&db, "begin").unwrap();
     session
         .execute(&db, "insert into drop_rows (id) values (11)")
         .unwrap();

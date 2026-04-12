@@ -298,9 +298,22 @@ impl CatalogStore {
         desc: RelationDesc,
         ctx: &CatalogWriteContext<'_>,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        self.create_table_mvcc_with_options(name, desc, crate::include::catalog::PUBLIC_NAMESPACE_OID, 1, 'p', ctx)
+    }
+
+    pub fn create_table_mvcc_with_options(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+        namespace_oid: u32,
+        db_oid: u32,
+        relpersistence: char,
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
-        let entry = catalog.create_table(name.clone(), desc)?;
+        let entry =
+            catalog.create_table_with_options(name.clone(), desc, namespace_oid, db_oid, relpersistence)?;
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_state(&catalog)?;
         let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
@@ -310,6 +323,48 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_rel(&mut effect.created_rels, entry.rel);
         Ok((entry, effect))
+    }
+
+    pub fn create_namespace_mvcc(
+        &mut self,
+        namespace_oid: u32,
+        namespace_name: &str,
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let rows = PhysicalCatalogRows {
+            namespaces: vec![PgNamespaceRow {
+                oid: namespace_oid,
+                nspname: namespace_name.to_string(),
+                nspowner: BOOTSTRAP_SUPERUSER_OID,
+            }],
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &[BootstrapCatalogKind::PgNamespace])?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
+        Ok(effect)
+    }
+
+    pub fn drop_namespace_mvcc(
+        &mut self,
+        namespace_oid: u32,
+        namespace_name: &str,
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let rows = PhysicalCatalogRows {
+            namespaces: vec![PgNamespaceRow {
+                oid: namespace_oid,
+                nspname: namespace_name.to_string(),
+                nspowner: BOOTSTRAP_SUPERUSER_OID,
+            }],
+            ..PhysicalCatalogRows::default()
+        };
+        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &[BootstrapCatalogKind::PgNamespace])?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
+        Ok(effect)
     }
 
     pub fn create_index_for_relation_mvcc(
@@ -811,7 +866,7 @@ fn physical_catalog_rows_for_catalog_entry(
         relowner: BOOTSTRAP_SUPERUSER_OID,
         relam: crate::include::catalog::relam_for_relkind(entry.relkind),
         relfilenode: entry.rel.rel_number,
-        relpersistence: 'p',
+        relpersistence: entry.relpersistence,
         relkind: entry.relkind,
     });
 
@@ -1547,6 +1602,7 @@ fn catalog_from_physical_rows(
                 relation_oid: row.oid,
                 namespace_oid: row.relnamespace,
                 row_type_oid: row.reltype,
+                relpersistence: row.relpersistence,
                 relkind: row.relkind,
                 desc: RelationDesc { columns },
                 index_meta: indexes_by_relid
