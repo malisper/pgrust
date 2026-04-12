@@ -1,10 +1,11 @@
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
+use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::access::htup::AttributeAlign;
-use crate::include::catalog::PUBLIC_NAMESPACE_OID;
+use crate::include::catalog::{PUBLIC_NAMESPACE_OID, PgConstraintRow};
 use std::collections::BTreeMap;
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -41,6 +42,7 @@ pub enum CatalogError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catalog {
     pub(crate) tables: BTreeMap<String, CatalogEntry>,
+    pub(crate) constraints: Vec<PgConstraintRow>,
     pub(crate) next_rel_number: u32,
     pub(crate) next_oid: u32,
 }
@@ -49,6 +51,7 @@ impl Default for Catalog {
     fn default() -> Self {
         let mut catalog = Self {
             tables: BTreeMap::new(),
+            constraints: Vec::new(),
             next_rel_number: DEFAULT_FIRST_REL_NUMBER,
             next_oid: DEFAULT_FIRST_USER_OID,
         };
@@ -92,6 +95,7 @@ impl Catalog {
             .max(entry.row_type_oid.saturating_add(1))
             .max(next_attrdef_oid)
             .max(next_constraint_oid);
+        self.replace_constraint_rows_for_entry(&name, &entry);
         self.tables.insert(name, entry);
     }
 
@@ -113,6 +117,10 @@ impl Catalog {
         self.tables
             .iter()
             .map(|(name, entry)| (name.as_str(), entry))
+    }
+
+    pub fn constraint_rows(&self) -> &[PgConstraintRow] {
+        &self.constraints
     }
 
     pub fn next_oid(&self) -> u32 {
@@ -149,6 +157,7 @@ impl Catalog {
         };
         self.next_rel_number = self.next_rel_number.saturating_add(1);
         self.next_oid = next_oid;
+        self.replace_constraint_rows_for_entry(&name, &entry);
         self.tables.insert(name, entry.clone());
         Ok(entry)
     }
@@ -233,9 +242,12 @@ impl Catalog {
             Some(entry) if entry.relkind == 'r' => {}
             _ => return Err(CatalogError::UnknownTable(name.to_string())),
         }
-        self.tables
+        let entry = self
+            .tables
             .remove(&name.to_ascii_lowercase())
-            .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))
+            .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
+        self.constraints.retain(|row| row.conrelid != entry.relation_oid);
+        Ok(entry)
     }
 
     pub fn remove_by_oid(&mut self, relation_oid: u32) -> Option<(String, CatalogEntry)> {
@@ -244,7 +256,23 @@ impl Catalog {
             .iter()
             .find_map(|(name, entry)| (entry.relation_oid == relation_oid).then(|| name.clone()))?;
         let entry = self.tables.remove(&name)?;
+        self.constraints.retain(|row| row.conrelid != relation_oid);
         Some((name, entry))
+    }
+
+    fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {
+        self.constraints.retain(|row| row.conrelid != entry.relation_oid);
+        if entry.relkind != 'r' {
+            return;
+        }
+        let relname = relation_name.rsplit('.').next().unwrap_or(relation_name);
+        self.constraints.extend(derived_pg_constraint_rows(
+            entry.relation_oid,
+            relname,
+            entry.namespace_oid,
+            &entry.desc,
+        ));
+        sort_pg_constraint_rows(&mut self.constraints);
     }
 }
 
