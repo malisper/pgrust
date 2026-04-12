@@ -2,9 +2,9 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
-    INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, NUMERIC_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID,
+    BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, FLOAT8_TYPE_OID,
+    INT2_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, NUMERIC_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID, VARBIT_TYPE_OID,
 };
 
 pub const CAST_PROC_INT4_INT2_OID: u32 = 6228;
@@ -36,6 +36,18 @@ pub const TEXT_CMP_GE_PROC_OID: u32 = 743;
 pub const BOOL_CMP_LE_PROC_OID: u32 = 1691;
 pub const BOOL_CMP_GE_PROC_OID: u32 = 1692;
 pub const TEXT_STARTS_WITH_PROC_OID: u32 = 3696;
+pub const BIT_CMP_EQ_PROC_OID: u32 = 1581;
+pub const BIT_CMP_NE_PROC_OID: u32 = 1582;
+pub const BIT_CMP_GE_PROC_OID: u32 = 1592;
+pub const BIT_CMP_GT_PROC_OID: u32 = 1593;
+pub const BIT_CMP_LE_PROC_OID: u32 = 1594;
+pub const BIT_CMP_LT_PROC_OID: u32 = 1595;
+pub const VARBIT_CMP_EQ_PROC_OID: u32 = 1666;
+pub const VARBIT_CMP_NE_PROC_OID: u32 = 1667;
+pub const VARBIT_CMP_GE_PROC_OID: u32 = 1668;
+pub const VARBIT_CMP_GT_PROC_OID: u32 = 1669;
+pub const VARBIT_CMP_LE_PROC_OID: u32 = 1670;
+pub const VARBIT_CMP_LT_PROC_OID: u32 = 1671;
 pub const JSONB_CMP_NE_PROC_OID: u32 = 4038;
 pub const JSONB_CMP_LT_PROC_OID: u32 = 4039;
 pub const JSONB_CMP_GT_PROC_OID: u32 = 4040;
@@ -473,6 +485,42 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             TEXT_STARTS_WITH_PROC_OID,
             "starts_with",
             &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(BIT_CMP_EQ_PROC_OID, "biteq", &[BIT_TYPE_OID, BIT_TYPE_OID]),
+        comparison_proc_row(BIT_CMP_NE_PROC_OID, "bitne", &[BIT_TYPE_OID, BIT_TYPE_OID]),
+        comparison_proc_row(BIT_CMP_LT_PROC_OID, "bitlt", &[BIT_TYPE_OID, BIT_TYPE_OID]),
+        comparison_proc_row(BIT_CMP_GT_PROC_OID, "bitgt", &[BIT_TYPE_OID, BIT_TYPE_OID]),
+        comparison_proc_row(BIT_CMP_LE_PROC_OID, "bitle", &[BIT_TYPE_OID, BIT_TYPE_OID]),
+        comparison_proc_row(BIT_CMP_GE_PROC_OID, "bitge", &[BIT_TYPE_OID, BIT_TYPE_OID]),
+        comparison_proc_row(
+            VARBIT_CMP_EQ_PROC_OID,
+            "varbiteq",
+            &[VARBIT_TYPE_OID, VARBIT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            VARBIT_CMP_NE_PROC_OID,
+            "varbitne",
+            &[VARBIT_TYPE_OID, VARBIT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            VARBIT_CMP_LT_PROC_OID,
+            "varbitlt",
+            &[VARBIT_TYPE_OID, VARBIT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            VARBIT_CMP_GT_PROC_OID,
+            "varbitgt",
+            &[VARBIT_TYPE_OID, VARBIT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            VARBIT_CMP_LE_PROC_OID,
+            "varbitle",
+            &[VARBIT_TYPE_OID, VARBIT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            VARBIT_CMP_GE_PROC_OID,
+            "varbitge",
+            &[VARBIT_TYPE_OID, VARBIT_TYPE_OID],
         ),
         comparison_proc_row(
             JSONB_CMP_NE_PROC_OID,
