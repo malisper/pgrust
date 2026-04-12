@@ -152,7 +152,7 @@ impl CatalogStore {
     ) -> Result<CatalogEntry, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
         let entry = catalog.create_table(name, desc)?;
-        self.persist_catalog(&catalog)?;
+        self.persist_catalog_kinds(&catalog, &create_table_sync_kinds(&entry))?;
         Ok(entry)
     }
 
@@ -165,7 +165,7 @@ impl CatalogStore {
     ) -> Result<CatalogEntry, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
         let entry = catalog.create_index(index_name, table_name, unique, columns)?;
-        self.persist_catalog(&catalog)?;
+        self.persist_catalog_kinds(&catalog, &create_index_sync_kinds())?;
         Ok(entry)
     }
 
@@ -178,7 +178,7 @@ impl CatalogStore {
     ) -> Result<CatalogEntry, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
         let entry = catalog.create_index_for_relation(index_name, relation_oid, unique, columns)?;
-        self.persist_catalog(&catalog)?;
+        self.persist_catalog_kinds(&catalog, &create_index_sync_kinds())?;
         Ok(entry)
     }
 
@@ -197,7 +197,7 @@ impl CatalogStore {
                 dropped.push(entry);
             }
         }
-        self.persist_catalog(&catalog)?;
+        self.persist_catalog_kinds(&catalog, &drop_relation_sync_kinds())?;
         Ok(dropped)
     }
 
@@ -213,11 +213,15 @@ impl CatalogStore {
                 dropped.push(entry);
             }
         }
-        self.persist_catalog(&catalog)?;
+        self.persist_catalog_kinds(&catalog, &drop_relation_sync_kinds())?;
         Ok(dropped)
     }
 
-    fn persist_catalog(&self, catalog: &Catalog) -> Result<(), CatalogError> {
+    fn persist_catalog_kinds(
+        &self,
+        catalog: &Catalog,
+        kinds: &[BootstrapCatalogKind],
+    ) -> Result<(), CatalogError> {
         persist_control_file(
             &self.control_path,
             &CatalogControl {
@@ -226,7 +230,7 @@ impl CatalogStore {
                 bootstrap_complete: true,
             },
         )?;
-        sync_physical_catalogs(&self.base_dir, catalog)
+        sync_physical_catalogs_kinds(&self.base_dir, catalog, kinds)
     }
 }
 
@@ -302,9 +306,17 @@ impl CatalogStore {
 }
 
 fn sync_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {
+    sync_physical_catalogs_kinds(base_dir, catalog, &bootstrap_catalog_kinds())
+}
+
+fn sync_physical_catalogs_kinds(
+    base_dir: &Path,
+    catalog: &Catalog,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
     let catcache = CatCache::from_catalog(catalog);
     let rows = physical_catalog_rows_from_catcache(&catcache);
-    sync_catalog_rows(base_dir, &rows, 1)
+    sync_catalog_rows_subset(base_dir, &rows, 1, kinds)
 }
 
 pub(crate) fn sync_catalog_rows(
@@ -312,8 +324,17 @@ pub(crate) fn sync_catalog_rows(
     rows: &PhysicalCatalogRows,
     db_oid: u32,
 ) -> Result<(), CatalogError> {
+    sync_catalog_rows_subset(base_dir, rows, db_oid, &bootstrap_catalog_kinds())
+}
+
+fn sync_catalog_rows_subset(
+    base_dir: &Path,
+    rows: &PhysicalCatalogRows,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
-    for kind in bootstrap_catalog_kinds() {
+    for &kind in kinds {
         let rel = RelFileLocator {
             spc_oid: 0,
             db_oid,
@@ -327,243 +348,139 @@ pub(crate) fn sync_catalog_rows(
     }
 
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgNamespace.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
-        rows.namespaces
+    for &kind in kinds {
+        insert_catalog_rows(
+            &pool,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid,
+                rel_number: kind.relation_oid(),
+            },
+            &bootstrap_relation_desc(kind),
+            catalog_row_values_for_kind(rows, kind),
+        )?;
+    }
+    Ok(())
+}
+
+fn catalog_row_values_for_kind(rows: &PhysicalCatalogRows, kind: BootstrapCatalogKind) -> Vec<Vec<Value>> {
+    match kind {
+        BootstrapCatalogKind::PgNamespace => rows
+            .namespaces
             .iter()
             .cloned()
             .map(namespace_row_values)
             .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgClass.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
-        rows.classes
-            .iter()
-            .cloned()
-            .map(pg_class_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgAuthId.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthId),
-        rows.authids
-            .iter()
-            .cloned()
-            .map(pg_authid_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgAuthMembers.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthMembers),
-        rows.auth_members
-            .iter()
-            .cloned()
-            .map(pg_auth_members_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgCollation.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgCollation),
-        rows.collations
-            .iter()
-            .cloned()
-            .map(pg_collation_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgLanguage.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgLanguage),
-        rows.languages
-            .iter()
-            .cloned()
-            .map(pg_language_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgProc),
-        rows.procs.iter().cloned().map(pg_proc_row_values).collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgOperator.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgOperator),
-        rows.operators
-            .iter()
-            .cloned()
-            .map(pg_operator_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgCast.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgCast),
-        rows.casts.iter().cloned().map(pg_cast_row_values).collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgConstraint.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgConstraint),
-        rows.constraints
-            .iter()
-            .cloned()
-            .map(pg_constraint_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgDatabase.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgDatabase),
-        rows.databases
-            .iter()
-            .cloned()
-            .map(pg_database_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgAm.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgAm),
-        rows.ams.iter().cloned().map(pg_am_row_values).collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgTablespace.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgTablespace),
-        rows.tablespaces
-            .iter()
-            .cloned()
-            .map(pg_tablespace_row_values)
-            .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgType.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
-        rows.types.iter().cloned().map(pg_type_row_values).collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgAttribute.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
-        rows.attributes
+        BootstrapCatalogKind::PgClass => rows.classes.iter().cloned().map(pg_class_row_values).collect(),
+        BootstrapCatalogKind::PgAttribute => rows
+            .attributes
             .iter()
             .cloned()
             .map(pg_attribute_row_values)
             .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgAttrdef.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttrdef),
-        rows.attrdefs
+        BootstrapCatalogKind::PgType => rows.types.iter().cloned().map(pg_type_row_values).collect(),
+        BootstrapCatalogKind::PgProc => rows.procs.iter().cloned().map(pg_proc_row_values).collect(),
+        BootstrapCatalogKind::PgLanguage => rows
+            .languages
+            .iter()
+            .cloned()
+            .map(pg_language_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgOperator => rows
+            .operators
+            .iter()
+            .cloned()
+            .map(pg_operator_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgDatabase => rows
+            .databases
+            .iter()
+            .cloned()
+            .map(pg_database_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgAuthId => rows.authids.iter().cloned().map(pg_authid_row_values).collect(),
+        BootstrapCatalogKind::PgAuthMembers => rows
+            .auth_members
+            .iter()
+            .cloned()
+            .map(pg_auth_members_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgCollation => rows
+            .collations
+            .iter()
+            .cloned()
+            .map(pg_collation_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgTablespace => rows
+            .tablespaces
+            .iter()
+            .cloned()
+            .map(pg_tablespace_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgAm => rows.ams.iter().cloned().map(pg_am_row_values).collect(),
+        BootstrapCatalogKind::PgAttrdef => rows
+            .attrdefs
             .iter()
             .cloned()
             .map(pg_attrdef_row_values)
             .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgDepend.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgDepend),
-        rows.depends
+        BootstrapCatalogKind::PgCast => rows.casts.iter().cloned().map(pg_cast_row_values).collect(),
+        BootstrapCatalogKind::PgConstraint => rows
+            .constraints
             .iter()
             .cloned()
-            .map(pg_depend_row_values)
+            .map(pg_constraint_row_values)
             .collect(),
-    )?;
-    insert_catalog_rows(
-        &pool,
-        RelFileLocator {
-            spc_oid: 0,
-            db_oid,
-            rel_number: BootstrapCatalogKind::PgIndex.relation_oid(),
-        },
-        &bootstrap_relation_desc(BootstrapCatalogKind::PgIndex),
-        rows.indexes
-            .iter()
-            .cloned()
-            .map(pg_index_row_values)
-            .collect(),
-    )?;
-    Ok(())
+        BootstrapCatalogKind::PgDepend => rows.depends.iter().cloned().map(pg_depend_row_values).collect(),
+        BootstrapCatalogKind::PgIndex => rows.indexes.iter().cloned().map(pg_index_row_values).collect(),
+    }
+}
+
+fn create_table_sync_kinds(entry: &CatalogEntry) -> Vec<BootstrapCatalogKind> {
+    let mut kinds = vec![
+        BootstrapCatalogKind::PgClass,
+        BootstrapCatalogKind::PgType,
+        BootstrapCatalogKind::PgAttribute,
+        BootstrapCatalogKind::PgDepend,
+    ];
+    if entry
+        .desc
+        .columns
+        .iter()
+        .any(|column| column.default_expr.is_some())
+    {
+        kinds.push(BootstrapCatalogKind::PgAttrdef);
+    }
+    if entry
+        .desc
+        .columns
+        .iter()
+        .any(|column| !column.storage.nullable)
+    {
+        kinds.push(BootstrapCatalogKind::PgConstraint);
+    }
+    kinds
+}
+
+fn create_index_sync_kinds() -> Vec<BootstrapCatalogKind> {
+    vec![
+        BootstrapCatalogKind::PgClass,
+        BootstrapCatalogKind::PgAttribute,
+        BootstrapCatalogKind::PgIndex,
+        BootstrapCatalogKind::PgDepend,
+    ]
+}
+
+fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
+    vec![
+        BootstrapCatalogKind::PgClass,
+        BootstrapCatalogKind::PgType,
+        BootstrapCatalogKind::PgAttribute,
+        BootstrapCatalogKind::PgAttrdef,
+        BootstrapCatalogKind::PgConstraint,
+        BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgIndex,
+    ]
 }
 
 fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRows {
@@ -1870,6 +1787,8 @@ mod tests {
         PG_TYPE_RELATION_OID,
         POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -2644,6 +2563,56 @@ mod tests {
                 && row.objid != attrdef_oid
                 && row.objid != constraint_oid
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_create_table_only_rewrites_touched_catalog_relations() {
+        let base = temp_dir("selective_catalog_sync_create_table");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let proc_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        let class_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgClass.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        let proc_meta_before = fs::metadata(&proc_path).unwrap();
+        let class_meta_before = fs::metadata(&class_path).unwrap();
+
+        store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let proc_meta_after = fs::metadata(&proc_path).unwrap();
+        let class_meta_after = fs::metadata(&class_path).unwrap();
+        assert_eq!(proc_meta_before.ino(), proc_meta_after.ino());
+        assert_eq!(
+            proc_meta_before.modified().unwrap(),
+            proc_meta_after.modified().unwrap()
+        );
+        assert!(
+            class_meta_before.ino() != class_meta_after.ino()
+                || class_meta_before.modified().unwrap() != class_meta_after.modified().unwrap()
+        );
     }
 
     #[test]
