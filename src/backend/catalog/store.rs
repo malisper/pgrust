@@ -75,7 +75,6 @@ pub struct CatalogMutationEffect {
     pub touched_catalogs: Vec<BootstrapCatalogKind>,
     pub created_rels: Vec<RelFileLocator>,
     pub dropped_rels: Vec<RelFileLocator>,
-    pub touched_relation_oids: Vec<u32>,
 }
 
 pub struct CatalogWriteContext<'a> {
@@ -310,7 +309,6 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_rel(&mut effect.created_rels, entry.rel);
-        effect_record_oid(&mut effect.touched_relation_oids, entry.relation_oid);
         Ok((entry, effect))
     }
 
@@ -334,7 +332,6 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_rel(&mut effect.created_rels, entry.rel);
-        effect_record_oid(&mut effect.touched_relation_oids, entry.relation_oid);
         Ok((entry, effect))
     }
 
@@ -369,7 +366,6 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         for entry in &dropped {
             effect_record_rel(&mut effect.dropped_rels, entry.rel);
-            effect_record_oid(&mut effect.touched_relation_oids, entry.relation_oid);
         }
         Ok((dropped, effect))
     }
@@ -511,12 +507,6 @@ fn effect_record_catalog_kinds(effect: &mut CatalogMutationEffect, kinds: &[Boot
 fn effect_record_rel(rels: &mut Vec<RelFileLocator>, rel: RelFileLocator) {
     if !rels.contains(&rel) {
         rels.push(rel);
-    }
-}
-
-fn effect_record_oid(oids: &mut Vec<u32>, oid: u32) {
-    if !oids.contains(&oid) {
-        oids.push(oid);
     }
 }
 
