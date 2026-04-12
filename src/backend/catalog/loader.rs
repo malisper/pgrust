@@ -207,6 +207,20 @@ pub(crate) fn catalog_from_physical_rows(
                         indrelid: index.indrelid,
                         indkey: parse_indkey(&index.indkey),
                         indisunique: index.indisunique,
+                        indisvalid: index.indisvalid,
+                        indisready: index.indisready,
+                        indislive: index.indislive,
+                        indclass: parse_indkey(&index.indclass)
+                            .into_iter()
+                            .map(|v| v as u32)
+                            .collect(),
+                        indcollation: parse_indkey(&index.indcollation)
+                            .into_iter()
+                            .map(|v| v as u32)
+                            .collect(),
+                        indoption: parse_indkey(&index.indoption),
+                        indexprs: index.indexprs.clone(),
+                        indpred: index.indpred.clone(),
                     }),
             },
         );
@@ -592,11 +606,15 @@ pub(crate) fn load_physical_catalog_rows(
         depends: depend_rows,
         indexes: index_rows,
         ams: am_rows,
+        amops: Vec::new(),
+        amprocs: Vec::new(),
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
         constraints: constraint_rows,
         operators: operator_rows,
+        opclasses: Vec::new(),
+        opfamilies: Vec::new(),
         procs: proc_rows,
         casts: cast_rows,
         collations: collation_rows,
@@ -964,11 +982,15 @@ pub(crate) fn load_physical_catalog_rows_visible(
         depends: depend_rows,
         indexes: index_rows,
         ams: am_rows,
+        amops: Vec::new(),
+        amprocs: Vec::new(),
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
         constraints: constraint_rows,
         operators: operator_rows,
+        opclasses: Vec::new(),
+        opfamilies: Vec::new(),
         procs: proc_rows,
         casts: cast_rows,
         collations: collation_rows,

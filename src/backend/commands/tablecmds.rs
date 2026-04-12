@@ -156,10 +156,18 @@ pub fn execute_create_index(
                 actual: format!("{other:?}"),
             }),
         })?;
-    let _ = ctx.pool.with_storage_mut(|s| s.smgr.open(entry.rel));
-    let _ = ctx
-        .pool
-        .with_storage_mut(|s| s.smgr.create(entry.rel, ForkNumber::Main, false));
+    let _ = ctx.pool.with_storage_mut(|s| {
+        crate::backend::access::index::indexam::index_build_stub(
+            crate::backend::storage::smgr::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 0,
+            },
+            entry.rel,
+            crate::include::catalog::BTREE_AM_OID,
+            &mut s.smgr,
+        )
+    });
     Ok(StatementResult::AffectedRows(0))
 }
 

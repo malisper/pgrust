@@ -175,7 +175,62 @@ fn parse_create_unique_index_statement() {
             unique: true,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
-            columns: vec!["id1".into(), "id2".into()],
+            using_method: None,
+            columns: vec![
+                IndexColumnDef {
+                    name: "id1".into(),
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+                IndexColumnDef {
+                    name: "id2".into(),
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+            ],
+            include_columns: Vec::new(),
+            predicate: None,
+            options: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_index_with_method_and_ordering() {
+    let stmt = parse_statement(
+        "create index num_exp_add_idx on num_exp_add using btree (id1 desc nulls first, id2 asc)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateIndex(CreateIndexStatement {
+            unique: false,
+            index_name: "num_exp_add_idx".into(),
+            table_name: "num_exp_add".into(),
+            using_method: Some("btree".into()),
+            columns: vec![
+                IndexColumnDef {
+                    name: "id1".into(),
+                    collation: None,
+                    opclass: None,
+                    descending: true,
+                    nulls_first: Some(true),
+                },
+                IndexColumnDef {
+                    name: "id2".into(),
+                    collation: None,
+                    opclass: None,
+                    descending: false,
+                    nulls_first: None,
+                },
+            ],
+            include_columns: Vec::new(),
+            predicate: None,
+            options: Vec::new(),
         })
     );
 }

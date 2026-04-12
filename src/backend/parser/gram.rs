@@ -769,22 +769,82 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
 fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, ParseError> {
     let raw = pair.as_str().to_ascii_lowercase();
     let unique = raw.starts_with("create unique index");
-    let mut identifiers = Vec::new();
+    let mut index_name = None;
+    let mut table_name = None;
+    let mut using_method = None;
+    let mut columns = Vec::new();
+    let mut include_columns = Vec::new();
+    let mut predicate = None;
+    let mut options = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier => identifiers.push(build_identifier(part)),
-            Rule::ident_list => identifiers.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier if index_name.is_none() => index_name = Some(build_identifier(part)),
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::create_index_using_clause => {
+                using_method = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier);
+            }
+            Rule::create_index_item => columns.push(build_create_index_item(part)?),
+            Rule::create_index_include_clause => {
+                include_columns.extend(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::ident_list)
+                        .flat_map(|inner| inner.into_inner().map(build_identifier)),
+                );
+            }
+            Rule::create_index_where_clause => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                predicate = Some(build_expr(expr)?);
+            }
+            Rule::create_index_with_clause => {
+                for option in part.into_inner().filter(|inner| inner.as_rule() == Rule::reloption) {
+                    options.push(build_reloption(option)?);
+                }
+            }
             _ => {}
         }
     }
-    if identifiers.len() < 3 {
+    if columns.is_empty() {
         return Err(ParseError::UnexpectedEof);
     }
     Ok(CreateIndexStatement {
         unique,
-        index_name: identifiers[0].clone(),
-        table_name: identifiers[1].clone(),
-        columns: identifiers[2..].to_vec(),
+        index_name: index_name.ok_or(ParseError::UnexpectedEof)?,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        using_method,
+        columns,
+        include_columns,
+        predicate,
+        options,
+    })
+}
+
+fn build_create_index_item(pair: Pair<'_, Rule>) -> Result<IndexColumnDef, ParseError> {
+    let mut name = None;
+    let mut descending = false;
+    let mut nulls_first = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::kw_desc => descending = true,
+            Rule::nulls_ordering => {
+                let text = part.as_str().to_ascii_lowercase();
+                nulls_first = Some(text.contains("first"));
+            }
+            _ => {}
+        }
+    }
+    Ok(IndexColumnDef {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        collation: None,
+        opclass: None,
+        descending,
+        nulls_first,
     })
 }
 

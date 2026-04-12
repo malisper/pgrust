@@ -4,6 +4,8 @@ use std::path::Path;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
+use crate::backend::catalog::pg_amop::sort_pg_amop_rows;
+use crate::backend::catalog::pg_amproc::sort_pg_amproc_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
 use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::catalog::pg_auth_members::sort_pg_auth_members_rows;
@@ -15,6 +17,8 @@ use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::pg_language::sort_pg_language_rows;
+use crate::backend::catalog::pg_opclass::sort_pg_opclass_rows;
+use crate::backend::catalog::pg_opfamily::sort_pg_opfamily_rows;
 use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
@@ -28,14 +32,16 @@ use crate::include::catalog::{
     INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID,
     JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
     JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow,
-    PgNamespaceRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows,
-    bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow,
+    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
+    PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
+    PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows,
+    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_constraint_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_opfamily_rows,
     bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
     builtin_type_rows,
 };
@@ -51,11 +57,15 @@ pub struct CatCache {
     depend_rows: Vec<PgDependRow>,
     index_rows: Vec<PgIndexRow>,
     am_rows: Vec<PgAmRow>,
+    amop_rows: Vec<PgAmopRow>,
+    amproc_rows: Vec<PgAmprocRow>,
     authid_rows: Vec<PgAuthIdRow>,
     auth_members_rows: Vec<PgAuthMembersRow>,
     language_rows: Vec<PgLanguageRow>,
     constraint_rows: Vec<PgConstraintRow>,
     operator_rows: Vec<PgOperatorRow>,
+    opclass_rows: Vec<PgOpclassRow>,
+    opfamily_rows: Vec<PgOpfamilyRow>,
     proc_rows: Vec<PgProcRow>,
     cast_rows: Vec<PgCastRow>,
     collation_rows: Vec<PgCollationRow>,
@@ -91,6 +101,10 @@ impl CatCache {
         }
         cache.am_rows.extend(bootstrap_pg_am_rows());
         sort_pg_am_rows(&mut cache.am_rows);
+        cache.amop_rows.extend(bootstrap_pg_amop_rows());
+        sort_pg_amop_rows(&mut cache.amop_rows);
+        cache.amproc_rows.extend(bootstrap_pg_amproc_rows());
+        sort_pg_amproc_rows(&mut cache.amproc_rows);
         cache.authid_rows.extend(bootstrap_pg_authid_rows());
         sort_pg_authid_rows(&mut cache.authid_rows);
         cache
@@ -103,6 +117,10 @@ impl CatCache {
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         cache.operator_rows.extend(bootstrap_pg_operator_rows());
         sort_pg_operator_rows(&mut cache.operator_rows);
+        cache.opclass_rows.extend(bootstrap_pg_opclass_rows());
+        sort_pg_opclass_rows(&mut cache.opclass_rows);
+        cache.opfamily_rows.extend(bootstrap_pg_opfamily_rows());
+        sort_pg_opfamily_rows(&mut cache.opfamily_rows);
         cache.proc_rows.extend(bootstrap_pg_proc_rows());
         sort_pg_proc_rows(&mut cache.proc_rows);
         cache.cast_rows.extend(bootstrap_pg_cast_rows());
@@ -211,10 +229,34 @@ impl CatCache {
                     indnatts: index_meta.indkey.len() as i16,
                     indnkeyatts: index_meta.indkey.len() as i16,
                     indisunique: index_meta.indisunique,
-                    indisvalid: true,
-                    indisready: true,
-                    indislive: true,
+                    indnullsnotdistinct: false,
+                    indisprimary: false,
+                    indisexclusion: false,
+                    indimmediate: true,
+                    indisclustered: false,
+                    indisvalid: index_meta.indisvalid,
+                    indcheckxmin: false,
+                    indisready: index_meta.indisready,
+                    indislive: index_meta.indislive,
+                    indisreplident: false,
                     indkey: format_indkey(&index_meta.indkey),
+                    indcollation: format_indkey(
+                        &index_meta
+                            .indcollation
+                            .iter()
+                            .map(|oid| *oid as i16)
+                            .collect::<Vec<_>>(),
+                    ),
+                    indclass: format_indkey(
+                        &index_meta
+                            .indclass
+                            .iter()
+                            .map(|oid| *oid as i16)
+                            .collect::<Vec<_>>(),
+                    ),
+                    indoption: format_indkey(&index_meta.indoption),
+                    indexprs: index_meta.indexprs.clone(),
+                    indpred: index_meta.indpred.clone(),
                 });
             }
         }
@@ -314,6 +356,8 @@ impl CatCache {
         sort_pg_index_rows(&mut cache.index_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
+        sort_pg_amop_rows(&mut cache.amop_rows);
+        sort_pg_amproc_rows(&mut cache.amproc_rows);
         cache.authid_rows = authid_rows;
         sort_pg_authid_rows(&mut cache.authid_rows);
         cache.auth_members_rows = auth_members_rows;
@@ -324,6 +368,8 @@ impl CatCache {
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         cache.operator_rows = operator_rows;
         sort_pg_operator_rows(&mut cache.operator_rows);
+        sort_pg_opclass_rows(&mut cache.opclass_rows);
+        sort_pg_opfamily_rows(&mut cache.opfamily_rows);
         cache.proc_rows = proc_rows;
         sort_pg_proc_rows(&mut cache.proc_rows);
         cache.cast_rows = cast_rows;
@@ -407,6 +453,14 @@ impl CatCache {
         self.am_rows.clone()
     }
 
+    pub fn amop_rows(&self) -> Vec<PgAmopRow> {
+        self.amop_rows.clone()
+    }
+
+    pub fn amproc_rows(&self) -> Vec<PgAmprocRow> {
+        self.amproc_rows.clone()
+    }
+
     pub fn authid_rows(&self) -> Vec<PgAuthIdRow> {
         self.authid_rows.clone()
     }
@@ -433,6 +487,14 @@ impl CatCache {
 
     pub fn operator_rows(&self) -> Vec<PgOperatorRow> {
         self.operator_rows.clone()
+    }
+
+    pub fn opclass_rows(&self) -> Vec<PgOpclassRow> {
+        self.opclass_rows.clone()
+    }
+
+    pub fn opfamily_rows(&self) -> Vec<PgOpfamilyRow> {
+        self.opfamily_rows.clone()
     }
 
     pub fn operator_by_name_left_right(

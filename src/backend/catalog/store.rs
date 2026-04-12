@@ -208,7 +208,7 @@ impl CatalogStore {
         index_name: impl Into<String>,
         table_name: &str,
         unique: bool,
-        columns: &[String],
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
@@ -224,7 +224,7 @@ impl CatalogStore {
         index_name: impl Into<String>,
         relation_oid: u32,
         unique: bool,
-        columns: &[String],
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
@@ -356,7 +356,7 @@ impl CatalogStore {
         index_name: impl Into<String>,
         relation_oid: u32,
         unique: bool,
-        columns: &[String],
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         ctx: &CatalogWriteContext<'_>,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let index_name = index_name.into();

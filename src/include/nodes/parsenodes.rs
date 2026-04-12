@@ -326,7 +326,38 @@ pub struct CreateIndexStatement {
     pub unique: bool,
     pub index_name: String,
     pub table_name: String,
-    pub columns: Vec<String>,
+    pub using_method: Option<String>,
+    pub columns: Vec<IndexColumnDef>,
+    pub include_columns: Vec<String>,
+    pub predicate: Option<SqlExpr>,
+    pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexColumnDef {
+    pub name: String,
+    pub collation: Option<String>,
+    pub opclass: Option<String>,
+    pub descending: bool,
+    pub nulls_first: Option<bool>,
+}
+
+impl From<&str> for IndexColumnDef {
+    fn from(value: &str) -> Self {
+        Self {
+            name: value.to_string(),
+            collation: None,
+            opclass: None,
+            descending: false,
+            nulls_first: None,
+        }
+    }
+}
+
+impl From<String> for IndexColumnDef {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
