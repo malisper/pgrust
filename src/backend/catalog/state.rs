@@ -17,6 +17,14 @@ pub struct CatalogIndexMeta {
     pub indrelid: u32,
     pub indkey: Vec<i16>,
     pub indisunique: bool,
+    pub indisvalid: bool,
+    pub indisready: bool,
+    pub indislive: bool,
+    pub indclass: Vec<u32>,
+    pub indcollation: Vec<u32>,
+    pub indoption: Vec<i16>,
+    pub indexprs: Option<String>,
+    pub indpred: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,7 +197,7 @@ impl Catalog {
         index_name: impl Into<String>,
         table_name: &str,
         unique: bool,
-        columns: &[String],
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
         let table = self
             .get(table_name)
@@ -202,7 +210,7 @@ impl Catalog {
         index_name: impl Into<String>,
         relation_oid: u32,
         unique: bool,
-        columns: &[String],
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into().to_ascii_lowercase();
         if self.tables.contains_key(&index_name) {
@@ -216,22 +224,44 @@ impl Catalog {
         if table.relkind != 'r' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
+        let type_rows = crate::include::catalog::builtin_type_rows();
         let mut indkey = Vec::with_capacity(columns.len());
         let mut index_columns = Vec::with_capacity(columns.len());
+        let mut indclass = Vec::with_capacity(columns.len());
+        let mut indcollation = Vec::with_capacity(columns.len());
+        let mut indoption = Vec::with_capacity(columns.len());
         for column_name in columns {
             let (attnum, column) = table
                 .desc
                 .columns
                 .iter()
                 .enumerate()
-                .find(|(_, column)| column.name.eq_ignore_ascii_case(column_name))
-                .ok_or_else(|| CatalogError::UnknownColumn(column_name.clone()))?;
+                .find(|(_, column)| column.name.eq_ignore_ascii_case(&column_name.name))
+                .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
             indkey.push(attnum.saturating_add(1) as i16);
             let mut column = column.clone();
             column.not_null_constraint_oid = None;
             column.attrdef_oid = None;
             column.default_expr = None;
+            let column_sql_type = column.sql_type;
             index_columns.push(column);
+            let type_oid = type_rows
+                .iter()
+                .find(|row| row.sql_type == column_sql_type)
+                .map(|row| row.oid)
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
+                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            indclass.push(opclass_oid);
+            indcollation.push(0);
+            let mut option = 0i16;
+            if column_name.descending {
+                option |= 0x0001;
+            }
+            if column_name.nulls_first.unwrap_or(false) {
+                option |= 0x0002;
+            }
+            indoption.push(option);
         }
 
         let entry = CatalogEntry {
@@ -252,6 +282,14 @@ impl Catalog {
                 indrelid: table.relation_oid,
                 indkey,
                 indisunique: unique,
+                indisvalid: false,
+                indisready: false,
+                indislive: true,
+                indclass,
+                indcollation,
+                indoption,
+                indexprs: None,
+                indpred: None,
             }),
         };
         self.next_rel_number = self.next_rel_number.saturating_add(1);

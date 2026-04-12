@@ -761,6 +761,29 @@ impl Database {
                 create_stmt.table_name.clone(),
             )));
         }
+        if create_stmt
+            .using_method
+            .as_deref()
+            .is_some_and(|name| !name.eq_ignore_ascii_case("btree"))
+        {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "USING btree",
+                actual: "unsupported index access method".into(),
+            }));
+        }
+        if !create_stmt.include_columns.is_empty()
+            || !create_stmt.options.is_empty()
+            || create_stmt.predicate.is_some()
+            || create_stmt
+                .columns
+                .iter()
+                .any(|column| column.descending || column.nulls_first.is_some())
+        {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "simple btree column index",
+                actual: "unsupported CREATE INDEX feature".into(),
+            }));
+        }
 
         let mut catalog_guard = self.catalog.write();
         let ctx = CatalogWriteContext {
@@ -779,11 +802,21 @@ impl Database {
             &ctx,
         );
         match result {
-            Ok((entry, effect)) => {
+            Ok((index_entry, effect)) => {
                 drop(catalog_guard);
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
+                self.pool.with_storage_mut(|storage| {
+                    crate::backend::access::index::indexam::index_build_stub(
+                        entry.rel,
+                        index_entry.rel,
+                        crate::include::catalog::BTREE_AM_OID,
+                        &mut storage.smgr,
+                    )
+                }).map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index access method build",
+                    actual: "index build failed".into(),
+                }))?;
                 catalog_effects.push(effect);
-                let _ = entry;
                 Ok(StatementResult::AffectedRows(0))
             }
             Err(err) => Err(match err {

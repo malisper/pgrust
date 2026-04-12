@@ -4,10 +4,11 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
-    PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOperatorRow, PgProcRow, PgTablespaceRow,
-    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOpfamilyRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow,
+    bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 
@@ -69,6 +70,13 @@ pub(crate) fn catalog_row_values_for_kind(
             .map(pg_tablespace_row_values)
             .collect(),
         BootstrapCatalogKind::PgAm => rows.ams.iter().cloned().map(pg_am_row_values).collect(),
+        BootstrapCatalogKind::PgAmop => rows.amops.iter().cloned().map(pg_amop_row_values).collect(),
+        BootstrapCatalogKind::PgAmproc => rows
+            .amprocs
+            .iter()
+            .cloned()
+            .map(pg_amproc_row_values)
+            .collect(),
         BootstrapCatalogKind::PgAttrdef => rows
             .attrdefs
             .iter()
@@ -84,6 +92,18 @@ pub(crate) fn catalog_row_values_for_kind(
             .collect(),
         BootstrapCatalogKind::PgDepend => rows.depends.iter().cloned().map(pg_depend_row_values).collect(),
         BootstrapCatalogKind::PgIndex => rows.indexes.iter().cloned().map(pg_index_row_values).collect(),
+        BootstrapCatalogKind::PgOpclass => rows
+            .opclasses
+            .iter()
+            .cloned()
+            .map(pg_opclass_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgOpfamily => rows
+            .opfamilies
+            .iter()
+            .cloned()
+            .map(pg_opfamily_row_values)
+            .collect(),
     }
 }
 
@@ -140,6 +160,31 @@ pub(crate) fn pg_am_row_from_values(values: Vec<Value>) -> Result<PgAmRow, Catal
         amname: expect_text(&values[1])?,
         amhandler: expect_oid(&values[2])?,
         amtype: expect_char(&values[3], "amtype")?,
+    })
+}
+
+pub(crate) fn pg_amop_row_from_values(values: Vec<Value>) -> Result<PgAmopRow, CatalogError> {
+    Ok(PgAmopRow {
+        oid: expect_oid(&values[0])?,
+        amopfamily: expect_oid(&values[1])?,
+        amoplefttype: expect_oid(&values[2])?,
+        amoprighttype: expect_oid(&values[3])?,
+        amopstrategy: expect_int16(&values[4])?,
+        amoppurpose: expect_char(&values[5], "amoppurpose")?,
+        amopopr: expect_oid(&values[6])?,
+        amopmethod: expect_oid(&values[7])?,
+        amopsortfamily: expect_oid(&values[8])?,
+    })
+}
+
+pub(crate) fn pg_amproc_row_from_values(values: Vec<Value>) -> Result<PgAmprocRow, CatalogError> {
+    Ok(PgAmprocRow {
+        oid: expect_oid(&values[0])?,
+        amprocfamily: expect_oid(&values[1])?,
+        amproclefttype: expect_oid(&values[2])?,
+        amprocrighttype: expect_oid(&values[3])?,
+        amprocnum: expect_int16(&values[4])?,
+        amproc: expect_oid(&values[5])?,
     })
 }
 
@@ -339,6 +384,30 @@ pub(crate) fn pg_depend_row_from_values(values: Vec<Value>) -> Result<PgDependRo
     })
 }
 
+pub(crate) fn pg_opclass_row_from_values(values: Vec<Value>) -> Result<PgOpclassRow, CatalogError> {
+    Ok(PgOpclassRow {
+        oid: expect_oid(&values[0])?,
+        opcmethod: expect_oid(&values[1])?,
+        opcname: expect_text(&values[2])?,
+        opcnamespace: expect_oid(&values[3])?,
+        opcowner: expect_oid(&values[4])?,
+        opcfamily: expect_oid(&values[5])?,
+        opcintype: expect_oid(&values[6])?,
+        opcdefault: expect_bool(&values[7])?,
+        opckeytype: expect_oid(&values[8])?,
+    })
+}
+
+pub(crate) fn pg_opfamily_row_from_values(values: Vec<Value>) -> Result<PgOpfamilyRow, CatalogError> {
+    Ok(PgOpfamilyRow {
+        oid: expect_oid(&values[0])?,
+        opfmethod: expect_oid(&values[1])?,
+        opfname: expect_text(&values[2])?,
+        opfnamespace: expect_oid(&values[3])?,
+        opfowner: expect_oid(&values[4])?,
+    })
+}
+
 pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow, CatalogError> {
     Ok(PgIndexRow {
         indexrelid: expect_oid(&values[0])?,
@@ -346,10 +415,22 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
         indnatts: expect_int16(&values[2])?,
         indnkeyatts: expect_int16(&values[3])?,
         indisunique: expect_bool(&values[4])?,
-        indisvalid: expect_bool(&values[5])?,
-        indisready: expect_bool(&values[6])?,
-        indislive: expect_bool(&values[7])?,
-        indkey: expect_text(&values[8])?,
+        indnullsnotdistinct: expect_bool(&values[5])?,
+        indisprimary: expect_bool(&values[6])?,
+        indisexclusion: expect_bool(&values[7])?,
+        indimmediate: expect_bool(&values[8])?,
+        indisclustered: expect_bool(&values[9])?,
+        indisvalid: expect_bool(&values[10])?,
+        indcheckxmin: expect_bool(&values[11])?,
+        indisready: expect_bool(&values[12])?,
+        indislive: expect_bool(&values[13])?,
+        indisreplident: expect_bool(&values[14])?,
+        indkey: expect_text(&values[15])?,
+        indcollation: expect_text(&values[16])?,
+        indclass: expect_text(&values[17])?,
+        indoption: expect_text(&values[18])?,
+        indexprs: expect_nullable_text(&values[19])?,
+        indpred: expect_nullable_text(&values[20])?,
     })
 }
 
@@ -384,6 +465,31 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.relfilenode as i32),
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
+    ]
+}
+
+fn pg_amop_row_values(row: PgAmopRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.amopfamily as i32),
+        Value::Int32(row.amoplefttype as i32),
+        Value::Int32(row.amoprighttype as i32),
+        Value::Int16(row.amopstrategy),
+        Value::Text(row.amoppurpose.to_string().into()),
+        Value::Int32(row.amopopr as i32),
+        Value::Int32(row.amopmethod as i32),
+        Value::Int32(row.amopsortfamily as i32),
+    ]
+}
+
+fn pg_amproc_row_values(row: PgAmprocRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.amprocfamily as i32),
+        Value::Int32(row.amproclefttype as i32),
+        Value::Int32(row.amprocrighttype as i32),
+        Value::Int16(row.amprocnum),
+        Value::Int32(row.amproc as i32),
     ]
 }
 
@@ -598,10 +704,46 @@ fn pg_index_row_values(row: PgIndexRow) -> Vec<Value> {
         Value::Int16(row.indnatts),
         Value::Int16(row.indnkeyatts),
         Value::Bool(row.indisunique),
+        Value::Bool(row.indnullsnotdistinct),
+        Value::Bool(row.indisprimary),
+        Value::Bool(row.indisexclusion),
+        Value::Bool(row.indimmediate),
+        Value::Bool(row.indisclustered),
         Value::Bool(row.indisvalid),
+        Value::Bool(row.indcheckxmin),
         Value::Bool(row.indisready),
         Value::Bool(row.indislive),
+        Value::Bool(row.indisreplident),
         Value::Text(row.indkey.into()),
+        Value::Text(row.indcollation.into()),
+        Value::Text(row.indclass.into()),
+        Value::Text(row.indoption.into()),
+        row.indexprs.map_or(Value::Null, |v| Value::Text(v.into())),
+        row.indpred.map_or(Value::Null, |v| Value::Text(v.into())),
+    ]
+}
+
+fn pg_opclass_row_values(row: PgOpclassRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.opcmethod as i32),
+        Value::Text(row.opcname.into()),
+        Value::Int32(row.opcnamespace as i32),
+        Value::Int32(row.opcowner as i32),
+        Value::Int32(row.opcfamily as i32),
+        Value::Int32(row.opcintype as i32),
+        Value::Bool(row.opcdefault),
+        Value::Int32(row.opckeytype as i32),
+    ]
+}
+
+fn pg_opfamily_row_values(row: PgOpfamilyRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.opfmethod as i32),
+        Value::Text(row.opfname.into()),
+        Value::Int32(row.opfnamespace as i32),
+        Value::Int32(row.opfowner as i32),
     ]
 }
 
@@ -629,6 +771,14 @@ fn expect_text(value: &Value) -> Result<String, CatalogError> {
     match value {
         Value::Text(text) => Ok(text.to_string()),
         _ => Err(CatalogError::Corrupt("expected text value")),
+    }
+}
+
+fn expect_nullable_text(value: &Value) -> Result<Option<String>, CatalogError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Text(text) => Ok(Some(text.to_string())),
+        _ => Err(CatalogError::Corrupt("expected nullable text value")),
     }
 }
 

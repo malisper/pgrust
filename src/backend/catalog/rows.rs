@@ -5,9 +5,10 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::{CatCache, format_indkey, sql_type_oid};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOperatorRow,
-    PgProcRow, PgTablespaceRow, PgTypeRow,
+    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgOperatorRow, PgProcRow, PgTablespaceRow,
+    PgTypeRow,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -19,11 +20,15 @@ pub(crate) struct PhysicalCatalogRows {
     pub depends: Vec<PgDependRow>,
     pub indexes: Vec<PgIndexRow>,
     pub ams: Vec<PgAmRow>,
+    pub amops: Vec<PgAmopRow>,
+    pub amprocs: Vec<PgAmprocRow>,
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
     pub languages: Vec<PgLanguageRow>,
     pub constraints: Vec<PgConstraintRow>,
     pub operators: Vec<PgOperatorRow>,
+    pub opclasses: Vec<PgOpclassRow>,
+    pub opfamilies: Vec<PgOpfamilyRow>,
     pub procs: Vec<PgProcRow>,
     pub casts: Vec<PgCastRow>,
     pub collations: Vec<PgCollationRow>,
@@ -102,11 +107,15 @@ pub(crate) fn extend_physical_catalog_rows(
     target.depends.extend(source.depends);
     target.indexes.extend(source.indexes);
     target.ams.extend(source.ams);
+    target.amops.extend(source.amops);
+    target.amprocs.extend(source.amprocs);
     target.authids.extend(source.authids);
     target.auth_members.extend(source.auth_members);
     target.languages.extend(source.languages);
     target.constraints.extend(source.constraints);
     target.operators.extend(source.operators);
+    target.opclasses.extend(source.opclasses);
+    target.opfamilies.extend(source.opfamilies);
     target.procs.extend(source.procs);
     target.casts.extend(source.casts);
     target.collations.extend(source.collations);
@@ -124,11 +133,15 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         depends: catcache.depend_rows(),
         indexes: catcache.index_rows(),
         ams: catcache.am_rows(),
+        amops: catcache.amop_rows(),
+        amprocs: catcache.amproc_rows(),
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
         languages: catcache.language_rows(),
         constraints: catcache.constraint_rows(),
         operators: catcache.operator_rows(),
+        opclasses: catcache.opclass_rows(),
+        opfamilies: catcache.opfamily_rows(),
         procs: catcache.proc_rows(),
         casts: catcache.cast_rows(),
         collations: catcache.collation_rows(),
@@ -224,10 +237,22 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             indnatts: index_meta.indkey.len() as i16,
             indnkeyatts: index_meta.indkey.len() as i16,
             indisunique: index_meta.indisunique,
-            indisvalid: true,
-            indisready: true,
-            indislive: true,
+            indnullsnotdistinct: false,
+            indisprimary: false,
+            indisexclusion: false,
+            indimmediate: true,
+            indisclustered: false,
+            indisvalid: index_meta.indisvalid,
+            indcheckxmin: false,
+            indisready: index_meta.indisready,
+            indislive: index_meta.indislive,
+            indisreplident: false,
             indkey: format_indkey(&index_meta.indkey),
+            indcollation: format_indkey(&index_meta.indcollation.iter().map(|oid| *oid as i16).collect::<Vec<_>>()),
+            indclass: format_indkey(&index_meta.indclass.iter().map(|oid| *oid as i16).collect::<Vec<_>>()),
+            indoption: format_indkey(&index_meta.indoption),
+            indexprs: index_meta.indexprs.clone(),
+            indpred: index_meta.indpred.clone(),
         });
     }
 
