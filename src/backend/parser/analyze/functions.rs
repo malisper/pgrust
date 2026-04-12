@@ -1,6 +1,6 @@
 use super::*;
 use crate::include::catalog::{
-    TEXT_TYPE_OID, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -185,16 +185,21 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
     }
 }
 
-pub(super) fn comparison_operator_exists(op: &str, left: SqlType, right: SqlType) -> bool {
-    let Some(left_oid) = builtin_type_oid(left) else {
+pub(super) fn comparison_operator_exists(
+    catalog: &dyn CatalogLookup,
+    op: &str,
+    left: SqlType,
+    right: SqlType,
+) -> bool {
+    let Some(left_oid) = catalog_builtin_type_oid(catalog, left) else {
         return false;
     };
-    let Some(right_oid) = builtin_type_oid(right) else {
+    let Some(right_oid) = catalog_builtin_type_oid(catalog, right) else {
         return false;
     };
-    bootstrap_pg_operator_rows().iter().any(|row| {
-        row.oprname == op && row.oprleft == left_oid && row.oprright == right_oid
-    })
+    catalog
+        .operator_by_name_left_right(op, left_oid, right_oid)
+        .is_some()
 }
 
 pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<SqlType> {
@@ -607,15 +612,6 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         .is_some_and(|row| row.castmethod == 'i')
 }
 
-fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
-    builtin_type_rows().into_iter().find_map(|row| {
-        (row.typrelid == 0
-            && row.sql_type.kind == sql_type.kind
-            && row.sql_type.is_array == sql_type.is_array)
-            .then_some(row.oid)
-    })
-}
-
 fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
     match name.to_ascii_lowercase().as_str() {
         "count" => Some(AggFunc::Count),
@@ -784,26 +780,31 @@ mod tests {
     #[test]
     fn comparison_operator_exists_uses_pg_operator_catalog() {
         assert!(comparison_operator_exists(
+            &Catalog::default(),
             "<",
             SqlType::new(SqlTypeKind::Text),
             SqlType::new(SqlTypeKind::Text)
         ));
         assert!(comparison_operator_exists(
+            &Catalog::default(),
             ">=",
             SqlType::new(SqlTypeKind::Text),
             SqlType::new(SqlTypeKind::Text)
         ));
         assert!(comparison_operator_exists(
+            &Catalog::default(),
             "=",
             SqlType::new(SqlTypeKind::Bool),
             SqlType::new(SqlTypeKind::Bool)
         ));
-        assert!(!comparison_operator_exists(
+        assert!(comparison_operator_exists(
+            &Catalog::default(),
             "=",
             SqlType::new(SqlTypeKind::Jsonb),
             SqlType::new(SqlTypeKind::Jsonb)
         ));
         assert!(!comparison_operator_exists(
+            &Catalog::default(),
             "=",
             SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
             SqlType::array_of(SqlType::new(SqlTypeKind::Int4))

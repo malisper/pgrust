@@ -80,6 +80,42 @@ fn visible_catalog_without_text_input_cast(target_oid: u32) -> crate::backend::u
     crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(relcache, Some(filtered))
 }
 
+fn visible_catalog_without_operator(
+    name: &str,
+    left_oid: u32,
+    right_oid: u32,
+) -> crate::backend::utils::cache::visible_catalog::VisibleCatalog {
+    let catalog = catalog();
+    let relcache = crate::backend::utils::cache::relcache::RelCache::from_catalog(&catalog);
+    let base = crate::backend::utils::cache::catcache::CatCache::from_catalog(&catalog);
+    let filtered = crate::backend::utils::cache::catcache::CatCache::from_rows(
+        base.namespace_rows(),
+        base.class_rows(),
+        base.attribute_rows(),
+        base.attrdef_rows(),
+        base.depend_rows(),
+        base.index_rows(),
+        base.am_rows(),
+        base.authid_rows(),
+        base.auth_members_rows(),
+        base.language_rows(),
+        base.constraint_rows(),
+        base.operator_rows()
+            .into_iter()
+            .filter(|row| {
+                !(row.oprname == name && row.oprleft == left_oid && row.oprright == right_oid)
+            })
+            .collect(),
+        base.proc_rows(),
+        base.cast_rows(),
+        base.collation_rows(),
+        base.database_rows(),
+        base.tablespace_rows(),
+        base.type_rows(),
+    );
+    crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(relcache, Some(filtered))
+}
+
 #[test]
 fn pest_matches_basic_select_keyword() {
     let result = gram::pest_parse_keyword(gram::Rule::kw_select_atom, "select").unwrap();
@@ -1046,6 +1082,25 @@ fn build_plan_rejects_missing_visible_catalog_text_input_cast() {
     assert!(matches!(
         err,
         ParseError::UnexpectedToken { actual, .. } if actual == "cannot cast type text to jsonb"
+    ));
+}
+
+#[test]
+fn build_plan_rejects_missing_visible_catalog_comparison_operator() {
+    let visible = visible_catalog_without_operator(
+        "<",
+        crate::include::catalog::BYTEA_TYPE_OID,
+        crate::include::catalog::BYTEA_TYPE_OID,
+    );
+    let err = build_plan(
+        &parse_select(r"select E'\\x01'::bytea < E'\\x02'::bytea").unwrap(),
+        &visible,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UndefinedOperator { op, left_type, right_type }
+            if op == "<" && left_type == "bytea" && right_type == "bytea"
     ));
 }
 
