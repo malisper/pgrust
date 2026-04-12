@@ -2,7 +2,8 @@ use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::executor::RelationDesc;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
-    PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+    PG_TYPE_RELATION_OID, PgDependRow,
 };
 
 pub fn sort_pg_depend_rows(rows: &mut [PgDependRow]) {
@@ -73,6 +74,17 @@ pub fn derived_relation_depend_rows(
         Some(PgDependRow {
             classid: PG_ATTRDEF_RELATION_OID,
             objid: column.attrdef_oid?,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: relation_oid,
+            refobjsubid: idx.saturating_add(1) as i32,
+            deptype: DEPENDENCY_AUTO,
+        })
+    }));
+    rows.extend(desc.columns.iter().enumerate().filter_map(|(idx, column)| {
+        Some(PgDependRow {
+            classid: PG_CONSTRAINT_RELATION_OID,
+            objid: column.not_null_constraint_oid?,
             objsubid: 0,
             refclassid: PG_CLASS_RELATION_OID,
             refobjid: relation_oid,

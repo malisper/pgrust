@@ -1869,7 +1869,8 @@ mod tests {
         CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
         DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID,
         JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
-        PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
+        PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TYPE_RELATION_OID,
         POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1972,6 +1973,7 @@ mod tests {
         desc.columns[1].default_expr = Some("'hello'".into());
         let entry = store.create_table("notes", desc).unwrap();
         let attrdef_oid = entry.desc.columns[1].attrdef_oid.unwrap();
+        let constraint_oid = entry.desc.columns[0].not_null_constraint_oid.unwrap();
 
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.depends.iter().any(|row| {
@@ -1999,6 +2001,15 @@ mod tests {
                 && row.refclassid == PG_CLASS_RELATION_OID
                 && row.refobjid == entry.relation_oid
                 && row.refobjsubid == 2
+                && row.deptype == DEPENDENCY_AUTO
+        }));
+        assert!(rows.depends.iter().any(|row| {
+            row.classid == PG_CONSTRAINT_RELATION_OID
+                && row.objid == constraint_oid
+                && row.objsubid == 0
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == entry.relation_oid
+                && row.refobjsubid == 1
                 && row.deptype == DEPENDENCY_AUTO
         }));
     }
