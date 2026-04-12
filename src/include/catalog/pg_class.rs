@@ -28,13 +28,14 @@ pub fn pg_class_desc() -> RelationDesc {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 5] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 6] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAttribute),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgClass),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAttrdef),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgDepend),
     ]
 }
 

@@ -3,7 +3,8 @@ use std::path::Path;
 
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
-use crate::backend::catalog::store::load_physical_catalog_rows;
+use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
+use crate::backend::catalog::store::{DEFAULT_FIRST_USER_OID, load_physical_catalog_rows};
 use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::catalog::CatalogError;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -16,9 +17,9 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAttrdefRow, PgAttributeRow, PgClassRow, PgNamespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgNamespaceRow, PgTypeRow,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
+    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_namespace_rows, builtin_type_rows,
 };
 
@@ -30,6 +31,7 @@ pub struct CatCache {
     classes_by_oid: BTreeMap<u32, PgClassRow>,
     attributes_by_relid: BTreeMap<u32, Vec<PgAttributeRow>>,
     attrdefs_by_key: BTreeMap<(u32, i16), PgAttrdefRow>,
+    depend_rows: Vec<PgDependRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
@@ -140,7 +142,18 @@ impl CatCache {
             for row in attrdefs {
                 cache.attrdefs_by_key.insert((row.adrelid, row.adnum), row);
             }
+
+            if entry.relation_oid >= DEFAULT_FIRST_USER_OID {
+                cache.depend_rows.extend(derived_pg_depend_rows(
+                    entry.relation_oid,
+                    entry.namespace_oid,
+                    entry.row_type_oid,
+                    &entry.desc,
+                ));
+            }
         }
+
+        sort_pg_depend_rows(&mut cache.depend_rows);
 
         cache
     }
@@ -152,6 +165,7 @@ impl CatCache {
             rows.classes,
             rows.attributes,
             rows.attrdefs,
+            rows.depends,
             rows.types,
         ))
     }
@@ -161,6 +175,7 @@ impl CatCache {
         class_rows: Vec<PgClassRow>,
         attribute_rows: Vec<PgAttributeRow>,
         attrdef_rows: Vec<PgAttrdefRow>,
+        depend_rows: Vec<PgDependRow>,
         type_rows: Vec<PgTypeRow>,
     ) -> Self {
         let mut cache = Self::default();
@@ -195,6 +210,8 @@ impl CatCache {
         for row in attrdefs {
             cache.attrdefs_by_key.insert((row.adrelid, row.adnum), row);
         }
+        cache.depend_rows = depend_rows;
+        sort_pg_depend_rows(&mut cache.depend_rows);
         cache
     }
 
@@ -255,6 +272,10 @@ impl CatCache {
     pub fn attrdef_rows(&self) -> Vec<PgAttrdefRow> {
         self.attrdefs_by_key.values().cloned().collect()
     }
+
+    pub fn depend_rows(&self) -> Vec<PgDependRow> {
+        self.depend_rows.clone()
+    }
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
@@ -313,6 +334,11 @@ mod tests {
     use crate::backend::catalog::CatalogStore;
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
+    use crate::include::catalog::{
+        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
+        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
+        PUBLIC_NAMESPACE_OID,
+    };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -389,5 +415,27 @@ mod tests {
                 .map(|row| row.adbin.as_str()),
             Some("'anon'")
         );
+        assert!(cache.depend_rows().iter().any(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objid == entry.relation_oid
+                && row.refclassid == PG_NAMESPACE_RELATION_OID
+                && row.refobjid == PUBLIC_NAMESPACE_OID
+                && row.deptype == DEPENDENCY_NORMAL
+        }));
+        assert!(cache.depend_rows().iter().any(|row| {
+            row.classid == PG_TYPE_RELATION_OID
+                && row.objid == entry.row_type_oid
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == entry.relation_oid
+                && row.deptype == DEPENDENCY_INTERNAL
+        }));
+        assert!(cache.depend_rows().iter().any(|row| {
+            row.classid == PG_ATTRDEF_RELATION_OID
+                && row.objid == entry.desc.columns[1].attrdef_oid.unwrap()
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == entry.relation_oid
+                && row.refobjsubid == 2
+                && row.deptype == DEPENDENCY_AUTO
+        }));
     }
 }
