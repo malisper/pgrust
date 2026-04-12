@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
@@ -18,10 +19,12 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgTypeRow,
+    PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgIndexRow, PgNamespaceRow,
+    PgTypeRow,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_namespace_rows, builtin_type_rows,
+    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_namespace_rows,
+    builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -34,6 +37,7 @@ pub struct CatCache {
     attrdefs_by_key: BTreeMap<(u32, i16), PgAttrdefRow>,
     depend_rows: Vec<PgDependRow>,
     index_rows: Vec<PgIndexRow>,
+    am_rows: Vec<PgAmRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
@@ -62,6 +66,8 @@ impl CatCache {
                 .insert(row.typname.to_ascii_lowercase(), row.clone());
             cache.types_by_oid.insert(row.oid, row);
         }
+        cache.am_rows.extend(bootstrap_pg_am_rows());
+        sort_pg_am_rows(&mut cache.am_rows);
 
         for (name, entry) in catalog.entries() {
             if let Some((namespace, _)) = name.split_once('.')
@@ -86,6 +92,7 @@ impl CatCache {
                 relname: relname.to_string(),
                 relnamespace: entry.namespace_oid,
                 reltype: entry.row_type_oid,
+                relam: crate::include::catalog::relam_for_relkind(entry.relkind),
                 relfilenode: entry.rel.rel_number,
                 relkind: entry.relkind,
             };
@@ -179,6 +186,7 @@ impl CatCache {
             rows.attrdefs,
             rows.depends,
             rows.indexes,
+            rows.ams,
             rows.types,
         ))
     }
@@ -190,6 +198,7 @@ impl CatCache {
         attrdef_rows: Vec<PgAttrdefRow>,
         depend_rows: Vec<PgDependRow>,
         index_rows: Vec<PgIndexRow>,
+        am_rows: Vec<PgAmRow>,
         type_rows: Vec<PgTypeRow>,
     ) -> Self {
         let mut cache = Self::default();
@@ -228,6 +237,8 @@ impl CatCache {
         sort_pg_depend_rows(&mut cache.depend_rows);
         cache.index_rows = index_rows;
         sort_pg_index_rows(&mut cache.index_rows);
+        cache.am_rows = am_rows;
+        sort_pg_am_rows(&mut cache.am_rows);
         cache
     }
 
@@ -296,6 +307,10 @@ impl CatCache {
     pub fn index_rows(&self) -> Vec<PgIndexRow> {
         self.index_rows.clone()
     }
+
+    pub fn am_rows(&self) -> Vec<PgAmRow> {
+        self.am_rows.clone()
+    }
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
@@ -363,9 +378,9 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::include::catalog::{
-        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
-        PUBLIC_NAMESPACE_OID,
+        BTREE_AM_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+        HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -472,11 +487,20 @@ mod tests {
             cache.class_by_name("people_name_idx").map(|row| row.relkind),
             Some('i')
         );
+        assert_eq!(
+            cache.class_by_name("people_name_idx").map(|row| row.relam),
+            Some(BTREE_AM_OID)
+        );
+        assert_eq!(
+            cache.class_by_name("people").map(|row| row.relam),
+            Some(HEAP_TABLE_AM_OID)
+        );
         assert!(cache.index_rows().iter().any(|row| {
             row.indexrelid == index.relation_oid
                 && row.indrelid == entry.relation_oid
                 && row.indisunique
                 && row.indkey == "2"
         }));
+        assert!(cache.am_rows().iter().any(|row| row.oid == BTREE_AM_OID && row.amname == "btree"));
     }
 }

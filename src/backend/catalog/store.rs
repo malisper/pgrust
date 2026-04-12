@@ -16,9 +16,9 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgIndexRow,
-    PgNamespaceRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_composite_type_rows,
-    bootstrap_relation_desc, builtin_type_rows,
+    BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow,
+    PgIndexRow, PgNamespaceRow, PgTypeRow, bootstrap_catalog_kinds,
+    bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::BufferPool;
@@ -35,6 +35,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub attrdefs: Vec<PgAttrdefRow>,
     pub depends: Vec<PgDependRow>,
     pub indexes: Vec<PgIndexRow>,
+    pub ams: Vec<PgAmRow>,
     pub types: Vec<PgTypeRow>,
 }
 
@@ -299,6 +300,16 @@ pub(crate) fn sync_catalog_rows(
         RelFileLocator {
             spc_oid: 0,
             db_oid,
+            rel_number: BootstrapCatalogKind::PgAm.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAm),
+        rows.ams.iter().cloned().map(pg_am_row_values).collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
             rel_number: BootstrapCatalogKind::PgType.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
@@ -371,6 +382,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         attrdefs: catcache.attrdef_rows(),
         depends: catcache.depend_rows(),
         indexes: catcache.index_rows(),
+        ams: catcache.am_rows(),
         types: catcache.type_rows(),
     }
 }
@@ -407,8 +419,18 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Text(row.relname.into()),
         Value::Int32(row.relnamespace as i32),
         Value::Int32(row.reltype as i32),
+        Value::Int32(row.relam as i32),
         Value::Int32(row.relfilenode as i32),
         Value::Text(row.relkind.to_string().into()),
+    ]
+}
+
+fn pg_am_row_values(row: PgAmRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.amname.into()),
+        Value::Int32(row.amhandler as i32),
+        Value::Text(row.amtype.to_string().into()),
     ]
 }
 
@@ -485,6 +507,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let attrdef_rows = rows.attrdefs;
     let _depend_rows = rows.depends;
     let index_rows = rows.indexes;
+    let _am_rows = rows.ams;
 
     let namespace_names = namespace_rows
         .iter()
@@ -647,6 +670,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut missing_attrdef = false;
     let mut missing_depend = false;
     let mut missing_index = false;
+    let mut missing_am = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -664,6 +688,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             if kind == BootstrapCatalogKind::PgIndex {
                 missing_index = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAm {
+                missing_am = true;
                 continue;
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
@@ -741,6 +769,18 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         .map(pg_index_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let am_rows = if missing_am {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgAm],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAm),
+        )?
+        .into_iter()
+        .map(pg_am_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     Ok(PhysicalCatalogRows {
         namespaces: namespace_rows,
@@ -749,6 +789,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         attrdefs: attrdef_rows,
         depends: depend_rows,
         indexes: index_rows,
+        ams: am_rows,
         types: type_rows,
     })
 }
@@ -829,7 +870,7 @@ fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespaceRow, Catal
 }
 
 fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
-    let relkind = match &values[5] {
+    let relkind = match &values[6] {
         Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relkind"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected relkind text")),
@@ -839,8 +880,23 @@ fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogErr
         relname: expect_text(&values[1])?,
         relnamespace: expect_oid(&values[2])?,
         reltype: expect_oid(&values[3])?,
-        relfilenode: expect_oid(&values[4])?,
+        relam: expect_oid(&values[4])?,
+        relfilenode: expect_oid(&values[5])?,
         relkind,
+    })
+}
+
+fn pg_am_row_from_values(values: Vec<Value>) -> Result<PgAmRow, CatalogError> {
+    let amtype = match &values[3] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty amtype"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected amtype text")),
+    };
+    Ok(PgAmRow {
+        oid: expect_oid(&values[0])?,
+        amname: expect_text(&values[1])?,
+        amhandler: expect_oid(&values[2])?,
+        amtype,
     })
 }
 
@@ -946,9 +1002,9 @@ mod tests {
     use super::*;
     use crate::backend::storage::smgr::segment_path;
     use crate::include::catalog::{
-        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
-        PUBLIC_NAMESPACE_OID,
+        BTREE_AM_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
+        HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
+        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1117,8 +1173,16 @@ mod tests {
             .find(|row| row.oid == index.relation_oid)
             .unwrap();
         assert_eq!(class_row.relkind, 'i');
+        assert_eq!(class_row.relam, BTREE_AM_OID);
         assert_eq!(class_row.relnamespace, PUBLIC_NAMESPACE_OID);
         assert_eq!(class_row.reltype, 0);
+
+        let table_row = rows
+            .classes
+            .iter()
+            .find(|row| row.oid == table.relation_oid)
+            .unwrap();
+        assert_eq!(table_row.relam, HEAP_TABLE_AM_OID);
 
         assert!(rows.depends.iter().any(|row| {
             row.classid == PG_CLASS_RELATION_OID
@@ -1150,6 +1214,26 @@ mod tests {
                 .map(|meta| (meta.indrelid, meta.indkey.clone(), meta.indisunique)),
             Some((table.relation_oid, vec![1, 2], true))
         );
+    }
+
+    #[test]
+    fn catalog_store_persists_pg_am_rows() {
+        let base = temp_dir("am_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+
+        assert!(rows.ams.iter().any(|row| {
+            row.oid == HEAP_TABLE_AM_OID
+                && row.amname == "heap"
+                && row.amhandler == 3
+                && row.amtype == 't'
+        }));
+        assert!(rows.ams.iter().any(|row| {
+            row.oid == BTREE_AM_OID
+                && row.amname == "btree"
+                && row.amhandler == 330
+                && row.amtype == 'i'
+        }));
     }
 
     #[test]
@@ -1214,6 +1298,9 @@ mod tests {
         let index = catalog.get("pg_index").unwrap();
         let index_path = segment_path(&base, index.rel, ForkNumber::Main, 0);
         assert!(index_path.exists(), "pg_index relfile should exist");
+        let am = catalog.get("pg_am").unwrap();
+        let am_path = segment_path(&base, am.rel, ForkNumber::Main, 0);
+        assert!(am_path.exists(), "pg_am relfile should exist");
     }
 
     #[test]
@@ -1408,6 +1495,41 @@ mod tests {
 
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.indexes.is_empty());
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_am_relation() {
+        let base = temp_dir("missing_am_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let am_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgAm.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&am_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(am_path.exists(), "pg_am relfile should be recreated");
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.ams.iter().any(|row| row.oid == HEAP_TABLE_AM_OID && row.amname == "heap"));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 }

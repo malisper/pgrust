@@ -212,14 +212,7 @@ impl Database {
                 relcache.insert(name.clone(), temp.entry.clone());
                 relcache.insert(format!("pg_temp.{name}"), temp.entry.clone());
             }
-            for kind in [
-                BootstrapCatalogKind::PgNamespace,
-                BootstrapCatalogKind::PgClass,
-                BootstrapCatalogKind::PgAttribute,
-                BootstrapCatalogKind::PgType,
-                BootstrapCatalogKind::PgAttrdef,
-                BootstrapCatalogKind::PgDepend,
-            ] {
+            for kind in bootstrap_catalog_kinds() {
                 let entry = Self::temp_catalog_entry(client_id, kind);
                 relcache.insert(kind.relation_name(), entry.clone());
                 relcache.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
@@ -247,6 +240,7 @@ impl Database {
                             relname: name.clone(),
                             relnamespace: temp.entry.namespace_oid,
                             reltype: temp.entry.row_type_oid,
+                            relam: crate::include::catalog::relam_for_relkind(temp.entry.relkind),
                             relfilenode: temp.entry.rel.rel_number,
                             relkind: temp.entry.relkind,
                         });
