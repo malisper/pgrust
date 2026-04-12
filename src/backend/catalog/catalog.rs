@@ -61,10 +61,19 @@ impl Catalog {
         self.next_rel_number = self
             .next_rel_number
             .max(entry.rel.rel_number.saturating_add(1));
+        let next_attrdef_oid = entry
+            .desc
+            .columns
+            .iter()
+            .filter_map(|column| column.attrdef_oid)
+            .max()
+            .map(|oid| oid.saturating_add(1))
+            .unwrap_or(self.next_oid);
         self.next_oid = self
             .next_oid
             .max(entry.relation_oid.saturating_add(1))
-            .max(entry.row_type_oid.saturating_add(1));
+            .max(entry.row_type_oid.saturating_add(1))
+            .max(next_attrdef_oid);
         self.tables.insert(name, entry);
     }
 
@@ -87,11 +96,21 @@ impl Catalog {
     pub fn create_table(
         &mut self,
         name: impl Into<String>,
-        desc: RelationDesc,
+        mut desc: RelationDesc,
     ) -> Result<CatalogEntry, CatalogError> {
         let name = name.into().to_ascii_lowercase();
         if self.tables.contains_key(&name) {
             return Err(CatalogError::TableAlreadyExists(name));
+        }
+
+        let relation_oid = self.next_oid;
+        let row_type_oid = relation_oid.saturating_add(1);
+        let mut next_oid = row_type_oid.saturating_add(1);
+        for column in &mut desc.columns {
+            if column.default_expr.is_some() {
+                column.attrdef_oid = Some(next_oid);
+                next_oid = next_oid.saturating_add(1);
+            }
         }
 
         let entry = CatalogEntry {
@@ -100,14 +119,14 @@ impl Catalog {
                 db_oid: DEFAULT_DB_OID,
                 rel_number: self.next_rel_number,
             },
-            relation_oid: self.next_oid,
+            relation_oid,
             namespace_oid: PUBLIC_NAMESPACE_OID,
-            row_type_oid: self.next_oid.saturating_add(1),
+            row_type_oid,
             relkind: 'r',
             desc,
         };
         self.next_rel_number = self.next_rel_number.saturating_add(1);
-        self.next_oid = self.next_oid.saturating_add(2);
+        self.next_oid = next_oid;
         self.tables.insert(name, entry.clone());
         Ok(entry)
     }
@@ -146,6 +165,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         },
         ty,
         sql_type,
+        attrdef_oid: None,
         default_expr: None,
     }
 }
