@@ -645,6 +645,9 @@ fn psql_describe_tableinfo_query(
     let oid = extract_quoted_oid(sql)?;
     let entry = catalog.relcache().get_by_oid(oid)?;
     let relhasindex = catalog.has_index_on_relation(oid);
+    let amname = catalog
+        .access_method_name_for_relation(oid)
+        .unwrap_or_default();
     Some((
         vec![
             QueryColumn {
@@ -714,7 +717,7 @@ fn psql_describe_tableinfo_query(
             Value::Text("".into()),
             Value::InternalChar(entry.relpersistence as u8),
             Value::InternalChar(b'd'),
-            Value::Text("heap".into()),
+            Value::Text(amname.into()),
         ]],
     ))
 }
@@ -1616,5 +1619,34 @@ mod tests {
         );
         let (_, rows) = psql_describe_tableinfo_query(&visible, &sql).unwrap();
         assert_eq!(rows[0][2], Value::Bool(true));
+    }
+
+    #[test]
+    fn psql_describe_tableinfo_query_reports_visible_access_method() {
+        let mut catalog = Catalog::default();
+        let table = catalog
+            .create_table(
+                "widgets",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let index = catalog
+            .create_index_for_relation("widgets_id_idx", table.relation_oid, false, &["id".into()])
+            .unwrap();
+        let visible = VisibleCatalog::new(
+            RelCache::from_catalog(&catalog),
+            Some(CatCache::from_catalog(&catalog)),
+        );
+
+        let sql = format!(
+            "select c.relpersistence, am.amname \
+                 from pg_catalog.pg_class c \
+                 where c.oid = '{}'",
+            index.relation_oid
+        );
+        let (_, rows) = psql_describe_tableinfo_query(&visible, &sql).unwrap();
+        assert_eq!(rows[0][14], Value::Text("btree".into()));
     }
 }
