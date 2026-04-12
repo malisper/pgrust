@@ -169,6 +169,12 @@ pub(super) fn comparison_operator_exists(op: &str, left: SqlType, right: SqlType
     })
 }
 
+pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<SqlType> {
+    scalar_fixed_return_types()
+        .iter()
+        .find_map(|(candidate, sql_type)| (*candidate == func).then_some(*sql_type))
+}
+
 pub(super) fn fixed_aggregate_return_type(func: AggFunc) -> Option<SqlType> {
     aggregate_fixed_return_types()
         .iter()
@@ -415,6 +421,90 @@ fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, Sca
         }
         by_func
     })
+}
+
+fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)> {
+    static TYPES: OnceLock<Vec<(BuiltinScalarFunction, SqlType)>> = OnceLock::new();
+    TYPES.get_or_init(|| {
+        let mut by_func = Vec::new();
+        for row in bootstrap_pg_proc_rows() {
+            if row.prokind != 'f' || row.proretset {
+                continue;
+            }
+            let Some(func) = builtin_scalar_function_for_proc_src(&row.prosrc) else {
+                continue;
+            };
+            if !supports_fixed_scalar_return_type(func) {
+                continue;
+            }
+            let Some(sql_type) = builtin_sql_type_for_oid(row.prorettype) else {
+                continue;
+            };
+            if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                by_func.push((func, sql_type));
+            }
+        }
+        by_func
+    })
+}
+
+fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
+    matches!(
+        func,
+        BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::GetDatabaseEncoding
+            | BuiltinScalarFunction::ToJson
+            | BuiltinScalarFunction::ToJsonb
+            | BuiltinScalarFunction::ArrayToJson
+            | BuiltinScalarFunction::JsonBuildArray
+            | BuiltinScalarFunction::JsonBuildObject
+            | BuiltinScalarFunction::JsonObject
+            | BuiltinScalarFunction::JsonTypeof
+            | BuiltinScalarFunction::JsonArrayLength
+            | BuiltinScalarFunction::JsonExtractPath
+            | BuiltinScalarFunction::JsonExtractPathText
+            | BuiltinScalarFunction::JsonbTypeof
+            | BuiltinScalarFunction::JsonbArrayLength
+            | BuiltinScalarFunction::JsonbExtractPath
+            | BuiltinScalarFunction::JsonbExtractPathText
+            | BuiltinScalarFunction::JsonbBuildArray
+            | BuiltinScalarFunction::JsonbBuildObject
+            | BuiltinScalarFunction::JsonbPathExists
+            | BuiltinScalarFunction::JsonbPathMatch
+            | BuiltinScalarFunction::JsonbPathQueryArray
+            | BuiltinScalarFunction::JsonbPathQueryFirst
+            | BuiltinScalarFunction::Left
+            | BuiltinScalarFunction::Repeat
+            | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Position
+            | BuiltinScalarFunction::ConvertFrom
+            | BuiltinScalarFunction::Md5
+            | BuiltinScalarFunction::ToChar
+            | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::Scale
+            | BuiltinScalarFunction::MinScale
+            | BuiltinScalarFunction::TrimScale
+            | BuiltinScalarFunction::NumericInc
+            | BuiltinScalarFunction::Factorial
+            | BuiltinScalarFunction::PgLsn
+            | BuiltinScalarFunction::Div
+            | BuiltinScalarFunction::Mod
+            | BuiltinScalarFunction::WidthBucket
+            | BuiltinScalarFunction::GetBit
+            | BuiltinScalarFunction::BitCount
+            | BuiltinScalarFunction::Float4Send
+            | BuiltinScalarFunction::Float8Send
+            | BuiltinScalarFunction::BoolEq
+            | BuiltinScalarFunction::BoolNe
+            | BuiltinScalarFunction::BitcastIntegerToFloat4
+            | BuiltinScalarFunction::BitcastBigintToFloat8
+            | BuiltinScalarFunction::PgInputIsValid
+            | BuiltinScalarFunction::PgInputErrorMessage
+            | BuiltinScalarFunction::PgInputErrorDetail
+            | BuiltinScalarFunction::PgInputErrorHint
+            | BuiltinScalarFunction::PgInputErrorSqlState
+    )
 }
 
 fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
@@ -667,5 +757,27 @@ mod tests {
             SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
             SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
         ));
+    }
+
+    #[test]
+    fn fixed_scalar_return_type_uses_pg_proc_for_type_invariant_rows() {
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::Random),
+            Some(SqlType::new(SqlTypeKind::Float8))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::Lower),
+            Some(SqlType::new(SqlTypeKind::Text))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::BoolEq),
+            Some(SqlType::new(SqlTypeKind::Bool))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::ToJsonb),
+            Some(SqlType::new(SqlTypeKind::Jsonb))
+        );
+        assert_eq!(fixed_scalar_return_type(BuiltinScalarFunction::Abs), None);
+        assert_eq!(fixed_scalar_return_type(BuiltinScalarFunction::Substring), None);
     }
 }
