@@ -150,6 +150,13 @@
         let base = temp_dir("numeric_sql_noops");
         let db = Database::open(&base, 16).unwrap();
 
+        match db.execute(1, "select datname from pg_database").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
         db.execute(1, "create table num_exp_add (id1 int4, id2 int4)")
             .unwrap();
 

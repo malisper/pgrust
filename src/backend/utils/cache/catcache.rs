@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
+use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_USER_OID, load_physical_catalog_rows};
@@ -19,12 +20,12 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgIndexRow, PgNamespaceRow,
-    PgTypeRow,
+    PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDatabaseRow, PgDependRow, PgIndexRow,
+    PgNamespaceRow, PgTypeRow,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_namespace_rows,
-    builtin_type_rows,
+    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_namespace_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -38,6 +39,7 @@ pub struct CatCache {
     depend_rows: Vec<PgDependRow>,
     index_rows: Vec<PgIndexRow>,
     am_rows: Vec<PgAmRow>,
+    database_rows: Vec<PgDatabaseRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
@@ -68,6 +70,8 @@ impl CatCache {
         }
         cache.am_rows.extend(bootstrap_pg_am_rows());
         sort_pg_am_rows(&mut cache.am_rows);
+        cache.database_rows.extend(bootstrap_pg_database_rows());
+        sort_pg_database_rows(&mut cache.database_rows);
 
         for (name, entry) in catalog.entries() {
             if let Some((namespace, _)) = name.split_once('.')
@@ -188,6 +192,7 @@ impl CatCache {
             rows.depends,
             rows.indexes,
             rows.ams,
+            rows.databases,
             rows.types,
         ))
     }
@@ -200,6 +205,7 @@ impl CatCache {
         depend_rows: Vec<PgDependRow>,
         index_rows: Vec<PgIndexRow>,
         am_rows: Vec<PgAmRow>,
+        database_rows: Vec<PgDatabaseRow>,
         type_rows: Vec<PgTypeRow>,
     ) -> Self {
         let mut cache = Self::default();
@@ -240,6 +246,8 @@ impl CatCache {
         sort_pg_index_rows(&mut cache.index_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
+        cache.database_rows = database_rows;
+        sort_pg_database_rows(&mut cache.database_rows);
         cache
     }
 
@@ -311,6 +319,10 @@ impl CatCache {
 
     pub fn am_rows(&self) -> Vec<PgAmRow> {
         self.am_rows.clone()
+    }
+
+    pub fn database_rows(&self) -> Vec<PgDatabaseRow> {
+        self.database_rows.clone()
     }
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
