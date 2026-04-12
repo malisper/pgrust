@@ -80,7 +80,7 @@ pub(super) fn bind_comparison_expr(
             } else {
                 (left_bound, right_bound, left_type, right_type)
             };
-        if !supports_comparison_operator(op, resolved_left_type, resolved_right_type) {
+        if !supports_comparison_operator(catalog, op, resolved_left_type, resolved_right_type) {
             return Err(ParseError::UndefinedOperator {
                 op,
                 left_type: sql_type_name(resolved_left_type),
@@ -92,8 +92,13 @@ pub(super) fn bind_comparison_expr(
     Ok(make(Box::new(left), Box::new(right)))
 }
 
-fn supports_comparison_operator(op: &str, left: SqlType, right: SqlType) -> bool {
-    if comparison_operator_exists(op, left, right) {
+fn supports_comparison_operator(
+    catalog: &dyn CatalogLookup,
+    op: &str,
+    left: SqlType,
+    right: SqlType,
+) -> bool {
+    if comparison_operator_exists(catalog, op, left, right) {
         return true;
     }
     supports_array_comparison_operator(op, left, right)
