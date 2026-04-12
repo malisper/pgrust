@@ -5,6 +5,7 @@ pub mod pg_attrdef;
 pub mod pg_depend;
 pub mod pg_attribute;
 pub mod pg_class;
+pub mod pg_index;
 pub mod pg_type;
 pub mod store;
 
@@ -15,5 +16,6 @@ pub use pg_attrdef::*;
 pub use pg_depend::*;
 pub use pg_attribute::*;
 pub use pg_class::*;
+pub use pg_index::*;
 pub use pg_type::*;
 pub use store::*;

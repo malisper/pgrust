@@ -11,6 +11,13 @@ const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogIndexMeta {
+    pub indrelid: u32,
+    pub indkey: Vec<i16>,
+    pub indisunique: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogEntry {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -18,6 +25,7 @@ pub struct CatalogEntry {
     pub row_type_oid: u32,
     pub relkind: char,
     pub desc: RelationDesc,
+    pub index_meta: Option<CatalogIndexMeta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +34,7 @@ pub enum CatalogError {
     Corrupt(&'static str),
     TableAlreadyExists(String),
     UnknownTable(String),
+    UnknownColumn(String),
     UnknownType(String),
 }
 
@@ -81,6 +90,12 @@ impl Catalog {
         self.tables.get(&name.to_ascii_lowercase())
     }
 
+    pub fn get_by_oid(&self, relation_oid: u32) -> Option<&CatalogEntry> {
+        self.tables
+            .values()
+            .find(|entry| entry.relation_oid == relation_oid)
+    }
+
     pub fn table_names(&self) -> impl Iterator<Item = &str> {
         self.tables.keys().map(String::as_str)
     }
@@ -124,6 +139,7 @@ impl Catalog {
             row_type_oid,
             relkind: 'r',
             desc,
+            index_meta: None,
         };
         self.next_rel_number = self.next_rel_number.saturating_add(1);
         self.next_oid = next_oid;
@@ -131,10 +147,84 @@ impl Catalog {
         Ok(entry)
     }
 
+    pub fn create_index(
+        &mut self,
+        index_name: impl Into<String>,
+        table_name: &str,
+        unique: bool,
+        columns: &[String],
+    ) -> Result<CatalogEntry, CatalogError> {
+        let index_name = index_name.into().to_ascii_lowercase();
+        if self.tables.contains_key(&index_name) {
+            return Err(CatalogError::TableAlreadyExists(index_name));
+        }
+
+        let table = self
+            .get(table_name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(table_name.to_string()))?;
+        if table.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(table_name.to_string()));
+        }
+        let mut indkey = Vec::with_capacity(columns.len());
+        let mut index_columns = Vec::with_capacity(columns.len());
+        for column_name in columns {
+            let (attnum, column) = table
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, column)| column.name.eq_ignore_ascii_case(column_name))
+                .ok_or_else(|| CatalogError::UnknownColumn(column_name.clone()))?;
+            indkey.push(attnum.saturating_add(1) as i16);
+            let mut column = column.clone();
+            column.attrdef_oid = None;
+            column.default_expr = None;
+            index_columns.push(column);
+        }
+
+        let entry = CatalogEntry {
+            rel: RelFileLocator {
+                spc_oid: DEFAULT_SPC_OID,
+                db_oid: DEFAULT_DB_OID,
+                rel_number: self.next_rel_number,
+            },
+            relation_oid: self.next_oid,
+            namespace_oid: table.namespace_oid,
+            row_type_oid: 0,
+            relkind: 'i',
+            desc: RelationDesc {
+                columns: index_columns,
+            },
+            index_meta: Some(CatalogIndexMeta {
+                indrelid: table.relation_oid,
+                indkey,
+                indisunique: unique,
+            }),
+        };
+        self.next_rel_number = self.next_rel_number.saturating_add(1);
+        self.next_oid = self.next_oid.saturating_add(1);
+        self.tables.insert(index_name, entry.clone());
+        Ok(entry)
+    }
+
     pub fn drop_table(&mut self, name: &str) -> Result<CatalogEntry, CatalogError> {
+        match self.tables.get(&name.to_ascii_lowercase()) {
+            Some(entry) if entry.relkind == 'r' => {}
+            _ => return Err(CatalogError::UnknownTable(name.to_string())),
+        }
         self.tables
             .remove(&name.to_ascii_lowercase())
             .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))
+    }
+
+    pub fn remove_by_oid(&mut self, relation_oid: u32) -> Option<(String, CatalogEntry)> {
+        let name = self
+            .tables
+            .iter()
+            .find_map(|(name, entry)| (entry.relation_oid == relation_oid).then(|| name.clone()))?;
+        let entry = self.tables.remove(&name)?;
+        Some((name, entry))
     }
 }
 

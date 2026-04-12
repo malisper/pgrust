@@ -85,6 +85,7 @@
             relkind: 'r',
             rel,
             desc,
+            index_meta: None,
         }
     }
 

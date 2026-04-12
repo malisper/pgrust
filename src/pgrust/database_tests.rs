@@ -1,5 +1,6 @@
     use super::*;
-    use crate::backend::executor::Value;
+    use crate::backend::executor::{ExecError, Value};
+    use crate::backend::parser::ParseError;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
 
@@ -160,6 +161,36 @@
             .unwrap(),
             StatementResult::AffectedRows(0)
         );
+        {
+            let catalog = db.catalog.read().catalog_snapshot().unwrap();
+            let entry = catalog.get("num_exp_add_idx").unwrap();
+            assert_eq!(entry.relkind, 'i');
+        }
+
+        match db
+            .execute(1, "select count(*) from pg_class where relname = 'num_exp_add_idx'")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match db.execute(1, "show tables").unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("num_exp_add".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        assert!(matches!(
+            db.execute(1, "select * from num_exp_add_idx"),
+            Err(ExecError::Parse(ParseError::UnknownTable(name)))
+                | Err(ExecError::Parse(ParseError::TableDoesNotExist(name)))
+                if name == "num_exp_add_idx"
+        ));
+
         assert_eq!(
             db.execute(
                 1,
@@ -168,6 +199,26 @@
             .unwrap(),
             StatementResult::AffectedRows(0)
         );
+
+        assert_eq!(
+            db.execute(1, "drop table num_exp_add").unwrap(),
+            StatementResult::AffectedRows(1)
+        );
+        {
+            let catalog = db.catalog.read().catalog_snapshot().unwrap();
+            assert!(catalog.get("num_exp_add").is_none());
+            assert!(catalog.get("num_exp_add_idx").is_none());
+        }
+
+        match db
+            .execute(1, "select count(*) from pg_class where relname = 'num_exp_add_idx'")
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
     }
 
     #[test]

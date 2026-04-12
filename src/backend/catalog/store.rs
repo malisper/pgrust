@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +7,7 @@ use serde_json::Value as JsonValue;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert, heap_scan_begin, heap_scan_next};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::utils::cache::catcache::CatCache;
-use crate::backend::catalog::catalog::{column_desc, Catalog, CatalogEntry, CatalogError};
+use crate::backend::catalog::catalog::{CatalogIndexMeta, column_desc, Catalog, CatalogEntry, CatalogError};
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::value_io::decode_value;
@@ -16,7 +16,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow,
+    BootstrapCatalogKind, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDependRow, PgIndexRow,
     PgNamespaceRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_composite_type_rows,
     bootstrap_relation_desc, builtin_type_rows,
 };
@@ -34,6 +34,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub attributes: Vec<PgAttributeRow>,
     pub attrdefs: Vec<PgAttrdefRow>,
     pub depends: Vec<PgDependRow>,
+    pub indexes: Vec<PgIndexRow>,
     pub types: Vec<PgTypeRow>,
 }
 
@@ -127,11 +128,30 @@ impl CatalogStore {
         Ok(entry)
     }
 
-    pub fn drop_table(&mut self, name: &str) -> Result<CatalogEntry, CatalogError> {
+    pub fn create_index(
+        &mut self,
+        index_name: impl Into<String>,
+        table_name: &str,
+        unique: bool,
+        columns: &[String],
+    ) -> Result<CatalogEntry, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry = catalog.drop_table(name)?;
+        let entry = catalog.create_index(index_name, table_name, unique, columns)?;
         self.persist_catalog(&catalog)?;
         Ok(entry)
+    }
+
+    pub fn drop_table(&mut self, name: &str) -> Result<Vec<CatalogEntry>, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let oids = drop_relation_oids(&catalog, name)?;
+        let mut dropped = Vec::with_capacity(oids.len());
+        for oid in oids {
+            if let Some((_name, entry)) = catalog.remove_by_oid(oid) {
+                dropped.push(entry);
+            }
+        }
+        self.persist_catalog(&catalog)?;
+        Ok(dropped)
     }
 
     fn persist_catalog(&self, catalog: &Catalog) -> Result<(), CatalogError> {
@@ -145,6 +165,56 @@ impl CatalogStore {
         )?;
         sync_physical_catalogs(&self.base_dir, catalog)
     }
+}
+
+fn drop_relation_oids(catalog: &Catalog, name: &str) -> Result<Vec<u32>, CatalogError> {
+    let entry = catalog
+        .get(name)
+        .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
+    if entry.relkind != 'r' {
+        return Err(CatalogError::UnknownTable(name.to_string()));
+    }
+    let depend_rows = CatCache::from_catalog(catalog).depend_rows();
+    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
+    collect_relation_drop_oids(
+        catalog,
+        &depend_rows,
+        entry.relation_oid,
+        &mut seen,
+        &mut order,
+    );
+    Ok(order)
+}
+
+fn collect_relation_drop_oids(
+    catalog: &Catalog,
+    depend_rows: &[PgDependRow],
+    relation_oid: u32,
+    seen: &mut BTreeSet<u32>,
+    order: &mut Vec<u32>,
+) {
+    if !seen.insert(relation_oid) {
+        return;
+    }
+
+    for row in depend_rows {
+        if row.refclassid != crate::include::catalog::PG_CLASS_RELATION_OID
+            || row.refobjid != relation_oid
+            || row.classid != crate::include::catalog::PG_CLASS_RELATION_OID
+            || row.objsubid != 0
+        {
+            continue;
+        }
+        if let Some(dependent) = catalog.get_by_oid(row.objid) {
+            if dependent.relkind != 'r' && dependent.relkind != 'i' {
+                continue;
+            }
+            collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);
+        }
+    }
+
+    order.push(relation_oid);
 }
 
 impl CatalogStore {
@@ -276,6 +346,20 @@ pub(crate) fn sync_catalog_rows(
             .map(pg_depend_row_values)
             .collect(),
     )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgIndex.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgIndex),
+        rows.indexes
+            .iter()
+            .cloned()
+            .map(pg_index_row_values)
+            .collect(),
+    )?;
     Ok(())
 }
 
@@ -286,6 +370,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         attributes: catcache.attribute_rows(),
         attrdefs: catcache.attrdef_rows(),
         depends: catcache.depend_rows(),
+        indexes: catcache.index_rows(),
         types: catcache.type_rows(),
     }
 }
@@ -368,6 +453,20 @@ fn pg_depend_row_values(row: PgDependRow) -> Vec<Value> {
     ]
 }
 
+fn pg_index_row_values(row: PgIndexRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.indexrelid as i32),
+        Value::Int32(row.indrelid as i32),
+        Value::Int16(row.indnatts),
+        Value::Int16(row.indnkeyatts),
+        Value::Bool(row.indisunique),
+        Value::Bool(row.indisvalid),
+        Value::Bool(row.indisready),
+        Value::Bool(row.indislive),
+        Value::Text(row.indkey.into()),
+    ]
+}
+
 fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), CatalogError> {
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&CONTROL_FILE_MAGIC.to_le_bytes());
@@ -385,6 +484,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let attribute_rows = rows.attributes;
     let attrdef_rows = rows.attrdefs;
     let _depend_rows = rows.depends;
+    let index_rows = rows.indexes;
 
     let namespace_names = namespace_rows
         .iter()
@@ -404,6 +504,10 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let attrdefs_by_key = attrdef_rows
         .into_iter()
         .map(|row| ((row.adrelid, row.adnum), row))
+        .collect::<BTreeMap<_, _>>();
+    let indexes_by_relid = index_rows
+        .into_iter()
+        .map(|row| (row.indexrelid, row))
         .collect::<BTreeMap<_, _>>();
     // :HACK: Keep a one-time compatibility path for stores created before `pg_attrdef`
     // existed. Once old datadirs no longer need migration, delete this fallback and
@@ -484,6 +588,11 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
                 row_type_oid: row.reltype,
                 relkind: row.relkind,
                 desc: RelationDesc { columns },
+                index_meta: indexes_by_relid.get(&row.oid).map(|index| CatalogIndexMeta {
+                    indrelid: index.indrelid,
+                    indkey: parse_indkey(&index.indkey),
+                    indisunique: index.indisunique,
+                }),
             },
         );
         catalog.next_oid = catalog
@@ -537,6 +646,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut rels = BTreeMap::new();
     let mut missing_attrdef = false;
     let mut missing_depend = false;
+    let mut missing_index = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -550,6 +660,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             if kind == BootstrapCatalogKind::PgDepend {
                 missing_depend = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgIndex {
+                missing_index = true;
                 continue;
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
@@ -615,6 +729,18 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         .map(pg_depend_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let index_rows = if missing_index {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgIndex],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgIndex),
+        )?
+        .into_iter()
+        .map(pg_index_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     Ok(PhysicalCatalogRows {
         namespaces: namespace_rows,
@@ -622,6 +748,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         attributes: attribute_rows,
         attrdefs: attrdef_rows,
         depends: depend_rows,
+        indexes: index_rows,
         types: type_rows,
     })
 }
@@ -664,6 +791,13 @@ fn expect_text(value: &Value) -> Result<String, CatalogError> {
         Value::Text(text) => Ok(text.to_string()),
         _ => Err(CatalogError::Corrupt("expected text value")),
     }
+}
+
+fn parse_indkey(indkey: &str) -> Vec<i16> {
+    indkey
+        .split_ascii_whitespace()
+        .filter_map(|value| value.parse::<i16>().ok())
+        .collect()
 }
 
 fn expect_bool(value: &Value) -> Result<bool, CatalogError> {
@@ -745,6 +879,20 @@ fn pg_depend_row_from_values(values: Vec<Value>) -> Result<PgDependRow, CatalogE
         refobjid: expect_oid(&values[4])?,
         refobjsubid: expect_int32(&values[5])?,
         deptype,
+    })
+}
+
+fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow, CatalogError> {
+    Ok(PgIndexRow {
+        indexrelid: expect_oid(&values[0])?,
+        indrelid: expect_oid(&values[1])?,
+        indnatts: expect_int16(&values[2])?,
+        indnkeyatts: expect_int16(&values[3])?,
+        indisunique: expect_bool(&values[4])?,
+        indisvalid: expect_bool(&values[5])?,
+        indisready: expect_bool(&values[6])?,
+        indislive: expect_bool(&values[7])?,
+        indkey: expect_text(&values[8])?,
     })
 }
 
@@ -928,6 +1076,124 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_persists_pg_index_rows() {
+        let base = temp_dir("index_rows");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let table = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("name", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+        let index = store
+            .create_index(
+                "people_name_idx",
+                "people",
+                true,
+                &["id".into(), "name".into()],
+            )
+            .unwrap();
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        let index_row = rows
+            .indexes
+            .iter()
+            .find(|row| row.indexrelid == index.relation_oid)
+            .unwrap();
+        assert_eq!(index_row.indrelid, table.relation_oid);
+        assert_eq!(index_row.indnatts, 2);
+        assert_eq!(index_row.indnkeyatts, 2);
+        assert!(index_row.indisunique);
+        assert_eq!(index_row.indkey, "1 2");
+
+        let class_row = rows
+            .classes
+            .iter()
+            .find(|row| row.oid == index.relation_oid)
+            .unwrap();
+        assert_eq!(class_row.relkind, 'i');
+        assert_eq!(class_row.relnamespace, PUBLIC_NAMESPACE_OID);
+        assert_eq!(class_row.reltype, 0);
+
+        assert!(rows.depends.iter().any(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objid == index.relation_oid
+                && row.objsubid == 0
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == table.relation_oid
+                && row.refobjsubid == 1
+                && row.deptype == DEPENDENCY_AUTO
+        }));
+        assert!(rows.depends.iter().any(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objid == index.relation_oid
+                && row.objsubid == 0
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == table.relation_oid
+                && row.refobjsubid == 2
+                && row.deptype == DEPENDENCY_AUTO
+        }));
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        let reopened_index = reopened_catalog.get("people_name_idx").unwrap();
+        assert_eq!(reopened_index.relkind, 'i');
+        assert_eq!(
+            reopened_index
+                .index_meta
+                .as_ref()
+                .map(|meta| (meta.indrelid, meta.indkey.clone(), meta.indisunique)),
+            Some((table.relation_oid, vec![1, 2], true))
+        );
+    }
+
+    #[test]
+    fn catalog_store_drop_table_cascades_indexes() {
+        let base = temp_dir("drop_index_cascade");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let table = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("name", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+        let index = store
+            .create_index("people_name_idx", "people", false, &["name".into()])
+            .unwrap();
+
+        let dropped = store.drop_table("people").unwrap();
+        assert_eq!(
+            dropped.iter().map(|entry| entry.relation_oid).collect::<Vec<_>>(),
+            vec![index.relation_oid, table.relation_oid]
+        );
+        assert_eq!(
+            dropped.iter().map(|entry| entry.relkind).collect::<Vec<_>>(),
+            vec!['i', 'r']
+        );
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_none());
+        assert!(reopened_catalog.get("people_name_idx").is_none());
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(!rows.classes.iter().any(|row| row.oid == table.relation_oid));
+        assert!(!rows.classes.iter().any(|row| row.oid == index.relation_oid));
+        assert!(!rows.indexes.iter().any(|row| row.indexrelid == index.relation_oid));
+        assert!(!rows.depends.iter().any(|row| row.objid == index.relation_oid));
+    }
+
+    #[test]
     fn catalog_store_bootstraps_physical_core_catalog_relfiles() {
         let base = temp_dir("physical_bootstrap");
         let store = CatalogStore::load(&base).unwrap();
@@ -945,6 +1211,9 @@ mod tests {
         let depend = catalog.get("pg_depend").unwrap();
         let depend_path = segment_path(&base, depend.rel, ForkNumber::Main, 0);
         assert!(depend_path.exists(), "pg_depend relfile should exist");
+        let index = catalog.get("pg_index").unwrap();
+        let index_path = segment_path(&base, index.rel, ForkNumber::Main, 0);
+        assert!(index_path.exists(), "pg_index relfile should exist");
     }
 
     #[test]
@@ -1105,5 +1374,40 @@ mod tests {
                 && row.refclassid == PG_NAMESPACE_RELATION_OID
                 && row.refobjid == PUBLIC_NAMESPACE_OID
         }));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_index_relation() {
+        let base = temp_dir("missing_index_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let index_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgIndex.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&index_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(index_path.exists(), "pg_index relfile should be recreated");
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.indexes.is_empty());
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 }
