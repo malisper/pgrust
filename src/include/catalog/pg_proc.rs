@@ -2,9 +2,9 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID,
-    INT8_TYPE_OID, JSONB_TYPE_OID, JSON_TYPE_OID, NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID,
+    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BPCHAR_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
+    INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, NUMERIC_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, TEXT_TYPE_OID,
 };
 
 pub const CAST_PROC_INT4_INT2_OID: u32 = 6228;
@@ -17,6 +17,21 @@ pub const CAST_PROC_INT2_INT8_OID: u32 = 6234;
 pub const CAST_PROC_INT4_INT8_OID: u32 = 6235;
 pub const CAST_PROC_NUMERIC_INT8_OID: u32 = 6236;
 pub const CAST_PROC_TEXT_BPCHAR_OID: u32 = 6237;
+pub const BOOL_CMP_LT_PROC_OID: u32 = 56;
+pub const BOOL_CMP_GT_PROC_OID: u32 = 57;
+pub const BOOL_CMP_EQ_PROC_OID: u32 = 60;
+pub const INT4_CMP_EQ_PROC_OID: u32 = 65;
+pub const INT4_CMP_LT_PROC_OID: u32 = 66;
+pub const TEXT_CMP_EQ_PROC_OID: u32 = 67;
+pub const BOOL_CMP_NE_PROC_OID: u32 = 84;
+pub const INT4_CMP_NE_PROC_OID: u32 = 144;
+pub const INT4_CMP_GT_PROC_OID: u32 = 147;
+pub const INT4_CMP_LE_PROC_OID: u32 = 149;
+pub const INT4_CMP_GE_PROC_OID: u32 = 150;
+pub const TEXT_CMP_NE_PROC_OID: u32 = 157;
+pub const BOOL_CMP_LE_PROC_OID: u32 = 1691;
+pub const BOOL_CMP_GE_PROC_OID: u32 = 1692;
+pub const TEXT_STARTS_WITH_PROC_OID: u32 = 3696;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -62,8 +77,16 @@ pub fn pg_proc_desc() -> RelationDesc {
             column_desc("proleakproof", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("proisstrict", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("proretset", SqlType::new(SqlTypeKind::Bool), false),
-            column_desc("provolatile", SqlType::new(SqlTypeKind::InternalChar), false),
-            column_desc("proparallel", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc(
+                "provolatile",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
+            column_desc(
+                "proparallel",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
             column_desc("pronargs", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("pronargdefaults", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("prorettype", SqlType::new(SqlTypeKind::Oid), false),
@@ -81,7 +104,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     // scalar, aggregate, and set-returning builtins that pgrust already
     // exposes through hardcoded binder and executor paths.
     vec![
-        proc_row(6200, "random", FLOAT8_TYPE_OID, "", "random", 0, false, false, 'f', 'v'),
+        proc_row(
+            6200,
+            "random",
+            FLOAT8_TYPE_OID,
+            "",
+            "random",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+        ),
         proc_row(
             6201,
             "getdatabaseencoding",
@@ -202,7 +236,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'i',
         ),
-        proc_row(6211, "to_json", JSON_TYPE_OID, "any", "to_json", 1, false, false, 'f', 's'),
+        proc_row(
+            6211,
+            "to_json",
+            JSON_TYPE_OID,
+            "any",
+            "to_json",
+            1,
+            false,
+            false,
+            'f',
+            's',
+        ),
         proc_row(
             6212,
             "to_jsonb",
@@ -280,10 +325,34 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             1,
         ),
         aggregate_row(6219, "count", INT8_TYPE_OID, "any", 1),
-        aggregate_row(6220, "sum", NUMERIC_TYPE_OID, &oid_argtypes(&[NUMERIC_TYPE_OID]), 1),
-        aggregate_row(6221, "avg", NUMERIC_TYPE_OID, &oid_argtypes(&[NUMERIC_TYPE_OID]), 1),
-        aggregate_row(6222, "min", TEXT_TYPE_OID, &oid_argtypes(&[TEXT_TYPE_OID]), 1),
-        aggregate_row(6223, "max", TEXT_TYPE_OID, &oid_argtypes(&[TEXT_TYPE_OID]), 1),
+        aggregate_row(
+            6220,
+            "sum",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[NUMERIC_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            6221,
+            "avg",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[NUMERIC_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            6222,
+            "min",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            1,
+        ),
+        aggregate_row(
+            6223,
+            "max",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID]),
+            1,
+        ),
         aggregate_row(6224, "json_agg", JSON_TYPE_OID, "any", 1),
         aggregate_row(6225, "jsonb_agg", JSONB_TYPE_OID, "any", 1),
         aggregate_row(
@@ -300,24 +369,129 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
             2,
         ),
-        cast_proc_row(CAST_PROC_INT4_INT2_OID, "int4", INT4_TYPE_OID, &[INT2_TYPE_OID]),
-        cast_proc_row(CAST_PROC_INT8_INT2_OID, "int8", INT8_TYPE_OID, &[INT2_TYPE_OID]),
+        comparison_proc_row(
+            BOOL_CMP_LT_PROC_OID,
+            "boollt",
+            &[BOOL_TYPE_OID, BOOL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BOOL_CMP_GT_PROC_OID,
+            "boolgt",
+            &[BOOL_TYPE_OID, BOOL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BOOL_CMP_EQ_PROC_OID,
+            "booleq",
+            &[BOOL_TYPE_OID, BOOL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INT4_CMP_EQ_PROC_OID,
+            "int4eq",
+            &[INT4_TYPE_OID, INT4_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INT4_CMP_LT_PROC_OID,
+            "int4lt",
+            &[INT4_TYPE_OID, INT4_TYPE_OID],
+        ),
+        comparison_proc_row(
+            TEXT_CMP_EQ_PROC_OID,
+            "texteq",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BOOL_CMP_NE_PROC_OID,
+            "boolne",
+            &[BOOL_TYPE_OID, BOOL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INT4_CMP_NE_PROC_OID,
+            "int4ne",
+            &[INT4_TYPE_OID, INT4_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INT4_CMP_GT_PROC_OID,
+            "int4gt",
+            &[INT4_TYPE_OID, INT4_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INT4_CMP_LE_PROC_OID,
+            "int4le",
+            &[INT4_TYPE_OID, INT4_TYPE_OID],
+        ),
+        comparison_proc_row(
+            INT4_CMP_GE_PROC_OID,
+            "int4ge",
+            &[INT4_TYPE_OID, INT4_TYPE_OID],
+        ),
+        comparison_proc_row(
+            TEXT_CMP_NE_PROC_OID,
+            "textne",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BOOL_CMP_LE_PROC_OID,
+            "boolle",
+            &[BOOL_TYPE_OID, BOOL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            BOOL_CMP_GE_PROC_OID,
+            "boolge",
+            &[BOOL_TYPE_OID, BOOL_TYPE_OID],
+        ),
+        comparison_proc_row(
+            TEXT_STARTS_WITH_PROC_OID,
+            "starts_with",
+            &[TEXT_TYPE_OID, TEXT_TYPE_OID],
+        ),
+        cast_proc_row(
+            CAST_PROC_INT4_INT2_OID,
+            "int4",
+            INT4_TYPE_OID,
+            &[INT2_TYPE_OID],
+        ),
+        cast_proc_row(
+            CAST_PROC_INT8_INT2_OID,
+            "int8",
+            INT8_TYPE_OID,
+            &[INT2_TYPE_OID],
+        ),
         cast_proc_row(
             CAST_PROC_NUMERIC_INT2_OID,
             "numeric",
             NUMERIC_TYPE_OID,
             &[INT2_TYPE_OID],
         ),
-        cast_proc_row(CAST_PROC_INT2_INT4_OID, "int2", INT2_TYPE_OID, &[INT4_TYPE_OID]),
-        cast_proc_row(CAST_PROC_INT8_INT4_OID, "int8", INT8_TYPE_OID, &[INT4_TYPE_OID]),
+        cast_proc_row(
+            CAST_PROC_INT2_INT4_OID,
+            "int2",
+            INT2_TYPE_OID,
+            &[INT4_TYPE_OID],
+        ),
+        cast_proc_row(
+            CAST_PROC_INT8_INT4_OID,
+            "int8",
+            INT8_TYPE_OID,
+            &[INT4_TYPE_OID],
+        ),
         cast_proc_row(
             CAST_PROC_NUMERIC_INT4_OID,
             "numeric",
             NUMERIC_TYPE_OID,
             &[INT4_TYPE_OID],
         ),
-        cast_proc_row(CAST_PROC_INT2_INT8_OID, "int2", INT2_TYPE_OID, &[INT8_TYPE_OID]),
-        cast_proc_row(CAST_PROC_INT4_INT8_OID, "int4", INT4_TYPE_OID, &[INT8_TYPE_OID]),
+        cast_proc_row(
+            CAST_PROC_INT2_INT8_OID,
+            "int2",
+            INT2_TYPE_OID,
+            &[INT8_TYPE_OID],
+        ),
+        cast_proc_row(
+            CAST_PROC_INT4_INT8_OID,
+            "int4",
+            INT4_TYPE_OID,
+            &[INT8_TYPE_OID],
+        ),
         cast_proc_row(
             CAST_PROC_NUMERIC_INT8_OID,
             "numeric",
@@ -326,7 +500,12 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         ),
         PgProcRow {
             prosrc: "bpchartotext".into(),
-            ..cast_proc_row(CAST_PROC_TEXT_BPCHAR_OID, "text", TEXT_TYPE_OID, &[BPCHAR_TYPE_OID])
+            ..cast_proc_row(
+                CAST_PROC_TEXT_BPCHAR_OID,
+                "text",
+                TEXT_TYPE_OID,
+                &[BPCHAR_TYPE_OID],
+            )
         },
     ]
 }
@@ -426,6 +605,23 @@ fn cast_proc_row(oid: u32, proname: &str, prorettype: u32, arg_oids: &[u32]) -> 
     )
 }
 
+fn comparison_proc_row(oid: u32, proname: &str, arg_oids: &[u32]) -> PgProcRow {
+    let mut row = proc_row(
+        oid,
+        proname,
+        BOOL_TYPE_OID,
+        &oid_argtypes(arg_oids),
+        proname,
+        arg_oids.len() as i16,
+        false,
+        true,
+        'f',
+        'i',
+    );
+    row.proleakproof = true;
+    row
+}
+
 fn oid_argtypes(arg_oids: &[u32]) -> String {
     arg_oids
         .iter()
@@ -441,7 +637,11 @@ mod tests {
     #[test]
     fn pg_proc_desc_matches_expected_columns() {
         let desc = pg_proc_desc();
-        let names: Vec<_> = desc.columns.iter().map(|column| column.name.as_str()).collect();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
         assert_eq!(
             names,
             vec![

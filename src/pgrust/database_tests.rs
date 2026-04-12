@@ -1,156 +1,157 @@
-    use super::*;
-    use crate::backend::executor::{ExecError, Value};
-    use crate::backend::parser::ParseError;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::thread;
 
-    use std::time::{Duration, Instant};
+use super::*;
+use crate::backend::executor::{ExecError, Value};
+use crate::backend::parser::ParseError;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 
-    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+use std::time::{Duration, Instant};
 
-    /// Start a background thread that periodically checks for deadlocks
-    /// using parking_lot's deadlock detector.  Called once via `Once`.
-    #[cfg(feature = "deadlock_detection")]
-    fn start_deadlock_checker() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            thread::Builder::new()
-                .name("deadlock-checker".into())
-                .spawn(|| {
-                    loop {
-                        thread::sleep(Duration::from_secs(1));
-                        let deadlocks = parking_lot::deadlock::check_deadlock();
-                        if !deadlocks.is_empty() {
-                            eprintln!("=== DEADLOCK DETECTED ({} cycle(s)) ===", deadlocks.len());
-                            for (i, threads) in deadlocks.iter().enumerate() {
-                                eprintln!("--- cycle {i} ---");
-                                for t in threads {
-                                    eprintln!("thread {:?}:\n{:#?}", t.thread_id(), t.backtrace());
-                                }
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Start a background thread that periodically checks for deadlocks
+/// using parking_lot's deadlock detector.  Called once via `Once`.
+#[cfg(feature = "deadlock_detection")]
+fn start_deadlock_checker() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        thread::Builder::new()
+            .name("deadlock-checker".into())
+            .spawn(|| {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    let deadlocks = parking_lot::deadlock::check_deadlock();
+                    if !deadlocks.is_empty() {
+                        eprintln!("=== DEADLOCK DETECTED ({} cycle(s)) ===", deadlocks.len());
+                        for (i, threads) in deadlocks.iter().enumerate() {
+                            eprintln!("--- cycle {i} ---");
+                            for t in threads {
+                                eprintln!("thread {:?}:\n{:#?}", t.thread_id(), t.backtrace());
                             }
-                            // Don't panic here — just log. The test timeout will handle it.
                         }
+                        // Don't panic here — just log. The test timeout will handle it.
                     }
-                })
-                .unwrap();
-        });
-    }
+                }
+            })
+            .unwrap();
+    });
+}
 
-    #[cfg(not(feature = "deadlock_detection"))]
-    fn start_deadlock_checker() {}
+#[cfg(not(feature = "deadlock_detection"))]
+fn start_deadlock_checker() {}
 
-    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
-    /// Run a test body with a timeout. If it doesn't complete within the
-    /// timeout, panic with a deadlock message. This catches deadlocks in
-    /// setup code that `join_all_with_timeout` wouldn't detect.
-    fn with_test_timeout<F: FnOnce() + Send + 'static>(f: F) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handle = thread::spawn(move || {
-            f();
-            let _ = tx.send(());
-        });
-        match rx.recv_timeout(TEST_TIMEOUT) {
-            Ok(()) => {
-                handle.join().unwrap();
-            }
-            Err(_) => {
-                #[cfg(feature = "deadlock_detection")]
-                log_deadlocks();
-                panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock");
-            }
+/// Run a test body with a timeout. If it doesn't complete within the
+/// timeout, panic with a deadlock message. This catches deadlocks in
+/// setup code that `join_all_with_timeout` wouldn't detect.
+fn with_test_timeout<F: FnOnce() + Send + 'static>(f: F) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(TEST_TIMEOUT) {
+        Ok(()) => {
+            handle.join().unwrap();
+        }
+        Err(_) => {
+            #[cfg(feature = "deadlock_detection")]
+            log_deadlocks();
+            panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock");
         }
     }
+}
 
-    fn join_all_with_timeout(handles: Vec<thread::JoinHandle<()>>, timeout: Duration) {
-        start_deadlock_checker();
-        let deadline = Instant::now() + timeout;
-        for h in handles {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+fn join_all_with_timeout(handles: Vec<thread::JoinHandle<()>>, timeout: Duration) {
+    start_deadlock_checker();
+    let deadline = Instant::now() + timeout;
+    for h in handles {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            #[cfg(feature = "deadlock_detection")]
+            log_deadlocks();
+            panic!("test timed out after {timeout:?} — likely deadlock");
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            let result = h.join();
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(remaining) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => std::panic::resume_unwind(e),
+            Err(_) => {
                 #[cfg(feature = "deadlock_detection")]
                 log_deadlocks();
                 panic!("test timed out after {timeout:?} — likely deadlock");
             }
-            let (tx, rx) = std::sync::mpsc::channel();
-            let waiter = thread::spawn(move || {
-                let result = h.join();
-                let _ = tx.send(result);
-            });
-            match rx.recv_timeout(remaining) {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => std::panic::resume_unwind(e),
-                Err(_) => {
-                    #[cfg(feature = "deadlock_detection")]
-                    log_deadlocks();
-                    panic!("test timed out after {timeout:?} — likely deadlock");
-                }
-            }
-            let _ = waiter.join();
         }
+        let _ = waiter.join();
+    }
+}
+
+#[cfg(feature = "deadlock_detection")]
+fn log_deadlocks() {
+    let deadlocks = parking_lot::deadlock::check_deadlock();
+    if deadlocks.is_empty() {
+        eprintln!("pgrust: parking_lot deadlock detector found no cycles");
+        return;
     }
 
-    #[cfg(feature = "deadlock_detection")]
-    fn log_deadlocks() {
-        let deadlocks = parking_lot::deadlock::check_deadlock();
-        if deadlocks.is_empty() {
-            eprintln!("pgrust: parking_lot deadlock detector found no cycles");
-            return;
-        }
-
-        eprintln!("pgrust: detected {} deadlock cycle(s)", deadlocks.len());
-        for (i, threads) in deadlocks.iter().enumerate() {
-            eprintln!("pgrust: deadlock cycle #{i}");
-            for thread in threads {
-                eprintln!("pgrust: thread id {:?}", thread.thread_id());
-                eprintln!("{:#?}", thread.backtrace());
-            }
+    eprintln!("pgrust: detected {} deadlock cycle(s)", deadlocks.len());
+    for (i, threads) in deadlocks.iter().enumerate() {
+        eprintln!("pgrust: deadlock cycle #{i}");
+        for thread in threads {
+            eprintln!("pgrust: thread id {:?}", thread.thread_id());
+            eprintln!("{:#?}", thread.backtrace());
         }
     }
+}
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "pgrust_database_{}_{}_{}",
-            label,
-            std::process::id(),
-            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
+fn temp_dir(label: &str) -> PathBuf {
+    let p = std::env::temp_dir().join(format!(
+        "pgrust_database_{}_{}_{}",
+        label,
+        std::process::id(),
+        NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&p);
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
 
-    #[test]
-    fn single_thread_create_insert_select() {
-        let base = temp_dir("single_thread");
-        let db = Database::open(&base, 16).unwrap();
+#[test]
+fn single_thread_create_insert_select() {
+    let base = temp_dir("single_thread");
+    let db = Database::open(&base, 16).unwrap();
 
-        db.execute(1, "create table items (id int4 not null, name text)")
-            .unwrap();
-        db.execute(1, "insert into items (id, name) values (1, 'alpha')")
-            .unwrap();
-        db.execute(1, "insert into items (id, name) values (2, 'beta')")
-            .unwrap();
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into items (id, name) values (1, 'alpha')")
+        .unwrap();
+    db.execute(1, "insert into items (id, name) values (2, 'beta')")
+        .unwrap();
 
-        match db
-            .execute(1, "select id, name from items order by id")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows.len(), 2);
-                assert_eq!(rows[0], vec![Value::Int32(1), Value::Text("alpha".into())]);
-                assert_eq!(rows[1], vec![Value::Int32(2), Value::Text("beta".into())]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(1, "select id, name from items order by id")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0], vec![Value::Int32(1), Value::Text("alpha".into())]);
+            assert_eq!(rows[1], vec![Value::Int32(2), Value::Text("beta".into())]);
         }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    #[test]
-    fn create_index_and_alter_table_set_are_noops() {
-        let base = temp_dir("numeric_sql_noops");
-        let db = Database::open(&base, 16).unwrap();
+#[test]
+fn create_index_and_alter_table_set_are_noops() {
+    let base = temp_dir("numeric_sql_noops");
+    let db = Database::open(&base, 16).unwrap();
 
-        match db
+    match db
             .execute(
                 1,
                 "select d.datname, t.spcname from pg_database d join pg_tablespace t on t.oid = d.dattablespace",
@@ -169,302 +170,358 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
-        match db
-            .execute(
-                1,
-                "select a.rolname from pg_database d join pg_authid a on a.oid = d.datdba",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(
+            1,
+            "select a.rolname from pg_database d join pg_authid a on a.oid = d.datdba",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db
-            .execute(
-                1,
-                "select rolname, rolsuper, rolcreatedb from pg_authid order by oid",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![
-                        Value::Text("postgres".into()),
-                        Value::Bool(true),
-                        Value::Bool(true),
-                    ]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(
+            1,
+            "select rolname, rolsuper, rolcreatedb from pg_authid order by oid",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("postgres".into()),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db
-            .execute(
-                1,
-                "select collname, collprovider from pg_collation order by oid",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![
-                            Value::Text("default".into()),
-                            Value::Text("d".into()),
-                        ],
-                        vec![Value::Text("C".into()), Value::Text("c".into())],
-                        vec![
-                            Value::Text("POSIX".into()),
-                            Value::Text("c".into()),
-                        ],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(
+            1,
+            "select collname, collprovider from pg_collation order by oid",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("default".into()), Value::Text("d".into()),],
+                    vec![Value::Text("C".into()), Value::Text("c".into())],
+                    vec![Value::Text("POSIX".into()), Value::Text("c".into()),],
+                ]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db
-            .execute(
-                1,
-                "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname, l.lanname \
+    match db
+        .execute(
+            1,
+            "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname, l.lanname \
                  from pg_proc p \
                  join pg_type t on t.oid = p.prorettype \
                  join pg_language l on l.oid = p.prolang \
                  where p.proname in ('count', 'json_array_elements', 'lower', 'random') \
                  order by p.proname",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
                     vec![
-                        vec![
-                            Value::Text("count".into()),
-                            Value::Text("a".into()),
-                            Value::Int16(1),
-                            Value::Bool(false),
-                            Value::Text("int8".into()),
-                            Value::Text("internal".into()),
-                        ],
-                        vec![
-                            Value::Text("json_array_elements".into()),
-                            Value::Text("f".into()),
-                            Value::Int16(1),
-                            Value::Bool(true),
-                            Value::Text("json".into()),
-                            Value::Text("internal".into()),
-                        ],
-                        vec![
-                            Value::Text("lower".into()),
-                            Value::Text("f".into()),
-                            Value::Int16(1),
-                            Value::Bool(false),
-                            Value::Text("text".into()),
-                            Value::Text("internal".into()),
-                        ],
-                        vec![
-                            Value::Text("random".into()),
-                            Value::Text("f".into()),
-                            Value::Int16(0),
-                            Value::Bool(false),
-                            Value::Text("float8".into()),
-                            Value::Text("internal".into()),
-                        ],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+                        Value::Text("count".into()),
+                        Value::Text("a".into()),
+                        Value::Int16(1),
+                        Value::Bool(false),
+                        Value::Text("int8".into()),
+                        Value::Text("internal".into()),
+                    ],
+                    vec![
+                        Value::Text("json_array_elements".into()),
+                        Value::Text("f".into()),
+                        Value::Int16(1),
+                        Value::Bool(true),
+                        Value::Text("json".into()),
+                        Value::Text("internal".into()),
+                    ],
+                    vec![
+                        Value::Text("lower".into()),
+                        Value::Text("f".into()),
+                        Value::Int16(1),
+                        Value::Bool(false),
+                        Value::Text("text".into()),
+                        Value::Text("internal".into()),
+                    ],
+                    vec![
+                        Value::Text("random".into()),
+                        Value::Text("f".into()),
+                        Value::Int16(0),
+                        Value::Bool(false),
+                        Value::Text("float8".into()),
+                        Value::Text("internal".into()),
+                    ],
+                ]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db
-            .execute(
-                1,
-                "select s.typname, t.typname, c.castcontext, c.castmethod \
+    match db
+        .execute(
+            1,
+            "select o.oprname, l.typname, r.typname, p.proname \
+                 from pg_operator o \
+                 join pg_type l on l.oid = o.oprleft \
+                 join pg_type r on r.oid = o.oprright \
+                 join pg_proc p on p.oid = o.oprcode \
+                 where o.oid in (91, 96, 98, 531, 1694, 3877) \
+                 order by o.oid",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Text("=".into()),
+                        Value::Text("bool".into()),
+                        Value::Text("bool".into()),
+                        Value::Text("booleq".into()),
+                    ],
+                    vec![
+                        Value::Text("=".into()),
+                        Value::Text("int4".into()),
+                        Value::Text("int4".into()),
+                        Value::Text("int4eq".into()),
+                    ],
+                    vec![
+                        Value::Text("=".into()),
+                        Value::Text("text".into()),
+                        Value::Text("text".into()),
+                        Value::Text("texteq".into()),
+                    ],
+                    vec![
+                        Value::Text("<>".into()),
+                        Value::Text("text".into()),
+                        Value::Text("text".into()),
+                        Value::Text("textne".into()),
+                    ],
+                    vec![
+                        Value::Text("<=".into()),
+                        Value::Text("bool".into()),
+                        Value::Text("bool".into()),
+                        Value::Text("boolle".into()),
+                    ],
+                    vec![
+                        Value::Text("^@".into()),
+                        Value::Text("text".into()),
+                        Value::Text("text".into()),
+                        Value::Text("starts_with".into()),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match db
+        .execute(
+            1,
+            "select s.typname, t.typname, c.castcontext, c.castmethod \
                  from pg_cast c \
                  join pg_type s on s.oid = c.castsource \
                  join pg_type t on t.oid = c.casttarget \
                  order by c.oid",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
                     vec![
-                        vec![
-                            Value::Text("int2".into()),
-                            Value::Text("int4".into()),
-                            Value::Text("i".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int2".into()),
-                            Value::Text("int8".into()),
-                            Value::Text("i".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int2".into()),
-                            Value::Text("numeric".into()),
-                            Value::Text("i".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int4".into()),
-                            Value::Text("int2".into()),
-                            Value::Text("a".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int4".into()),
-                            Value::Text("int8".into()),
-                            Value::Text("i".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int4".into()),
-                            Value::Text("numeric".into()),
-                            Value::Text("i".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int4".into()),
-                            Value::Text("oid".into()),
-                            Value::Text("i".into()),
-                            Value::Text("b".into()),
-                        ],
-                        vec![
-                            Value::Text("int8".into()),
-                            Value::Text("int2".into()),
-                            Value::Text("a".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int8".into()),
-                            Value::Text("int4".into()),
-                            Value::Text("a".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("int8".into()),
-                            Value::Text("numeric".into()),
-                            Value::Text("i".into()),
-                            Value::Text("f".into()),
-                        ],
-                        vec![
-                            Value::Text("oid".into()),
-                            Value::Text("int4".into()),
-                            Value::Text("a".into()),
-                            Value::Text("b".into()),
-                        ],
-                        vec![
-                            Value::Text("varchar".into()),
-                            Value::Text("text".into()),
-                            Value::Text("i".into()),
-                            Value::Text("b".into()),
-                        ],
-                        vec![
-                            Value::Text("char".into()),
-                            Value::Text("text".into()),
-                            Value::Text("i".into()),
-                            Value::Text("f".into()),
-                        ],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+                        Value::Text("int2".into()),
+                        Value::Text("int4".into()),
+                        Value::Text("i".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int2".into()),
+                        Value::Text("int8".into()),
+                        Value::Text("i".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int2".into()),
+                        Value::Text("numeric".into()),
+                        Value::Text("i".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int4".into()),
+                        Value::Text("int2".into()),
+                        Value::Text("a".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int4".into()),
+                        Value::Text("int8".into()),
+                        Value::Text("i".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int4".into()),
+                        Value::Text("numeric".into()),
+                        Value::Text("i".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int4".into()),
+                        Value::Text("oid".into()),
+                        Value::Text("i".into()),
+                        Value::Text("b".into()),
+                    ],
+                    vec![
+                        Value::Text("int8".into()),
+                        Value::Text("int2".into()),
+                        Value::Text("a".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int8".into()),
+                        Value::Text("int4".into()),
+                        Value::Text("a".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("int8".into()),
+                        Value::Text("numeric".into()),
+                        Value::Text("i".into()),
+                        Value::Text("f".into()),
+                    ],
+                    vec![
+                        Value::Text("oid".into()),
+                        Value::Text("int4".into()),
+                        Value::Text("a".into()),
+                        Value::Text("b".into()),
+                    ],
+                    vec![
+                        Value::Text("varchar".into()),
+                        Value::Text("text".into()),
+                        Value::Text("i".into()),
+                        Value::Text("b".into()),
+                    ],
+                    vec![
+                        Value::Text("char".into()),
+                        Value::Text("text".into()),
+                        Value::Text("i".into()),
+                        Value::Text("f".into()),
+                    ],
+                ]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db
-            .execute(
-                1,
-                "select s.typname, t.typname, p.proname \
+    match db
+        .execute(
+            1,
+            "select s.typname, t.typname, p.proname \
                  from pg_cast c \
                  join pg_type s on s.oid = c.castsource \
                  join pg_type t on t.oid = c.casttarget \
                  join pg_proc p on p.oid = c.castfunc \
                  where c.castfunc <> 0 \
                  order by c.oid",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
                     vec![
-                        vec![
-                            Value::Text("int2".into()),
-                            Value::Text("int4".into()),
-                            Value::Text("int4".into()),
-                        ],
-                        vec![
-                            Value::Text("int2".into()),
-                            Value::Text("int8".into()),
-                            Value::Text("int8".into()),
-                        ],
-                        vec![
-                            Value::Text("int2".into()),
-                            Value::Text("numeric".into()),
-                            Value::Text("numeric".into()),
-                        ],
-                        vec![
-                            Value::Text("int4".into()),
-                            Value::Text("int2".into()),
-                            Value::Text("int2".into()),
-                        ],
-                        vec![
-                            Value::Text("int4".into()),
-                            Value::Text("int8".into()),
-                            Value::Text("int8".into()),
-                        ],
-                        vec![
-                            Value::Text("int4".into()),
-                            Value::Text("numeric".into()),
-                            Value::Text("numeric".into()),
-                        ],
-                        vec![
-                            Value::Text("int8".into()),
-                            Value::Text("int2".into()),
-                            Value::Text("int2".into()),
-                        ],
-                        vec![
-                            Value::Text("int8".into()),
-                            Value::Text("int4".into()),
-                            Value::Text("int4".into()),
-                        ],
-                        vec![
-                            Value::Text("int8".into()),
-                            Value::Text("numeric".into()),
-                            Value::Text("numeric".into()),
-                        ],
-                        vec![
-                            Value::Text("char".into()),
-                            Value::Text("text".into()),
-                            Value::Text("text".into()),
-                        ],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+                        Value::Text("int2".into()),
+                        Value::Text("int4".into()),
+                        Value::Text("int4".into()),
+                    ],
+                    vec![
+                        Value::Text("int2".into()),
+                        Value::Text("int8".into()),
+                        Value::Text("int8".into()),
+                    ],
+                    vec![
+                        Value::Text("int2".into()),
+                        Value::Text("numeric".into()),
+                        Value::Text("numeric".into()),
+                    ],
+                    vec![
+                        Value::Text("int4".into()),
+                        Value::Text("int2".into()),
+                        Value::Text("int2".into()),
+                    ],
+                    vec![
+                        Value::Text("int4".into()),
+                        Value::Text("int8".into()),
+                        Value::Text("int8".into()),
+                    ],
+                    vec![
+                        Value::Text("int4".into()),
+                        Value::Text("numeric".into()),
+                        Value::Text("numeric".into()),
+                    ],
+                    vec![
+                        Value::Text("int8".into()),
+                        Value::Text("int2".into()),
+                        Value::Text("int2".into()),
+                    ],
+                    vec![
+                        Value::Text("int8".into()),
+                        Value::Text("int4".into()),
+                        Value::Text("int4".into()),
+                    ],
+                    vec![
+                        Value::Text("int8".into()),
+                        Value::Text("numeric".into()),
+                        Value::Text("numeric".into()),
+                    ],
+                    vec![
+                        Value::Text("char".into()),
+                        Value::Text("text".into()),
+                        Value::Text("text".into()),
+                    ],
+                ]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db.execute(1, "select count(*) from pg_auth_members").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(1, "select count(*) from pg_auth_members")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        db.execute(1, "create table num_exp_add (id1 int4, id2 int4)")
-            .unwrap();
+    db.execute(1, "create table num_exp_add (id1 int4, id2 int4)")
+        .unwrap();
 
-        match db
+    match db
             .execute(
                 1,
                 "select a.rolname from pg_class c join pg_authid a on a.oid = c.relowner where c.relname = 'num_exp_add'",
@@ -477,44 +534,47 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
-        assert_eq!(
-            db.execute(
-                1,
-                "create unique index num_exp_add_idx on num_exp_add (id1, id2)",
-            )
-            .unwrap(),
-            StatementResult::AffectedRows(0)
-        );
-        {
-            let catalog = db.catalog.read().catalog_snapshot().unwrap();
-            let entry = catalog.get("num_exp_add_idx").unwrap();
-            assert_eq!(entry.relkind, 'i');
-        }
+    assert_eq!(
+        db.execute(
+            1,
+            "create unique index num_exp_add_idx on num_exp_add (id1, id2)",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    {
+        let catalog = db.catalog.read().catalog_snapshot().unwrap();
+        let entry = catalog.get("num_exp_add_idx").unwrap();
+        assert_eq!(entry.relkind, 'i');
+    }
 
-        match db
-            .execute(1, "select count(*) from pg_class where relname = 'num_exp_add_idx'")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(1)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(
+            1,
+            "select count(*) from pg_class where relname = 'num_exp_add_idx'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db
-            .execute(
-                1,
-                "select relpersistence from pg_class where relname = 'num_exp_add_idx'",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("p".into())]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(
+            1,
+            "select relpersistence from pg_class where relname = 'num_exp_add_idx'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("p".into())]]);
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        match db
+    match db
             .execute(
                 1,
                 "select a.amname from pg_class c join pg_am a on a.oid = c.relam where c.relname = 'num_exp_add'",
@@ -527,7 +587,7 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
-        match db
+    match db
             .execute(
                 1,
                 "select a.amname from pg_class c join pg_am a on a.oid = c.relam where c.relname = 'num_exp_add_idx'",
@@ -540,313 +600,313 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
-        match db.execute(1, "show tables").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("num_exp_add".into())]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db.execute(1, "show tables").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("num_exp_add".into())]]);
         }
-
-        assert!(matches!(
-            db.execute(1, "select * from num_exp_add_idx"),
-            Err(ExecError::Parse(ParseError::UnknownTable(name)))
-                | Err(ExecError::Parse(ParseError::TableDoesNotExist(name)))
-                if name == "num_exp_add_idx"
-        ));
-
-        assert_eq!(
-            db.execute(
-                1,
-                "alter table num_exp_add set (parallel_workers = 4)",
-            )
-            .unwrap(),
-            StatementResult::AffectedRows(0)
-        );
-
-        assert_eq!(
-            db.execute(1, "drop table num_exp_add").unwrap(),
-            StatementResult::AffectedRows(1)
-        );
-        {
-            let catalog = db.catalog.read().catalog_snapshot().unwrap();
-            assert!(catalog.get("num_exp_add").is_none());
-            assert!(catalog.get("num_exp_add_idx").is_none());
-        }
-
-        match db
-            .execute(1, "select count(*) from pg_class where relname = 'num_exp_add_idx'")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
+        other => panic!("expected query result, got {:?}", other),
     }
 
-    #[test]
-    fn copy_from_rows_inserts_typed_rows() {
-        let base = temp_dir("copy_from_rows");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
+    assert!(matches!(
+        db.execute(1, "select * from num_exp_add_idx"),
+        Err(ExecError::Parse(ParseError::UnknownTable(name)))
+            | Err(ExecError::Parse(ParseError::TableDoesNotExist(name)))
+            if name == "num_exp_add_idx"
+    ));
 
-        db.execute(
+    assert_eq!(
+        db.execute(1, "alter table num_exp_add set (parallel_workers = 4)",)
+            .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    assert_eq!(
+        db.execute(1, "drop table num_exp_add").unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    {
+        let catalog = db.catalog.read().catalog_snapshot().unwrap();
+        assert!(catalog.get("num_exp_add").is_none());
+        assert!(catalog.get("num_exp_add_idx").is_none());
+    }
+
+    match db
+        .execute(
             1,
-            "create table pgbench_branches (bid int not null, bbalance int not null, filler text)",
+            "select count(*) from pg_class where relname = 'num_exp_add_idx'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn copy_from_rows_inserts_typed_rows() {
+    let base = temp_dir("copy_from_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(
+        1,
+        "create table pgbench_branches (bid int not null, bbalance int not null, filler text)",
+    )
+    .unwrap();
+
+    let inserted = session
+        .copy_from_rows(
+            &db,
+            "pgbench_branches",
+            &[
+                vec!["1".into(), "0".into(), "\\N".into()],
+                vec!["2".into(), "5".into(), "branch".into()],
+            ],
         )
         .unwrap();
+    assert_eq!(inserted, 2);
 
-        let inserted = session
-            .copy_from_rows(
-                &db,
-                "pgbench_branches",
-                &[
-                    vec!["1".into(), "0".into(), "\\N".into()],
-                    vec!["2".into(), "5".into(), "branch".into()],
-                ],
-            )
-            .unwrap();
-        assert_eq!(inserted, 2);
-
-        match db
-            .execute(
-                1,
-                "select bid, bbalance, filler from pgbench_branches order by bid",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
+    match db
+        .execute(
+            1,
+            "select bid, bbalance, filler from pgbench_branches order by bid",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(0), Value::Null],
                     vec![
-                        vec![Value::Int32(1), Value::Int32(0), Value::Null],
-                        vec![
-                            Value::Int32(2),
-                            Value::Int32(5),
-                            Value::Text("branch".into()),
-                        ],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+                        Value::Int32(2),
+                        Value::Int32(5),
+                        Value::Text("branch".into()),
+                    ],
+                ]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    #[test]
-    fn copy_from_rows_respects_active_transaction() {
-        let base = temp_dir("copy_from_rows_txn");
-        let db = Database::open(&base, 16).unwrap();
-        let mut writer = Session::new(1);
-        let mut reader = Session::new(2);
+#[test]
+fn copy_from_rows_respects_active_transaction() {
+    let base = temp_dir("copy_from_rows_txn");
+    let db = Database::open(&base, 16).unwrap();
+    let mut writer = Session::new(1);
+    let mut reader = Session::new(2);
 
-        db.execute(
+    db.execute(
             1,
             "create table pgbench_tellers (tid int not null, bid int not null, tbalance int not null, filler text)",
         )
         .unwrap();
 
-        writer.execute(&db, "begin").unwrap();
-        let inserted = writer
-            .copy_from_rows(
-                &db,
-                "pgbench_tellers",
-                &[vec!["10".into(), "1".into(), "0".into(), "\\N".into()]],
-            )
-            .unwrap();
-        assert_eq!(inserted, 1);
+    writer.execute(&db, "begin").unwrap();
+    let inserted = writer
+        .copy_from_rows(
+            &db,
+            "pgbench_tellers",
+            &[vec!["10".into(), "1".into(), "0".into(), "\\N".into()]],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1);
 
-        match reader
-            .execute(&db, "select count(*) from pgbench_tellers")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match reader
+        .execute(&db, "select count(*) from pgbench_tellers")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
-
-        writer.execute(&db, "commit").unwrap();
-
-        match reader
-            .execute(
-                &db,
-                "select tid, bid, tbalance, filler from pgbench_tellers",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![
-                        Value::Int32(10),
-                        Value::Int32(1),
-                        Value::Int32(0),
-                        Value::Null,
-                    ]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
+        other => panic!("expected query result, got {:?}", other),
     }
 
-    #[test]
-    fn copy_from_rows_parses_array_literals() {
-        let base = temp_dir("copy_from_rows_arrays");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
+    writer.execute(&db, "commit").unwrap();
 
-        db.execute(
-            1,
-            "create table records (id int not null, tags varchar[], sizes int4[])",
+    match reader
+        .execute(
+            &db,
+            "select tid, bid, tbalance, filler from pgbench_tellers",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(10),
+                    Value::Int32(1),
+                    Value::Int32(0),
+                    Value::Null,
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn copy_from_rows_parses_array_literals() {
+    let base = temp_dir("copy_from_rows_arrays");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(
+        1,
+        "create table records (id int not null, tags varchar[], sizes int4[])",
+    )
+    .unwrap();
+
+    let inserted = session
+        .copy_from_rows(
+            &db,
+            "records",
+            &[vec![
+                "1".into(),
+                "{\"a\",\"b\"}".into(),
+                "{1,NULL,3}".into(),
+            ]],
+        )
+        .unwrap();
+    assert_eq!(inserted, 1);
+
+    match db
+        .execute(1, "select id, tags, sizes from records")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(1),
+                    Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())]),
+                    Value::Array(vec![Value::Int32(1), Value::Null, Value::Int32(3)]),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn copy_from_rows_parses_quoted_array_text_and_empty_arrays() {
+    let base = temp_dir("copy_from_rows_arrays_quoted");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(
+        1,
+        "create table records (id int not null, tags varchar[], sizes int4[])",
+    )
+    .unwrap();
+
+    session
+        .copy_from_rows(
+            &db,
+            "records",
+            &[
+                vec!["1".into(), "{\"a,b\",\"c\\\"d\"}".into(), "{}".into()],
+                vec!["2".into(), "{}".into(), "{NULL}".into()],
+            ],
         )
         .unwrap();
 
-        let inserted = session
-            .copy_from_rows(
-                &db,
-                "records",
-                &[vec![
-                    "1".into(),
-                    "{\"a\",\"b\"}".into(),
-                    "{1,NULL,3}".into(),
-                ]],
-            )
-            .unwrap();
-        assert_eq!(inserted, 1);
-
-        match db
-            .execute(1, "select id, tags, sizes from records")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![
-                        Value::Int32(1),
-                        Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())]),
-                        Value::Array(vec![Value::Int32(1), Value::Null, Value::Int32(3)]),
-                    ]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn copy_from_rows_parses_quoted_array_text_and_empty_arrays() {
-        let base = temp_dir("copy_from_rows_arrays_quoted");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
-
-        db.execute(
-            1,
-            "create table records (id int not null, tags varchar[], sizes int4[])",
-        )
-        .unwrap();
-
-        session
-            .copy_from_rows(
-                &db,
-                "records",
-                &[
-                    vec!["1".into(), "{\"a,b\",\"c\\\"d\"}".into(), "{}".into()],
-                    vec!["2".into(), "{}".into(), "{NULL}".into()],
-                ],
-            )
-            .unwrap();
-
-        match db
-            .execute(1, "select id, tags, sizes from records order by id")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
+    match db
+        .execute(1, "select id, tags, sizes from records order by id")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
                     vec![
-                        vec![
-                            Value::Int32(1),
-                            Value::Array(vec![
-                                Value::Text("a,b".into()),
-                                Value::Text("c\"d".into())
-                            ]),
-                            Value::Array(vec![]),
-                        ],
-                        vec![
-                            Value::Int32(2),
-                            Value::Array(vec![]),
-                            Value::Array(vec![Value::Null]),
-                        ],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+                        Value::Int32(1),
+                        Value::Array(vec![Value::Text("a,b".into()), Value::Text("c\"d".into())]),
+                        Value::Array(vec![]),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Array(vec![]),
+                        Value::Array(vec![Value::Null]),
+                    ],
+                ]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn temp_tables_are_session_local_and_mask_permanent_tables() {
+    let base = temp_dir("temp_table_masking");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session_a = Session::new(1);
+    let mut session_b = Session::new(2);
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into items (id) values (1)").unwrap();
+
+    session_a
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    let relcache = db.visible_relcache(1);
+    let unqualified = relcache.get_by_name("items").unwrap();
+    let qualified = relcache.get_by_name("public.items").unwrap();
+    assert_ne!(unqualified.rel, qualified.rel);
+    session_a
+        .execute(&db, "insert into items (id) values (2)")
+        .unwrap();
+
+    match session_a.execute(&db, "select id from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(2)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
     }
 
-    #[test]
-    fn temp_tables_are_session_local_and_mask_permanent_tables() {
-        let base = temp_dir("temp_table_masking");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session_a = Session::new(1);
-        let mut session_b = Session::new(2);
-
-        db.execute(1, "create table items (id int4 not null)")
-            .unwrap();
-        db.execute(1, "insert into items (id) values (1)").unwrap();
-
-        session_a
-            .execute(&db, "create temp table items (id int4 not null)")
-            .unwrap();
-        let relcache = db.visible_relcache(1);
-        let unqualified = relcache.get_by_name("items").unwrap();
-        let qualified = relcache.get_by_name("public.items").unwrap();
-        assert_ne!(unqualified.rel, qualified.rel);
-        session_a
-            .execute(&db, "insert into items (id) values (2)")
-            .unwrap();
-
-        match session_a.execute(&db, "select id from items").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(2)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match session_b.execute(&db, "select id from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
         }
-
-        match session_b.execute(&db, "select id from items").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        session_a.execute(&db, "drop table items").unwrap();
-        match session_a.execute(&db, "select id from items").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        match session_a.execute(&db, "select id from public.items").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
+        other => panic!("expected query result, got {:?}", other),
     }
 
-    #[test]
-    fn temp_catalog_rows_appear_with_pg_temp_namespace() {
-        let base = temp_dir("temp_catalog_rows");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session_a = Session::new(1);
-        let mut session_b = Session::new(2);
+    session_a.execute(&db, "drop table items").unwrap();
+    match session_a.execute(&db, "select id from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 
-        session_a
-            .execute(&db, "create temp table temp_items (id int4 not null)")
-            .unwrap();
+    match session_a
+        .execute(&db, "select id from public.items")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 
-        match session_a
+#[test]
+fn temp_catalog_rows_appear_with_pg_temp_namespace() {
+    let base = temp_dir("temp_catalog_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session_a = Session::new(1);
+    let mut session_b = Session::new(2);
+
+    session_a
+        .execute(&db, "create temp table temp_items (id int4 not null)")
+        .unwrap();
+
+    match session_a
             .execute(
                 &db,
                 "select n.nspname, c.relname, c.relpersistence from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.relname = 'temp_items'",
@@ -866,1870 +926,1869 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
-        match session_b
-            .execute(
-                &db,
-                "select count(*) from pg_class where relname = 'temp_items'",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(0)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn show_tables_does_not_duplicate_catalog_aliases_under_temp_shadowing() {
-        let base = temp_dir("show_tables_temp_shadow");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
-
-        db.execute(1, "create table items (id int4 not null)").unwrap();
-        session
-            .execute(&db, "create temp table items (id int4 not null)")
-            .unwrap();
-
-        match session.execute(&db, "show tables").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("items".into())]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn temp_table_on_commit_actions_apply_at_commit() {
-        let base = temp_dir("temp_table_on_commit");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
-
-        session
-            .execute(&db, "create temp table keep_rows (id int4 not null)")
-            .unwrap();
-        session
-            .execute(&db, "insert into keep_rows (id) values (1)")
-            .unwrap();
-        match session
-            .execute(&db, "select count(*) from keep_rows")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        session
-            .execute(
-                &db,
-                "create temp table delete_rows (id int4 not null) on commit delete rows",
-            )
-            .unwrap();
-        session.execute(&db, "begin").unwrap();
-        session
-            .execute(&db, "insert into delete_rows (id) values (10)")
-            .unwrap();
-        session.execute(&db, "commit").unwrap();
-        match session
-            .execute(&db, "select count(*) from delete_rows")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(0)]]),
-            other => panic!("expected query result, got {:?}", other),
-        }
-
-        session
-            .execute(
-                &db,
-                "create temp table drop_rows (id int4 not null) on commit drop",
-            )
-            .unwrap();
-        session.execute(&db, "begin").unwrap();
-        session
-            .execute(&db, "insert into drop_rows (id) values (11)")
-            .unwrap();
-        session.execute(&db, "commit").unwrap();
-        let err = session
-            .execute(&db, "select count(*) from drop_rows")
-            .unwrap_err();
-        assert!(
-            matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "drop_rows")
-        );
-    }
-
-    #[test]
-    fn temp_create_table_as_select_works() {
-        let base = temp_dir("temp_ctas");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
-
-        db.execute(1, "create table source_items (id int4 not null, note text)")
-            .unwrap();
-        db.execute(
-            1,
-            "insert into source_items (id, note) values (1, 'a'), (2, 'b')",
+    match session_b
+        .execute(
+            &db,
+            "select count(*) from pg_class where relname = 'temp_items'",
         )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn show_tables_does_not_duplicate_catalog_aliases_under_temp_shadowing() {
+    let base = temp_dir("show_tables_temp_shadow");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
         .unwrap();
 
-        session
+    match session.execute(&db, "show tables").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("items".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn temp_table_on_commit_actions_apply_at_commit() {
+    let base = temp_dir("temp_table_on_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table keep_rows (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into keep_rows (id) values (1)")
+        .unwrap();
+    match session
+        .execute(&db, "select count(*) from keep_rows")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session
+        .execute(
+            &db,
+            "create temp table delete_rows (id int4 not null) on commit delete rows",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into delete_rows (id) values (10)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    match session
+        .execute(&db, "select count(*) from delete_rows")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(0)]]),
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    session
+        .execute(
+            &db,
+            "create temp table drop_rows (id int4 not null) on commit drop",
+        )
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into drop_rows (id) values (11)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    let err = session
+        .execute(&db, "select count(*) from drop_rows")
+        .unwrap_err();
+    assert!(matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "drop_rows"));
+}
+
+#[test]
+fn temp_create_table_as_select_works() {
+    let base = temp_dir("temp_ctas");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table source_items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into source_items (id, note) values (1, 'a'), (2, 'b')",
+    )
+    .unwrap();
+
+    session
             .execute(&db, "create temp table temp_items(tmp_id, tmp_note) as select id, note from source_items order by id")
             .unwrap();
 
-        match session
-            .execute(
-                &db,
-                "select tmp_id, tmp_note from temp_items order by tmp_id",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![
-                        vec![Value::Int32(1), Value::Text("a".into())],
-                        vec![Value::Int32(2), Value::Text("b".into())],
-                    ]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn streaming_select_uses_temp_table_shadowing() {
-        let base = temp_dir("streaming_temp_shadowing");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
-
-        db.execute(1, "create table items (id int4 not null)")
-            .unwrap();
-        db.execute(1, "insert into items (id) values (1), (2)")
-            .unwrap();
-
-        session
-            .execute(&db, "create temp table items (id int4 not null)")
-            .unwrap();
-        session
-            .execute(&db, "insert into items (id) values (10), (20), (30)")
-            .unwrap();
-
-        let stmt = crate::backend::parser::parse_select("select id from items order by id").unwrap();
-        let mut guard = session.execute_streaming(&db, &stmt).unwrap();
-        let mut rows = Vec::new();
-        while let Some(slot) =
-            crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap()
-        {
-            rows.push(
-                slot.values()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.to_owned_value())
-                    .collect::<Vec<_>>(),
+    match session
+        .execute(
+            &db,
+            "select tmp_id, tmp_note from temp_items order by tmp_id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Text("a".into())],
+                    vec![Value::Int32(2), Value::Text("b".into())],
+                ]
             );
         }
-        drop(guard);
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 
-        assert_eq!(
-            rows,
-            vec![
-                vec![Value::Int32(10)],
-                vec![Value::Int32(20)],
-                vec![Value::Int32(30)],
-            ]
+#[test]
+fn streaming_select_uses_temp_table_shadowing() {
+    let base = temp_dir("streaming_temp_shadowing");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into items (id) values (1), (2)")
+        .unwrap();
+
+    session
+        .execute(&db, "create temp table items (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items (id) values (10), (20), (30)")
+        .unwrap();
+
+    let stmt = crate::backend::parser::parse_select("select id from items order by id").unwrap();
+    let mut guard = session.execute_streaming(&db, &stmt).unwrap();
+    let mut rows = Vec::new();
+    while let Some(slot) =
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap()
+    {
+        rows.push(
+            slot.values()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_owned_value())
+                .collect::<Vec<_>>(),
         );
     }
+    drop(guard);
 
-    #[test]
-    fn temp_tables_are_removed_on_client_cleanup() {
-        let base = temp_dir("temp_cleanup");
-        let db = Database::open(&base, 16).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int32(10)],
+            vec![Value::Int32(20)],
+            vec![Value::Int32(30)],
+        ]
+    );
+}
 
-        db.execute(1, "create temp table cleanup_me (id int4 not null)")
-            .unwrap();
-        db.execute(1, "insert into cleanup_me (id) values (1)")
-            .unwrap();
-        match db.execute(1, "select count(*) from cleanup_me").unwrap() {
-            StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
-            other => panic!("expected query result, got {:?}", other),
-        }
+#[test]
+fn temp_tables_are_removed_on_client_cleanup() {
+    let base = temp_dir("temp_cleanup");
+    let db = Database::open(&base, 16).unwrap();
 
-        db.cleanup_client_temp_relations(1);
-        let err = db
-            .execute(1, "select count(*) from cleanup_me")
-            .unwrap_err();
-        assert!(
-            matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "cleanup_me")
-        );
+    db.execute(1, "create temp table cleanup_me (id int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into cleanup_me (id) values (1)")
+        .unwrap();
+    match db.execute(1, "select count(*) from cleanup_me").unwrap() {
+        StatementResult::Query { rows, .. } => assert_eq!(rows, vec![vec![Value::Int64(1)]]),
+        other => panic!("expected query result, got {:?}", other),
     }
 
-    #[test]
-    fn copy_from_rows_parses_extended_numeric_types() {
-        let base = temp_dir("copy_from_rows_extended_numeric");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
+    db.cleanup_client_temp_relations(1);
+    let err = db
+        .execute(1, "select count(*) from cleanup_me")
+        .unwrap_err();
+    assert!(
+        matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "cleanup_me")
+    );
+}
 
-        db.execute(
-            1,
-            "create table metrics (a int2, b int8, c float4, d float8)",
+#[test]
+fn copy_from_rows_parses_extended_numeric_types() {
+    let base = temp_dir("copy_from_rows_extended_numeric");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(
+        1,
+        "create table metrics (a int2, b int8, c float4, d float8)",
+    )
+    .unwrap();
+
+    let inserted = session
+        .copy_from_rows(
+            &db,
+            "metrics",
+            &[vec![
+                "7".into(),
+                "9000000000".into(),
+                "1.5".into(),
+                "2.5".into(),
+            ]],
         )
         .unwrap();
+    assert_eq!(inserted, 1);
 
-        let inserted = session
-            .copy_from_rows(
-                &db,
-                "metrics",
-                &[vec![
-                    "7".into(),
-                    "9000000000".into(),
-                    "1.5".into(),
-                    "2.5".into(),
-                ]],
-            )
-            .unwrap();
-        assert_eq!(inserted, 1);
-
-        match db.execute(1, "select a, b, c, d from metrics").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![
-                        Value::Int16(7),
-                        Value::Int64(9_000_000_000),
-                        Value::Float64(1.5),
-                        Value::Float64(2.5),
-                    ]]
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db.execute(1, "select a, b, c, d from metrics").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int16(7),
+                    Value::Int64(9_000_000_000),
+                    Value::Float64(1.5),
+                    Value::Float64(2.5),
+                ]]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    #[test]
-    fn copy_from_rows_into_column_subset_leaves_other_columns_null() {
-        let base = temp_dir("copy_from_rows_subset");
-        let db = Database::open(&base, 16).unwrap();
-        let mut session = Session::new(1);
+#[test]
+fn copy_from_rows_into_column_subset_leaves_other_columns_null() {
+    let base = temp_dir("copy_from_rows_subset");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
 
-        db.execute(
-            1,
-            "create table width_bucket_test (operand_num numeric, operand_f8 float8)",
+    db.execute(
+        1,
+        "create table width_bucket_test (operand_num numeric, operand_f8 float8)",
+    )
+    .unwrap();
+
+    let inserted = session
+        .copy_from_rows_into(
+            &db,
+            "width_bucket_test",
+            Some(&["operand_num".into()]),
+            &[vec!["5.5".into()]],
         )
         .unwrap();
+    assert_eq!(inserted, 1);
 
-        let inserted = session
-            .copy_from_rows_into(
-                &db,
-                "width_bucket_test",
-                Some(&["operand_num".into()]),
-                &[vec!["5.5".into()]],
-            )
-            .unwrap();
-        assert_eq!(inserted, 1);
-
-        match db
-            .execute(
-                1,
-                "select operand_num, operand_f8 is null from width_bucket_test",
-            )
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Numeric("5.5".into()), Value::Bool(true)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match db
+        .execute(
+            1,
+            "select operand_num, operand_f8 is null from width_bucket_test",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Numeric("5.5".into()), Value::Bool(true)]]
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    #[test]
-    fn concurrent_selects_on_shared_data() {
-        let base = temp_dir("concurrent_selects");
-        let db = Database::open(&base, 32).unwrap();
+#[test]
+fn concurrent_selects_on_shared_data() {
+    let base = temp_dir("concurrent_selects");
+    let db = Database::open(&base, 32).unwrap();
 
-        db.execute(1, "create table nums (id int4 not null, val int4 not null)")
-            .unwrap();
-        for i in 1..=10 {
-            db.execute(
-                1,
-                &format!("insert into nums (id, val) values ({i}, {})", i * 10),
-            )
-            .unwrap();
-        }
-
-        let num_threads = 4;
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for _ in 0..5 {
-                        match db
-                            .execute((t + 100) as ClientId, "select count(*) from nums")
-                            .unwrap()
-                        {
-                            StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows, vec![vec![Value::Int64(10)]]);
-                            }
-                            other => panic!("expected query result, got {:?}", other),
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-    }
-
-    #[test]
-    fn concurrent_inserts_and_selects() {
-        let base = temp_dir("concurrent_inserts");
-        let db = Database::open(&base, 64).unwrap();
-
+    db.execute(1, "create table nums (id int4 not null, val int4 not null)")
+        .unwrap();
+    for i in 1..=10 {
         db.execute(
             1,
-            "create table log (id int4 not null, thread_id int4 not null)",
+            &format!("insert into nums (id, val) values ({i}, {})", i * 10),
         )
         .unwrap();
-
-        let num_threads = 4;
-        let inserts_per_thread = 5;
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for i in 0..inserts_per_thread {
-                        let id = t * 100 + i;
-                        db.execute(
-                            (t + 200) as ClientId,
-                            &format!("insert into log (id, thread_id) values ({id}, {t})"),
-                        )
-                        .unwrap();
-                    }
-                })
-            })
-            .collect();
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        let total = num_threads * inserts_per_thread;
-        match db.execute(1, "select count(*) from log").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(total as i64)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
     }
 
-    #[test]
-    fn mixed_concurrent_reads_and_writes() {
-        let base = temp_dir("mixed_concurrent");
-        let db = Database::open(&base, 64).unwrap();
-
-        db.execute(
-            1,
-            "create table counters (id int4 not null, val int4 not null)",
-        )
-        .unwrap();
-        db.execute(1, "insert into counters (id, val) values (1, 0)")
-            .unwrap();
-
-        let num_readers = 3;
-        let num_writers = 2;
-        let ops_per_thread = 5;
-
-        let mut handles = Vec::new();
-
-        for t in 0..num_readers {
+    let num_threads = 4;
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
             let db = db.clone();
-            handles.push(thread::spawn(move || {
-                for _ in 0..ops_per_thread {
-                    let result = db
-                        .execute(
-                            (t + 300) as ClientId,
-                            "select val from counters where id = 1",
-                        )
-                        .unwrap();
-                    match result {
+            thread::spawn(move || {
+                for _ in 0..5 {
+                    match db
+                        .execute((t + 100) as ClientId, "select count(*) from nums")
+                        .unwrap()
+                    {
                         StatementResult::Query { rows, .. } => {
-                            assert_eq!(rows.len(), 1);
+                            assert_eq!(rows, vec![vec![Value::Int64(10)]]);
                         }
                         other => panic!("expected query result, got {:?}", other),
                     }
                 }
-            }));
-        }
+            })
+        })
+        .collect();
 
-        for t in 0..num_writers {
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+}
+
+#[test]
+fn concurrent_inserts_and_selects() {
+    let base = temp_dir("concurrent_inserts");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table log (id int4 not null, thread_id int4 not null)",
+    )
+    .unwrap();
+
+    let num_threads = 4;
+    let inserts_per_thread = 5;
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
             let db = db.clone();
-            handles.push(thread::spawn(move || {
-                for i in 0..ops_per_thread {
-                    let id = 1000 + t * 100 + i;
+            thread::spawn(move || {
+                for i in 0..inserts_per_thread {
+                    let id = t * 100 + i;
                     db.execute(
-                        (t + 400) as ClientId,
-                        &format!("insert into counters (id, val) values ({id}, {i})"),
+                        (t + 200) as ClientId,
+                        &format!("insert into log (id, thread_id) values ({id}, {t})"),
                     )
                     .unwrap();
                 }
-            }));
-        }
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        match db.execute(1, "select count(*) from counters").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                let expected = 1 + num_writers * ops_per_thread;
-                assert_eq!(rows, vec![vec![Value::Int64(expected as i64)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn concurrent_updates_same_row_no_lost_updates() {
-        let base = temp_dir("concurrent_update_same_row");
-        let db = Database::open(&base, 64).unwrap();
-
-        db.execute(
-            1,
-            "create table counter (id int4 not null, val int4 not null)",
-        )
-        .unwrap();
-        db.execute(1, "insert into counter (id, val) values (1, 0)")
-            .unwrap();
-
-        let num_threads = 4;
-        let updates_per_thread = 10;
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for _ in 0..updates_per_thread {
-                        db.execute(
-                            (t + 500) as ClientId,
-                            "update counter set val = val + 1 where id = 1",
-                        )
-                        .unwrap();
-                    }
-                })
             })
-            .collect();
+        })
+        .collect();
 
-        join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, TEST_TIMEOUT);
 
-        let expected = num_threads * updates_per_thread;
-        match db
-            .execute(1, "select val from counter where id = 1")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected as i32)]],
-                    "expected val={expected} after {num_threads} threads x {updates_per_thread} increments"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    let total = num_threads * inserts_per_thread;
+    match db.execute(1, "select count(*) from log").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(total as i64)]]);
         }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    #[test]
-    fn concurrent_updates_different_rows() {
-        let base = temp_dir("concurrent_update_diff_rows");
-        let db = Database::open(&base, 64).unwrap();
+#[test]
+fn mixed_concurrent_reads_and_writes() {
+    let base = temp_dir("mixed_concurrent");
+    let db = Database::open(&base, 64).unwrap();
 
-        db.execute(
-            1,
-            "create table slots (id int4 not null, val int4 not null)",
-        )
+    db.execute(
+        1,
+        "create table counters (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    db.execute(1, "insert into counters (id, val) values (1, 0)")
         .unwrap();
 
-        let num_threads = 4;
-        for i in 0..num_threads {
-            db.execute(1, &format!("insert into slots (id, val) values ({i}, 0)"))
-                .unwrap();
-        }
+    let num_readers = 3;
+    let num_writers = 2;
+    let ops_per_thread = 5;
 
-        let updates_per_thread = 20;
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for _ in 0..updates_per_thread {
-                        db.execute(
-                            (t + 600) as ClientId,
-                            &format!("update slots set val = val + 1 where id = {t}"),
-                        )
-                        .unwrap();
-                    }
-                })
-            })
-            .collect();
+    let mut handles = Vec::new();
 
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        for i in 0..num_threads {
-            match db
-                .execute(1, &format!("select val from slots where id = {i}"))
-                .unwrap()
-            {
-                StatementResult::Query { rows, .. } => {
-                    assert_eq!(
-                        rows,
-                        vec![vec![Value::Int32(updates_per_thread as i32)]],
-                        "row {i} should have val={updates_per_thread}"
-                    );
-                }
-                other => panic!("expected query result, got {:?}", other),
-            }
-        }
-    }
-
-    #[test]
-    fn epq_predicate_recheck_skips_non_matching() {
-        let base = temp_dir("epq_predicate_recheck");
-        let db = Database::open(&base, 64).unwrap();
-
-        db.execute(1, "create table flag (id int4 not null, val int4 not null)")
-            .unwrap();
-        db.execute(1, "insert into flag (id, val) values (1, 0)")
-            .unwrap();
-
-        let num_threads = 4;
-        let results: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    db.execute(
-                        (t + 700) as ClientId,
-                        "update flag set val = 99 where val = 0",
+    for t in 0..num_readers {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            for _ in 0..ops_per_thread {
+                let result = db
+                    .execute(
+                        (t + 300) as ClientId,
+                        "select val from counters where id = 1",
                     )
-                    .unwrap()
-                })
-            })
-            .collect();
-
-        let deadline = Instant::now() + TEST_TIMEOUT;
-        let affected: Vec<usize> = results
-            .into_iter()
-            .map(|h| {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock");
-                }
-                let (tx, rx) = std::sync::mpsc::channel();
-                let waiter = thread::spawn(move || {
-                    let _ = tx.send(h.join());
-                });
-                let result = rx.recv_timeout(remaining).unwrap_or_else(|_| {
-                    panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock")
-                });
-                let _ = waiter.join();
-                match result.unwrap() {
-                    StatementResult::AffectedRows(n) => n,
-                    other => panic!("expected affected rows, got {:?}", other),
-                }
-            })
-            .collect();
-
-        let total_affected: usize = affected.iter().sum();
-        assert!(
-            total_affected >= 1,
-            "at least one thread should have updated the row, got {total_affected}"
-        );
-
-        match db.execute(1, "select val from flag where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(99)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    /// Regression: heap_flush used to call complete_write unconditionally even
-    /// when another thread already flushed the buffer (FlushResult::AlreadyClean).
-    /// This caused a NoIoInProgress error under concurrency.
-    #[test]
-    fn concurrent_flush_does_not_error() {
-        let base = temp_dir("concurrent_flush");
-        let db = Database::open(&base, 64).unwrap();
-
-        db.execute(
-            1,
-            "create table ftest (id int4 not null, val int4 not null)",
-        )
-        .unwrap();
-
-        let num_threads = 4;
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for i in 0..20 {
-                        let id = t * 1000 + i;
-                        db.execute(
-                            (t + 800) as ClientId,
-                            &format!("insert into ftest (id, val) values ({id}, {i})"),
-                        )
-                        .unwrap();
+                    .unwrap();
+                match result {
+                    StatementResult::Query { rows, .. } => {
+                        assert_eq!(rows.len(), 1);
                     }
-                })
-            })
-            .collect();
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        match db.execute(1, "select count(*) from ftest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(80)]]);
+                    other => panic!("expected query result, got {:?}", other),
+                }
             }
-            other => panic!("expected query result, got {:?}", other),
-        }
+        }));
     }
 
-    /// Regression: heap_insert_version used to do read-modify-write on a page
-    /// without the content lock. Two concurrent inserts could overwrite each
-    /// other's tuples, losing rows.
-    #[test]
-    fn concurrent_inserts_no_lost_rows() {
-        let base = temp_dir("concurrent_insert_no_loss");
-        let db = Database::open(&base, 64).unwrap();
-
-        db.execute(1, "create table itest (id int4 not null)")
-            .unwrap();
-
-        let num_threads = 4;
-        let inserts_per_thread = 25;
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for i in 0..inserts_per_thread {
-                        let id = t * 1000 + i;
-                        db.execute(
-                            (t + 900) as ClientId,
-                            &format!("insert into itest (id) values ({id})"),
-                        )
-                        .unwrap();
-                    }
-                })
-            })
-            .collect();
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        let expected = num_threads * inserts_per_thread;
-        match db.execute(1, "select count(*) from itest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(expected as i64)]],
-                    "expected {expected} rows, no lost inserts"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
-    }
-
-    /// Regression: pin_existing_block used to call complete_read even for
-    /// WaitingOnRead, which failed with NoIoInProgress because another thread
-    /// already completed the read. Now uses wait_for_io instead.
-    #[test]
-    fn concurrent_reads_same_page_no_io_error() {
-        let base = temp_dir("concurrent_reads_same_page");
-        let db = Database::open(&base, 16).unwrap();
-
-        db.execute(
-            1,
-            "create table rtest (id int4 not null, val int4 not null)",
-        )
-        .unwrap();
-        for i in 0..5 {
-            db.execute(1, &format!("insert into rtest (id, val) values ({i}, {i})"))
+    for t in 0..num_writers {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            for i in 0..ops_per_thread {
+                let id = 1000 + t * 100 + i;
+                db.execute(
+                    (t + 400) as ClientId,
+                    &format!("insert into counters (id, val) values ({id}, {i})"),
+                )
                 .unwrap();
-        }
-
-        let num_threads = 8;
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for _ in 0..50 {
-                        match db
-                            .execute((t + 1000) as ClientId, "select count(*) from rtest")
-                            .unwrap()
-                        {
-                            StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows, vec![vec![Value::Int64(5)]]);
-                            }
-                            other => panic!("expected query result, got {:?}", other),
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
+            }
+        }));
     }
 
-    /// Regression: without the content lock on heap_scan_next, a reader could
-    /// see a partially written page from a concurrent writer (torn read).
-    /// This test exercises concurrent reads and writes on the same table to
-    /// verify no panics or corrupt data.
-    #[test]
-    fn concurrent_read_write_same_table_no_corruption() {
-        let base = temp_dir("concurrent_rw_corruption");
-        let db = Database::open(&base, 64).unwrap();
+    join_all_with_timeout(handles, TEST_TIMEOUT);
 
-        db.execute(
-            1,
-            "create table rwtest (id int4 not null, val int4 not null)",
-        )
+    match db.execute(1, "select count(*) from counters").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let expected = 1 + num_writers * ops_per_thread;
+            assert_eq!(rows, vec![vec![Value::Int64(expected as i64)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn concurrent_updates_same_row_no_lost_updates() {
+    let base = temp_dir("concurrent_update_same_row");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table counter (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    db.execute(1, "insert into counter (id, val) values (1, 0)")
         .unwrap();
-        db.execute(1, "insert into rwtest (id, val) values (1, 0)")
+
+    let num_threads = 4;
+    let updates_per_thread = 10;
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for _ in 0..updates_per_thread {
+                    db.execute(
+                        (t + 500) as ClientId,
+                        "update counter set val = val + 1 where id = 1",
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+
+    let expected = num_threads * updates_per_thread;
+    match db
+        .execute(1, "select val from counter where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(expected as i32)]],
+                "expected val={expected} after {num_threads} threads x {updates_per_thread} increments"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn concurrent_updates_different_rows() {
+    let base = temp_dir("concurrent_update_diff_rows");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table slots (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+
+    let num_threads = 4;
+    for i in 0..num_threads {
+        db.execute(1, &format!("insert into slots (id, val) values ({i}, 0)"))
             .unwrap();
+    }
 
-        let num_readers = 4;
-        let num_writers = 2;
-        let mut handles = Vec::new();
-
-        for t in 0..num_writers {
+    let updates_per_thread = 20;
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
             let db = db.clone();
-            handles.push(thread::spawn(move || {
-                for i in 0..20 {
-                    if let Err(e) = db.execute(
-                        (t + 1100) as ClientId,
-                        "update rwtest set val = val + 1 where id = 1",
-                    ) {
-                        panic!("writer {t} iteration {i} failed: {e:?}");
-                    }
+            thread::spawn(move || {
+                for _ in 0..updates_per_thread {
+                    db.execute(
+                        (t + 600) as ClientId,
+                        &format!("update slots set val = val + 1 where id = {t}"),
+                    )
+                    .unwrap();
                 }
-            }));
-        }
+            })
+        })
+        .collect();
 
-        for t in 0..num_readers {
-            let db = db.clone();
-            handles.push(thread::spawn(move || {
-                for i in 0..50 {
-                    let result = db.execute(
-                        (t + 1200) as ClientId,
-                        "select val from rwtest where id = 1",
-                    );
-                    match result {
-                        Err(e) => panic!("reader {t} iteration {i} failed: {e:?}"),
-                        Ok(StatementResult::Query { rows, .. }) => {
-                            assert_eq!(rows.len(), 1, "should always see exactly one row");
-                            match &rows[0][0] {
-                                Value::Int32(v) => assert!(*v >= 0, "val should never be negative"),
-                                other => panic!("expected Int32, got {:?}", other),
-                            }
-                        }
-                        Ok(other) => panic!("expected query result, got {:?}", other),
-                    }
-                }
-            }));
-        }
+    join_all_with_timeout(handles, TEST_TIMEOUT);
 
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        let expected_val = num_writers * 20;
+    for i in 0..num_threads {
         match db
-            .execute(1, "select val from rwtest where id = 1")
+            .execute(1, &format!("select val from slots where id = {i}"))
             .unwrap()
         {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(
                     rows,
-                    vec![vec![Value::Int32(expected_val as i32)]],
-                    "all writer updates should be applied"
+                    vec![vec![Value::Int32(updates_per_thread as i32)]],
+                    "row {i} should have val={updates_per_thread}"
                 );
             }
             other => panic!("expected query result, got {:?}", other),
         }
     }
+}
 
-    /// Regression: the write-preferring RwLock in parking_lot caused a deadlock
-    /// when a thread tried to acquire a txns read lock (to check xmax status)
-    /// while another thread was pending a txns write lock (to commit). The
-    /// pending writer blocks new readers, creating a cycle.
-    /// This test verifies the deadlock is resolved (would timeout otherwise).
-    #[test]
-    fn no_deadlock_under_write_preferring_rwlock() {
-        let base = temp_dir("write_preferring_deadlock");
-        let db = Database::open(&base, 64).unwrap();
+#[test]
+fn epq_predicate_recheck_skips_non_matching() {
+    let base = temp_dir("epq_predicate_recheck");
+    let db = Database::open(&base, 64).unwrap();
 
-        db.execute(
-            1,
-            "create table dltest (id int4 not null, val int4 not null)",
-        )
+    db.execute(1, "create table flag (id int4 not null, val int4 not null)")
         .unwrap();
-        db.execute(1, "insert into dltest (id, val) values (1, 0)")
-            .unwrap();
+    db.execute(1, "insert into flag (id, val) values (1, 0)")
+        .unwrap();
 
-        let num_threads = 4;
-        let updates_per_thread = 20;
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for _ in 0..updates_per_thread {
-                        db.execute(
-                            (t + 1300) as ClientId,
-                            "update dltest set val = val + 1 where id = 1",
-                        )
-                        .unwrap();
-                    }
-                })
+    let num_threads = 4;
+    let results: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                db.execute(
+                    (t + 700) as ClientId,
+                    "update flag set val = 99 where val = 0",
+                )
+                .unwrap()
             })
-            .collect();
+        })
+        .collect();
 
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        let expected = num_threads * updates_per_thread;
-        match db
-            .execute(1, "select val from dltest where id = 1")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(expected as i32)]]);
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    let affected: Vec<usize> = results
+        .into_iter()
+        .map(|h| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock");
             }
-            other => panic!("expected query result, got {:?}", other),
+            let (tx, rx) = std::sync::mpsc::channel();
+            let waiter = thread::spawn(move || {
+                let _ = tx.send(h.join());
+            });
+            let result = rx.recv_timeout(remaining).unwrap_or_else(|_| {
+                panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock")
+            });
+            let _ = waiter.join();
+            match result.unwrap() {
+                StatementResult::AffectedRows(n) => n,
+                other => panic!("expected affected rows, got {:?}", other),
+            }
+        })
+        .collect();
+
+    let total_affected: usize = affected.iter().sum();
+    assert!(
+        total_affected >= 1,
+        "at least one thread should have updated the row, got {total_affected}"
+    );
+
+    match db.execute(1, "select val from flag where id = 1").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(99)]]);
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Regression: heap_flush used to call complete_write unconditionally even
+/// when another thread already flushed the buffer (FlushResult::AlreadyClean).
+/// This caused a NoIoInProgress error under concurrency.
+#[test]
+fn concurrent_flush_does_not_error() {
+    let base = temp_dir("concurrent_flush");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table ftest (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+
+    let num_threads = 4;
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..20 {
+                    let id = t * 1000 + i;
+                    db.execute(
+                        (t + 800) as ClientId,
+                        &format!("insert into ftest (id, val) values ({id}, {i})"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+
+    match db.execute(1, "select count(*) from ftest").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(80)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Regression: heap_insert_version used to do read-modify-write on a page
+/// without the content lock. Two concurrent inserts could overwrite each
+/// other's tuples, losing rows.
+#[test]
+fn concurrent_inserts_no_lost_rows() {
+    let base = temp_dir("concurrent_insert_no_loss");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table itest (id int4 not null)")
+        .unwrap();
+
+    let num_threads = 4;
+    let inserts_per_thread = 25;
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..inserts_per_thread {
+                    let id = t * 1000 + i;
+                    db.execute(
+                        (t + 900) as ClientId,
+                        &format!("insert into itest (id) values ({id})"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+
+    let expected = num_threads * inserts_per_thread;
+    match db.execute(1, "select count(*) from itest").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(expected as i64)]],
+                "expected {expected} rows, no lost inserts"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Regression: pin_existing_block used to call complete_read even for
+/// WaitingOnRead, which failed with NoIoInProgress because another thread
+/// already completed the read. Now uses wait_for_io instead.
+#[test]
+fn concurrent_reads_same_page_no_io_error() {
+    let base = temp_dir("concurrent_reads_same_page");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table rtest (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    for i in 0..5 {
+        db.execute(1, &format!("insert into rtest (id, val) values ({i}, {i})"))
+            .unwrap();
     }
 
-    /// Reproduces the pgbench benchmark hang more closely than the simple
-    /// counter tests: many concurrent full-table UPDATE/SELECT cycles over a
-    /// relation much larger than the buffer pool.
-    #[test]
-    fn pgbench_style_accounts_workload_completes() {
-        let base = temp_dir("pgbench_style_hang");
-        let db = Database::open(&base, 128).unwrap();
+    let num_threads = 8;
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for _ in 0..50 {
+                    match db
+                        .execute((t + 1000) as ClientId, "select count(*) from rtest")
+                        .unwrap()
+                    {
+                        StatementResult::Query { rows, .. } => {
+                            assert_eq!(rows, vec![vec![Value::Int64(5)]]);
+                        }
+                        other => panic!("expected query result, got {:?}", other),
+                    }
+                }
+            })
+        })
+        .collect();
 
-        db.execute(
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+}
+
+/// Regression: without the content lock on heap_scan_next, a reader could
+/// see a partially written page from a concurrent writer (torn read).
+/// This test exercises concurrent reads and writes on the same table to
+/// verify no panics or corrupt data.
+#[test]
+fn concurrent_read_write_same_table_no_corruption() {
+    let base = temp_dir("concurrent_rw_corruption");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table rwtest (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    db.execute(1, "insert into rwtest (id, val) values (1, 0)")
+        .unwrap();
+
+    let num_readers = 4;
+    let num_writers = 2;
+    let mut handles = Vec::new();
+
+    for t in 0..num_writers {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            for i in 0..20 {
+                if let Err(e) = db.execute(
+                    (t + 1100) as ClientId,
+                    "update rwtest set val = val + 1 where id = 1",
+                ) {
+                    panic!("writer {t} iteration {i} failed: {e:?}");
+                }
+            }
+        }));
+    }
+
+    for t in 0..num_readers {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            for i in 0..50 {
+                let result = db.execute(
+                    (t + 1200) as ClientId,
+                    "select val from rwtest where id = 1",
+                );
+                match result {
+                    Err(e) => panic!("reader {t} iteration {i} failed: {e:?}"),
+                    Ok(StatementResult::Query { rows, .. }) => {
+                        assert_eq!(rows.len(), 1, "should always see exactly one row");
+                        match &rows[0][0] {
+                            Value::Int32(v) => assert!(*v >= 0, "val should never be negative"),
+                            other => panic!("expected Int32, got {:?}", other),
+                        }
+                    }
+                    Ok(other) => panic!("expected query result, got {:?}", other),
+                }
+            }
+        }));
+    }
+
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+
+    let expected_val = num_writers * 20;
+    match db
+        .execute(1, "select val from rwtest where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(expected_val as i32)]],
+                "all writer updates should be applied"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Regression: the write-preferring RwLock in parking_lot caused a deadlock
+/// when a thread tried to acquire a txns read lock (to check xmax status)
+/// while another thread was pending a txns write lock (to commit). The
+/// pending writer blocks new readers, creating a cycle.
+/// This test verifies the deadlock is resolved (would timeout otherwise).
+#[test]
+fn no_deadlock_under_write_preferring_rwlock() {
+    let base = temp_dir("write_preferring_deadlock");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table dltest (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    db.execute(1, "insert into dltest (id, val) values (1, 0)")
+        .unwrap();
+
+    let num_threads = 4;
+    let updates_per_thread = 20;
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for _ in 0..updates_per_thread {
+                    db.execute(
+                        (t + 1300) as ClientId,
+                        "update dltest set val = val + 1 where id = 1",
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+
+    let expected = num_threads * updates_per_thread;
+    match db
+        .execute(1, "select val from dltest where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(expected as i32)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Reproduces the pgbench benchmark hang more closely than the simple
+/// counter tests: many concurrent full-table UPDATE/SELECT cycles over a
+/// relation much larger than the buffer pool.
+#[test]
+fn pgbench_style_accounts_workload_completes() {
+    let base = temp_dir("pgbench_style_hang");
+    let db = Database::open(&base, 128).unwrap();
+
+    db.execute(
             1,
             "create table pgbench_accounts (aid int4 not null, bid int4 not null, abalance int4 not null, filler text)",
         )
         .unwrap();
 
-        for aid in 1..=5000 {
-            db.execute(
+    for aid in 1..=5000 {
+        db.execute(
                 1,
                 &format!(
                     "insert into pgbench_accounts (aid, bid, abalance, filler) values ({aid}, 1, 0, 'x')"
                 ),
             )
             .unwrap();
-        }
+    }
 
-        let num_threads = 10;
-        let ops_per_thread = 10;
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    for i in 0..ops_per_thread {
-                        let aid = ((t * 997 + i * 389) % 5000) + 1;
-                        db.execute(
-                            (t + 2100) as ClientId,
-                            &format!(
-                                "update pgbench_accounts set abalance = abalance + -1 where aid = {aid}"
-                            ),
+    let num_threads = 10;
+    let ops_per_thread = 10;
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..ops_per_thread {
+                    let aid = ((t * 997 + i * 389) % 5000) + 1;
+                    db.execute(
+                        (t + 2100) as ClientId,
+                        &format!(
+                            "update pgbench_accounts set abalance = abalance + -1 where aid = {aid}"
+                        ),
+                    )
+                    .unwrap();
+                    match db
+                        .execute(
+                            (t + 2200) as ClientId,
+                            &format!("select abalance from pgbench_accounts where aid = {aid}"),
                         )
-                        .unwrap();
-                        match db
-                            .execute(
-                                (t + 2200) as ClientId,
-                                &format!(
-                                    "select abalance from pgbench_accounts where aid = {aid}"
-                                ),
-                            )
-                            .unwrap()
-                        {
-                            StatementResult::Query { rows, .. } => {
-                                assert_eq!(rows.len(), 1);
-                            }
-                            other => panic!("expected query result, got {:?}", other),
+                        .unwrap()
+                    {
+                        StatementResult::Query { rows, .. } => {
+                            assert_eq!(rows.len(), 1);
                         }
+                        other => panic!("expected query result, got {:?}", other),
                     }
-                })
+                }
             })
-            .collect();
+        })
+        .collect();
 
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-    }
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+}
 
-    /// Regression: try_claim_tuple reads ctid before dropping the buffer lock,
-    /// then checks xmax status after dropping it. If the updater commits and
-    /// sets ctid between those two points, the stale ctid (== self) makes us
-    /// think the row was deleted rather than updated, losing the update.
-    ///
-    /// Uses a Barrier so all threads start simultaneously, maximizing the
-    /// chance of hitting the race window.
-    #[test]
-    fn no_lost_updates_under_heavy_contention() {
-        let base = temp_dir("no_lost_updates_heavy");
-        let db = Database::open(&base, 64).unwrap();
+/// Regression: try_claim_tuple reads ctid before dropping the buffer lock,
+/// then checks xmax status after dropping it. If the updater commits and
+/// sets ctid between those two points, the stale ctid (== self) makes us
+/// think the row was deleted rather than updated, losing the update.
+///
+/// Uses a Barrier so all threads start simultaneously, maximizing the
+/// chance of hitting the race window.
+#[test]
+fn no_lost_updates_under_heavy_contention() {
+    let base = temp_dir("no_lost_updates_heavy");
+    let db = Database::open(&base, 64).unwrap();
 
-        db.execute(
-            1,
-            "create table counter (id int4 not null, val int4 not null)",
-        )
+    db.execute(
+        1,
+        "create table counter (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    db.execute(1, "insert into counter (id, val) values (1, 0)")
         .unwrap();
-        db.execute(1, "insert into counter (id, val) values (1, 0)")
-            .unwrap();
 
-        let num_threads = 4usize;
-        let increments_per_thread = 10;
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                let barrier = barrier.clone();
-                thread::spawn(move || {
-                    barrier.wait();
-                    for i in 0..increments_per_thread {
-                        if let Err(e) = db.execute(
-                            (t + 5000) as ClientId,
-                            "update counter set val = val + 1 where id = 1",
-                        ) {
-                            panic!("thread {t} iteration {i}: {e:?}");
-                        }
+    let num_threads = 4usize;
+    let increments_per_thread = 10;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                for i in 0..increments_per_thread {
+                    if let Err(e) = db.execute(
+                        (t + 5000) as ClientId,
+                        "update counter set val = val + 1 where id = 1",
+                    ) {
+                        panic!("thread {t} iteration {i}: {e:?}");
                     }
-                })
+                }
             })
-            .collect();
+        })
+        .collect();
 
-        join_all_with_timeout(handles, Duration::from_secs(30));
+    join_all_with_timeout(handles, Duration::from_secs(30));
 
-        let expected = num_threads * increments_per_thread;
-        match db
-            .execute(1, "select val from counter where id = 1")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                let actual = match &rows[0][0] {
-                    Value::Int32(v) => *v,
-                    other => panic!("expected Int32, got {:?}", other),
-                };
-                assert_eq!(
-                    actual,
-                    expected as i32,
-                    "lost {} update(s): expected {expected}, got {actual}",
-                    expected as i32 - actual
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    let expected = num_threads * increments_per_thread;
+    match db
+        .execute(1, "select val from counter where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let actual = match &rows[0][0] {
+                Value::Int32(v) => *v,
+                other => panic!("expected Int32, got {:?}", other),
+            };
+            assert_eq!(
+                actual,
+                expected as i32,
+                "lost {} update(s): expected {expected}, got {actual}",
+                expected as i32 - actual
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    /// Regression test for bugs/005: try_read contention busy-loop.
-    ///
-    /// Before the fix, try_claim_tuple used try_read() to check xmax status.
-    /// Under contention (16 threads updating the same row), all try_read
-    /// attempts could fail, causing an infinite busy-loop. The fix replaced
-    /// try_read() with blocking read().
-    ///
-    /// This test verifies no lost updates under high contention.
-    #[test]
-    fn poc_try_read_contention_lost_update() {
-        let base = temp_dir("poc_try_read_contention");
-        let db = Database::open(&base, 64).unwrap();
+/// Regression test for bugs/005: try_read contention busy-loop.
+///
+/// Before the fix, try_claim_tuple used try_read() to check xmax status.
+/// Under contention (16 threads updating the same row), all try_read
+/// attempts could fail, causing an infinite busy-loop. The fix replaced
+/// try_read() with blocking read().
+///
+/// This test verifies no lost updates under high contention.
+#[test]
+fn poc_try_read_contention_lost_update() {
+    let base = temp_dir("poc_try_read_contention");
+    let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table ctr (id int4 not null, val int4 not null)")
-            .unwrap();
-        db.execute(1, "insert into ctr (id, val) values (1, 0)")
-            .unwrap();
+    db.execute(1, "create table ctr (id int4 not null, val int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into ctr (id, val) values (1, 0)")
+        .unwrap();
 
-        let num_threads = 16;
-        let updates_per_thread = 5;
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
+    let num_threads = 16;
+    let updates_per_thread = 5;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(num_threads));
 
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                let barrier = barrier.clone();
-                thread::spawn(move || {
-                    barrier.wait();
-                    for i in 0..updates_per_thread {
-                        if let Err(e) = db.execute(
-                            (t + 6000) as ClientId,
-                            "update ctr set val = val + 1 where id = 1",
-                        ) {
-                            panic!("thread {t} iteration {i}: {e:?}");
-                        }
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                for i in 0..updates_per_thread {
+                    if let Err(e) = db.execute(
+                        (t + 6000) as ClientId,
+                        "update ctr set val = val + 1 where id = 1",
+                    ) {
+                        panic!("thread {t} iteration {i}: {e:?}");
                     }
-                })
+                }
             })
-            .collect();
+        })
+        .collect();
 
-        join_all_with_timeout(handles, Duration::from_secs(60));
+    join_all_with_timeout(handles, Duration::from_secs(60));
 
-        let expected = (num_threads * updates_per_thread) as i32;
-        match db.execute(1, "select val from ctr where id = 1").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                let actual = match &rows[0][0] {
-                    Value::Int32(v) => *v,
-                    other => panic!("expected Int32, got {:?}", other),
-                };
-                assert_eq!(
-                    actual,
-                    expected,
-                    "LOST {} update(s): expected {expected}, got {actual}. \
+    let expected = (num_threads * updates_per_thread) as i32;
+    match db.execute(1, "select val from ctr where id = 1").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            let actual = match &rows[0][0] {
+                Value::Int32(v) => *v,
+                other => panic!("expected Int32, got {:?}", other),
+            };
+            assert_eq!(
+                actual,
+                expected,
+                "LOST {} update(s): expected {expected}, got {actual}. \
                      This demonstrates the try_read contention bug — \
                      try_read returns None under txns write-lock contention, \
                      causing committed updates to be treated as in-progress.",
-                    expected - actual
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+                expected - actual
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    #[test]
-    fn begin_commit_groups_statements() {
-        let base = temp_dir("begin_commit");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
+#[test]
+fn begin_commit_groups_statements() {
+    let base = temp_dir("begin_commit");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
 
-        session
-            .execute(
-                &db,
-                "create table txtest (id int4 not null, val int4 not null)",
-            )
-            .unwrap();
-        session.execute(&db, "begin").unwrap();
-        assert!(session.in_transaction());
-        assert_eq!(session.ready_status(), b'T');
-
-        session
-            .execute(&db, "insert into txtest (id, val) values (1, 10)")
-            .unwrap();
-        session
-            .execute(&db, "insert into txtest (id, val) values (2, 20)")
-            .unwrap();
-        session.execute(&db, "commit").unwrap();
-        assert!(!session.in_transaction());
-        assert_eq!(session.ready_status(), b'I');
-
-        match session.execute(&db, "select count(*) from txtest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(2)]]);
-            }
-            other => panic!("expected query, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn rollback_discards_changes() {
-        let base = temp_dir("rollback");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
-
-        session
-            .execute(&db, "create table rbtest (id int4 not null)")
-            .unwrap();
-        session
-            .execute(&db, "insert into rbtest (id) values (1)")
-            .unwrap();
-
-        session.execute(&db, "begin").unwrap();
-        session
-            .execute(&db, "insert into rbtest (id) values (2)")
-            .unwrap();
-        session
-            .execute(&db, "insert into rbtest (id) values (3)")
-            .unwrap();
-        session.execute(&db, "rollback").unwrap();
-
-        match session.execute(&db, "select count(*) from rbtest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(1)]],
-                    "only the autocommitted row should survive rollback"
-                );
-            }
-            other => panic!("expected query, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn failed_transaction_rejects_commands() {
-        let base = temp_dir("failed_txn");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
-
-        session
-            .execute(&db, "create table ftest (id int4 not null)")
-            .unwrap();
-        session.execute(&db, "begin").unwrap();
-        session
-            .execute(&db, "insert into ftest (id) values (1)")
-            .unwrap();
-
-        let err = session.execute(&db, "select * from nonexistent");
-        assert!(err.is_err());
-        assert!(session.transaction_failed());
-        assert_eq!(session.ready_status(), b'E');
-
-        let err = session.execute(&db, "select * from ftest");
-        assert!(
-            err.is_err(),
-            "commands should be rejected in failed transaction"
-        );
-
-        session.execute(&db, "rollback").unwrap();
-        assert!(!session.in_transaction());
-        assert_eq!(session.ready_status(), b'I');
-
-        match session.execute(&db, "select count(*) from ftest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(0)]],
-                    "all inserts should be rolled back"
-                );
-            }
-            other => panic!("expected query, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn autocommit_still_works_without_begin() {
-        let base = temp_dir("autocommit");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
-
-        session
-            .execute(&db, "create table atest (id int4 not null)")
-            .unwrap();
-        session
-            .execute(&db, "insert into atest (id) values (1)")
-            .unwrap();
-        session
-            .execute(&db, "insert into atest (id) values (2)")
-            .unwrap();
-
-        match session.execute(&db, "select count(*) from atest").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(2)]]);
-            }
-            other => panic!("expected query, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn vacuum_analyze_is_rejected_inside_transaction_block() {
-        let base = temp_dir("vacuum_txn_block");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
-
-        session.execute(&db, "begin").unwrap();
-        match session.execute(&db, "vacuum analyze pgbench_branches") {
-            Err(crate::backend::executor::ExecError::Parse(
-                crate::backend::parser::ParseError::ActiveSqlTransaction(stmt),
-            )) => {
-                assert_eq!(stmt, "VACUUM");
-            }
-            other => panic!("expected active transaction error, got {:?}", other),
-        }
-        session.execute(&db, "rollback").unwrap();
-    }
-
-    #[test]
-    fn read_committed_isolation() {
-        let base = temp_dir("read_committed");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session_a = Session::new(1);
-        let mut session_b = Session::new(2);
-
-        session_a
-            .execute(
-                &db,
-                "create table isotest (id int4 not null, val int4 not null)",
-            )
-            .unwrap();
-        session_a
-            .execute(&db, "insert into isotest (id, val) values (1, 100)")
-            .unwrap();
-
-        session_a.execute(&db, "begin").unwrap();
-        session_a
-            .execute(&db, "insert into isotest (id, val) values (2, 200)")
-            .unwrap();
-
-        match session_b
-            .execute(&db, "select count(*) from isotest")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(1)]],
-                    "session B should not see session A's uncommitted insert"
-                );
-            }
-            other => panic!("expected query, got {:?}", other),
-        }
-
-        session_a.execute(&db, "commit").unwrap();
-
-        match session_b
-            .execute(&db, "select count(*) from isotest")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(2)]],
-                    "session B should see session A's committed insert"
-                );
-            }
-            other => panic!("expected query, got {:?}", other),
-        }
-    }
-
-    /// Multiple threads each run a loop of BEGIN; UPDATE counter; COMMIT.
-    /// The row-level lock must be held for the duration of the explicit
-    /// transaction, so updates cannot interleave — the final value must equal
-    /// num_threads × iterations_per_thread.
-    #[test]
-    fn concurrent_transactions_update_counter() {
-        let base = temp_dir("txn_update_counter");
-        let db = Database::open(&base, 64).unwrap();
-
-        db.execute(
-            1,
-            "create table counter (id int4 not null, val int4 not null)",
+    session
+        .execute(
+            &db,
+            "create table txtest (id int4 not null, val int4 not null)",
         )
         .unwrap();
-        db.execute(1, "insert into counter (id, val) values (1, 0)")
-            .unwrap();
+    session.execute(&db, "begin").unwrap();
+    assert!(session.in_transaction());
+    assert_eq!(session.ready_status(), b'T');
 
-        let num_threads = 4;
-        let iters_per_thread = 10;
+    session
+        .execute(&db, "insert into txtest (id, val) values (1, 10)")
+        .unwrap();
+    session
+        .execute(&db, "insert into txtest (id, val) values (2, 20)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert!(!session.in_transaction());
+    assert_eq!(session.ready_status(), b'I');
 
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    let mut session = Session::new((t + 1500) as ClientId);
-                    for _ in 0..iters_per_thread {
-                        session.execute(&db, "begin").unwrap();
-                        session
-                            .execute(&db, "update counter set val = val + 1 where id = 1")
-                            .unwrap();
-                        session.execute(&db, "commit").unwrap();
-                    }
-                })
-            })
-            .collect();
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        let expected = num_threads * iters_per_thread;
-        match db
-            .execute(1, "select val from counter where id = 1")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(expected as i32)]],
-                    "all transactional updates must be serialized — expected {expected}"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match session.execute(&db, "select count(*) from txtest").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
         }
+        other => panic!("expected query, got {:?}", other),
+    }
+}
+
+#[test]
+fn rollback_discards_changes() {
+    let base = temp_dir("rollback");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table rbtest (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into rbtest (id) values (1)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into rbtest (id) values (2)")
+        .unwrap();
+    session
+        .execute(&db, "insert into rbtest (id) values (3)")
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    match session.execute(&db, "select count(*) from rbtest").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(1)]],
+                "only the autocommitted row should survive rollback"
+            );
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+}
+
+#[test]
+fn failed_transaction_rejects_commands() {
+    let base = temp_dir("failed_txn");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table ftest (id int4 not null)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into ftest (id) values (1)")
+        .unwrap();
+
+    let err = session.execute(&db, "select * from nonexistent");
+    assert!(err.is_err());
+    assert!(session.transaction_failed());
+    assert_eq!(session.ready_status(), b'E');
+
+    let err = session.execute(&db, "select * from ftest");
+    assert!(
+        err.is_err(),
+        "commands should be rejected in failed transaction"
+    );
+
+    session.execute(&db, "rollback").unwrap();
+    assert!(!session.in_transaction());
+    assert_eq!(session.ready_status(), b'I');
+
+    match session.execute(&db, "select count(*) from ftest").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(0)]],
+                "all inserts should be rolled back"
+            );
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+}
+
+#[test]
+fn autocommit_still_works_without_begin() {
+    let base = temp_dir("autocommit");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table atest (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "insert into atest (id) values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into atest (id) values (2)")
+        .unwrap();
+
+    match session.execute(&db, "select count(*) from atest").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(2)]]);
+        }
+        other => panic!("expected query, got {:?}", other),
+    }
+}
+
+#[test]
+fn vacuum_analyze_is_rejected_inside_transaction_block() {
+    let base = temp_dir("vacuum_txn_block");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    match session.execute(&db, "vacuum analyze pgbench_branches") {
+        Err(crate::backend::executor::ExecError::Parse(
+            crate::backend::parser::ParseError::ActiveSqlTransaction(stmt),
+        )) => {
+            assert_eq!(stmt, "VACUUM");
+        }
+        other => panic!("expected active transaction error, got {:?}", other),
+    }
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn read_committed_isolation() {
+    let base = temp_dir("read_committed");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session_a = Session::new(1);
+    let mut session_b = Session::new(2);
+
+    session_a
+        .execute(
+            &db,
+            "create table isotest (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
+    session_a
+        .execute(&db, "insert into isotest (id, val) values (1, 100)")
+        .unwrap();
+
+    session_a.execute(&db, "begin").unwrap();
+    session_a
+        .execute(&db, "insert into isotest (id, val) values (2, 200)")
+        .unwrap();
+
+    match session_b
+        .execute(&db, "select count(*) from isotest")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(1)]],
+                "session B should not see session A's uncommitted insert"
+            );
+        }
+        other => panic!("expected query, got {:?}", other),
     }
 
-    /// Within a single BEGIN block, a row inserted earlier in the transaction
-    /// must be visible to a SELECT issued later in the same transaction
-    /// (read-your-own-writes / command-id visibility).
-    #[test]
-    fn read_your_own_writes_within_transaction() {
-        let base = temp_dir("read_own_writes");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
+    session_a.execute(&db, "commit").unwrap();
 
-        session
-            .execute(
-                &db,
-                "create table rowtable (id int4 not null, val int4 not null)",
-            )
-            .unwrap();
-
-        session.execute(&db, "begin").unwrap();
-        session
-            .execute(&db, "insert into rowtable (id, val) values (1, 42)")
-            .unwrap();
-
-        // The insert is not yet committed, but the same session must see it.
-        match session
-            .execute(&db, "select val from rowtable where id = 1")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int32(42)]],
-                    "own uncommitted insert must be visible within the transaction"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    match session_b
+        .execute(&db, "select count(*) from isotest")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(2)]],
+                "session B should see session A's committed insert"
+            );
         }
-
-        session.execute(&db, "commit").unwrap();
-
-        // After commit the row must still be there.
-        match session
-            .execute(&db, "select count(*) from rowtable")
-            .unwrap()
-        {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int64(1)]]);
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
+        other => panic!("expected query, got {:?}", other),
     }
+}
 
-    /// Each thread runs one explicit transaction that inserts a batch of rows.
-    /// No row must be lost: the final count must equal num_threads × batch_size,
-    /// even though all transactions overlap in time.
-    #[test]
-    fn concurrent_transactions_bulk_insert() {
-        let base = temp_dir("txn_bulk_insert");
-        let db = Database::open(&base, 64).unwrap();
+/// Multiple threads each run a loop of BEGIN; UPDATE counter; COMMIT.
+/// The row-level lock must be held for the duration of the explicit
+/// transaction, so updates cannot interleave — the final value must equal
+/// num_threads × iterations_per_thread.
+#[test]
+fn concurrent_transactions_update_counter() {
+    let base = temp_dir("txn_update_counter");
+    let db = Database::open(&base, 64).unwrap();
 
-        db.execute(1, "create table bulk (id int4 not null)")
-            .unwrap();
+    db.execute(
+        1,
+        "create table counter (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    db.execute(1, "insert into counter (id, val) values (1, 0)")
+        .unwrap();
 
-        let num_threads = 4;
-        let batch_size = 10;
+    let num_threads = 4;
+    let iters_per_thread = 10;
 
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    let mut session = Session::new((t + 1600) as ClientId);
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                let mut session = Session::new((t + 1500) as ClientId);
+                for _ in 0..iters_per_thread {
                     session.execute(&db, "begin").unwrap();
-                    for i in 0..batch_size {
-                        let id = t * 10_000 + i;
-                        session
-                            .execute(&db, &format!("insert into bulk (id) values ({id})"))
-                            .unwrap();
-                    }
+                    session
+                        .execute(&db, "update counter set val = val + 1 where id = 1")
+                        .unwrap();
                     session.execute(&db, "commit").unwrap();
-                })
+                }
             })
-            .collect();
+        })
+        .collect();
 
-        join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, TEST_TIMEOUT);
 
-        let expected = (num_threads * batch_size) as i32;
-        match db.execute(1, "select count(*) from bulk").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(expected as i64)]],
-                    "all bulk-inserted rows must survive — expected {expected}"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    let expected = num_threads * iters_per_thread;
+    match db
+        .execute(1, "select val from counter where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(expected as i32)]],
+                "all transactional updates must be serialized — expected {expected}"
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Within a single BEGIN block, a row inserted earlier in the transaction
+/// must be visible to a SELECT issued later in the same transaction
+/// (read-your-own-writes / command-id visibility).
+#[test]
+fn read_your_own_writes_within_transaction() {
+    let base = temp_dir("read_own_writes");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table rowtable (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into rowtable (id, val) values (1, 42)")
+        .unwrap();
+
+    // The insert is not yet committed, but the same session must see it.
+    match session
+        .execute(&db, "select val from rowtable where id = 1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(42)]],
+                "own uncommitted insert must be visible within the transaction"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
     }
 
-    /// Thread A opens a transaction and inserts a row, then waits for a signal
-    /// before committing.  Thread B reads the table repeatedly while A is still
-    /// in progress — it must never see A's uncommitted row (no dirty reads).
-    /// After A commits, B must see the row.
-    #[test]
-    fn no_dirty_reads_concurrent() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    session.execute(&db, "commit").unwrap();
 
-        let base = temp_dir("no_dirty_reads");
-        let db = Database::open(&base, 64).unwrap();
+    // After commit the row must still be there.
+    match session
+        .execute(&db, "select count(*) from rowtable")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 
-        db.execute(1, "create table dirty (id int4 not null)")
+/// Each thread runs one explicit transaction that inserts a batch of rows.
+/// No row must be lost: the final count must equal num_threads × batch_size,
+/// even though all transactions overlap in time.
+#[test]
+fn concurrent_transactions_bulk_insert() {
+    let base = temp_dir("txn_bulk_insert");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table bulk (id int4 not null)")
+        .unwrap();
+
+    let num_threads = 4;
+    let batch_size = 10;
+
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
+            let db = db.clone();
+            thread::spawn(move || {
+                let mut session = Session::new((t + 1600) as ClientId);
+                session.execute(&db, "begin").unwrap();
+                for i in 0..batch_size {
+                    let id = t * 10_000 + i;
+                    session
+                        .execute(&db, &format!("insert into bulk (id) values ({id})"))
+                        .unwrap();
+                }
+                session.execute(&db, "commit").unwrap();
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+
+    let expected = (num_threads * batch_size) as i32;
+    match db.execute(1, "select count(*) from bulk").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(expected as i64)]],
+                "all bulk-inserted rows must survive — expected {expected}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Thread A opens a transaction and inserts a row, then waits for a signal
+/// before committing.  Thread B reads the table repeatedly while A is still
+/// in progress — it must never see A's uncommitted row (no dirty reads).
+/// After A commits, B must see the row.
+#[test]
+fn no_dirty_reads_concurrent() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let base = temp_dir("no_dirty_reads");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table dirty (id int4 not null)")
+        .unwrap();
+
+    // Shared flags: writer signals when it has inserted (but not committed),
+    // and when it has committed.
+    let inserted = Arc::new(AtomicBool::new(false));
+    let committed = Arc::new(AtomicBool::new(false));
+
+    let inserted_w = inserted.clone();
+    let committed_w = committed.clone();
+    let db_w = db.clone();
+
+    let writer = thread::spawn(move || {
+        let mut session = Session::new(1700);
+        session.execute(&db_w, "begin").unwrap();
+        session
+            .execute(&db_w, "insert into dirty (id) values (1)")
             .unwrap();
-
-        // Shared flags: writer signals when it has inserted (but not committed),
-        // and when it has committed.
-        let inserted = Arc::new(AtomicBool::new(false));
-        let committed = Arc::new(AtomicBool::new(false));
-
-        let inserted_w = inserted.clone();
-        let committed_w = committed.clone();
-        let db_w = db.clone();
-
-        let writer = thread::spawn(move || {
-            let mut session = Session::new(1700);
-            session.execute(&db_w, "begin").unwrap();
-            session
-                .execute(&db_w, "insert into dirty (id) values (1)")
-                .unwrap();
-            // Signal that the insert is done but not yet committed.
-            inserted_w.store(true, Ordering::Release);
-            // Busy-wait a moment to give the reader time to observe the state.
-            let deadline = Instant::now() + Duration::from_millis(200);
-            while Instant::now() < deadline {
-                std::hint::spin_loop();
-            }
-            session.execute(&db_w, "commit").unwrap();
-            committed_w.store(true, Ordering::Release);
-        });
-
-        // Reader: spin until writer has inserted, then verify no dirty read.
-        let deadline = Instant::now() + TEST_TIMEOUT;
-        while !inserted.load(Ordering::Acquire) {
-            if Instant::now() > deadline {
-                panic!("timed out waiting for writer to insert");
-            }
+        // Signal that the insert is done but not yet committed.
+        inserted_w.store(true, Ordering::Release);
+        // Busy-wait a moment to give the reader time to observe the state.
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
             std::hint::spin_loop();
         }
+        session.execute(&db_w, "commit").unwrap();
+        committed_w.store(true, Ordering::Release);
+    });
 
-        // While writer is still in progress, we must see 0 rows.
-        match db.execute(1800, "select count(*) from dirty").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(0)]],
-                    "must not see uncommitted row (dirty read)"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    // Reader: spin until writer has inserted, then verify no dirty read.
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    while !inserted.load(Ordering::Acquire) {
+        if Instant::now() > deadline {
+            panic!("timed out waiting for writer to insert");
         }
-
-        writer
-            .join()
-            .unwrap_or_else(|e| std::panic::resume_unwind(e));
-
-        assert!(committed.load(Ordering::Acquire));
-
-        // After commit, the row must now be visible.
-        match db.execute(1800, "select count(*) from dirty").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(1)]],
-                    "committed row must be visible after commit"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
-        }
+        std::hint::spin_loop();
     }
 
-    /// Half the threads commit their transaction; half roll it back.
-    /// Only the committed threads' rows must survive.
-    #[test]
-    fn concurrent_mixed_commit_and_rollback() {
-        let base = temp_dir("mixed_commit_rollback");
-        let db = Database::open(&base, 64).unwrap();
-
-        db.execute(1, "create table mixed (id int4 not null)")
-            .unwrap();
-
-        let num_threads = 6; // must be even
-        let rows_per_thread = 5;
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|t| {
-                let db = db.clone();
-                thread::spawn(move || {
-                    let mut session = Session::new((t + 1900) as ClientId);
-                    session.execute(&db, "begin").unwrap();
-                    for i in 0..rows_per_thread {
-                        let id = t * 10_000 + i;
-                        session
-                            .execute(&db, &format!("insert into mixed (id) values ({id})"))
-                            .unwrap();
-                    }
-                    // Even-numbered threads commit; odd-numbered threads roll back.
-                    if t % 2 == 0 {
-                        session.execute(&db, "commit").unwrap();
-                    } else {
-                        session.execute(&db, "rollback").unwrap();
-                    }
-                })
-            })
-            .collect();
-
-        join_all_with_timeout(handles, TEST_TIMEOUT);
-
-        let committing_threads = num_threads / 2; // threads 0, 2, 4, …
-        let expected = (committing_threads * rows_per_thread) as i32;
-        match db.execute(1, "select count(*) from mixed").unwrap() {
-            StatementResult::Query { rows, .. } => {
-                assert_eq!(
-                    rows,
-                    vec![vec![Value::Int64(expected as i64)]],
-                    "only committed rows should survive — expected {expected}"
-                );
-            }
-            other => panic!("expected query result, got {:?}", other),
+    // While writer is still in progress, we must see 0 rows.
+    match db.execute(1800, "select count(*) from dirty").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(0)]],
+                "must not see uncommitted row (dirty read)"
+            );
         }
+        other => panic!("expected query result, got {:?}", other),
     }
 
-    /// Reproduces a lock-ordering deadlock between the write-preferring
-    /// `txns` RwLock and the write-preferring buffer `content_lock` RwLock.
-    ///
-    /// The SELECT path acquires content_lock(shared) → txns.read(),
-    /// while the UPDATE scan path acquires txns.read() → content_lock(shared).
-    /// With pending exclusive waiters on both locks, this creates a cycle.
-    ///
-    /// Many readers + writers on a single-row table maximises the chance
-    /// that all four roles (R, W, R2, WW) overlap on the same page.
-    #[test]
-    fn lock_ordering_deadlock_repro() {
-        let base = temp_dir("lock_ordering_deadlock");
-        let db = Database::open(&base, 16).unwrap();
+    writer
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e));
 
-        db.execute(
-            1,
-            "create table locktest (id int4 not null, val int4 not null)",
-        )
+    assert!(committed.load(Ordering::Acquire));
+
+    // After commit, the row must now be visible.
+    match db.execute(1800, "select count(*) from dirty").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(1)]],
+                "committed row must be visible after commit"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+/// Half the threads commit their transaction; half roll it back.
+/// Only the committed threads' rows must survive.
+#[test]
+fn concurrent_mixed_commit_and_rollback() {
+    let base = temp_dir("mixed_commit_rollback");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table mixed (id int4 not null)")
         .unwrap();
-        db.execute(1, "insert into locktest (id, val) values (1, 0)")
-            .unwrap();
 
-        let num_readers = 8;
-        let num_writers = 4;
-        let mut handles = Vec::new();
+    let num_threads = 6; // must be even
+    let rows_per_thread = 5;
 
-        for t in 0..num_writers {
+    let handles: Vec<_> = (0..num_threads)
+        .map(|t| {
             let db = db.clone();
-            handles.push(thread::spawn(move || {
-                for _ in 0..50 {
-                    db.execute(
-                        (t + 2000) as ClientId,
-                        "update locktest set val = val + 1 where id = 1",
-                    )
-                    .unwrap();
-                }
-            }));
-        }
-
-        for t in 0..num_readers {
-            let db = db.clone();
-            handles.push(thread::spawn(move || {
-                for _ in 0..200 {
-                    let _ = db
-                        .execute(
-                            (t + 3000) as ClientId,
-                            "select val from locktest where id = 1",
-                        )
+            thread::spawn(move || {
+                let mut session = Session::new((t + 1900) as ClientId);
+                session.execute(&db, "begin").unwrap();
+                for i in 0..rows_per_thread {
+                    let id = t * 10_000 + i;
+                    session
+                        .execute(&db, &format!("insert into mixed (id) values ({id})"))
                         .unwrap();
                 }
-            }));
-        }
+                // Even-numbered threads commit; odd-numbered threads roll back.
+                if t % 2 == 0 {
+                    session.execute(&db, "commit").unwrap();
+                } else {
+                    session.execute(&db, "rollback").unwrap();
+                }
+            })
+        })
+        .collect();
 
-        join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+
+    let committing_threads = num_threads / 2; // threads 0, 2, 4, …
+    let expected = (committing_threads * rows_per_thread) as i32;
+    match db.execute(1, "select count(*) from mixed").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int64(expected as i64)]],
+                "only committed rows should survive — expected {expected}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
     }
+}
 
-    #[test]
-    fn no_pins_leaked_concurrent_contention() {
-        // The cold table accumulates dead versions (no vacuum), so scans get
-        // slower with bloat; a small pool adds eviction pressure on top.
-        let base = temp_dir("no_pins_concurrent");
-        let db = Database::open(&base, 128).unwrap();
+/// Reproduces a lock-ordering deadlock between the write-preferring
+/// `txns` RwLock and the write-preferring buffer `content_lock` RwLock.
+///
+/// The SELECT path acquires content_lock(shared) → txns.read(),
+/// while the UPDATE scan path acquires txns.read() → content_lock(shared).
+/// With pending exclusive waiters on both locks, this creates a cycle.
+///
+/// Many readers + writers on a single-row table maximises the chance
+/// that all four roles (R, W, R2, WW) overlap on the same page.
+#[test]
+fn lock_ordering_deadlock_repro() {
+    let base = temp_dir("lock_ordering_deadlock");
+    let db = Database::open(&base, 16).unwrap();
 
-        // Create two tables so threads contend on the same rows from
-        // different directions (readers vs writers, writers vs writers).
-        db.execute(1, "create table hot (id int4 not null, val int4 not null)")
-            .unwrap();
-        db.execute(1, "create table cold (id int4 not null, val int4 not null)")
-            .unwrap();
-        for i in 0..20 {
-            db.execute(1, &format!("insert into hot (id, val) values ({i}, 0)"))
-                .unwrap();
-            db.execute(1, &format!("insert into cold (id, val) values ({i}, 0)"))
-                .unwrap();
-        }
+    db.execute(
+        1,
+        "create table locktest (id int4 not null, val int4 not null)",
+    )
+    .unwrap();
+    db.execute(1, "insert into locktest (id, val) values (1, 0)")
+        .unwrap();
 
-        let num_threads = 8;
-        let iters = 100;
-        let mut handles = Vec::new();
+    let num_readers = 8;
+    let num_writers = 4;
+    let mut handles = Vec::new();
 
-        // Writers: all contend on the same hot rows.
-        for t in 0..num_threads / 2 {
-            let db = db.clone();
-            handles.push(thread::spawn(move || {
-                let client = (t + 10) as ClientId;
-                for i in 0..iters {
-                    let row = i % 5; // contend on rows 0-4
-                    let _ = db.execute(
-                        client,
-                        &format!("update hot set val = val + 1 where id = {row}"),
-                    );
-                    // Full-table scan to pin many pages at once.
-                    let _ = db.execute(client, "select * from hot");
-                }
-            }));
-        }
-
-        // Readers + cross-table writers: read hot, write cold.
-        for t in 0..num_threads / 2 {
-            let db = db.clone();
-            handles.push(thread::spawn(move || {
-                let client = (t + 20) as ClientId;
-                for i in 0..iters {
-                    let row = i % 5;
-                    let _ = db.execute(client, "select count(*) from hot");
-                    let _ = db.execute(
-                        client,
-                        &format!("update cold set val = val + 1 where id = {row}"),
-                    );
-                    // Delete + reinsert to force page layout changes.
-                    let _ =
-                        db.execute(client, &format!("delete from cold where id = {}", (i % 20)));
-                    let _ = db.execute(
-                        client,
-                        &format!("insert into cold (id, val) values ({}, {})", i % 20, i),
-                    );
-                }
-            }));
-        }
-
-        join_all_with_timeout(handles, Duration::from_secs(30));
-
-        // After all threads finish, no pins should remain.
-        let capacity = db.pool.capacity();
-        let mut pinned = Vec::new();
-        for buffer_id in 0..capacity {
-            if let Some(state) = db.pool.buffer_state(buffer_id) {
-                if state.pin_count > 0 {
-                    pinned.push((buffer_id, state));
-                }
-            }
-        }
-        assert!(
-            pinned.is_empty(),
-            "buffer pin leak: {} buffer(s) still pinned after concurrent workload:\n{:#?}",
-            pinned.len(),
-            pinned,
-        );
-    }
-
-    #[test]
-    fn concurrent_same_row_updates_do_not_deadlock() {
-        let base = temp_dir("no_deadlock_same_row");
-        let db = Database::open(&base, 64).unwrap();
-        db.execute(1, "create table t (id int4 not null, val int4 not null)")
-            .unwrap();
-        db.execute(1, "insert into t (id, val) values (1, 0)")
-            .unwrap();
-
-        let num_threads = 4;
-        let iters = 200;
-        let mut handles = Vec::new();
-        for t in 0..num_threads {
-            let db = db.clone();
-            handles.push(thread::spawn(move || {
-                let client = (t + 10) as ClientId;
-                for _ in 0..iters {
-                    db.execute(client, "update t set val = val + 1 where id = 1")
-                        .unwrap();
-                }
-            }));
-        }
-        join_all_with_timeout(handles, Duration::from_secs(10));
-
-        let result = db.execute(1, "select val from t where id = 1").unwrap();
-        let expected = num_threads * iters;
-        match result {
-            StatementResult::Query { rows, .. } => {
-                let val = match &rows[0][0] {
-                    crate::backend::executor::Value::Int32(v) => *v,
-                    other => panic!("expected Int32, got {other:?}"),
-                };
-                assert_eq!(
-                    val, expected as i32,
-                    "expected val={expected} after {num_threads} threads x {iters} increments"
-                );
-            }
-            other => panic!("expected query result, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn no_pins_leaked_after_queries() {
-        let base = temp_dir("no_pins_leaked");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
-
-        // Set up schema and data.
-        session
-            .execute(
-                &db,
-                "create table pintest (id int4 not null, val int4 not null)",
-            )
-            .unwrap();
-        for i in 0..50 {
-            session
-                .execute(
-                    &db,
-                    &format!("insert into pintest (id, val) values ({i}, {i})"),
+    for t in 0..num_writers {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            for _ in 0..50 {
+                db.execute(
+                    (t + 2000) as ClientId,
+                    "update locktest set val = val + 1 where id = 1",
                 )
                 .unwrap();
-        }
-
-        // Run a variety of query types.
-        session.execute(&db, "select * from pintest").unwrap();
-        session
-            .execute(&db, "select count(*) from pintest")
-            .unwrap();
-        session
-            .execute(&db, "select id, val from pintest where id > 10")
-            .unwrap();
-        session
-            .execute(&db, "select id + val from pintest")
-            .unwrap();
-        session
-            .execute(&db, "update pintest set val = val + 1 where id = 1")
-            .unwrap();
-        session.execute(&db, "update pintest set val = 0").unwrap();
-        session
-            .execute(&db, "delete from pintest where id > 40")
-            .unwrap();
-
-        // Explicit transaction.
-        session.execute(&db, "begin").unwrap();
-        session
-            .execute(&db, "insert into pintest (id, val) values (999, 999)")
-            .unwrap();
-        session
-            .execute(&db, "select * from pintest where id = 999")
-            .unwrap();
-        session.execute(&db, "commit").unwrap();
-
-        // Rolled-back transaction.
-        session.execute(&db, "begin").unwrap();
-        session
-            .execute(&db, "insert into pintest (id, val) values (1000, 1000)")
-            .unwrap();
-        session.execute(&db, "rollback").unwrap();
-
-        // Assert no pins are held anywhere in the buffer pool.
-        let capacity = db.pool.capacity();
-        let mut pinned = Vec::new();
-        for buffer_id in 0..capacity {
-            if let Some(state) = db.pool.buffer_state(buffer_id) {
-                if state.pin_count > 0 {
-                    pinned.push((buffer_id, state));
-                }
             }
-        }
-        assert!(
-            pinned.is_empty(),
-            "buffer pin leak: {} buffer(s) still pinned after all queries completed:\n{:#?}",
-            pinned.len(),
-            pinned,
-        );
+        }));
     }
 
-    #[test]
-    fn streaming_select_supports_correlated_subqueries() {
-        let base = temp_dir("streaming_correlated_subquery");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
+    for t in 0..num_readers {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            for _ in 0..200 {
+                let _ = db
+                    .execute(
+                        (t + 3000) as ClientId,
+                        "select val from locktest where id = 1",
+                    )
+                    .unwrap();
+            }
+        }));
+    }
 
-        session
-            .execute(&db, "create table people (id int4 not null, name text)")
+    join_all_with_timeout(handles, TEST_TIMEOUT);
+}
+
+#[test]
+fn no_pins_leaked_concurrent_contention() {
+    // The cold table accumulates dead versions (no vacuum), so scans get
+    // slower with bloat; a small pool adds eviction pressure on top.
+    let base = temp_dir("no_pins_concurrent");
+    let db = Database::open(&base, 128).unwrap();
+
+    // Create two tables so threads contend on the same rows from
+    // different directions (readers vs writers, writers vs writers).
+    db.execute(1, "create table hot (id int4 not null, val int4 not null)")
+        .unwrap();
+    db.execute(1, "create table cold (id int4 not null, val int4 not null)")
+        .unwrap();
+    for i in 0..20 {
+        db.execute(1, &format!("insert into hot (id, val) values ({i}, 0)"))
             .unwrap();
+        db.execute(1, &format!("insert into cold (id, val) values ({i}, 0)"))
+            .unwrap();
+    }
+
+    let num_threads = 8;
+    let iters = 100;
+    let mut handles = Vec::new();
+
+    // Writers: all contend on the same hot rows.
+    for t in 0..num_threads / 2 {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            let client = (t + 10) as ClientId;
+            for i in 0..iters {
+                let row = i % 5; // contend on rows 0-4
+                let _ = db.execute(
+                    client,
+                    &format!("update hot set val = val + 1 where id = {row}"),
+                );
+                // Full-table scan to pin many pages at once.
+                let _ = db.execute(client, "select * from hot");
+            }
+        }));
+    }
+
+    // Readers + cross-table writers: read hot, write cold.
+    for t in 0..num_threads / 2 {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            let client = (t + 20) as ClientId;
+            for i in 0..iters {
+                let row = i % 5;
+                let _ = db.execute(client, "select count(*) from hot");
+                let _ = db.execute(
+                    client,
+                    &format!("update cold set val = val + 1 where id = {row}"),
+                );
+                // Delete + reinsert to force page layout changes.
+                let _ = db.execute(client, &format!("delete from cold where id = {}", (i % 20)));
+                let _ = db.execute(
+                    client,
+                    &format!("insert into cold (id, val) values ({}, {})", i % 20, i),
+                );
+            }
+        }));
+    }
+
+    join_all_with_timeout(handles, Duration::from_secs(30));
+
+    // After all threads finish, no pins should remain.
+    let capacity = db.pool.capacity();
+    let mut pinned = Vec::new();
+    for buffer_id in 0..capacity {
+        if let Some(state) = db.pool.buffer_state(buffer_id) {
+            if state.pin_count > 0 {
+                pinned.push((buffer_id, state));
+            }
+        }
+    }
+    assert!(
+        pinned.is_empty(),
+        "buffer pin leak: {} buffer(s) still pinned after concurrent workload:\n{:#?}",
+        pinned.len(),
+        pinned,
+    );
+}
+
+#[test]
+fn concurrent_same_row_updates_do_not_deadlock() {
+    let base = temp_dir("no_deadlock_same_row");
+    let db = Database::open(&base, 64).unwrap();
+    db.execute(1, "create table t (id int4 not null, val int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into t (id, val) values (1, 0)")
+        .unwrap();
+
+    let num_threads = 4;
+    let iters = 200;
+    let mut handles = Vec::new();
+    for t in 0..num_threads {
+        let db = db.clone();
+        handles.push(thread::spawn(move || {
+            let client = (t + 10) as ClientId;
+            for _ in 0..iters {
+                db.execute(client, "update t set val = val + 1 where id = 1")
+                    .unwrap();
+            }
+        }));
+    }
+    join_all_with_timeout(handles, Duration::from_secs(10));
+
+    let result = db.execute(1, "select val from t where id = 1").unwrap();
+    let expected = num_threads * iters;
+    match result {
+        StatementResult::Query { rows, .. } => {
+            let val = match &rows[0][0] {
+                crate::backend::executor::Value::Int32(v) => *v,
+                other => panic!("expected Int32, got {other:?}"),
+            };
+            assert_eq!(
+                val, expected as i32,
+                "expected val={expected} after {num_threads} threads x {iters} increments"
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn no_pins_leaked_after_queries() {
+    let base = temp_dir("no_pins_leaked");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    // Set up schema and data.
+    session
+        .execute(
+            &db,
+            "create table pintest (id int4 not null, val int4 not null)",
+        )
+        .unwrap();
+    for i in 0..50 {
         session
             .execute(
                 &db,
-                "create table pets (id int4 not null, owner_id int4, name text)",
+                &format!("insert into pintest (id, val) values ({i}, {i})"),
             )
             .unwrap();
-        session
-            .execute(
-                &db,
-                "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')",
-            )
-            .unwrap();
-        session
+    }
+
+    // Run a variety of query types.
+    session.execute(&db, "select * from pintest").unwrap();
+    session
+        .execute(&db, "select count(*) from pintest")
+        .unwrap();
+    session
+        .execute(&db, "select id, val from pintest where id > 10")
+        .unwrap();
+    session
+        .execute(&db, "select id + val from pintest")
+        .unwrap();
+    session
+        .execute(&db, "update pintest set val = val + 1 where id = 1")
+        .unwrap();
+    session.execute(&db, "update pintest set val = 0").unwrap();
+    session
+        .execute(&db, "delete from pintest where id > 40")
+        .unwrap();
+
+    // Explicit transaction.
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into pintest (id, val) values (999, 999)")
+        .unwrap();
+    session
+        .execute(&db, "select * from pintest where id = 999")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    // Rolled-back transaction.
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into pintest (id, val) values (1000, 1000)")
+        .unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    // Assert no pins are held anywhere in the buffer pool.
+    let capacity = db.pool.capacity();
+    let mut pinned = Vec::new();
+    for buffer_id in 0..capacity {
+        if let Some(state) = db.pool.buffer_state(buffer_id) {
+            if state.pin_count > 0 {
+                pinned.push((buffer_id, state));
+            }
+        }
+    }
+    assert!(
+        pinned.is_empty(),
+        "buffer pin leak: {} buffer(s) still pinned after all queries completed:\n{:#?}",
+        pinned.len(),
+        pinned,
+    );
+}
+
+#[test]
+fn streaming_select_supports_correlated_subqueries() {
+    let base = temp_dir("streaming_correlated_subquery");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table people (id int4 not null, name text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pets (id int4 not null, owner_id int4, name text)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into people (id, name) values (1, 'alice'), (2, 'bob'), (3, 'carol')",
+        )
+        .unwrap();
+    session
             .execute(&db, "insert into pets (id, owner_id, name) values (10, 1, 'mocha'), (11, 1, 'pixel'), (12, 2, 'otis')")
             .unwrap();
 
-        let stmt = crate::backend::parser::parse_select(
+    let stmt = crate::backend::parser::parse_select(
             "select p.id, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
         )
         .unwrap();
-        let mut guard = session.execute_streaming(&db, &stmt).unwrap();
-        let mut rows = Vec::new();
-        while let Some(slot) =
-            crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap()
-        {
-            rows.push(
-                slot.values()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.to_owned_value())
-                    .collect::<Vec<_>>(),
-            );
-        }
-        drop(guard);
-
-        assert_eq!(
-            rows,
-            vec![
-                vec![Value::Int32(1), Value::Int64(2)],
-                vec![Value::Int32(2), Value::Int64(1)],
-                vec![Value::Int32(3), Value::Int64(0)],
-            ]
+    let mut guard = session.execute_streaming(&db, &stmt).unwrap();
+    let mut rows = Vec::new();
+    while let Some(slot) =
+        crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx).unwrap()
+    {
+        rows.push(
+            slot.values()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_owned_value())
+                .collect::<Vec<_>>(),
         );
     }
+    drop(guard);
 
-    #[test]
-    fn streaming_correlated_subquery_holds_access_share_lock_on_inner_relation() {
-        use std::sync::mpsc;
+    assert_eq!(
+        rows,
+        vec![
+            vec![Value::Int32(1), Value::Int64(2)],
+            vec![Value::Int32(2), Value::Int64(1)],
+            vec![Value::Int32(3), Value::Int64(0)],
+        ]
+    );
+}
 
-        let base = temp_dir("streaming_correlated_subquery_lock");
-        let db = Database::open(&base, 64).unwrap();
-        let mut session = Session::new(1);
+#[test]
+fn streaming_correlated_subquery_holds_access_share_lock_on_inner_relation() {
+    use std::sync::mpsc;
 
-        session
-            .execute(&db, "create table people (id int4 not null, name text)")
-            .unwrap();
-        session
-            .execute(
-                &db,
-                "create table pets (id int4 not null, owner_id int4, name text)",
-            )
-            .unwrap();
-        session
-            .execute(&db, "insert into people (id, name) values (1, 'alice')")
-            .unwrap();
-        session
-            .execute(
-                &db,
-                "insert into pets (id, owner_id, name) values (10, 1, 'mocha')",
-            )
-            .unwrap();
+    let base = temp_dir("streaming_correlated_subquery_lock");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
 
-        let stmt = crate::backend::parser::parse_select(
-            "select p.id, exists (select 1 from pets q where q.owner_id = p.id) from people p",
+    session
+        .execute(&db, "create table people (id int4 not null, name text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table pets (id int4 not null, owner_id int4, name text)",
         )
         .unwrap();
-        let guard = session.execute_streaming(&db, &stmt).unwrap();
+    session
+        .execute(&db, "insert into people (id, name) values (1, 'alice')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into pets (id, owner_id, name) values (10, 1, 'mocha')",
+        )
+        .unwrap();
 
-        let db2 = db.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        let worker = thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            db2.execute(2, "truncate pets").unwrap();
-            done_tx.send(()).unwrap();
-        });
+    let stmt = crate::backend::parser::parse_select(
+        "select p.id, exists (select 1 from pets q where q.owner_id = p.id) from people p",
+    )
+    .unwrap();
+    let guard = session.execute_streaming(&db, &stmt).unwrap();
 
-        started_rx.recv().unwrap();
-        assert!(
-            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
-            "truncate should block while the streaming guard holds the inner relation lock"
-        );
+    let db2 = db.clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        db2.execute(2, "truncate pets").unwrap();
+        done_tx.send(()).unwrap();
+    });
 
-        drop(guard);
-        done_rx.recv_timeout(TEST_TIMEOUT).unwrap();
-        worker.join().unwrap();
-    }
+    started_rx.recv().unwrap();
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "truncate should block while the streaming guard holds the inner relation lock"
+    );
+
+    drop(guard);
+    done_rx.recv_timeout(TEST_TIMEOUT).unwrap();
+    worker.join().unwrap();
+}

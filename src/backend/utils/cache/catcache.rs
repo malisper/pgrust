@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
+use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::catalog::pg_auth_members::sort_pg_auth_members_rows;
 use crate::backend::catalog::pg_authid::sort_pg_authid_rows;
 use crate::backend::catalog::pg_cast::sort_pg_cast_rows;
@@ -12,30 +14,28 @@ use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::pg_language::sort_pg_language_rows;
+use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_USER_OID, load_physical_catalog_rows};
-use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
-use crate::backend::catalog::CatalogError;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
-    BOOTSTRAP_SUPERUSER_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
-    BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
-    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
-    INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
-    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
-    JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
-    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, PgAmRow,
-    PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
+    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
+    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
+    FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
+    INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID,
+    INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID,
+    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
+    JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
+    PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows,
+    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    bootstrap_pg_tablespace_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -52,6 +52,7 @@ pub struct CatCache {
     authid_rows: Vec<PgAuthIdRow>,
     auth_members_rows: Vec<PgAuthMembersRow>,
     language_rows: Vec<PgLanguageRow>,
+    operator_rows: Vec<PgOperatorRow>,
     proc_rows: Vec<PgProcRow>,
     cast_rows: Vec<PgCastRow>,
     collation_rows: Vec<PgCollationRow>,
@@ -95,6 +96,8 @@ impl CatCache {
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.language_rows.extend(bootstrap_pg_language_rows());
         sort_pg_language_rows(&mut cache.language_rows);
+        cache.operator_rows.extend(bootstrap_pg_operator_rows());
+        sort_pg_operator_rows(&mut cache.operator_rows);
         cache.proc_rows.extend(bootstrap_pg_proc_rows());
         sort_pg_proc_rows(&mut cache.proc_rows);
         cache.cast_rows.extend(bootstrap_pg_cast_rows());
@@ -108,9 +111,7 @@ impl CatCache {
 
         for (name, entry) in catalog.entries() {
             if let Some((namespace, _)) = name.split_once('.')
-                && !cache
-                    .namespaces_by_oid
-                    .contains_key(&entry.namespace_oid)
+                && !cache.namespaces_by_oid.contains_key(&entry.namespace_oid)
             {
                 let namespace_row = PgNamespaceRow {
                     oid: entry.namespace_oid,
@@ -121,7 +122,9 @@ impl CatCache {
                     namespace_row.nspname.to_ascii_lowercase(),
                     namespace_row.clone(),
                 );
-                cache.namespaces_by_oid.insert(namespace_row.oid, namespace_row);
+                cache
+                    .namespaces_by_oid
+                    .insert(namespace_row.oid, namespace_row);
             }
 
             let relname = catalog_object_name(name);
@@ -136,9 +139,10 @@ impl CatCache {
                 relpersistence: 'p',
                 relkind: entry.relkind,
             };
-            cache
-                .classes_by_name
-                .insert(normalize_catalog_name(name).to_ascii_lowercase(), class_row.clone());
+            cache.classes_by_name.insert(
+                normalize_catalog_name(name).to_ascii_lowercase(),
+                class_row.clone(),
+            );
             cache.classes_by_oid.insert(class_row.oid, class_row);
 
             if entry.row_type_oid != 0 {
@@ -153,7 +157,9 @@ impl CatCache {
                 cache
                     .types_by_name
                     .insert(relname.to_ascii_lowercase(), composite_type.clone());
-                cache.types_by_oid.insert(composite_type.oid, composite_type);
+                cache
+                    .types_by_oid
+                    .insert(composite_type.oid, composite_type);
             }
 
             let mut attrs = entry
@@ -231,6 +237,7 @@ impl CatCache {
             rows.authids,
             rows.auth_members,
             rows.languages,
+            rows.operators,
             rows.procs,
             rows.casts,
             rows.collations,
@@ -251,6 +258,7 @@ impl CatCache {
         authid_rows: Vec<PgAuthIdRow>,
         auth_members_rows: Vec<PgAuthMembersRow>,
         language_rows: Vec<PgLanguageRow>,
+        operator_rows: Vec<PgOperatorRow>,
         proc_rows: Vec<PgProcRow>,
         cast_rows: Vec<PgCastRow>,
         collation_rows: Vec<PgCollationRow>,
@@ -302,6 +310,8 @@ impl CatCache {
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.language_rows = language_rows;
         sort_pg_language_rows(&mut cache.language_rows);
+        cache.operator_rows = operator_rows;
+        sort_pg_operator_rows(&mut cache.operator_rows);
         cache.proc_rows = proc_rows;
         sort_pg_proc_rows(&mut cache.proc_rows);
         cache.cast_rows = cast_rows;
@@ -397,6 +407,10 @@ impl CatCache {
         self.language_rows.clone()
     }
 
+    pub fn operator_rows(&self) -> Vec<PgOperatorRow> {
+        self.operator_rows.clone()
+    }
+
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
         self.proc_rows.clone()
     }
@@ -430,7 +444,9 @@ pub fn format_indkey(indkey: &[i16]) -> String {
 }
 
 fn catalog_object_name(name: &str) -> &str {
-    name.rsplit_once('.').map(|(_, object)| object).unwrap_or(name)
+    name.rsplit_once('.')
+        .map(|(_, object)| object)
+        .unwrap_or(name)
 }
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {
@@ -483,12 +499,13 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::include::catalog::{
-        BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
-        CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
-        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID,
-        JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
-        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID,
-        PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+        BOOL_CMP_EQ_PROC_OID, BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID,
+        C_COLLATION_OID, CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID,
+        DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID,
+        INT4_CMP_EQ_PROC_OID, INT4_TYPE_OID, JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID,
+        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
+        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
+        VARCHAR_TYPE_OID,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -520,9 +537,14 @@ mod tests {
             .unwrap();
 
         let cache = CatCache::from_catalog(&catalog);
-        assert_eq!(cache.class_by_name("people").map(|row| row.oid), Some(entry.relation_oid));
         assert_eq!(
-            cache.attributes_by_relid(entry.relation_oid).map(|rows| rows.len()),
+            cache.class_by_name("people").map(|row| row.oid),
+            Some(entry.relation_oid)
+        );
+        assert_eq!(
+            cache
+                .attributes_by_relid(entry.relation_oid)
+                .map(|rows| rows.len()),
             Some(2)
         );
         assert_eq!(
@@ -534,8 +556,14 @@ mod tests {
     #[test]
     fn catcache_derives_builtin_pg_type_rows() {
         let cache = CatCache::from_catalog(&Catalog::default());
-        assert_eq!(cache.type_by_name("int4").map(|row| row.oid), Some(INT4_TYPE_OID));
-        assert_eq!(cache.type_by_name("pg_class").map(|row| row.typrelid), Some(1259));
+        assert_eq!(
+            cache.type_by_name("int4").map(|row| row.oid),
+            Some(INT4_TYPE_OID)
+        );
+        assert_eq!(
+            cache.type_by_name("pg_class").map(|row| row.typrelid),
+            Some(1259)
+        );
     }
 
     #[test]
@@ -549,20 +577,28 @@ mod tests {
             ],
         };
         desc.columns[1].default_expr = Some("'anon'".into());
-        let entry = store
-            .create_table(
-                "people",
-                desc,
-            )
-            .unwrap();
+        let entry = store.create_table("people", desc).unwrap();
         let index = store
             .create_index("people_name_idx", "people", true, &["name".into()])
             .unwrap();
 
         let cache = CatCache::from_physical(&base).unwrap();
-        assert_eq!(cache.class_by_name("people").map(|row| row.oid), Some(entry.relation_oid));
-        assert_eq!(cache.attributes_by_relid(entry.relation_oid).map(|rows| rows.len()), Some(2));
-        assert_eq!(cache.type_by_oid(entry.row_type_oid).map(|row| row.typrelid), Some(entry.relation_oid));
+        assert_eq!(
+            cache.class_by_name("people").map(|row| row.oid),
+            Some(entry.relation_oid)
+        );
+        assert_eq!(
+            cache
+                .attributes_by_relid(entry.relation_oid)
+                .map(|rows| rows.len()),
+            Some(2)
+        );
+        assert_eq!(
+            cache
+                .type_by_oid(entry.row_type_oid)
+                .map(|row| row.typrelid),
+            Some(entry.relation_oid)
+        );
         assert_eq!(
             cache
                 .attrdef_by_relid_attnum(entry.relation_oid, 2)
@@ -592,7 +628,9 @@ mod tests {
                 && row.deptype == DEPENDENCY_AUTO
         }));
         assert_eq!(
-            cache.class_by_name("people_name_idx").map(|row| row.relkind),
+            cache
+                .class_by_name("people_name_idx")
+                .map(|row| row.relkind),
             Some('i')
         );
         assert_eq!(
@@ -600,7 +638,9 @@ mod tests {
             Some(BTREE_AM_OID)
         );
         assert_eq!(
-            cache.class_by_name("people_name_idx").map(|row| row.relpersistence),
+            cache
+                .class_by_name("people_name_idx")
+                .map(|row| row.relpersistence),
             Some('p')
         );
         assert_eq!(
@@ -622,11 +662,37 @@ mod tests {
                 && row.rolsuper
         }));
         assert!(cache.auth_members_rows().is_empty());
-        assert!(cache.language_rows().iter().any(|row| {
-            row.lanname == "internal" && row.lanowner == BOOTSTRAP_SUPERUSER_OID
+        assert!(
+            cache.language_rows().iter().any(|row| {
+                row.lanname == "internal" && row.lanowner == BOOTSTRAP_SUPERUSER_OID
+            })
+        );
+        assert!(
+            cache
+                .language_rows()
+                .iter()
+                .any(|row| { row.lanname == "sql" && row.lanpltrusted })
+        );
+        assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 91
+                && row.oprname == "="
+                && row.oprcode == BOOL_CMP_EQ_PROC_OID
+                && row.oprcanmerge
+                && row.oprcanhash
         }));
-        assert!(cache.language_rows().iter().any(|row| {
-            row.lanname == "sql" && row.lanpltrusted
+        assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 96
+                && row.oprname == "="
+                && row.oprcode == INT4_CMP_EQ_PROC_OID
+                && row.oprleft == INT4_TYPE_OID
+                && row.oprright == INT4_TYPE_OID
+        }));
+        assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 3877
+                && row.oprname == "^@"
+                && row.oprcode == TEXT_STARTS_WITH_PROC_OID
+                && row.oprleft == TEXT_TYPE_OID
+                && row.oprright == TEXT_TYPE_OID
         }));
         assert!(cache.proc_rows().iter().any(|row| {
             row.proname == "lower"
@@ -641,9 +707,7 @@ mod tests {
                 && row.prokind == 'a'
         }));
         assert!(cache.proc_rows().iter().any(|row| {
-            row.proname == "json_array_elements"
-                && row.proretset
-                && row.prorettype == JSON_TYPE_OID
+            row.proname == "json_array_elements" && row.proretset && row.prorettype == JSON_TYPE_OID
         }));
         assert!(cache.cast_rows().iter().any(|row| {
             row.castsource == INT4_TYPE_OID
@@ -685,6 +749,11 @@ mod tests {
                 && row.indisunique
                 && row.indkey == "2"
         }));
-        assert!(cache.am_rows().iter().any(|row| row.oid == BTREE_AM_OID && row.amname == "btree"));
+        assert!(
+            cache
+                .am_rows()
+                .iter()
+                .any(|row| row.oid == BTREE_AM_OID && row.amname == "btree")
+        );
     }
 }

@@ -1,0 +1,288 @@
+use crate::backend::catalog::catalog::column_desc;
+use crate::backend::executor::RelationDesc;
+use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::{
+    BOOL_CMP_EQ_PROC_OID, BOOL_CMP_GE_PROC_OID, BOOL_CMP_GT_PROC_OID, BOOL_CMP_LE_PROC_OID,
+    BOOL_CMP_LT_PROC_OID, BOOL_CMP_NE_PROC_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
+    INT4_CMP_EQ_PROC_OID, INT4_CMP_GE_PROC_OID, INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID,
+    INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID, INT4_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    TEXT_CMP_EQ_PROC_OID, TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgOperatorRow {
+    pub oid: u32,
+    pub oprname: String,
+    pub oprnamespace: u32,
+    pub oprowner: u32,
+    pub oprkind: char,
+    pub oprcanmerge: bool,
+    pub oprcanhash: bool,
+    pub oprleft: u32,
+    pub oprright: u32,
+    pub oprresult: u32,
+    pub oprcom: u32,
+    pub oprnegate: u32,
+    pub oprcode: u32,
+    pub oprrest: u32,
+    pub oprjoin: u32,
+}
+
+pub fn pg_operator_desc() -> RelationDesc {
+    RelationDesc {
+        columns: vec![
+            column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("oprnamespace", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprowner", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprkind", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc("oprcanmerge", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("oprcanhash", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("oprleft", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprright", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprresult", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprcom", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprnegate", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprcode", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprrest", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("oprjoin", SqlType::new(SqlTypeKind::Oid), false),
+        ],
+    }
+}
+
+pub fn bootstrap_pg_operator_rows() -> [PgOperatorRow; 15] {
+    [
+        operator_row(
+            58,
+            "<",
+            BOOL_TYPE_OID,
+            BOOL_TYPE_OID,
+            59,
+            1695,
+            BOOL_CMP_LT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            59,
+            ">",
+            BOOL_TYPE_OID,
+            BOOL_TYPE_OID,
+            58,
+            1694,
+            BOOL_CMP_GT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            85,
+            "<>",
+            BOOL_TYPE_OID,
+            BOOL_TYPE_OID,
+            85,
+            91,
+            BOOL_CMP_NE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            91,
+            "=",
+            BOOL_TYPE_OID,
+            BOOL_TYPE_OID,
+            91,
+            85,
+            BOOL_CMP_EQ_PROC_OID,
+            true,
+            true,
+        ),
+        operator_row(
+            96,
+            "=",
+            INT4_TYPE_OID,
+            INT4_TYPE_OID,
+            96,
+            518,
+            INT4_CMP_EQ_PROC_OID,
+            true,
+            true,
+        ),
+        operator_row(
+            97,
+            "<",
+            INT4_TYPE_OID,
+            INT4_TYPE_OID,
+            521,
+            525,
+            INT4_CMP_LT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            98,
+            "=",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            98,
+            531,
+            TEXT_CMP_EQ_PROC_OID,
+            true,
+            true,
+        ),
+        operator_row(
+            518,
+            "<>",
+            INT4_TYPE_OID,
+            INT4_TYPE_OID,
+            518,
+            96,
+            INT4_CMP_NE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            521,
+            ">",
+            INT4_TYPE_OID,
+            INT4_TYPE_OID,
+            97,
+            523,
+            INT4_CMP_GT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            523,
+            "<=",
+            INT4_TYPE_OID,
+            INT4_TYPE_OID,
+            525,
+            521,
+            INT4_CMP_LE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            525,
+            ">=",
+            INT4_TYPE_OID,
+            INT4_TYPE_OID,
+            523,
+            97,
+            INT4_CMP_GE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            531,
+            "<>",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            531,
+            98,
+            TEXT_CMP_NE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            1694,
+            "<=",
+            BOOL_TYPE_OID,
+            BOOL_TYPE_OID,
+            1695,
+            59,
+            BOOL_CMP_LE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            1695,
+            ">=",
+            BOOL_TYPE_OID,
+            BOOL_TYPE_OID,
+            1694,
+            58,
+            BOOL_CMP_GE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            3877,
+            "^@",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            0,
+            0,
+            TEXT_STARTS_WITH_PROC_OID,
+            false,
+            false,
+        ),
+    ]
+}
+
+fn operator_row(
+    oid: u32,
+    oprname: &str,
+    oprleft: u32,
+    oprright: u32,
+    oprcom: u32,
+    oprnegate: u32,
+    oprcode: u32,
+    oprcanmerge: bool,
+    oprcanhash: bool,
+) -> PgOperatorRow {
+    PgOperatorRow {
+        oid,
+        oprname: oprname.into(),
+        oprnamespace: PG_CATALOG_NAMESPACE_OID,
+        oprowner: BOOTSTRAP_SUPERUSER_OID,
+        oprkind: 'b',
+        oprcanmerge,
+        oprcanhash,
+        oprleft,
+        oprright,
+        oprresult: BOOL_TYPE_OID,
+        oprcom,
+        oprnegate,
+        oprcode,
+        // :HACK: estimator functions are not cataloged yet in pgrust, so keep
+        // `oprrest` / `oprjoin` as zero until that metadata exists.
+        oprrest: 0,
+        oprjoin: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pg_operator_desc_matches_expected_columns() {
+        let desc = pg_operator_desc();
+        let names: Vec<_> = desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "oid",
+                "oprname",
+                "oprnamespace",
+                "oprowner",
+                "oprkind",
+                "oprcanmerge",
+                "oprcanhash",
+                "oprleft",
+                "oprright",
+                "oprresult",
+                "oprcom",
+                "oprnegate",
+                "oprcode",
+                "oprrest",
+                "oprjoin",
+            ]
+        );
+    }
+}
