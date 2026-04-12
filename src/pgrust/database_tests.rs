@@ -146,22 +146,22 @@ fn single_thread_create_insert_select() {
 }
 
 #[test]
-fn committed_visible_catalog_cache_refreshes_after_create_table() {
-    let base = temp_dir("committed_visible_cache_refresh");
+fn client_visible_cache_refreshes_after_create_table() {
+    let base = temp_dir("client_visible_cache_refresh");
     let db = Database::open(&base, 16).unwrap();
 
     let visible = db.visible_catalog_with_search_path(1, None);
     assert!(visible.relcache().get_by_name("cache_test").is_none());
-    assert!(db.committed_visible_cache.read().is_some());
-    let initial_epoch = db.committed_catalog_epoch();
+    assert!(db.client_visible_caches.read().contains_key(&1));
+    let initial_generation = db.catalog_cache_generation();
 
     db.execute(1, "create table cache_test (id int4)").unwrap();
 
-    assert!(db.committed_catalog_epoch() > initial_epoch);
+    assert!(db.catalog_cache_generation() > initial_generation);
     let visible = db.visible_catalog_with_search_path(1, None);
     assert!(visible.relcache().get_by_name("cache_test").is_some());
-    let cache = db.committed_visible_cache.read().clone().unwrap();
-    assert_eq!(cache.epoch, db.committed_catalog_epoch());
+    let cache = db.client_visible_caches.read().get(&1).cloned().unwrap();
+    assert_eq!(cache.generation, db.catalog_cache_generation());
 }
 
 #[test]

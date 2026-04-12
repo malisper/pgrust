@@ -78,8 +78,8 @@ pub struct Database {
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
-    catalog_cache_epoch: Arc<AtomicU64>,
-    committed_visible_cache: Arc<RwLock<Option<CommittedVisibleCache>>>,
+    catalog_cache_generation: Arc<AtomicU64>,
+    client_visible_caches: Arc<RwLock<HashMap<ClientId, ClientVisibleCache>>>,
     temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     /// Background WAL writer — flushes BufWriter to kernel periodically.
     _wal_bg_writer: Arc<WalBgWriter>,
@@ -102,8 +102,8 @@ struct TempNamespace {
 }
 
 #[derive(Debug, Clone)]
-struct CommittedVisibleCache {
-    epoch: u64,
+struct ClientVisibleCache {
+    generation: u64,
     relcache: RelCache,
     catcache: CatCache,
 }
@@ -181,8 +181,8 @@ impl Database {
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
-            catalog_cache_epoch: Arc::new(AtomicU64::new(0)),
-            committed_visible_cache: Arc::new(RwLock::new(None)),
+            catalog_cache_generation: Arc::new(AtomicU64::new(0)),
+            client_visible_caches: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             _wal_bg_writer: Arc::new(wal_bg_writer),
         })
@@ -229,19 +229,19 @@ impl Database {
             .is_some_and(|namespace| !namespace.tables.is_empty())
     }
 
-    fn committed_catalog_epoch(&self) -> u64 {
-        self.catalog_cache_epoch.load(Ordering::Acquire)
+    fn catalog_cache_generation(&self) -> u64 {
+        self.catalog_cache_generation.load(Ordering::Acquire)
     }
 
-    fn invalidate_committed_visible_cache(&self) {
-        self.catalog_cache_epoch.fetch_add(1, Ordering::AcqRel);
-        *self.committed_visible_cache.write() = None;
+    fn invalidate_visible_caches(&self) {
+        self.catalog_cache_generation.fetch_add(1, Ordering::AcqRel);
+        self.client_visible_caches.write().clear();
     }
 
-    fn committed_visible_cache_snapshot(&self) -> Option<CommittedVisibleCache> {
-        let epoch = self.committed_catalog_epoch();
-        if let Some(cache) = self.committed_visible_cache.read().clone()
-            && cache.epoch == epoch
+    fn client_visible_cache_snapshot(&self, client_id: ClientId) -> Option<ClientVisibleCache> {
+        let generation = self.catalog_cache_generation();
+        if let Some(cache) = self.client_visible_caches.read().get(&client_id).cloned()
+            && cache.generation == generation
         {
             return Some(cache);
         }
@@ -262,8 +262,8 @@ impl Database {
                 .and_then(|catcache| {
                     RelCache::from_catcache(&catcache)
                         .ok()
-                        .map(|relcache| CommittedVisibleCache {
-                            epoch,
+                        .map(|relcache| ClientVisibleCache {
+                            generation,
                             relcache,
                             catcache,
                         })
@@ -271,28 +271,24 @@ impl Database {
                 .or_else(|| {
                     let relcache = catalog_guard.relcache().ok()?;
                     let catcache = catalog_guard.catcache().ok()?;
-                    Some(CommittedVisibleCache {
-                        epoch,
+                    Some(ClientVisibleCache {
+                        generation,
                         relcache,
                         catcache,
                     })
                 })
         }?;
 
-        if self.committed_catalog_epoch() == epoch {
-            *self.committed_visible_cache.write() = Some(rebuilt.clone());
+        if self.catalog_cache_generation() == generation {
+            self.client_visible_caches
+                .write()
+                .insert(client_id, rebuilt.clone());
         }
 
         Some(rebuilt)
     }
 
     fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
-        if txn_ctx.is_none() && !self.has_active_temp_namespace(client_id) {
-            if let Some(cache) = self.committed_visible_cache_snapshot() {
-                return cache.relcache;
-            }
-        }
-
         let mut relcache = {
             let catalog_guard = self.catalog.read();
             let txns = self.txns.read();
@@ -447,6 +443,12 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         configured_search_path: Option<&[String]>,
     ) -> RelCache {
+        if txn_ctx.is_none() && !self.has_active_temp_namespace(client_id) {
+            if let Some(cache) = self.client_visible_cache_snapshot(client_id) {
+                let search_path = self.effective_search_path(client_id, configured_search_path);
+                return cache.relcache.with_search_path(&search_path);
+            }
+        }
         let relcache = self.raw_visible_relcache(client_id, txn_ctx);
         let search_path = self.effective_search_path(client_id, configured_search_path);
         relcache.with_search_path(&search_path)
@@ -467,7 +469,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> VisibleCatalog {
         if txn_ctx.is_none() && !self.has_active_temp_namespace(client_id) {
-            if let Some(cache) = self.committed_visible_cache_snapshot() {
+            if let Some(cache) = self.client_visible_cache_snapshot(client_id) {
                 let search_path = self.effective_search_path(client_id, configured_search_path);
                 return VisibleCatalog::new(
                     cache.relcache.with_search_path(&search_path),
@@ -718,6 +720,7 @@ impl Database {
     }
 
     pub(crate) fn cleanup_client_temp_relations(&self, client_id: ClientId) {
+        self.client_visible_caches.write().remove(&client_id);
         let entries = {
             let mut namespaces = self.temp_relations.write();
             namespaces
@@ -1825,7 +1828,7 @@ impl Database {
             }
         }
         if catalog_changed {
-            self.invalidate_committed_visible_cache();
+            self.invalidate_visible_caches();
         }
     }
 
