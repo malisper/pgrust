@@ -99,6 +99,8 @@ struct TempNamespace {
     tables: BTreeMap<String, TempCatalogEntry>,
     next_rel_number: u32,
     next_oid: u32,
+    generation: u64,
+    synced_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -238,6 +240,10 @@ impl Database {
         self.client_visible_caches.write().clear();
     }
 
+    fn invalidate_client_visible_cache(&self, client_id: ClientId) {
+        self.client_visible_caches.write().remove(&client_id);
+    }
+
     fn client_visible_cache_snapshot(&self, client_id: ClientId) -> Option<ClientVisibleCache> {
         let generation = self.catalog_cache_generation();
         if let Some(cache) = self.client_visible_caches.read().get(&client_id).cloned()
@@ -256,7 +262,7 @@ impl Database {
             snapshot
                 .and_then(|snapshot| {
                     catalog_guard
-                        .catcache_with_snapshot(&self.pool, &txns, &snapshot, 0)
+                        .catcache_with_snapshot(&self.pool, &txns, &snapshot, client_id)
                         .ok()
                 })
                 .and_then(|catcache| {
@@ -503,6 +509,14 @@ impl Database {
 
     pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
         if self.has_active_temp_namespace(client_id) {
+            {
+                let namespaces = self.temp_relations.read();
+                if let Some(namespace) = namespaces.get(&client_id)
+                    && namespace.synced_generation == namespace.generation
+                {
+                    return;
+                }
+            }
             let catalog_guard = self.catalog.read();
             let base_dir = catalog_guard.base_dir().to_path_buf();
             drop(catalog_guard);
@@ -584,6 +598,9 @@ impl Database {
                         &sync_kinds,
                     );
                 }
+                if let Some(namespace) = self.temp_relations.write().get_mut(&client_id) {
+                    namespace.synced_generation = namespace.generation;
+                }
                 self.refresh_catalog_storage();
             }
         }
@@ -643,8 +660,10 @@ impl Database {
                     on_commit,
                 },
             );
+            namespace.generation = namespace.generation.saturating_add(1);
             entry
         };
+        self.invalidate_client_visible_cache(client_id);
 
         let _ = self.pool.with_storage_mut(|s| {
             use crate::backend::storage::smgr::StorageManager;
@@ -676,11 +695,13 @@ impl Database {
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
                 })?;
+            namespace.generation = namespace.generation.saturating_add(1);
             if namespace.tables.is_empty() {
                 namespaces.remove(&client_id);
             }
             entry
         };
+        self.invalidate_client_visible_cache(client_id);
         let _ = self.pool.invalidate_relation(entry.rel);
         self.pool
             .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
@@ -720,7 +741,7 @@ impl Database {
     }
 
     pub(crate) fn cleanup_client_temp_relations(&self, client_id: ClientId) {
-        self.client_visible_caches.write().remove(&client_id);
+        self.invalidate_client_visible_cache(client_id);
         let entries = {
             let mut namespaces = self.temp_relations.write();
             namespaces
