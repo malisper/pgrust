@@ -75,6 +75,10 @@ pub struct CatalogMutationEffect {
     pub touched_catalogs: Vec<BootstrapCatalogKind>,
     pub created_rels: Vec<RelFileLocator>,
     pub dropped_rels: Vec<RelFileLocator>,
+    pub relation_oids: Vec<u32>,
+    pub namespace_oids: Vec<u32>,
+    pub type_oids: Vec<u32>,
+    pub full_reset: bool,
 }
 
 pub struct CatalogWriteContext<'a> {
@@ -322,6 +326,9 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_rel(&mut effect.created_rels, entry.rel);
+        effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
         Ok((entry, effect))
     }
 
@@ -343,6 +350,7 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
+        effect_record_oid(&mut effect.namespace_oids, namespace_oid);
         Ok(effect)
     }
 
@@ -364,6 +372,7 @@ impl CatalogStore {
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
+        effect_record_oid(&mut effect.namespace_oids, namespace_oid);
         Ok(effect)
     }
 
@@ -387,6 +396,10 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_rel(&mut effect.created_rels, entry.rel);
+        effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
         Ok((entry, effect))
     }
 
@@ -421,6 +434,9 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         for entry in &dropped {
             effect_record_rel(&mut effect.dropped_rels, entry.rel);
+            effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+            effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+            effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
         }
         Ok((dropped, effect))
     }
@@ -562,6 +578,12 @@ fn effect_record_catalog_kinds(effect: &mut CatalogMutationEffect, kinds: &[Boot
 fn effect_record_rel(rels: &mut Vec<RelFileLocator>, rel: RelFileLocator) {
     if !rels.contains(&rel) {
         rels.push(rel);
+    }
+}
+
+fn effect_record_oid(oids: &mut Vec<u32>, oid: u32) {
+    if !oids.contains(&oid) {
+        oids.push(oid);
     }
 }
 
@@ -2392,6 +2414,98 @@ pub(crate) fn load_physical_catalog_rows_visible(
         missing_depend,
     )?;
     Ok(rows)
+}
+
+pub(crate) fn load_visible_namespace_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgNamespaceRow>, CatalogError> {
+    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgNamespace)?
+        .into_iter()
+        .map(namespace_row_from_values)
+        .collect()
+}
+
+pub(crate) fn load_visible_type_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgTypeRow>, CatalogError> {
+    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgType)?
+        .into_iter()
+        .map(pg_type_row_from_values)
+        .collect()
+}
+
+pub(crate) fn load_visible_class_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgClassRow>, CatalogError> {
+    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgClass)?
+        .into_iter()
+        .map(pg_class_row_from_values)
+        .collect()
+}
+
+pub(crate) fn load_visible_attribute_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgAttributeRow>, CatalogError> {
+    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAttribute)?
+        .into_iter()
+        .map(pg_attribute_row_from_values)
+        .collect()
+}
+
+pub(crate) fn load_visible_attrdef_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgAttrdefRow>, CatalogError> {
+    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAttrdef)?
+        .into_iter()
+        .map(pg_attrdef_row_from_values)
+        .collect()
+}
+
+fn load_visible_catalog_kind(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    kind: BootstrapCatalogKind,
+) -> Result<Vec<Vec<Value>>, CatalogError> {
+    let rel = RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: kind.relation_oid(),
+    };
+    let mut smgr = MdStorageManager::new(base_dir);
+    if !smgr.exists(rel, ForkNumber::Main) {
+        return Ok(Vec::new());
+    }
+    scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rel,
+        &bootstrap_relation_desc(kind),
+    )
 }
 
 fn scan_catalog_relation(
