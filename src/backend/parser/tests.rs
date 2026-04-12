@@ -978,6 +978,18 @@ fn build_plan_accepts_catalog_backed_bytea_comparisons() {
 }
 
 #[test]
+fn build_plan_accepts_same_type_array_equality_comparisons() {
+    assert!(build_plan(
+        &parse_select(
+            "select ARRAY[1, 2] = ARRAY[1, 2], ARRAY['a']::varchar[] <> ARRAY['b']::varchar[]"
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
+}
+
+#[test]
 fn build_plan_rejects_missing_catalog_text_input_cast() {
     let err = build_plan(&parse_select("select cast('1' as int4[])").unwrap(), &catalog())
         .unwrap_err();
