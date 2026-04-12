@@ -672,7 +672,7 @@ fn psql_describe_tableinfo_query(
             Value::Text("".into()),
             Value::Int32(0),
             Value::Text("".into()),
-            Value::InternalChar(b'p'),
+            Value::InternalChar(entry.relpersistence as u8),
             Value::InternalChar(b'd'),
             Value::Text("heap".into()),
         ]],

@@ -184,6 +184,7 @@ impl Database {
             relation_oid: entry.relation_oid,
             namespace_oid: entry.namespace_oid,
             row_type_oid: entry.row_type_oid,
+            relpersistence: 'p',
             relkind: entry.relkind,
             desc: entry.desc,
         }
@@ -242,6 +243,7 @@ impl Database {
                             reltype: temp.entry.row_type_oid,
                             relam: crate::include::catalog::relam_for_relkind(temp.entry.relkind),
                             relfilenode: temp.entry.rel.rel_number,
+                            relpersistence: temp.entry.relpersistence,
                             relkind: temp.entry.relkind,
                         });
                         rows.types.push(PgTypeRow {
@@ -349,6 +351,7 @@ impl Database {
                 relation_oid,
                 namespace_oid: Self::temp_db_oid(client_id),
                 row_type_oid,
+                relpersistence: 't',
                 relkind: 'r',
                 desc,
             };

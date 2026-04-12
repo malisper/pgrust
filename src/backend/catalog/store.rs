@@ -421,6 +421,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.reltype as i32),
         Value::Int32(row.relam as i32),
         Value::Int32(row.relfilenode as i32),
+        Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
     ]
 }
@@ -870,7 +871,12 @@ fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespaceRow, Catal
 }
 
 fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
-    let relkind = match &values[6] {
+    let relpersistence = match &values[6] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relpersistence"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected relpersistence text")),
+    };
+    let relkind = match &values[7] {
         Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relkind"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected relkind text")),
@@ -882,6 +888,7 @@ fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogErr
         reltype: expect_oid(&values[3])?,
         relam: expect_oid(&values[4])?,
         relfilenode: expect_oid(&values[5])?,
+        relpersistence,
         relkind,
     })
 }
@@ -1174,6 +1181,7 @@ mod tests {
             .unwrap();
         assert_eq!(class_row.relkind, 'i');
         assert_eq!(class_row.relam, BTREE_AM_OID);
+        assert_eq!(class_row.relpersistence, 'p');
         assert_eq!(class_row.relnamespace, PUBLIC_NAMESPACE_OID);
         assert_eq!(class_row.reltype, 0);
 
@@ -1183,6 +1191,7 @@ mod tests {
             .find(|row| row.oid == table.relation_oid)
             .unwrap();
         assert_eq!(table_row.relam, HEAP_TABLE_AM_OID);
+        assert_eq!(table_row.relpersistence, 'p');
 
         assert!(rows.depends.iter().any(|row| {
             row.classid == PG_CLASS_RELATION_OID

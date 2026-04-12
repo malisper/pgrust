@@ -128,6 +128,7 @@ fn main() -> Result<(), ExecError> {
             relation_oid: 16_384,
             namespace_oid: 11,
             row_type_oid: 16_385,
+            relpersistence: 'p',
             relkind: 'r',
             desc: desc(),
         },
