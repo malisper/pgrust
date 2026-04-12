@@ -2190,6 +2190,22 @@ mod tests {
                 && row.oprcode == crate::include::catalog::VARBIT_CMP_LT_PROC_OID
         }));
         assert!(rows.operators.iter().any(|row| {
+            row.oid == 1955
+                && row.oprname == "="
+                && row.oprleft == crate::include::catalog::BYTEA_TYPE_OID
+                && row.oprright == crate::include::catalog::BYTEA_TYPE_OID
+                && row.oprcode == crate::include::catalog::BYTEA_CMP_EQ_PROC_OID
+                && row.oprcanmerge
+                && row.oprcanhash
+        }));
+        assert!(rows.operators.iter().any(|row| {
+            row.oid == 1957
+                && row.oprname == "<"
+                && row.oprleft == crate::include::catalog::BYTEA_TYPE_OID
+                && row.oprright == crate::include::catalog::BYTEA_TYPE_OID
+                && row.oprcode == crate::include::catalog::BYTEA_CMP_LT_PROC_OID
+        }));
+        assert!(rows.operators.iter().any(|row| {
             row.oid == 3240
                 && row.oprname == "="
                 && row.oprleft == crate::include::catalog::JSONB_TYPE_OID
@@ -2270,6 +2286,28 @@ mod tests {
                     )
                 && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
                 && row.prosrc == "varbitlt"
+        }));
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "byteaeq"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::BYTEA_TYPE_OID,
+                        crate::include::catalog::BYTEA_TYPE_OID
+                    )
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+                && row.prosrc == "byteaeq"
+        }));
+        assert!(rows.procs.iter().any(|row| {
+            row.proname == "bytealt"
+                && row.proargtypes
+                    == format!(
+                        "{} {}",
+                        crate::include::catalog::BYTEA_TYPE_OID,
+                        crate::include::catalog::BYTEA_TYPE_OID
+                    )
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+                && row.prosrc == "bytealt"
         }));
         assert!(rows.procs.iter().any(|row| {
             row.proname == "jsonb_eq"
