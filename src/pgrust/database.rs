@@ -1162,8 +1162,21 @@ impl Database {
                             }
                         }
                     } else {
+                        let relation_oid = match self
+                            .visible_relcache_with_search_path(client_id, configured_search_path)
+                            .get_by_name(table_name)
+                        {
+                            Some(entry) if entry.relkind == 'r' => entry.relation_oid,
+                            Some(_) | None if drop_stmt.if_exists => continue,
+                            Some(_) | None => {
+                                result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                                    table_name.clone(),
+                                )));
+                                break;
+                            }
+                        };
                         let mut catalog_guard = self.catalog.write();
-                        match catalog_guard.drop_table(table_name) {
+                        match catalog_guard.drop_relation_by_oid(relation_oid) {
                             Ok(entries) => {
                                 drop(catalog_guard);
                                 self.refresh_catalog_storage();
@@ -1175,8 +1188,10 @@ impl Database {
                                 self.plan_cache.invalidate_all();
                             }
                             Err(CatalogError::UnknownTable(_)) if drop_stmt.if_exists => {}
-                            Err(CatalogError::UnknownTable(name)) => {
-                                result = Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
+                            Err(CatalogError::UnknownTable(_)) => {
+                                result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                                    table_name.clone(),
+                                )));
                                 break;
                             }
                             Err(other) => {

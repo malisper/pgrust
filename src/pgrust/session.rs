@@ -430,8 +430,17 @@ impl Session {
                         db.drop_temp_relation(client_id, table_name)?;
                         dropped += 1;
                     } else {
+                        let relation_oid = match self.visible_relcache(db).get_by_name(table_name) {
+                            Some(entry) if entry.relkind == 'r' => entry.relation_oid,
+                            Some(_) | None if drop_stmt.if_exists => continue,
+                            Some(_) | None => {
+                                return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                                    table_name.clone(),
+                                )));
+                            }
+                        };
                         let mut catalog_guard = db.catalog.write();
-                        match catalog_guard.drop_table(table_name) {
+                        match catalog_guard.drop_relation_by_oid(relation_oid) {
                             Ok(entries) => {
                                 drop(catalog_guard);
                                 db.refresh_catalog_storage();
@@ -446,8 +455,10 @@ impl Session {
                             }
                             Err(crate::backend::catalog::CatalogError::UnknownTable(_))
                                 if drop_stmt.if_exists => {}
-                            Err(crate::backend::catalog::CatalogError::UnknownTable(name)) => {
-                                return Err(ExecError::Parse(ParseError::TableDoesNotExist(name)));
+                            Err(crate::backend::catalog::CatalogError::UnknownTable(_)) => {
+                                return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                                    table_name.clone(),
+                                )));
                             }
                             Err(other) => {
                                 return Err(ExecError::Parse(ParseError::UnexpectedToken {

@@ -179,7 +179,29 @@ impl CatalogStore {
 
     pub fn drop_table(&mut self, name: &str) -> Result<Vec<CatalogEntry>, CatalogError> {
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let oids = drop_relation_oids(&catalog, name)?;
+        let entry = catalog
+            .get(name)
+            .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
+        if entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(name.to_string()));
+        }
+        let oids = drop_relation_oids_by_oid(&catalog, entry.relation_oid)?;
+        let mut dropped = Vec::with_capacity(oids.len());
+        for oid in oids {
+            if let Some((_name, entry)) = catalog.remove_by_oid(oid) {
+                dropped.push(entry);
+            }
+        }
+        self.persist_catalog(&catalog)?;
+        Ok(dropped)
+    }
+
+    pub fn drop_relation_by_oid(
+        &mut self,
+        relation_oid: u32,
+    ) -> Result<Vec<CatalogEntry>, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let oids = drop_relation_oids_by_oid(&catalog, relation_oid)?;
         let mut dropped = Vec::with_capacity(oids.len());
         for oid in oids {
             if let Some((_name, entry)) = catalog.remove_by_oid(oid) {
@@ -203,12 +225,12 @@ impl CatalogStore {
     }
 }
 
-fn drop_relation_oids(catalog: &Catalog, name: &str) -> Result<Vec<u32>, CatalogError> {
+fn drop_relation_oids_by_oid(catalog: &Catalog, relation_oid: u32) -> Result<Vec<u32>, CatalogError> {
     let entry = catalog
-        .get(name)
-        .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
+        .get_by_oid(relation_oid)
+        .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
     if entry.relkind != 'r' {
-        return Err(CatalogError::UnknownTable(name.to_string()));
+        return Err(CatalogError::UnknownTable(relation_oid.to_string()));
     }
     let depend_rows = CatCache::from_catalog(catalog).depend_rows();
     let mut seen = BTreeSet::new();
@@ -216,7 +238,7 @@ fn drop_relation_oids(catalog: &Catalog, name: &str) -> Result<Vec<u32>, Catalog
     collect_relation_drop_oids(
         catalog,
         &depend_rows,
-        entry.relation_oid,
+        relation_oid,
         &mut seen,
         &mut order,
     );
