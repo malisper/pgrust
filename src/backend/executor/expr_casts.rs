@@ -335,10 +335,7 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
 }
 
 fn input_type_name_supported(parsed: SqlType) -> bool {
-    if parsed.is_array {
-        return false;
-    }
-    if matches!(parsed.kind, SqlTypeKind::Text) {
+    if !parsed.is_array && matches!(parsed.kind, SqlTypeKind::Text) {
         return true;
     }
     let Some(type_oid) = builtin_type_oid(parsed) else {
@@ -471,7 +468,7 @@ pub(crate) fn soft_input_error_info(
         column: type_name.to_string(),
         details: format!("unsupported type: {type_name}"),
     })?;
-    match cast_text_value(text, ty, false) {
+    match cast_value(Value::Text(text.into()), ty) {
         Ok(_) => Ok(None),
         Err(err) => Ok(Some(InputErrorInfo {
             message: input_error_message(&err, text),
@@ -1340,7 +1337,17 @@ mod tests {
             parse_input_type_name("varchar(4)").unwrap(),
             Some(SqlType::with_char_len(SqlTypeKind::Varchar, 4))
         );
-        assert_eq!(parse_input_type_name("int4[]").unwrap(), None);
+        assert_eq!(
+            parse_input_type_name("int4[]").unwrap(),
+            Some(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+        );
+        assert_eq!(
+            parse_input_type_name("varchar(4)[]").unwrap(),
+            Some(SqlType::array_of(SqlType::with_char_len(
+                SqlTypeKind::Varchar,
+                4
+            )))
+        );
     }
 
     #[test]
@@ -1390,5 +1397,11 @@ mod tests {
         assert!(soft_input_error_info("$.a", "jsonpath")
             .unwrap()
             .is_none());
+        assert!(soft_input_error_info("{1,2,3}", "int4[]")
+            .unwrap()
+            .is_none());
+        assert!(soft_input_error_info("{1,nope}", "int4[]")
+            .unwrap()
+            .is_some());
     }
 }
