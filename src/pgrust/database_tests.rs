@@ -228,6 +228,105 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
+        match db
+            .execute(
+                1,
+                "select s.typname, t.typname, c.castcontext, c.castmethod \
+                 from pg_cast c \
+                 join pg_type s on s.oid = c.castsource \
+                 join pg_type t on t.oid = c.casttarget \
+                 order by c.oid",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![
+                        vec![
+                            Value::Text("int2".into()),
+                            Value::Text("int4".into()),
+                            Value::Text("i".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int2".into()),
+                            Value::Text("int8".into()),
+                            Value::Text("i".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int2".into()),
+                            Value::Text("numeric".into()),
+                            Value::Text("i".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int4".into()),
+                            Value::Text("int2".into()),
+                            Value::Text("a".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int4".into()),
+                            Value::Text("int8".into()),
+                            Value::Text("i".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int4".into()),
+                            Value::Text("numeric".into()),
+                            Value::Text("i".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int4".into()),
+                            Value::Text("oid".into()),
+                            Value::Text("i".into()),
+                            Value::Text("b".into()),
+                        ],
+                        vec![
+                            Value::Text("int8".into()),
+                            Value::Text("int2".into()),
+                            Value::Text("a".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int8".into()),
+                            Value::Text("int4".into()),
+                            Value::Text("a".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("int8".into()),
+                            Value::Text("numeric".into()),
+                            Value::Text("i".into()),
+                            Value::Text("f".into()),
+                        ],
+                        vec![
+                            Value::Text("oid".into()),
+                            Value::Text("int4".into()),
+                            Value::Text("a".into()),
+                            Value::Text("b".into()),
+                        ],
+                        vec![
+                            Value::Text("varchar".into()),
+                            Value::Text("text".into()),
+                            Value::Text("i".into()),
+                            Value::Text("b".into()),
+                        ],
+                        vec![
+                            Value::Text("char".into()),
+                            Value::Text("text".into()),
+                            Value::Text("i".into()),
+                            Value::Text("f".into()),
+                        ],
+                    ]
+                );
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
         match db.execute(1, "select count(*) from pg_auth_members").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int64(0)]]);

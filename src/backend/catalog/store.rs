@@ -17,9 +17,9 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgClassRow, PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgNamespaceRow,
-    PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_composite_type_rows,
-    bootstrap_relation_desc, builtin_type_rows,
+    PgCastRow, PgClassRow, PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow,
+    PgNamespaceRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
+    bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::BufferPool;
@@ -39,6 +39,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub ams: Vec<PgAmRow>,
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
+    pub casts: Vec<PgCastRow>,
     pub collations: Vec<PgCollationRow>,
     pub databases: Vec<PgDatabaseRow>,
     pub tablespaces: Vec<PgTablespaceRow>,
@@ -348,6 +349,16 @@ pub(crate) fn sync_catalog_rows(
         RelFileLocator {
             spc_oid: 0,
             db_oid,
+            rel_number: BootstrapCatalogKind::PgCast.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgCast),
+        rows.casts.iter().cloned().map(pg_cast_row_values).collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
             rel_number: BootstrapCatalogKind::PgDatabase.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgDatabase),
@@ -461,6 +472,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         ams: catcache.am_rows(),
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
+        casts: catcache.cast_rows(),
         collations: catcache.collation_rows(),
         databases: catcache.database_rows(),
         tablespaces: catcache.tablespace_rows(),
@@ -560,6 +572,17 @@ fn pg_collation_row_values(row: PgCollationRow) -> Vec<Value> {
     ]
 }
 
+fn pg_cast_row_values(row: PgCastRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.castsource as i32),
+        Value::Int32(row.casttarget as i32),
+        Value::Int32(row.castfunc as i32),
+        Value::Text(row.castcontext.to_string().into()),
+        Value::Text(row.castmethod.to_string().into()),
+    ]
+}
+
 fn pg_database_row_values(row: PgDatabaseRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -656,6 +679,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let _am_rows = rows.ams;
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
+    let _cast_rows = rows.casts;
     let _collation_rows = rows.collations;
     let _database_rows = rows.databases;
     let _tablespace_rows = rows.tablespaces;
@@ -824,6 +848,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut missing_am = false;
     let mut missing_authid = false;
     let mut missing_auth_members = false;
+    let mut missing_cast = false;
     let mut missing_collation = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
@@ -860,6 +885,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             if kind == BootstrapCatalogKind::PgCollation {
                 missing_collation = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgCast {
+                missing_cast = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgDatabase {
@@ -957,6 +986,18 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         .map(pg_collation_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let cast_rows = if missing_cast {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgCast],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgCast),
+        )?
+        .into_iter()
+        .map(pg_cast_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let attrdef_rows = if missing_attrdef {
         Vec::new()
     } else {
@@ -1028,6 +1069,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         ams: am_rows,
         authids: authid_rows,
         auth_members: auth_members_rows,
+        casts: cast_rows,
         collations: collation_rows,
         databases: database_rows,
         tablespaces: tablespace_rows,
@@ -1193,6 +1235,27 @@ fn pg_collation_row_from_values(values: Vec<Value>) -> Result<PgCollationRow, Ca
     })
 }
 
+fn pg_cast_row_from_values(values: Vec<Value>) -> Result<PgCastRow, CatalogError> {
+    let castcontext = match &values[4] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty castcontext"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected castcontext text")),
+    };
+    let castmethod = match &values[5] {
+        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty castmethod"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected castmethod text")),
+    };
+    Ok(PgCastRow {
+        oid: expect_oid(&values[0])?,
+        castsource: expect_oid(&values[1])?,
+        casttarget: expect_oid(&values[2])?,
+        castfunc: expect_oid(&values[3])?,
+        castcontext,
+        castmethod,
+    })
+}
+
 fn pg_database_row_from_values(values: Vec<Value>) -> Result<PgDatabaseRow, CatalogError> {
     Ok(PgDatabaseRow {
         oid: expect_oid(&values[0])?,
@@ -1316,9 +1379,10 @@ mod tests {
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, CURRENT_DATABASE_NAME,
         C_COLLATION_OID, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
-        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
-        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID,
+        DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, OID_TYPE_OID,
+        PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID,
+        VARCHAR_TYPE_OID,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1601,6 +1665,26 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_persists_pg_cast_rows() {
+        let base = temp_dir("cast_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == INT4_TYPE_OID
+                && row.casttarget == OID_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'i'
+                && row.castmethod == 'b'
+        }));
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == VARCHAR_TYPE_OID
+                && row.casttarget == TEXT_TYPE_OID
+                && row.castcontext == 'i'
+        }));
+    }
+
+    #[test]
     fn catalog_store_persists_pg_database_rows() {
         let base = temp_dir("database_rows");
         let _store = CatalogStore::load(&base).unwrap();
@@ -1708,6 +1792,9 @@ mod tests {
         let collation = catalog.get("pg_collation").unwrap();
         let collation_path = segment_path(&base, collation.rel, ForkNumber::Main, 0);
         assert!(collation_path.exists(), "pg_collation relfile should exist");
+        let cast = catalog.get("pg_cast").unwrap();
+        let cast_path = segment_path(&base, cast.rel, ForkNumber::Main, 0);
+        assert!(cast_path.exists(), "pg_cast relfile should exist");
         let am = catalog.get("pg_am").unwrap();
         let am_path = segment_path(&base, am.rel, ForkNumber::Main, 0);
         assert!(am_path.exists(), "pg_am relfile should exist");
@@ -2091,6 +2178,43 @@ mod tests {
             .collations
             .iter()
             .any(|row| row.oid == DEFAULT_COLLATION_OID && row.collname == "default"));
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_cast_relation() {
+        let base = temp_dir("missing_cast_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let cast_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgCast.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&cast_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(cast_path.exists(), "pg_cast relfile should be recreated");
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == INT4_TYPE_OID && row.casttarget == OID_TYPE_OID
+        }));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
