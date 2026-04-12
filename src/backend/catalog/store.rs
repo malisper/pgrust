@@ -2413,6 +2413,20 @@ mod tests {
                 && row.castcontext == 'e'
                 && row.castmethod == 'i'
         }));
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == crate::include::catalog::INT4_ARRAY_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == crate::include::catalog::JSONB_ARRAY_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
     }
 
     #[test]
