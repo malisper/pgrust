@@ -146,6 +146,40 @@ fn single_thread_create_insert_select() {
 }
 
 #[test]
+fn committed_visible_catalog_cache_refreshes_after_create_table() {
+    let base = temp_dir("committed_visible_cache_refresh");
+    let db = Database::open(&base, 16).unwrap();
+
+    let visible = db.visible_catalog_with_search_path(1, None);
+    assert!(visible.relcache().get_by_name("cache_test").is_none());
+    assert!(db.committed_visible_cache.read().is_some());
+    let initial_epoch = db.committed_catalog_epoch();
+
+    db.execute(1, "create table cache_test (id int4)").unwrap();
+
+    assert!(db.committed_catalog_epoch() > initial_epoch);
+    let visible = db.visible_catalog_with_search_path(1, None);
+    assert!(visible.relcache().get_by_name("cache_test").is_some());
+    let cache = db.committed_visible_cache.read().clone().unwrap();
+    assert_eq!(cache.epoch, db.committed_catalog_epoch());
+}
+
+#[test]
+fn dropping_last_temp_table_removes_temp_namespace() {
+    let base = temp_dir("drop_temp_namespace_cleanup");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create temp table temp_cleanup (id int4)")
+        .unwrap();
+    assert!(db.has_active_temp_namespace(1));
+
+    db.execute(1, "drop table temp_cleanup").unwrap();
+
+    assert!(!db.has_active_temp_namespace(1));
+    assert!(!db.temp_relations.read().contains_key(&1));
+}
+
+#[test]
 fn create_index_and_alter_table_set_are_noops() {
     let base = temp_dir("numeric_sql_noops");
     let db = Database::open(&base, 16).unwrap();
