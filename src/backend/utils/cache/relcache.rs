@@ -163,7 +163,7 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         relation_oid: entry.relation_oid,
         namespace_oid: entry.namespace_oid,
         row_type_oid: entry.row_type_oid,
-        relpersistence: 'p',
+        relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         desc: entry.desc.clone(),
     }

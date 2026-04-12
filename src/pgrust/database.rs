@@ -96,11 +96,10 @@ struct TempCatalogEntry {
 
 #[derive(Debug, Default, Clone)]
 struct TempNamespace {
+    oid: u32,
+    name: String,
     tables: BTreeMap<String, TempCatalogEntry>,
-    next_rel_number: u32,
-    next_oid: u32,
     generation: u64,
-    synced_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +107,21 @@ struct ClientVisibleCache {
     generation: u64,
     relcache: RelCache,
     catcache: CatCache,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum TempMutationEffect {
+    Create {
+        name: String,
+        entry: RelCacheEntry,
+        on_commit: OnCommitAction,
+        namespace_created: bool,
+    },
+    Drop {
+        name: String,
+        entry: RelCacheEntry,
+        on_commit: OnCommitAction,
+    },
 }
 
 impl Database {
@@ -194,22 +208,12 @@ impl Database {
         TEMP_DB_OID_BASE.saturating_add(client_id)
     }
 
-    fn temp_catalog_entry(client_id: ClientId, kind: BootstrapCatalogKind) -> RelCacheEntry {
-        let entry = bootstrap_catalog_entry(kind);
-        let rel = RelFileLocator {
-            spc_oid: 0,
-            db_oid: Self::temp_db_oid(client_id),
-            rel_number: kind.relation_oid(),
-        };
-        RelCacheEntry {
-            rel,
-            relation_oid: entry.relation_oid,
-            namespace_oid: entry.namespace_oid,
-            row_type_oid: entry.row_type_oid,
-            relpersistence: 'p',
-            relkind: entry.relkind,
-            desc: entry.desc,
-        }
+    fn temp_namespace_name(client_id: ClientId) -> String {
+        format!("pg_temp_{client_id}")
+    }
+
+    fn temp_namespace_oid(client_id: ClientId) -> u32 {
+        Self::temp_db_oid(client_id)
     }
 
     pub(crate) fn refresh_catalog_storage(&self) {
@@ -225,10 +229,15 @@ impl Database {
     }
 
     fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
-        self.temp_relations
-            .read()
-            .get(&client_id)
-            .is_some_and(|namespace| !namespace.tables.is_empty())
+        self.temp_relations.read().contains_key(&client_id)
+    }
+
+    fn owned_temp_namespace(&self, client_id: ClientId) -> Option<TempNamespace> {
+        self.temp_relations.read().get(&client_id).cloned()
+    }
+
+    fn other_session_temp_namespace_oid(&self, client_id: ClientId, namespace_oid: u32) -> bool {
+        namespace_oid >= TEMP_DB_OID_BASE && namespace_oid != Self::temp_namespace_oid(client_id)
     }
 
     fn catalog_cache_generation(&self) -> u64 {
@@ -297,13 +306,8 @@ impl Database {
     fn apply_temp_relcache_overlay(&self, client_id: ClientId, relcache: &mut RelCache) {
         if let Some(namespace) = self.temp_relations.read().get(&client_id) {
             for (name, temp) in &namespace.tables {
-                relcache.insert(name.clone(), temp.entry.clone());
+                relcache.insert(format!("{}.{}", namespace.name, name), temp.entry.clone());
                 relcache.insert(format!("pg_temp.{name}"), temp.entry.clone());
-            }
-            for kind in temp_catalog_sync_kinds(namespace) {
-                let entry = Self::temp_catalog_entry(client_id, kind);
-                relcache.insert(kind.relation_name(), entry.clone());
-                relcache.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
             }
         }
     }
@@ -314,7 +318,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Option<VisibleCatalog> {
         let cache = self.client_visible_cache_snapshot(client_id)?;
-        let mut relcache = cache.relcache;
+        let mut relcache = filter_temp_relcache_for_client(client_id, cache.relcache);
         self.apply_temp_relcache_overlay(client_id, &mut relcache);
         let search_path = self.effective_search_path(client_id, configured_search_path);
         Some(VisibleCatalog::new(
@@ -350,6 +354,7 @@ impl Database {
 
     fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
         let (mut relcache, _) = self.snapshot_visible_state(client_id, txn_ctx);
+        relcache = filter_temp_relcache_for_client(client_id, relcache);
         self.apply_temp_relcache_overlay(client_id, &mut relcache);
         relcache
     }
@@ -360,7 +365,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Vec<String> {
         let mut path = Vec::new();
-        let has_temp_namespace = self.has_active_temp_namespace(client_id);
+        let temp_namespace = self.owned_temp_namespace(client_id);
         let explicit = configured_search_path
             .map(|search_path| {
                 search_path
@@ -371,14 +376,23 @@ impl Database {
             })
             .unwrap_or_else(|| vec!["public".into()]);
 
-        if has_temp_namespace && !explicit.iter().any(|schema| schema == "pg_temp") {
-            path.push("pg_temp".into());
+        if let Some(namespace) = &temp_namespace
+            && !explicit
+                .iter()
+                .any(|schema| schema == "pg_temp" || schema == &namespace.name)
+        {
+            path.push(namespace.name.clone());
         }
         if !explicit.iter().any(|schema| schema == "pg_catalog") {
             path.push("pg_catalog".into());
         }
         for schema in explicit {
-            if schema == "pg_temp" && !has_temp_namespace {
+            if schema == "pg_temp" {
+                if let Some(namespace) = &temp_namespace {
+                    if !path.iter().any(|existing| existing == &namespace.name) {
+                        path.push(namespace.name.clone());
+                    }
+                }
                 continue;
             }
             if !path.iter().any(|existing| existing == &schema) {
@@ -478,7 +492,7 @@ impl Database {
     ) -> RelCache {
         if txn_ctx.is_none() {
             if let Some(cache) = self.client_visible_cache_snapshot(client_id) {
-                let mut relcache = cache.relcache;
+                let mut relcache = filter_temp_relcache_for_client(client_id, cache.relcache);
                 self.apply_temp_relcache_overlay(client_id, &mut relcache);
                 let search_path = self.effective_search_path(client_id, configured_search_path);
                 return relcache.with_search_path(&search_path);
@@ -507,7 +521,7 @@ impl Database {
             if let Some(cache) = self.client_visible_cache_snapshot(client_id) {
                 let search_path = self.effective_search_path(client_id, configured_search_path);
                 return VisibleCatalog::new(
-                    cache.relcache.with_search_path(&search_path),
+                    filter_temp_relcache_for_client(client_id, cache.relcache).with_search_path(&search_path),
                     Some(cache.catcache),
                 );
             }
@@ -520,102 +534,7 @@ impl Database {
     }
 
     pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
-        if self.has_active_temp_namespace(client_id) {
-            {
-                let namespaces = self.temp_relations.read();
-                if let Some(namespace) = namespaces.get(&client_id)
-                    && namespace.synced_generation == namespace.generation
-                {
-                    return;
-                }
-            }
-            let catalog_guard = self.catalog.read();
-            let base_dir = catalog_guard.base_dir().to_path_buf();
-            drop(catalog_guard);
-            if let Ok(mut rows) = load_physical_catalog_rows(&base_dir) {
-                let temp_namespace_oid = Self::temp_db_oid(client_id);
-                rows.namespaces.push(PgNamespaceRow {
-                    oid: temp_namespace_oid,
-                    nspname: "pg_temp".into(),
-                    nspowner: BOOTSTRAP_SUPERUSER_OID,
-                });
-
-                if let Some(namespace) = self.temp_relations.read().get(&client_id) {
-                    let sync_kinds = temp_catalog_sync_kinds(namespace);
-                    for (name, temp) in &namespace.tables {
-                        rows.classes.push(PgClassRow {
-                            oid: temp.entry.relation_oid,
-                            relname: name.clone(),
-                            relnamespace: temp.entry.namespace_oid,
-                            reltype: temp.entry.row_type_oid,
-                            relowner: BOOTSTRAP_SUPERUSER_OID,
-                            relam: crate::include::catalog::relam_for_relkind(temp.entry.relkind),
-                            relfilenode: temp.entry.rel.rel_number,
-                            relpersistence: temp.entry.relpersistence,
-                            relkind: temp.entry.relkind,
-                        });
-                        rows.types.push(PgTypeRow {
-                            oid: temp.entry.row_type_oid,
-                            typname: name.clone(),
-                            typnamespace: temp.entry.namespace_oid,
-                            typowner: BOOTSTRAP_SUPERUSER_OID,
-                            typrelid: temp.entry.relation_oid,
-                            sql_type: crate::backend::parser::SqlType::new(
-                                crate::backend::parser::SqlTypeKind::Text,
-                            ),
-                        });
-                        rows.attributes
-                            .extend(temp.entry.desc.columns.iter().enumerate().map(
-                                |(idx, column)| PgAttributeRow {
-                                    attrelid: temp.entry.relation_oid,
-                                    attname: column.name.clone(),
-                                    atttypid: crate::backend::utils::cache::catcache::sql_type_oid(
-                                        column.sql_type,
-                                    ),
-                                    attnum: idx.saturating_add(1) as i16,
-                                    attnotnull: !column.storage.nullable,
-                                    atttypmod: column.sql_type.typmod,
-                                    sql_type: column.sql_type,
-                                },
-                            ));
-                        rows.attrdefs.extend(
-                            temp.entry.desc.columns.iter().enumerate().filter_map(
-                                |(idx, column)| {
-                                    Some(PgAttrdefRow {
-                                        oid: column.attrdef_oid?,
-                                        adrelid: temp.entry.relation_oid,
-                                        adnum: idx.saturating_add(1) as i16,
-                                        adbin: column.default_expr.clone()?,
-                                    })
-                                },
-                            ),
-                        );
-                        rows.constraints.extend(derived_pg_constraint_rows(
-                            temp.entry.relation_oid,
-                            name,
-                            temp.entry.namespace_oid,
-                            &temp.entry.desc,
-                        ));
-                        rows.depends.extend(derived_relation_depend_rows(
-                            temp.entry.relation_oid,
-                            temp.entry.namespace_oid,
-                            temp.entry.row_type_oid,
-                            &temp.entry.desc,
-                        ));
-                    }
-                    let _ = sync_catalog_rows_subset(
-                        &base_dir,
-                        &rows,
-                        temp_namespace_oid,
-                        &sync_kinds,
-                    );
-                }
-                if let Some(namespace) = self.temp_relations.write().get_mut(&client_id) {
-                    namespace.synced_generation = namespace.generation;
-                }
-                self.refresh_catalog_storage();
-            }
-        }
+        let _ = client_id;
     }
 
     pub(crate) fn temp_entry(
@@ -630,94 +549,181 @@ impl Database {
             .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
     }
 
-    fn create_temp_relation(
+    fn ensure_temp_namespace(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<TempNamespace, ExecError> {
+        if let Some(namespace) = self.owned_temp_namespace(client_id) {
+            return Ok(namespace);
+        }
+
+        let namespace = TempNamespace {
+            oid: Self::temp_namespace_oid(client_id),
+            name: Self::temp_namespace_name(client_id),
+            tables: BTreeMap::new(),
+            generation: 0,
+        };
+        let ctx = CatalogWriteContext {
+            pool: &self.pool,
+            txns: &self.txns,
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .create_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        {
+            let mut namespaces = self.temp_relations.write();
+            namespaces.insert(client_id, namespace.clone());
+        }
+        temp_effects.push(TempMutationEffect::Create {
+            name: namespace.name.clone(),
+            entry: RelCacheEntry {
+                rel: RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: crate::include::catalog::BootstrapCatalogKind::PgNamespace.relation_oid(),
+                },
+                relation_oid: namespace.oid,
+                namespace_oid: namespace.oid,
+                row_type_oid: 0,
+                relpersistence: 't',
+                relkind: 'n',
+                desc: crate::backend::executor::RelationDesc { columns: Vec::new() },
+            },
+            on_commit: OnCommitAction::PreserveRows,
+            namespace_created: true,
+        });
+        self.invalidate_client_visible_cache(client_id);
+        Ok(namespace)
+    }
+
+    fn create_temp_relation_in_transaction(
         &self,
         client_id: ClientId,
         table_name: String,
-        mut desc: crate::backend::executor::RelationDesc,
+        desc: crate::backend::executor::RelationDesc,
         on_commit: OnCommitAction,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<RelCacheEntry, ExecError> {
         let normalized = normalize_temp_lookup_name(&table_name);
-        let entry = {
-            let mut namespaces = self.temp_relations.write();
-            let namespace = namespaces.entry(client_id).or_default();
-            if namespace.tables.contains_key(&normalized) {
-                return Err(ExecError::Parse(ParseError::TableAlreadyExists(normalized)));
-            }
-            let rel_number = namespace.next_rel_number.max(1);
-            namespace.next_rel_number = rel_number.saturating_add(1);
-            let base_oid = Self::temp_db_oid(client_id);
-            let relation_oid = namespace.next_oid.max(base_oid.saturating_add(1));
-            let row_type_oid = relation_oid.saturating_add(1);
-            let mut next_oid = row_type_oid.saturating_add(1);
-            allocate_relation_object_oids(&mut desc, &mut next_oid);
-            namespace.next_oid = next_oid;
-            let entry = RelCacheEntry {
-                rel: RelFileLocator {
-                    spc_oid: 0,
-                    db_oid: Self::temp_db_oid(client_id),
-                    rel_number,
-                },
-                relation_oid,
-                namespace_oid: Self::temp_db_oid(client_id),
-                row_type_oid,
-                relpersistence: 't',
-                relkind: 'r',
-                desc,
-            };
-            namespace.tables.insert(
-                normalized,
-                TempCatalogEntry {
-                    entry: entry.clone(),
-                    on_commit,
-                },
-            );
-            namespace.generation = namespace.generation.saturating_add(1);
-            entry
+        let namespace =
+            self.ensure_temp_namespace(client_id, xid, cid, catalog_effects, temp_effects)?;
+        if namespace.tables.contains_key(&normalized) {
+            return Err(ExecError::Parse(ParseError::TableAlreadyExists(normalized)));
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: &self.pool,
+            txns: &self.txns,
+            xid,
+            cid,
+            client_id,
+            waiter: None,
         };
-        self.invalidate_client_visible_cache(client_id);
-
-        let _ = self.pool.with_storage_mut(|s| {
-            use crate::backend::storage::smgr::StorageManager;
-            let _ = s.smgr.open(entry.rel);
-            let _ = s.smgr.create(
-                entry.rel,
-                crate::backend::storage::smgr::ForkNumber::Main,
-                false,
-            );
-        });
-        Ok(entry)
-    }
-
-    pub(crate) fn drop_temp_relation(
-        &self,
-        client_id: ClientId,
-        table_name: &str,
-    ) -> Result<RelCacheEntry, ExecError> {
-        let normalized = normalize_temp_lookup_name(table_name);
-        let entry = {
+        let (entry, effect) = self
+            .catalog
+            .write()
+            .create_table_mvcc_with_options(
+                format!("{}.{}", namespace.name, normalized),
+                desc,
+                namespace.oid,
+                Self::temp_db_oid(client_id),
+                't',
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        let rel_entry = RelCacheEntry {
+            rel: entry.rel,
+            relation_oid: entry.relation_oid,
+            namespace_oid: entry.namespace_oid,
+            row_type_oid: entry.row_type_oid,
+            relpersistence: entry.relpersistence,
+            relkind: entry.relkind,
+            desc: entry.desc,
+        };
+        {
             let mut namespaces = self.temp_relations.write();
             let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
             })?;
-            let entry = namespace
-                .tables
-                .remove(&normalized)
-                .map(|entry| entry.entry)
-                .ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
-                })?;
+            namespace.tables.insert(
+                normalized.clone(),
+                TempCatalogEntry {
+                    entry: rel_entry.clone(),
+                    on_commit,
+                },
+            );
             namespace.generation = namespace.generation.saturating_add(1);
-            if namespace.tables.is_empty() {
-                namespaces.remove(&client_id);
-            }
-            entry
-        };
+        }
+        temp_effects.push(TempMutationEffect::Create {
+            name: normalized,
+            entry: rel_entry.clone(),
+            on_commit,
+            namespace_created: false,
+        });
         self.invalidate_client_visible_cache(client_id);
-        let _ = self.pool.invalidate_relation(entry.rel);
-        self.pool
-            .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
-        Ok(entry)
+        Ok(rel_entry)
+    }
+
+    pub(crate) fn drop_temp_relation_in_transaction(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<RelCacheEntry, ExecError> {
+        let normalized = normalize_temp_lookup_name(table_name);
+        let removed = {
+            let mut namespaces = self.temp_relations.write();
+            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            let removed = namespace.tables.remove(&normalized).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            namespace.generation = namespace.generation.saturating_add(1);
+            removed
+        };
+        let ctx = CatalogWriteContext {
+            pool: &self.pool,
+            txns: &self.txns,
+            xid,
+            cid,
+            client_id,
+            waiter: Some(&self.txn_waiter),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .drop_relation_by_oid_mvcc(removed.entry.relation_oid, &ctx)
+            .map_err(map_catalog_error)?
+            .1;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        temp_effects.push(TempMutationEffect::Drop {
+            name: normalized,
+            entry: removed.entry.clone(),
+            on_commit: removed.on_commit,
+        });
+        self.invalidate_client_visible_cache(client_id);
+        Ok(removed.entry)
     }
 
     pub(crate) fn apply_temp_on_commit(&self, client_id: ClientId) -> Result<(), ExecError> {
@@ -747,29 +753,74 @@ impl Database {
         }
 
         for name in to_drop {
-            let _ = self.drop_temp_relation(client_id, &name)?;
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let mut catalog_effects = Vec::new();
+            let mut temp_effects = Vec::new();
+            let result = self.drop_temp_relation_in_transaction(
+                client_id,
+                &name,
+                xid,
+                0,
+                &mut catalog_effects,
+                &mut temp_effects,
+            );
+            let result = self.finish_txn(client_id, xid, result.map(|_| StatementResult::AffectedRows(0)), &catalog_effects, &temp_effects);
+            guard.disarm();
+            let _ = result?;
         }
         Ok(())
     }
 
     pub(crate) fn cleanup_client_temp_relations(&self, client_id: ClientId) {
-        self.invalidate_client_visible_cache(client_id);
-        let entries = {
-            let mut namespaces = self.temp_relations.write();
-            namespaces
-                .remove(&client_id)
-                .map(|ns| {
-                    ns.tables
-                        .into_values()
-                        .map(|entry| entry.entry)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+        let Some(namespace) = self.owned_temp_namespace(client_id) else {
+            return;
         };
-        for entry in entries {
-            let _ = self.pool.invalidate_relation(entry.rel);
-            self.pool
-                .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
+        for name in namespace.tables.keys().cloned().collect::<Vec<_>>() {
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let mut catalog_effects = Vec::new();
+            let mut temp_effects = Vec::new();
+            let result = self.drop_temp_relation_in_transaction(
+                client_id,
+                &name,
+                xid,
+                0,
+                &mut catalog_effects,
+                &mut temp_effects,
+            );
+            let _ = self.finish_txn(
+                client_id,
+                xid,
+                result.map(|_| StatementResult::AffectedRows(0)),
+                &catalog_effects,
+                &temp_effects,
+            );
+            guard.disarm();
+        }
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let ctx = CatalogWriteContext {
+            pool: &self.pool,
+            txns: &self.txns,
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+        };
+        if let Ok(effect) = self
+            .catalog
+            .write()
+            .drop_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
+        {
+            let _ = self.finish_txn(
+                client_id,
+                xid,
+                Ok(StatementResult::AffectedRows(0)),
+                &[effect],
+                &[],
+            );
+            guard.disarm();
         }
     }
 
@@ -787,24 +838,10 @@ impl Database {
         create_stmt: &CreateTableStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let persistence = self
-            .normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?
-            .1;
-        if persistence == TablePersistence::Temporary {
-            let (table_name, _) = self
-                .normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
-            let _ = self.create_temp_relation(
-                client_id,
-                table_name,
-                create_relation_desc(create_stmt),
-                create_stmt.on_commit,
-            )?;
-            return Ok(StatementResult::AffectedRows(0));
-        }
-
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_create_table_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -812,8 +849,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
         guard.disarm();
         result
     }
@@ -826,6 +864,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) =
             self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
@@ -876,8 +915,16 @@ impl Database {
                 }
             }
             TablePersistence::Temporary => {
-                let _ =
-                    self.create_temp_relation(client_id, table_name, desc, create_stmt.on_commit)?;
+                let _ = self.create_temp_relation_in_transaction(
+                    client_id,
+                    table_name,
+                    desc,
+                    create_stmt.on_commit,
+                    xid,
+                    cid,
+                    catalog_effects,
+                    temp_effects,
+                )?;
                 Ok(StatementResult::AffectedRows(0))
             }
         }
@@ -908,7 +955,7 @@ impl Database {
             configured_search_path,
             &mut catalog_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
         guard.disarm();
         result
     }
@@ -999,6 +1046,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let relcache =
             self.visible_relcache_with_txn_search_path(client_id, Some((xid, cid)), configured_search_path);
@@ -1015,8 +1063,26 @@ impl Database {
         let mut dropped = 0usize;
         let mut result = Ok(StatementResult::AffectedRows(0));
         for table_name in &drop_stmt.table_names {
-            if self.temp_entry(client_id, table_name).is_some() {
-                match self.drop_temp_relation(client_id, table_name) {
+            let maybe_entry = self
+                .visible_relcache_with_txn_search_path(
+                    client_id,
+                    Some((xid, cid)),
+                    configured_search_path,
+                )
+                .get_by_name(table_name)
+                .cloned();
+            if maybe_entry
+                .as_ref()
+                .is_some_and(|entry| entry.relpersistence == 't')
+            {
+                match self.drop_temp_relation_in_transaction(
+                    client_id,
+                    table_name,
+                    xid,
+                    cid,
+                    catalog_effects,
+                    temp_effects,
+                ) {
                     Ok(_) => dropped += 1,
                     Err(_) if drop_stmt.if_exists => {}
                     Err(err) => {
@@ -1027,14 +1093,7 @@ impl Database {
                 continue;
             }
 
-            let relation_oid = match self
-                .visible_relcache_with_txn_search_path(
-                    client_id,
-                    Some((xid, cid)),
-                    configured_search_path,
-                )
-                .get_by_name(table_name)
-            {
+            let relation_oid = match maybe_entry.as_ref() {
                 Some(entry) if entry.relkind == 'r' => entry.relation_oid,
                 Some(_) | None if drop_stmt.if_exists => continue,
                 Some(_) | None => {
@@ -1107,12 +1166,10 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
-        if select_statement_needs_temp_catalog_sync(&create_stmt.query) {
-            self.sync_visible_catalog_heaps(client_id);
-        }
         let visible_catalog = self.visible_catalog_with_txn_search_path(
             client_id,
             Some((xid, cid)),
@@ -1217,11 +1274,15 @@ impl Database {
                 entry.rel
             }
             TablePersistence::Temporary => {
-                self.create_temp_relation(
+                self.create_temp_relation_in_transaction(
                     client_id,
                     table_name.clone(),
                     desc.clone(),
                     create_stmt.on_commit,
+                    xid,
+                    cid,
+                    catalog_effects,
+                    temp_effects,
                 )?
                 .rel
             }
@@ -1257,6 +1318,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         if let Some(xid) = xid {
             let mut catalog_effects = Vec::new();
+            let mut temp_effects = Vec::new();
             return self.execute_create_table_as_stmt_in_transaction_with_search_path(
                 client_id,
                 create_stmt,
@@ -1264,11 +1326,13 @@ impl Database {
                 cid,
                 configured_search_path,
                 &mut catalog_effects,
+                &mut temp_effects,
             );
         }
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_create_table_as_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -1276,8 +1340,9 @@ impl Database {
             cid,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
         guard.disarm();
         result
     }
@@ -1323,18 +1388,11 @@ impl Database {
             // narrow ALTER TABLE form until table reloptions are represented properly.
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
-                let needs_temp_sync = statement_needs_temp_catalog_sync(&stmt);
-                if needs_temp_sync {
-                    self.sync_visible_catalog_heaps(client_id);
-                }
-                let visible_catalog = if !needs_temp_sync {
-                    self.cached_visible_catalog_for_autocommit(client_id, configured_search_path)
-                        .unwrap_or_else(|| {
-                            self.visible_catalog_with_search_path(client_id, configured_search_path)
-                        })
-                } else {
-                    self.visible_catalog_with_search_path(client_id, configured_search_path)
-                };
+                let visible_catalog = self
+                    .cached_visible_catalog_for_autocommit(client_id, configured_search_path)
+                    .unwrap_or_else(|| {
+                        self.visible_catalog_with_search_path(client_id, configured_search_path)
+                    });
                 let (plan_or_stmt, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
@@ -1397,7 +1455,7 @@ impl Database {
                 };
                 let result = execute_insert(bound, &mut ctx, xid, 0);
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[]);
+                let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
@@ -1431,7 +1489,7 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter)),
                 );
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[]);
+                let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
@@ -1464,7 +1522,7 @@ impl Database {
                     Some((&self.txns, &self.txn_waiter)),
                 );
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[]);
+                let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
                 self.table_locks.unlock_table(rel, client_id);
                 result
@@ -1492,6 +1550,7 @@ impl Database {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
                 let mut catalog_effects = Vec::new();
+                let mut temp_effects = Vec::new();
                 let result = self.execute_drop_table_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
@@ -1499,8 +1558,9 @@ impl Database {
                     0,
                     configured_search_path,
                     &mut catalog_effects,
+                    &mut temp_effects,
                 );
-                let result = self.finish_txn(client_id, xid, result, &catalog_effects);
+                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
                 guard.disarm();
                 result
             }
@@ -1579,12 +1639,8 @@ impl Database {
         use crate::backend::executor::executor_start;
         use crate::backend::parser::build_plan;
 
-        let needs_temp_sync = select_statement_needs_temp_catalog_sync(select_stmt);
         let (plan, rels) = {
-            if needs_temp_sync {
-                self.sync_visible_catalog_heaps(client_id);
-            }
-            let visible_catalog = if txn_ctx.is_none() && !needs_temp_sync {
+            let visible_catalog = if txn_ctx.is_none() {
                 self.cached_visible_catalog_for_autocommit(client_id, configured_search_path)
                     .unwrap_or_else(|| {
                         self.visible_catalog_with_txn_search_path(
@@ -1941,12 +1997,64 @@ impl Database {
         }
     }
 
+    pub(crate) fn finalize_committed_temp_effects(
+        &self,
+        _client_id: ClientId,
+        _effects: &[TempMutationEffect],
+    ) {
+    }
+
+    pub(crate) fn finalize_aborted_temp_effects(
+        &self,
+        client_id: ClientId,
+        effects: &[TempMutationEffect],
+    ) {
+        let mut namespaces = self.temp_relations.write();
+        for effect in effects.iter().rev() {
+            match effect {
+                TempMutationEffect::Create {
+                    name,
+                    namespace_created,
+                    ..
+                } => {
+                    if *namespace_created {
+                        namespaces.remove(&client_id);
+                        continue;
+                    }
+                    if let Some(namespace) = namespaces.get_mut(&client_id) {
+                        namespace.tables.remove(name);
+                        namespace.generation = namespace.generation.saturating_add(1);
+                    }
+                }
+                TempMutationEffect::Drop {
+                    name,
+                    entry,
+                    on_commit,
+                } => {
+                    if let Some(namespace) = namespaces.get_mut(&client_id) {
+                        namespace.tables.insert(
+                            name.clone(),
+                            TempCatalogEntry {
+                                entry: entry.clone(),
+                                on_commit: *on_commit,
+                            },
+                        );
+                        namespace.generation = namespace.generation.saturating_add(1);
+                    }
+                }
+            }
+        }
+        drop(namespaces);
+        self.invalidate_client_visible_cache(client_id);
+    }
+
     fn finish_txn(
         &self,
         client_id: ClientId,
         xid: TransactionId,
         result: Result<StatementResult, ExecError>,
         catalog_effects: &[CatalogMutationEffect],
+        temp_effects: &[TempMutationEffect],
     ) -> Result<StatementResult, ExecError> {
         match result {
             Ok(r) => {
@@ -1973,6 +2081,7 @@ impl Database {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
                 self.finalize_committed_catalog_effects(catalog_effects);
+                self.finalize_committed_temp_effects(client_id, temp_effects);
                 self.apply_temp_on_commit(client_id)?;
                 self.txn_waiter.notify();
                 Ok(r)
@@ -1980,6 +2089,7 @@ impl Database {
             Err(e) => {
                 let _ = self.txns.write().abort(xid);
                 self.finalize_aborted_catalog_effects(catalog_effects);
+                self.finalize_aborted_temp_effects(client_id, temp_effects);
                 self.txn_waiter.notify();
                 Err(e)
             }
@@ -1990,6 +2100,35 @@ impl Database {
 impl Drop for Database {
     fn drop(&mut self) {
         self.txns.write().flush_clog();
+    }
+}
+
+fn filter_temp_relcache_for_client(client_id: ClientId, relcache: RelCache) -> RelCache {
+    let mut filtered = RelCache::default();
+    for (name, entry) in relcache.entries() {
+        if entry.relpersistence == 't'
+            && entry.namespace_oid >= TEMP_DB_OID_BASE
+            && entry.namespace_oid != Database::temp_namespace_oid(client_id)
+        {
+            continue;
+        }
+        filtered.insert(name.to_string(), entry.clone());
+    }
+    filtered
+}
+
+fn map_catalog_error(err: CatalogError) -> ExecError {
+    match err {
+        CatalogError::TableAlreadyExists(name) => ExecError::Parse(ParseError::TableAlreadyExists(name)),
+        CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
+        CatalogError::UnknownColumn(name) => ExecError::Parse(ParseError::UnknownColumn(name)),
+        CatalogError::UnknownType(name) => ExecError::Parse(ParseError::UnsupportedType(name)),
+        CatalogError::Io(_) | CatalogError::Corrupt(_) => {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "valid catalog state",
+                actual: "catalog error".into(),
+            })
+        }
     }
 }
 

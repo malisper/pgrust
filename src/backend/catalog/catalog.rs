@@ -25,6 +25,7 @@ pub struct CatalogEntry {
     pub relation_oid: u32,
     pub namespace_oid: u32,
     pub row_type_oid: u32,
+    pub relpersistence: char,
     pub relkind: char,
     pub desc: RelationDesc,
     pub index_meta: Option<CatalogIndexMeta>,
@@ -140,6 +141,17 @@ impl Catalog {
         name: impl Into<String>,
         mut desc: RelationDesc,
     ) -> Result<CatalogEntry, CatalogError> {
+        self.create_table_with_options(name, desc, PUBLIC_NAMESPACE_OID, DEFAULT_DB_OID, 'p')
+    }
+
+    pub fn create_table_with_options(
+        &mut self,
+        name: impl Into<String>,
+        mut desc: RelationDesc,
+        namespace_oid: u32,
+        db_oid: u32,
+        relpersistence: char,
+    ) -> Result<CatalogEntry, CatalogError> {
         let name = name.into().to_ascii_lowercase();
         if self.tables.contains_key(&name) {
             return Err(CatalogError::TableAlreadyExists(name));
@@ -153,12 +165,13 @@ impl Catalog {
         let entry = CatalogEntry {
             rel: RelFileLocator {
                 spc_oid: DEFAULT_SPC_OID,
-                db_oid: DEFAULT_DB_OID,
+                db_oid,
                 rel_number: self.next_rel_number,
             },
             relation_oid,
-            namespace_oid: PUBLIC_NAMESPACE_OID,
+            namespace_oid,
             row_type_oid,
+            relpersistence,
             relkind: 'r',
             desc,
             index_meta: None,
@@ -230,6 +243,7 @@ impl Catalog {
             relation_oid: self.next_oid,
             namespace_oid: table.namespace_oid,
             row_type_oid: 0,
+            relpersistence: table.relpersistence,
             relkind: 'i',
             desc: RelationDesc {
                 columns: index_columns,

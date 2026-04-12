@@ -141,7 +141,7 @@ impl CatCache {
                 relowner: BOOTSTRAP_SUPERUSER_OID,
                 relam: crate::include::catalog::relam_for_relkind(entry.relkind),
                 relfilenode: entry.rel.rel_number,
-                relpersistence: 'p',
+                relpersistence: entry.relpersistence,
                 relkind: entry.relkind,
             };
             cache.classes_by_name.insert(

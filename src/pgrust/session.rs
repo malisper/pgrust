@@ -22,7 +22,7 @@ use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
 use crate::include::nodes::execnodes::ScalarType;
-use crate::pgrust::database::Database;
+use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
 
@@ -48,6 +48,7 @@ struct ActiveTransaction {
     held_table_locks: Vec<RelFileLocator>,
     next_command_id: u32,
     catalog_effects: Vec<CatalogMutationEffect>,
+    temp_effects: Vec<TempMutationEffect>,
 }
 
 pub struct Session {
@@ -205,6 +206,7 @@ impl Session {
                     held_table_locks: Vec::new(),
                     next_command_id: 0,
                     catalog_effects: Vec::new(),
+                    temp_effects: Vec::new(),
                 });
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -236,6 +238,7 @@ impl Session {
                     ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
                 })?;
                 db.finalize_committed_catalog_effects(&txn.catalog_effects);
+                db.finalize_committed_temp_effects(self.client_id, &txn.temp_effects);
                 db.apply_temp_on_commit(self.client_id)?;
                 db.txn_waiter.notify();
                 Ok(StatementResult::AffectedRows(0))
@@ -250,6 +253,7 @@ impl Session {
                 }
                 let _ = db.txns.write().abort(txn.xid);
                 db.finalize_aborted_catalog_effects(&txn.catalog_effects);
+                db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
                 db.txn_waiter.notify();
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -344,9 +348,6 @@ impl Session {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
-                if super::database::statement_needs_temp_catalog_sync(&stmt) {
-                    db.sync_visible_catalog_heaps(client_id);
-                }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let visible_catalog = self.visible_catalog_for_command(db, xid, cid);
                 let mut ctx = ExecutorContext {
@@ -434,26 +435,28 @@ impl Session {
             }
             Statement::CreateTable(ref create_stmt) => {
                 let search_path = self.configured_search_path();
-                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_table_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
-                    catalog_effects,
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
-                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_table_as_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
-                    catalog_effects,
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::DropTable(ref drop_stmt) => {
@@ -474,14 +477,15 @@ impl Session {
                     }
                 }
                 let search_path = self.configured_search_path();
-                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_table_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
-                    catalog_effects,
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::TruncateTable(ref truncate_stmt) => {
@@ -629,6 +633,7 @@ impl Session {
                 held_table_locks: Vec::new(),
                 next_command_id: 0,
                 catalog_effects: Vec::new(),
+                temp_effects: Vec::new(),
             });
             true
         } else {

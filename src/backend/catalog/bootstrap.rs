@@ -19,6 +19,7 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         relation_oid: kind.relation_oid(),
         namespace_oid: bootstrap_namespace_oid(),
         row_type_oid: kind.row_type_oid(),
+        relpersistence: 'p',
         relkind: 'r',
         desc: bootstrap_relation_desc(kind),
         index_meta: None,

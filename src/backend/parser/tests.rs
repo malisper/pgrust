@@ -22,6 +22,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel_number),
         namespace_oid: 11,
         row_type_oid: 60_000u32.saturating_add(rel_number),
+        relpersistence: 'p',
         relkind: 'r',
         desc,
         index_meta: None,
