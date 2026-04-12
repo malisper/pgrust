@@ -569,20 +569,41 @@ impl Database {
         client_id: ClientId,
         create_stmt: &CreateIndexStatement,
     ) -> Result<StatementResult, ExecError> {
-        if self
-            .temp_entry(client_id, &create_stmt.table_name)
-            .is_some()
-        {
+        self.execute_create_index_stmt_with_search_path(client_id, create_stmt, None)
+    }
+
+    pub(crate) fn execute_create_index_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateIndexStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let visible_relcache =
+            self.visible_relcache_with_search_path(client_id, configured_search_path);
+        let entry = visible_relcache
+            .get_by_name(&create_stmt.table_name)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(
+                    create_stmt.table_name.clone(),
+                ))
+            })?;
+
+        if entry.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for CREATE INDEX",
                 actual: "temporary table".into(),
             }));
         }
+        if entry.relkind != 'r' {
+            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                create_stmt.table_name.clone(),
+            )));
+        }
 
         let mut catalog_guard = self.catalog.write();
-        let result = catalog_guard.create_index(
+        let result = catalog_guard.create_index_for_relation(
             create_stmt.index_name.clone(),
-            &create_stmt.table_name,
+            entry.relation_oid,
             create_stmt.unique,
             &create_stmt.columns,
         );
@@ -853,7 +874,11 @@ impl Database {
                 execute_analyze(analyze_stmt.clone(), &visible_relcache)
             }
             Statement::CreateIndex(ref create_stmt) => {
-                self.execute_create_index_stmt(client_id, create_stmt)
+                self.execute_create_index_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                )
             }
             Statement::Set(_)
             | Statement::Reset(_)

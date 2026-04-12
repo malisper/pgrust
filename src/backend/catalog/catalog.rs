@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
@@ -6,6 +5,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::PUBLIC_NAMESPACE_OID;
+use std::collections::BTreeMap;
 
 const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
@@ -101,7 +101,9 @@ impl Catalog {
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&str, &CatalogEntry)> {
-        self.tables.iter().map(|(name, entry)| (name.as_str(), entry))
+        self.tables
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry))
     }
 
     pub fn next_oid(&self) -> u32 {
@@ -154,17 +156,30 @@ impl Catalog {
         unique: bool,
         columns: &[String],
     ) -> Result<CatalogEntry, CatalogError> {
+        let table = self
+            .get(table_name)
+            .ok_or_else(|| CatalogError::UnknownTable(table_name.to_string()))?;
+        self.create_index_for_relation(index_name, table.relation_oid, unique, columns)
+    }
+
+    pub fn create_index_for_relation(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        columns: &[String],
+    ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into().to_ascii_lowercase();
         if self.tables.contains_key(&index_name) {
             return Err(CatalogError::TableAlreadyExists(index_name));
         }
 
         let table = self
-            .get(table_name)
+            .get_by_oid(relation_oid)
             .cloned()
-            .ok_or_else(|| CatalogError::UnknownTable(table_name.to_string()))?;
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
         if table.relkind != 'r' {
-            return Err(CatalogError::UnknownTable(table_name.to_string()));
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let mut indkey = Vec::with_capacity(columns.len());
         let mut index_columns = Vec::with_capacity(columns.len());
@@ -281,9 +296,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         | SqlTypeKind::Timestamp
         | SqlTypeKind::InternalChar
         | SqlTypeKind::Char
-        | SqlTypeKind::Varchar => {
-            ScalarType::Text
-        }
+        | SqlTypeKind::Varchar => ScalarType::Text,
         SqlTypeKind::Bool => ScalarType::Bool,
     }
 }
