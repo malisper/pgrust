@@ -10,6 +10,7 @@ use crate::backend::access::transam::xact::{
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
+use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
@@ -205,6 +206,7 @@ impl Database {
                 BootstrapCatalogKind::PgAttribute,
                 BootstrapCatalogKind::PgType,
                 BootstrapCatalogKind::PgAttrdef,
+                BootstrapCatalogKind::PgDepend,
             ] {
                 let entry = Self::temp_catalog_entry(client_id, kind);
                 relcache.insert(kind.relation_name(), entry.clone());
@@ -278,6 +280,12 @@ impl Database {
                                     })
                                 }),
                         );
+                        rows.depends.extend(derived_pg_depend_rows(
+                            temp.entry.relation_oid,
+                            temp.entry.namespace_oid,
+                            temp.entry.row_type_oid,
+                            &temp.entry.desc,
+                        ));
                     }
                 }
 
