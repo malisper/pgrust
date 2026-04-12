@@ -468,7 +468,17 @@ pub(crate) fn soft_input_error_info(
         column: type_name.to_string(),
         details: format!("unsupported type: {type_name}"),
     })?;
-    match cast_value(Value::Text(text.into()), ty) {
+    let parsed = match ty.kind {
+        // PostgreSQL's pg_input_* helpers use the type input function semantics,
+        // not explicit-cast padding/truncation semantics for bit and typmod-
+        // constrained text inputs.
+        SqlTypeKind::Bit
+        | SqlTypeKind::VarBit
+        | SqlTypeKind::Char
+        | SqlTypeKind::Varchar => cast_text_value(text, ty, false),
+        _ => cast_value(Value::Text(text.into()), ty),
+    };
+    match parsed {
         Ok(_) => Ok(None),
         Err(err) => Ok(Some(InputErrorInfo {
             message: input_error_message(&err, text),
