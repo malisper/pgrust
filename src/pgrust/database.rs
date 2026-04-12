@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +31,7 @@ use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
 };
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
@@ -76,6 +78,8 @@ pub struct Database {
     pub txn_waiter: Arc<TransactionWaiter>,
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
+    catalog_cache_epoch: Arc<AtomicU64>,
+    committed_visible_cache: Arc<RwLock<Option<CommittedVisibleCache>>>,
     temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     /// Background WAL writer — flushes BufWriter to kernel periodically.
     _wal_bg_writer: Arc<WalBgWriter>,
@@ -95,6 +99,13 @@ struct TempNamespace {
     tables: BTreeMap<String, TempCatalogEntry>,
     next_rel_number: u32,
     next_oid: u32,
+}
+
+#[derive(Debug, Clone)]
+struct CommittedVisibleCache {
+    epoch: u64,
+    relcache: RelCache,
+    catcache: CatCache,
 }
 
 impl Database {
@@ -170,6 +181,8 @@ impl Database {
             txn_waiter: Arc::new(TransactionWaiter::new()),
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
+            catalog_cache_epoch: Arc::new(AtomicU64::new(0)),
+            committed_visible_cache: Arc::new(RwLock::new(None)),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             _wal_bg_writer: Arc::new(wal_bg_writer),
         })
@@ -209,7 +222,77 @@ impl Database {
         }
     }
 
+    fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
+        self.temp_relations
+            .read()
+            .get(&client_id)
+            .is_some_and(|namespace| !namespace.tables.is_empty())
+    }
+
+    fn committed_catalog_epoch(&self) -> u64 {
+        self.catalog_cache_epoch.load(Ordering::Acquire)
+    }
+
+    fn invalidate_committed_visible_cache(&self) {
+        self.catalog_cache_epoch.fetch_add(1, Ordering::AcqRel);
+        *self.committed_visible_cache.write() = None;
+    }
+
+    fn committed_visible_cache_snapshot(&self) -> Option<CommittedVisibleCache> {
+        let epoch = self.committed_catalog_epoch();
+        if let Some(cache) = self.committed_visible_cache.read().clone()
+            && cache.epoch == epoch
+        {
+            return Some(cache);
+        }
+
+        let rebuilt = {
+            let catalog_guard = self.catalog.read();
+            let txns = self.txns.read();
+            let snapshot = txns
+                .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+                .ok();
+
+            snapshot
+                .and_then(|snapshot| {
+                    catalog_guard
+                        .catcache_with_snapshot(&self.pool, &txns, &snapshot, 0)
+                        .ok()
+                })
+                .and_then(|catcache| {
+                    RelCache::from_catcache(&catcache)
+                        .ok()
+                        .map(|relcache| CommittedVisibleCache {
+                            epoch,
+                            relcache,
+                            catcache,
+                        })
+                })
+                .or_else(|| {
+                    let relcache = catalog_guard.relcache().ok()?;
+                    let catcache = catalog_guard.catcache().ok()?;
+                    Some(CommittedVisibleCache {
+                        epoch,
+                        relcache,
+                        catcache,
+                    })
+                })
+        }?;
+
+        if self.committed_catalog_epoch() == epoch {
+            *self.committed_visible_cache.write() = Some(rebuilt.clone());
+        }
+
+        Some(rebuilt)
+    }
+
     fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
+        if txn_ctx.is_none() && !self.has_active_temp_namespace(client_id) {
+            if let Some(cache) = self.committed_visible_cache_snapshot() {
+                return cache.relcache;
+            }
+        }
+
         let mut relcache = {
             let catalog_guard = self.catalog.read();
             let txns = self.txns.read();
@@ -248,7 +331,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Vec<String> {
         let mut path = Vec::new();
-        let has_temp_namespace = self.temp_relations.read().contains_key(&client_id);
+        let has_temp_namespace = self.has_active_temp_namespace(client_id);
         let explicit = configured_search_path
             .map(|search_path| {
                 search_path
@@ -383,6 +466,16 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         configured_search_path: Option<&[String]>,
     ) -> VisibleCatalog {
+        if txn_ctx.is_none() && !self.has_active_temp_namespace(client_id) {
+            if let Some(cache) = self.committed_visible_cache_snapshot() {
+                let search_path = self.effective_search_path(client_id, configured_search_path);
+                return VisibleCatalog::new(
+                    cache.relcache.with_search_path(&search_path),
+                    Some(cache.catcache),
+                );
+            }
+        }
+
         let relcache =
             self.visible_relcache_with_txn_search_path(client_id, txn_ctx, configured_search_path);
         let catcache = {
@@ -407,7 +500,7 @@ impl Database {
     }
 
     pub(crate) fn sync_visible_catalog_heaps(&self, client_id: ClientId) {
-        if self.temp_relations.read().contains_key(&client_id) {
+        if self.has_active_temp_namespace(client_id) {
             let catalog_guard = self.catalog.read();
             let base_dir = catalog_guard.base_dir().to_path_buf();
             drop(catalog_guard);
@@ -574,13 +667,17 @@ impl Database {
             let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
                 ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
             })?;
-            namespace
+            let entry = namespace
                 .tables
                 .remove(&normalized)
                 .map(|entry| entry.entry)
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
-                })?
+                })?;
+            if namespace.tables.is_empty() {
+                namespaces.remove(&client_id);
+            }
+            entry
         };
         let _ = self.pool.invalidate_relation(entry.rel);
         self.pool
@@ -1697,6 +1794,11 @@ impl Database {
     }
 
     pub(crate) fn finalize_committed_catalog_effects(&self, effects: &[CatalogMutationEffect]) {
+        let catalog_changed = effects.iter().any(|effect| {
+            !effect.touched_catalogs.is_empty()
+                || !effect.created_rels.is_empty()
+                || !effect.dropped_rels.is_empty()
+        });
         let mut touched_catalogs = Vec::new();
         for effect in effects {
             for &kind in &effect.touched_catalogs {
@@ -1721,6 +1823,9 @@ impl Database {
                 self.pool
                     .with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
             }
+        }
+        if catalog_changed {
+            self.invalidate_committed_visible_cache();
         }
     }
 
