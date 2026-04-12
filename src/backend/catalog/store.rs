@@ -2296,6 +2296,27 @@ mod tests {
                 && row.casttarget == TEXT_TYPE_OID
                 && row.castcontext == 'i'
         }));
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == crate::include::catalog::JSONB_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == crate::include::catalog::JSONPATH_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.casts.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == crate::include::catalog::VARBIT_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
     }
 
     #[test]
