@@ -560,7 +560,6 @@ impl Database {
                 false,
             );
         });
-        self.plan_cache.invalidate_all();
         Ok(entry)
     }
 
@@ -586,7 +585,6 @@ impl Database {
         let _ = self.pool.invalidate_relation(entry.rel);
         self.pool
             .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
-        self.plan_cache.invalidate_all();
         Ok(entry)
     }
 
@@ -635,14 +633,10 @@ impl Database {
                 })
                 .unwrap_or_default()
         };
-        let had_entries = !entries.is_empty();
         for entry in entries {
             let _ = self.pool.invalidate_relation(entry.rel);
             self.pool
                 .with_storage_mut(|s| s.smgr.unlink(entry.rel, None, false));
-        }
-        if had_entries {
-            self.plan_cache.invalidate_all();
         }
     }
 
@@ -1698,12 +1692,6 @@ impl Database {
             .map_err(|e| {
                 ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(e))
             })?;
-        }
-        if !effect.touched_catalogs.is_empty()
-            || !effect.created_rels.is_empty()
-            || !effect.dropped_rels.is_empty()
-        {
-            self.plan_cache.invalidate_all();
         }
         Ok(())
     }

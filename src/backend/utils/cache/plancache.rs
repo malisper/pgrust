@@ -6,10 +6,10 @@ use crate::backend::executor::ExecError;
 use crate::backend::parser::{CatalogLookup, Statement, build_plan, parse_statement};
 use crate::include::nodes::execnodes::Plan;
 
-/// Query plan cache — caches parsed statements and built plans to avoid
-/// re-parsing and re-planning on repeated executions of the same SQL.
-/// Like PostgreSQL's CachedPlanSource, but simpler: keyed on SQL string,
-/// invalidated on any DDL.
+/// Query plan cache — caches parsed statements and can optionally retain
+/// built plans for repeated execution of the same SQL.
+/// Like PostgreSQL's CachedPlanSource, but simpler: keyed on SQL string.
+/// The current runtime only consumes the parsed-statement path.
 pub struct PlanCache {
     cache: RwLock<HashMap<String, CachedEntry>>,
 }
