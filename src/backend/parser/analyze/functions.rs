@@ -25,7 +25,13 @@ pub(super) fn validate_scalar_function_arity(
     func: BuiltinScalarFunction,
     args: &[SqlExpr],
 ) -> Result<(), ParseError> {
-    let valid = match func {
+    let valid = scalar_function_arity_overrides()
+        .iter()
+        .find_map(|(candidate, arity)| (*candidate == func).then_some(arity))
+        .map(|arity| match arity {
+            ScalarFunctionArity::Exact(count) => args.len() == *count,
+        })
+        .unwrap_or_else(|| match func {
         BuiltinScalarFunction::Random => args.is_empty(),
         BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
         BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
@@ -112,7 +118,7 @@ pub(super) fn validate_scalar_function_arity(
         | BuiltinScalarFunction::JsonbPathMatch
         | BuiltinScalarFunction::JsonbPathQueryArray
         | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
-    };
+    });
 
     if valid {
         Ok(())
@@ -368,6 +374,57 @@ fn function_cast_type_aliases() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, ScalarFunctionArity)> {
+    static ARITIES: OnceLock<Vec<(BuiltinScalarFunction, ScalarFunctionArity)>> = OnceLock::new();
+    ARITIES.get_or_init(|| {
+        let mut by_func = Vec::new();
+        for row in bootstrap_pg_proc_rows() {
+            if row.prokind != 'f' || row.proretset || row.provariadic != 0 {
+                continue;
+            }
+            if let Some(func) = builtin_scalar_function_for_proc_src(&row.prosrc) {
+                if !supports_exact_proc_arity(func) {
+                    continue;
+                }
+                if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                    by_func.push((func, ScalarFunctionArity::Exact(row.pronargs.max(0) as usize)));
+                }
+            }
+        }
+        by_func
+    })
+}
+
+fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
+    !matches!(
+        func,
+        BuiltinScalarFunction::Log
+            | BuiltinScalarFunction::Trunc
+            | BuiltinScalarFunction::Round
+            | BuiltinScalarFunction::Substring
+            | BuiltinScalarFunction::Overlay
+            | BuiltinScalarFunction::ArrayToJson
+            | BuiltinScalarFunction::JsonBuildArray
+            | BuiltinScalarFunction::JsonBuildObject
+            | BuiltinScalarFunction::JsonObject
+            | BuiltinScalarFunction::JsonExtractPath
+            | BuiltinScalarFunction::JsonExtractPathText
+            | BuiltinScalarFunction::JsonbExtractPath
+            | BuiltinScalarFunction::JsonbExtractPathText
+            | BuiltinScalarFunction::JsonbBuildArray
+            | BuiltinScalarFunction::JsonbBuildObject
+            | BuiltinScalarFunction::JsonbPathExists
+            | BuiltinScalarFunction::JsonbPathMatch
+            | BuiltinScalarFunction::JsonbPathQueryArray
+            | BuiltinScalarFunction::JsonbPathQueryFirst
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ScalarFunctionArity {
+    Exact(usize),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +484,18 @@ mod tests {
             Some(SqlType::new(SqlTypeKind::Bool))
         );
         assert_eq!(resolve_function_cast_type("varchar"), None);
+    }
+
+    #[test]
+    fn validate_scalar_function_arity_uses_pg_proc_for_exact_arity_rows() {
+        assert!(validate_scalar_function_arity(BuiltinScalarFunction::Lower, &[SqlExpr::Default]).is_ok());
+        assert!(validate_scalar_function_arity(BuiltinScalarFunction::Lower, &[]).is_err());
+        assert!(validate_scalar_function_arity(BuiltinScalarFunction::Random, &[]).is_ok());
+        assert!(validate_scalar_function_arity(BuiltinScalarFunction::Random, &[SqlExpr::Default]).is_err());
+        assert!(validate_scalar_function_arity(
+            BuiltinScalarFunction::JsonBuildArray,
+            &[SqlExpr::Default, SqlExpr::Default]
+        )
+        .is_ok());
     }
 }
