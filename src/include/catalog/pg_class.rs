@@ -2,7 +2,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, HEAP_TABLE_AM_OID, BTREE_AM_OID,
+    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, HEAP_TABLE_AM_OID,
     PG_CATALOG_NAMESPACE_OID,
 };
 
@@ -29,7 +29,11 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("relowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("relam", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("relfilenode", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("relpersistence", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc(
+                "relpersistence",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
             column_desc("relkind", SqlType::new(SqlTypeKind::InternalChar), false),
         ],
     }
@@ -42,12 +46,13 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 16] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 17] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgProc),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgLanguage),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgOperator),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAttribute),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgClass),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgAuthId),

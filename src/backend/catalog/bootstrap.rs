@@ -1,11 +1,11 @@
 use crate::backend::catalog::catalog::CatalogEntry;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::catalog::{
-    bootstrap_catalog_kinds as shared_bootstrap_catalog_kinds, bootstrap_relation_desc,
-    bootstrap_namespace_oid, BootstrapCatalogKind,
+    BootstrapCatalogKind, bootstrap_catalog_kinds as shared_bootstrap_catalog_kinds,
+    bootstrap_namespace_oid, bootstrap_relation_desc,
 };
 
-pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 16] {
+pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 17] {
     shared_bootstrap_catalog_kinds()
 }
 
@@ -28,8 +28,8 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::include::catalog::CORE_BOOTSTRAP_RELATIONS;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::catalog::CORE_BOOTSTRAP_RELATIONS;
 
     #[test]
     fn bootstrap_catalog_kinds_match_shared_bootstrap_relations() {
@@ -47,7 +47,10 @@ mod tests {
     #[test]
     fn pg_class_bootstrap_desc_contains_relkind() {
         let desc = bootstrap_relation_desc(BootstrapCatalogKind::PgClass);
-        assert_eq!(desc.columns.last().map(|col| col.name.as_str()), Some("relkind"));
+        assert_eq!(
+            desc.columns.last().map(|col| col.name.as_str()),
+            Some("relkind")
+        );
         assert_eq!(
             desc.columns.last().map(|col| col.sql_type),
             Some(SqlType::new(SqlTypeKind::InternalChar))

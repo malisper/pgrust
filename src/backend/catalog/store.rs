@@ -4,26 +4,29 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value as JsonValue;
 
-use crate::backend::access::heap::heapam::{heap_flush, heap_insert, heap_scan_begin, heap_scan_next};
+use crate::BufferPool;
+use crate::backend::access::heap::heapam::{
+    heap_flush, heap_insert, heap_scan_begin, heap_scan_next,
+};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-use crate::backend::utils::cache::catcache::CatCache;
-use crate::backend::catalog::catalog::{CatalogIndexMeta, column_desc, Catalog, CatalogEntry, CatalogError};
-use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
-use crate::backend::executor::value_io::tuple_from_values;
-use crate::backend::executor::value_io::decode_value;
+use crate::backend::catalog::catalog::{
+    Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, column_desc,
+};
 use crate::backend::executor::RelationDesc;
+use crate::backend::executor::value_io::decode_value;
+use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgCastRow, PgClassRow, PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow,
-    PgLanguageRow, PgNamespaceRow, PgProcRow, PgTablespaceRow, PgTypeRow,
-    bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_relation_desc,
-    builtin_type_rows,
+    PgCastRow, PgClassRow, PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow,
+    PgNamespaceRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
+    bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
-use crate::BufferPool;
 
 const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
 pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
@@ -41,6 +44,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
     pub languages: Vec<PgLanguageRow>,
+    pub operators: Vec<PgOperatorRow>,
     pub procs: Vec<PgProcRow>,
     pub casts: Vec<PgCastRow>,
     pub collations: Vec<PgCollationRow>,
@@ -100,7 +104,10 @@ impl CatalogStore {
         )?;
         sync_physical_catalogs(&base_dir, &catalog)?;
 
-        Ok(Self { base_dir, control_path })
+        Ok(Self {
+            base_dir,
+            control_path,
+        })
     }
 
     pub fn catalog_snapshot(&self) -> Result<Catalog, CatalogError> {
@@ -274,7 +281,8 @@ pub(crate) fn sync_catalog_rows(
             db_oid,
             rel_number: kind.relation_oid(),
         };
-        smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
+        smgr.open(rel)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
         smgr.unlink(rel, Some(ForkNumber::Main), false);
         smgr.create(rel, ForkNumber::Main, false)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
@@ -303,7 +311,11 @@ pub(crate) fn sync_catalog_rows(
             rel_number: BootstrapCatalogKind::PgClass.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
-        rows.classes.iter().cloned().map(pg_class_row_values).collect(),
+        rows.classes
+            .iter()
+            .cloned()
+            .map(pg_class_row_values)
+            .collect(),
     )?;
     insert_catalog_rows(
         &pool,
@@ -370,6 +382,20 @@ pub(crate) fn sync_catalog_rows(
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgProc),
         rows.procs.iter().cloned().map(pg_proc_row_values).collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: BootstrapCatalogKind::PgOperator.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgOperator),
+        rows.operators
+            .iter()
+            .cloned()
+            .map(pg_operator_row_values)
+            .collect(),
     )?;
     insert_catalog_rows(
         &pool,
@@ -500,6 +526,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
         languages: catcache.language_rows(),
+        operators: catcache.operator_rows(),
         procs: catcache.proc_rows(),
         casts: catcache.cast_rows(),
         collations: catcache.collation_rows(),
@@ -640,6 +667,26 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
     ]
 }
 
+fn pg_operator_row_values(row: PgOperatorRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.oprname.into()),
+        Value::Int32(row.oprnamespace as i32),
+        Value::Int32(row.oprowner as i32),
+        Value::Text(row.oprkind.to_string().into()),
+        Value::Bool(row.oprcanmerge),
+        Value::Bool(row.oprcanhash),
+        Value::Int32(row.oprleft as i32),
+        Value::Int32(row.oprright as i32),
+        Value::Int32(row.oprresult as i32),
+        Value::Int32(row.oprcom as i32),
+        Value::Int32(row.oprnegate as i32),
+        Value::Int32(row.oprcode as i32),
+        Value::Int32(row.oprrest as i32),
+        Value::Int32(row.oprjoin as i32),
+    ]
+}
+
 fn pg_cast_row_values(row: PgCastRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -748,6 +795,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
     let _language_rows = rows.languages;
+    let _operator_rows = rows.operators;
     let _proc_rows = rows.procs;
     let _cast_rows = rows.casts;
     let _collation_rows = rows.collations;
@@ -809,7 +857,10 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
         next_oid,
     };
     for row in class_rows {
-        let attrs = attrs_by_relid.get(&row.oid).map(Vec::as_slice).unwrap_or(&[]);
+        let attrs = attrs_by_relid
+            .get(&row.oid)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let columns = attrs
             .iter()
             .map(|attr| {
@@ -856,11 +907,13 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
                 row_type_oid: row.reltype,
                 relkind: row.relkind,
                 desc: RelationDesc { columns },
-                index_meta: indexes_by_relid.get(&row.oid).map(|index| CatalogIndexMeta {
-                    indrelid: index.indrelid,
-                    indkey: parse_indkey(&index.indkey),
-                    indisunique: index.indisunique,
-                }),
+                index_meta: indexes_by_relid
+                    .get(&row.oid)
+                    .map(|index| CatalogIndexMeta {
+                        indrelid: index.indrelid,
+                        indkey: parse_indkey(&index.indkey),
+                        indisunique: index.indisunique,
+                    }),
             },
         );
         catalog.next_oid = catalog
@@ -874,7 +927,9 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     Ok(catalog)
 }
 
-fn load_legacy_default_exprs(base_dir: &Path) -> Result<BTreeMap<(u32, i16), String>, CatalogError> {
+fn load_legacy_default_exprs(
+    base_dir: &Path,
+) -> Result<BTreeMap<(u32, i16), String>, CatalogError> {
     let path = base_dir.join("catalog").join("defaults.json");
     if !path.exists() {
         return Ok(BTreeMap::new());
@@ -909,7 +964,9 @@ fn load_legacy_default_exprs(base_dir: &Path) -> Result<BTreeMap<(u32, i16), Str
     Ok(defaults)
 }
 
-pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCatalogRows, CatalogError> {
+pub(crate) fn load_physical_catalog_rows(
+    base_dir: &Path,
+) -> Result<PhysicalCatalogRows, CatalogError> {
     let mut smgr = MdStorageManager::new(base_dir);
     let mut rels = BTreeMap::new();
     let mut missing_attrdef = false;
@@ -919,6 +976,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut missing_authid = false;
     let mut missing_auth_members = false;
     let mut missing_language = false;
+    let mut missing_operator = false;
     let mut missing_proc = false;
     let mut missing_cast = false;
     let mut missing_collation = false;
@@ -959,6 +1017,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
                 missing_language = true;
                 continue;
             }
+            if kind == BootstrapCatalogKind::PgOperator {
+                missing_operator = true;
+                continue;
+            }
             if kind == BootstrapCatalogKind::PgProc {
                 missing_proc = true;
                 continue;
@@ -981,7 +1043,8 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
         }
-        smgr.open(rel).map_err(|e| CatalogError::Io(e.to_string()))?;
+        smgr.open(rel)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
         rels.insert(kind, rel);
     }
     let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
@@ -1064,6 +1127,18 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         )?
         .into_iter()
         .map(pg_language_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let operator_rows = if missing_operator {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgOperator],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgOperator),
+        )?
+        .into_iter()
+        .map(pg_operator_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
     let proc_rows = if missing_proc {
@@ -1174,6 +1249,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
+        operators: operator_rows,
         procs: proc_rows,
         casts: cast_rows,
         collations: collation_rows,
@@ -1201,7 +1277,9 @@ fn scan_catalog_relation(
             .columns
             .iter()
             .zip(raw.into_iter())
-            .map(|(column, datum)| decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}"))))
+            .map(|(column, datum)| {
+                decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         rows.push(row);
     }
@@ -1210,8 +1288,12 @@ fn scan_catalog_relation(
 
 fn expect_oid(value: &Value) -> Result<u32, CatalogError> {
     match value {
-        Value::Int64(v) => u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value")),
-        Value::Int32(v) => u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value")),
+        Value::Int64(v) => {
+            u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value"))
+        }
+        Value::Int32(v) => {
+            u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value"))
+        }
         _ => Err(CatalogError::Corrupt("expected oid value")),
     }
 }
@@ -1268,12 +1350,18 @@ fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespaceRow, Catal
 
 fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
     let relpersistence = match &values[7] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relpersistence"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty relpersistence"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected relpersistence text")),
     };
     let relkind = match &values[8] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty relkind"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty relkind"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected relkind text")),
     };
@@ -1292,7 +1380,10 @@ fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogErr
 
 fn pg_am_row_from_values(values: Vec<Value>) -> Result<PgAmRow, CatalogError> {
     let amtype = match &values[3] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty amtype"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty amtype"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected amtype text")),
     };
@@ -1344,19 +1435,56 @@ fn pg_language_row_from_values(values: Vec<Value>) -> Result<PgLanguageRow, Cata
     })
 }
 
+fn pg_operator_row_from_values(values: Vec<Value>) -> Result<PgOperatorRow, CatalogError> {
+    let oprkind = match &values[4] {
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty oprkind"))?,
+        Value::InternalChar(byte) => char::from(*byte),
+        _ => return Err(CatalogError::Corrupt("expected oprkind text")),
+    };
+    Ok(PgOperatorRow {
+        oid: expect_oid(&values[0])?,
+        oprname: expect_text(&values[1])?,
+        oprnamespace: expect_oid(&values[2])?,
+        oprowner: expect_oid(&values[3])?,
+        oprkind,
+        oprcanmerge: expect_bool(&values[5])?,
+        oprcanhash: expect_bool(&values[6])?,
+        oprleft: expect_oid(&values[7])?,
+        oprright: expect_oid(&values[8])?,
+        oprresult: expect_oid(&values[9])?,
+        oprcom: expect_oid(&values[10])?,
+        oprnegate: expect_oid(&values[11])?,
+        oprcode: expect_oid(&values[12])?,
+        oprrest: expect_oid(&values[13])?,
+        oprjoin: expect_oid(&values[14])?,
+    })
+}
+
 fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, CatalogError> {
     let prokind = match &values[9] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty prokind"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty prokind"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected prokind text")),
     };
     let provolatile = match &values[14] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty provolatile"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty provolatile"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected provolatile text")),
     };
     let proparallel = match &values[15] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty proparallel"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty proparallel"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected proparallel text")),
     };
@@ -1387,7 +1515,10 @@ fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, CatalogError
 
 fn pg_collation_row_from_values(values: Vec<Value>) -> Result<PgCollationRow, CatalogError> {
     let collprovider = match &values[4] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty collprovider"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty collprovider"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected collprovider text")),
     };
@@ -1404,12 +1535,18 @@ fn pg_collation_row_from_values(values: Vec<Value>) -> Result<PgCollationRow, Ca
 
 fn pg_cast_row_from_values(values: Vec<Value>) -> Result<PgCastRow, CatalogError> {
     let castcontext = match &values[4] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty castcontext"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty castcontext"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected castcontext text")),
     };
     let castmethod = match &values[5] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty castmethod"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty castmethod"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected castmethod text")),
     };
@@ -1465,7 +1602,10 @@ fn pg_attrdef_row_from_values(values: Vec<Value>) -> Result<PgAttrdefRow, Catalo
 
 fn pg_depend_row_from_values(values: Vec<Value>) -> Result<PgDependRow, CatalogError> {
     let deptype = match &values[6] {
-        Value::Text(text) => text.chars().next().ok_or(CatalogError::Corrupt("empty deptype"))?,
+        Value::Text(text) => text
+            .chars()
+            .next()
+            .ok_or(CatalogError::Corrupt("empty deptype"))?,
         Value::InternalChar(byte) => char::from(*byte),
         _ => return Err(CatalogError::Corrupt("expected deptype text")),
     };
@@ -1507,7 +1647,10 @@ fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, CatalogError
 }
 
 fn decode_builtin_sql_type(oid: u32) -> Option<SqlType> {
-    for row in builtin_type_rows().into_iter().chain(bootstrap_composite_type_rows()) {
+    for row in builtin_type_rows()
+        .into_iter()
+        .chain(bootstrap_composite_type_rows())
+    {
         if row.oid == oid {
             return Some(row.sql_type);
         }
@@ -1544,8 +1687,8 @@ mod tests {
     use super::*;
     use crate::backend::storage::smgr::segment_path;
     use crate::include::catalog::{
-        BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, CURRENT_DATABASE_NAME,
-        C_COLLATION_OID, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
+        BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
+        CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
         DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID,
         JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
         PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
@@ -1605,8 +1748,14 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let relcache = reopened.relcache().unwrap();
         let entry = relcache.get_by_name("bit_defaults").unwrap();
-        assert_eq!(entry.desc.columns[0].default_expr.as_deref(), Some("'1001'"));
-        assert_eq!(entry.desc.columns[1].default_expr.as_deref(), Some("B'0101'"));
+        assert_eq!(
+            entry.desc.columns[0].default_expr.as_deref(),
+            Some("'1001'")
+        );
+        assert_eq!(
+            entry.desc.columns[1].default_expr.as_deref(),
+            Some("B'0101'")
+        );
     }
 
     #[test]
@@ -1755,10 +1904,11 @@ mod tests {
         let reopened_index = reopened_catalog.get("people_name_idx").unwrap();
         assert_eq!(reopened_index.relkind, 'i');
         assert_eq!(
-            reopened_index
-                .index_meta
-                .as_ref()
-                .map(|meta| (meta.indrelid, meta.indkey.clone(), meta.indisunique)),
+            reopened_index.index_meta.as_ref().map(|meta| (
+                meta.indrelid,
+                meta.indkey.clone(),
+                meta.indisunique
+            )),
             Some((table.relation_oid, vec![1, 2], true))
         );
     }
@@ -1818,10 +1968,42 @@ mod tests {
                 && row.lanname == "internal"
                 && row.lanowner == BOOTSTRAP_SUPERUSER_OID
         }));
-        assert!(rows
-            .languages
-            .iter()
-            .any(|row| row.lanname == "sql" && row.lanpltrusted));
+        assert!(
+            rows.languages
+                .iter()
+                .any(|row| row.lanname == "sql" && row.lanpltrusted)
+        );
+    }
+
+    #[test]
+    fn catalog_store_persists_pg_operator_rows() {
+        let base = temp_dir("operator_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+
+        assert!(rows.operators.iter().any(|row| {
+            row.oid == 91
+                && row.oprname == "="
+                && row.oprleft == crate::include::catalog::BOOL_TYPE_OID
+                && row.oprright == crate::include::catalog::BOOL_TYPE_OID
+                && row.oprcode == crate::include::catalog::BOOL_CMP_EQ_PROC_OID
+                && row.oprcanmerge
+                && row.oprcanhash
+        }));
+        assert!(rows.operators.iter().any(|row| {
+            row.oid == 96
+                && row.oprname == "="
+                && row.oprleft == INT4_TYPE_OID
+                && row.oprright == INT4_TYPE_OID
+                && row.oprcode == crate::include::catalog::INT4_CMP_EQ_PROC_OID
+        }));
+        assert!(rows.operators.iter().any(|row| {
+            row.oid == 3877
+                && row.oprname == "^@"
+                && row.oprleft == TEXT_TYPE_OID
+                && row.oprright == TEXT_TYPE_OID
+                && row.oprcode == crate::include::catalog::TEXT_STARTS_WITH_PROC_OID
+        }));
     }
 
     #[test]
@@ -1849,9 +2031,7 @@ mod tests {
                 && row.prorettype == crate::include::catalog::NUMERIC_TYPE_OID
         }));
         assert!(rows.procs.iter().any(|row| {
-            row.proname == "json_array_elements"
-                && row.proretset
-                && row.prorettype == JSON_TYPE_OID
+            row.proname == "json_array_elements" && row.proretset && row.prorettype == JSON_TYPE_OID
         }));
     }
 
@@ -1864,7 +2044,12 @@ mod tests {
         assert_eq!(
             rows.collations
                 .iter()
-                .map(|row| (row.oid, row.collname.as_str(), row.collprovider, row.collowner))
+                .map(|row| (
+                    row.oid,
+                    row.collname.as_str(),
+                    row.collprovider,
+                    row.collowner
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (
@@ -1961,11 +2146,17 @@ mod tests {
 
         let dropped = store.drop_table("people").unwrap();
         assert_eq!(
-            dropped.iter().map(|entry| entry.relation_oid).collect::<Vec<_>>(),
+            dropped
+                .iter()
+                .map(|entry| entry.relation_oid)
+                .collect::<Vec<_>>(),
             vec![index.relation_oid, table.relation_oid]
         );
         assert_eq!(
-            dropped.iter().map(|entry| entry.relkind).collect::<Vec<_>>(),
+            dropped
+                .iter()
+                .map(|entry| entry.relkind)
+                .collect::<Vec<_>>(),
             vec!['i', 'r']
         );
 
@@ -1977,8 +2168,18 @@ mod tests {
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(!rows.classes.iter().any(|row| row.oid == table.relation_oid));
         assert!(!rows.classes.iter().any(|row| row.oid == index.relation_oid));
-        assert!(!rows.indexes.iter().any(|row| row.indexrelid == index.relation_oid));
-        assert!(!rows.depends.iter().any(|row| row.objid == index.relation_oid));
+        assert!(
+            !rows
+                .indexes
+                .iter()
+                .any(|row| row.indexrelid == index.relation_oid)
+        );
+        assert!(
+            !rows
+                .depends
+                .iter()
+                .any(|row| row.objid == index.relation_oid)
+        );
     }
 
     #[test]
@@ -2010,13 +2211,19 @@ mod tests {
         assert!(authid_path.exists(), "pg_authid relfile should exist");
         let auth_members = catalog.get("pg_auth_members").unwrap();
         let auth_members_path = segment_path(&base, auth_members.rel, ForkNumber::Main, 0);
-        assert!(auth_members_path.exists(), "pg_auth_members relfile should exist");
+        assert!(
+            auth_members_path.exists(),
+            "pg_auth_members relfile should exist"
+        );
         let collation = catalog.get("pg_collation").unwrap();
         let collation_path = segment_path(&base, collation.rel, ForkNumber::Main, 0);
         assert!(collation_path.exists(), "pg_collation relfile should exist");
         let language = catalog.get("pg_language").unwrap();
         let language_path = segment_path(&base, language.rel, ForkNumber::Main, 0);
         assert!(language_path.exists(), "pg_language relfile should exist");
+        let operator = catalog.get("pg_operator").unwrap();
+        let operator_path = segment_path(&base, operator.rel, ForkNumber::Main, 0);
+        assert!(operator_path.exists(), "pg_operator relfile should exist");
         let proc = catalog.get("pg_proc").unwrap();
         let proc_path = segment_path(&base, proc.rel, ForkNumber::Main, 0);
         assert!(proc_path.exists(), "pg_proc relfile should exist");
@@ -2028,7 +2235,10 @@ mod tests {
         assert!(am_path.exists(), "pg_am relfile should exist");
         let tablespace = catalog.get("pg_tablespace").unwrap();
         let tablespace_path = segment_path(&base, tablespace.rel, ForkNumber::Main, 0);
-        assert!(tablespace_path.exists(), "pg_tablespace relfile should exist");
+        assert!(
+            tablespace_path.exists(),
+            "pg_tablespace relfile should exist"
+        );
     }
 
     #[test]
@@ -2143,7 +2353,10 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let relcache = reopened.relcache().unwrap();
         let migrated = relcache.get_by_name("notes").unwrap();
-        assert_eq!(migrated.desc.columns[1].default_expr.as_deref(), Some("'legacy'"));
+        assert_eq!(
+            migrated.desc.columns[1].default_expr.as_deref(),
+            Some("'legacy'")
+        );
         assert!(migrated.desc.columns[1].attrdef_oid.is_some());
 
         let rows = load_physical_catalog_rows(&base).unwrap();
@@ -2257,7 +2470,11 @@ mod tests {
         assert!(am_path.exists(), "pg_am relfile should be recreated");
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.ams.iter().any(|row| row.oid == HEAP_TABLE_AM_OID && row.amname == "heap"));
+        assert!(
+            rows.ams
+                .iter()
+                .any(|row| row.oid == HEAP_TABLE_AM_OID && row.amname == "heap")
+        );
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
@@ -2289,10 +2506,17 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("people").is_some());
-        assert!(database_path.exists(), "pg_database relfile should be recreated");
+        assert!(
+            database_path.exists(),
+            "pg_database relfile should be recreated"
+        );
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.databases.iter().any(|row| row.datname == CURRENT_DATABASE_NAME));
+        assert!(
+            rows.databases
+                .iter()
+                .any(|row| row.datname == CURRENT_DATABASE_NAME)
+        );
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
@@ -2324,7 +2548,10 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("people").is_some());
-        assert!(authid_path.exists(), "pg_authid relfile should be recreated");
+        assert!(
+            authid_path.exists(),
+            "pg_authid relfile should be recreated"
+        );
 
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.authids.iter().any(|row| {
@@ -2399,13 +2626,17 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("people").is_some());
-        assert!(collation_path.exists(), "pg_collation relfile should be recreated");
+        assert!(
+            collation_path.exists(),
+            "pg_collation relfile should be recreated"
+        );
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows
-            .collations
-            .iter()
-            .any(|row| row.oid == DEFAULT_COLLATION_OID && row.collname == "default"));
+        assert!(
+            rows.collations
+                .iter()
+                .any(|row| row.oid == DEFAULT_COLLATION_OID && row.collname == "default")
+        );
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
@@ -2440,9 +2671,11 @@ mod tests {
         assert!(cast_path.exists(), "pg_cast relfile should be recreated");
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows.casts.iter().any(|row| {
-            row.castsource == INT4_TYPE_OID && row.casttarget == OID_TYPE_OID
-        }));
+        assert!(
+            rows.casts
+                .iter()
+                .any(|row| { row.castsource == INT4_TYPE_OID && row.casttarget == OID_TYPE_OID })
+        );
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
@@ -2477,10 +2710,11 @@ mod tests {
         assert!(proc_path.exists(), "pg_proc relfile should be recreated");
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows
-            .procs
-            .iter()
-            .any(|row| row.proname == "lower" && row.prorettype == TEXT_TYPE_OID));
+        assert!(
+            rows.procs
+                .iter()
+                .any(|row| row.proname == "lower" && row.prorettype == TEXT_TYPE_OID)
+        );
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
@@ -2512,13 +2746,61 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("people").is_some());
-        assert!(language_path.exists(), "pg_language relfile should be recreated");
+        assert!(
+            language_path.exists(),
+            "pg_language relfile should be recreated"
+        );
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows
-            .languages
-            .iter()
-            .any(|row| row.oid == PG_LANGUAGE_INTERNAL_OID && row.lanname == "internal"));
+        assert!(
+            rows.languages
+                .iter()
+                .any(|row| row.oid == PG_LANGUAGE_INTERNAL_OID && row.lanname == "internal")
+        );
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_operator_relation() {
+        let base = temp_dir("missing_operator_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let operator_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgOperator.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&operator_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(
+            operator_path.exists(),
+            "pg_operator relfile should be recreated"
+        );
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.operators.iter().any(|row| {
+            row.oid == 96
+                && row.oprname == "="
+                && row.oprleft == INT4_TYPE_OID
+                && row.oprright == INT4_TYPE_OID
+                && row.oprcode == crate::include::catalog::INT4_CMP_EQ_PROC_OID
+        }));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
@@ -2550,7 +2832,10 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("people").is_some());
-        assert!(tablespace_path.exists(), "pg_tablespace relfile should be recreated");
+        assert!(
+            tablespace_path.exists(),
+            "pg_tablespace relfile should be recreated"
+        );
 
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.tablespaces.iter().any(|row| {
