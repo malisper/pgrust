@@ -756,6 +756,20 @@ mod tests {
                 && row.oprleft == TEXT_TYPE_OID
                 && row.oprright == TEXT_TYPE_OID
         }));
+        assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 664
+                && row.oprname == "<"
+                && row.oprcode == crate::include::catalog::TEXT_CMP_LT_PROC_OID
+                && row.oprleft == TEXT_TYPE_OID
+                && row.oprright == TEXT_TYPE_OID
+        }));
+        assert!(cache.operator_rows().iter().any(|row| {
+            row.oid == 667
+                && row.oprname == ">="
+                && row.oprcode == crate::include::catalog::TEXT_CMP_GE_PROC_OID
+                && row.oprleft == TEXT_TYPE_OID
+                && row.oprright == TEXT_TYPE_OID
+        }));
         assert!(cache.proc_rows().iter().any(|row| {
             row.proname == "lower"
                 && row.pronargs == 1
@@ -770,6 +784,18 @@ mod tests {
         }));
         assert!(cache.proc_rows().iter().any(|row| {
             row.proname == "json_array_elements" && row.proretset && row.prorettype == JSON_TYPE_OID
+        }));
+        assert!(cache.proc_rows().iter().any(|row| {
+            row.oid == crate::include::catalog::TEXT_CMP_LT_PROC_OID
+                && row.proname == "text_lt"
+                && row.proargtypes == format!("{TEXT_TYPE_OID} {TEXT_TYPE_OID}")
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
+        }));
+        assert!(cache.proc_rows().iter().any(|row| {
+            row.oid == crate::include::catalog::TEXT_CMP_GE_PROC_OID
+                && row.proname == "text_ge"
+                && row.proargtypes == format!("{TEXT_TYPE_OID} {TEXT_TYPE_OID}")
+                && row.prorettype == crate::include::catalog::BOOL_TYPE_OID
         }));
         assert!(cache.cast_rows().iter().any(|row| {
             row.castsource == INT4_TYPE_OID
