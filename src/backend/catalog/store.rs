@@ -12,6 +12,8 @@ use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, column_desc,
 };
+use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
+use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::pg_constraint::not_null_constraint_name;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
@@ -19,14 +21,14 @@ use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
-use crate::backend::utils::cache::catcache::CatCache;
+use crate::backend::utils::cache::catcache::{CatCache, format_indkey, sql_type_oid};
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
-    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow,
-    PgLanguageRow, PgNamespaceRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow,
-    bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_relation_desc,
-    builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOperatorRow,
+    PgProcRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
+    bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 
@@ -34,7 +36,7 @@ const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
 pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
 pub(crate) const DEFAULT_FIRST_USER_OID: u32 = 16_384;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct PhysicalCatalogRows {
     pub namespaces: Vec<PgNamespaceRow>,
     pub classes: Vec<PgClassRow>,
@@ -150,9 +152,12 @@ impl CatalogStore {
         name: impl Into<String>,
         desc: RelationDesc,
     ) -> Result<CatalogEntry, CatalogError> {
+        let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry = catalog.create_table(name, desc)?;
-        self.persist_catalog_kinds(&catalog, &create_table_sync_kinds(&entry))?;
+        let entry = catalog.create_table(name.clone(), desc)?;
+        let kinds = create_table_sync_kinds(&entry);
+        self.persist_control_state(&catalog)?;
+        append_catalog_entry_rows(&self.base_dir, &name, &entry, &kinds)?;
         Ok(entry)
     }
 
@@ -163,9 +168,12 @@ impl CatalogStore {
         unique: bool,
         columns: &[String],
     ) -> Result<CatalogEntry, CatalogError> {
+        let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry = catalog.create_index(index_name, table_name, unique, columns)?;
-        self.persist_catalog_kinds(&catalog, &create_index_sync_kinds())?;
+        let entry = catalog.create_index(index_name.clone(), table_name, unique, columns)?;
+        let kinds = create_index_sync_kinds();
+        self.persist_control_state(&catalog)?;
+        append_catalog_entry_rows(&self.base_dir, &index_name, &entry, &kinds)?;
         Ok(entry)
     }
 
@@ -176,9 +184,13 @@ impl CatalogStore {
         unique: bool,
         columns: &[String],
     ) -> Result<CatalogEntry, CatalogError> {
+        let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry = catalog.create_index_for_relation(index_name, relation_oid, unique, columns)?;
-        self.persist_catalog_kinds(&catalog, &create_index_sync_kinds())?;
+        let entry =
+            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?;
+        let kinds = create_index_sync_kinds();
+        self.persist_control_state(&catalog)?;
+        append_catalog_entry_rows(&self.base_dir, &index_name, &entry, &kinds)?;
         Ok(entry)
     }
 
@@ -222,6 +234,11 @@ impl CatalogStore {
         catalog: &Catalog,
         kinds: &[BootstrapCatalogKind],
     ) -> Result<(), CatalogError> {
+        self.persist_control_state(catalog)?;
+        sync_physical_catalogs_kinds(&self.base_dir, catalog, kinds)
+    }
+
+    fn persist_control_state(&self, catalog: &Catalog) -> Result<(), CatalogError> {
         persist_control_file(
             &self.control_path,
             &CatalogControl {
@@ -229,8 +246,7 @@ impl CatalogStore {
                 next_rel_number: catalog.next_rel_number,
                 bootstrap_complete: true,
             },
-        )?;
-        sync_physical_catalogs_kinds(&self.base_dir, catalog, kinds)
+        )
     }
 }
 
@@ -361,6 +377,51 @@ pub(crate) fn sync_catalog_rows_subset(
         )?;
     }
     Ok(())
+}
+
+fn append_catalog_rows_subset(
+    base_dir: &Path,
+    rows: &PhysicalCatalogRows,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    let mut smgr = MdStorageManager::new(base_dir);
+    for &kind in kinds {
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: kind.relation_oid(),
+        };
+        smgr.open(rel)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
+        smgr.create(rel, ForkNumber::Main, true)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
+    }
+
+    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
+    for &kind in kinds {
+        insert_catalog_rows(
+            &pool,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid,
+                rel_number: kind.relation_oid(),
+            },
+            &bootstrap_relation_desc(kind),
+            catalog_row_values_for_kind(rows, kind),
+        )?;
+    }
+    Ok(())
+}
+
+fn append_catalog_entry_rows(
+    base_dir: &Path,
+    relation_name: &str,
+    entry: &CatalogEntry,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    let rows = physical_catalog_rows_for_entry(relation_name, entry);
+    append_catalog_rows_subset(base_dir, &rows, 1, kinds)
 }
 
 fn catalog_row_values_for_kind(rows: &PhysicalCatalogRows, kind: BootstrapCatalogKind) -> Vec<Vec<Value>> {
@@ -504,6 +565,90 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         tablespaces: catcache.tablespace_rows(),
         types: catcache.type_rows(),
     }
+}
+
+fn physical_catalog_rows_for_entry(relation_name: &str, entry: &CatalogEntry) -> PhysicalCatalogRows {
+    let relname = relation_name
+        .rsplit_once('.')
+        .map(|(_, object)| object)
+        .unwrap_or(relation_name);
+    let mut rows = PhysicalCatalogRows::default();
+    rows.classes.push(PgClassRow {
+        oid: entry.relation_oid,
+        relname: relname.to_string(),
+        relnamespace: entry.namespace_oid,
+        reltype: entry.row_type_oid,
+        relowner: BOOTSTRAP_SUPERUSER_OID,
+        relam: crate::include::catalog::relam_for_relkind(entry.relkind),
+        relfilenode: entry.rel.rel_number,
+        relpersistence: 'p',
+        relkind: entry.relkind,
+    });
+
+    if entry.row_type_oid != 0 {
+        rows.types.push(PgTypeRow {
+            oid: entry.row_type_oid,
+            typname: relname.to_string(),
+            typnamespace: entry.namespace_oid,
+            typowner: BOOTSTRAP_SUPERUSER_OID,
+            typrelid: entry.relation_oid,
+            sql_type: SqlType::new(SqlTypeKind::Text),
+        });
+    }
+
+    rows.attributes
+        .extend(entry.desc.columns.iter().enumerate().map(|(idx, column)| PgAttributeRow {
+            attrelid: entry.relation_oid,
+            attname: column.name.clone(),
+            atttypid: sql_type_oid(column.sql_type),
+            attnum: idx.saturating_add(1) as i16,
+            attnotnull: !column.storage.nullable,
+            atttypmod: column.sql_type.typmod,
+            sql_type: column.sql_type,
+        }));
+
+    rows.attrdefs.extend(
+        entry
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, column)| {
+                Some(PgAttrdefRow {
+                    oid: column.attrdef_oid?,
+                    adrelid: entry.relation_oid,
+                    adnum: idx.saturating_add(1) as i16,
+                    adbin: column.default_expr.clone()?,
+                })
+            }),
+    );
+
+    if entry.relkind == 'r' {
+        rows.constraints.extend(derived_pg_constraint_rows(
+            entry.relation_oid,
+            relname,
+            entry.namespace_oid,
+            &entry.desc,
+        ));
+    }
+
+    rows.depends.extend(derived_pg_depend_rows(entry));
+
+    if let Some(index_meta) = &entry.index_meta {
+        rows.indexes.push(PgIndexRow {
+            indexrelid: entry.relation_oid,
+            indrelid: index_meta.indrelid,
+            indnatts: index_meta.indkey.len() as i16,
+            indnkeyatts: index_meta.indkey.len() as i16,
+            indisunique: index_meta.indisunique,
+            indisvalid: true,
+            indisready: true,
+            indislive: true,
+            indkey: format_indkey(&index_meta.indkey),
+        });
+    }
+
+    rows
 }
 
 fn insert_catalog_rows(
@@ -2567,7 +2712,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn catalog_store_create_table_only_rewrites_touched_catalog_relations() {
+    fn catalog_store_create_table_appends_to_touched_catalog_relations() {
         let base = temp_dir("selective_catalog_sync_create_table");
         let mut store = CatalogStore::load(&base).unwrap();
         let proc_path = segment_path(
@@ -2609,10 +2754,70 @@ mod tests {
             proc_meta_before.modified().unwrap(),
             proc_meta_after.modified().unwrap()
         );
-        assert!(
-            class_meta_before.ino() != class_meta_after.ino()
-                || class_meta_before.modified().unwrap() != class_meta_after.modified().unwrap()
+        assert_eq!(class_meta_before.ino(), class_meta_after.ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_store_create_index_appends_to_touched_catalog_relations() {
+        let base = temp_dir("selective_catalog_sync_create_index");
+        let mut store = CatalogStore::load(&base).unwrap();
+        store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+        let proc_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
         );
+        let class_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgClass.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        let index_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgIndex.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        let proc_meta_before = fs::metadata(&proc_path).unwrap();
+        let class_meta_before = fs::metadata(&class_path).unwrap();
+        let index_meta_before = fs::metadata(&index_path).unwrap();
+
+        store
+            .create_index("people_id_idx", "people", false, &["id".into()])
+            .unwrap();
+
+        let proc_meta_after = fs::metadata(&proc_path).unwrap();
+        let class_meta_after = fs::metadata(&class_path).unwrap();
+        let index_meta_after = fs::metadata(&index_path).unwrap();
+        assert_eq!(proc_meta_before.ino(), proc_meta_after.ino());
+        assert_eq!(
+            proc_meta_before.modified().unwrap(),
+            proc_meta_after.modified().unwrap()
+        );
+        assert_eq!(class_meta_before.ino(), class_meta_after.ino());
+        assert_eq!(index_meta_before.ino(), index_meta_after.ino());
     }
 
     #[test]
