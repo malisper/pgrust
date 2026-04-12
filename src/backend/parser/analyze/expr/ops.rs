@@ -80,7 +80,7 @@ pub(super) fn bind_comparison_expr(
             } else {
                 (left_bound, right_bound, left_type, right_type)
             };
-        if !comparison_operator_exists(op, resolved_left_type, resolved_right_type) {
+        if !supports_comparison_operator(op, resolved_left_type, resolved_right_type) {
             return Err(ParseError::UndefinedOperator {
                 op,
                 left_type: sql_type_name(resolved_left_type),
@@ -90,6 +90,20 @@ pub(super) fn bind_comparison_expr(
         (left, right)
     };
     Ok(make(Box::new(left), Box::new(right)))
+}
+
+fn supports_comparison_operator(op: &str, left: SqlType, right: SqlType) -> bool {
+    if comparison_operator_exists(op, left, right) {
+        return true;
+    }
+    supports_array_equality_operator(op, left, right)
+}
+
+// :HACK: PostgreSQL models array comparison via polymorphic catalog operators.
+// pgrust does not bootstrap that polymorphic operator surface yet, so allow the
+// exact same-type array equality operators that the executor already supports.
+fn supports_array_equality_operator(op: &str, left: SqlType, right: SqlType) -> bool {
+    left.is_array && right.is_array && left == right && matches!(op, "=" | "<>")
 }
 
 fn comparison_operator_name(make: fn(Box<Expr>, Box<Expr>) -> Expr) -> &'static str {
