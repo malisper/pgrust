@@ -1,6 +1,9 @@
 use super::*;
-use crate::include::catalog::{bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows};
-use std::collections::BTreeMap;
+use crate::include::catalog::{
+    TEXT_TYPE_OID, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    builtin_type_rows,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
@@ -13,6 +16,13 @@ pub(super) fn resolve_function_cast_type(name: &str) -> Option<SqlType> {
     function_cast_types_by_name()
         .get(&name.to_ascii_lowercase())
         .copied()
+}
+
+pub(super) fn explicit_text_input_cast_exists(target: SqlType) -> bool {
+    let Some(target_oid) = builtin_type_oid(target) else {
+        return false;
+    };
+    text_input_cast_target_oids().contains(&target_oid)
 }
 
 pub(super) fn resolve_json_table_function(name: &str) -> Option<JsonTableFunction> {
@@ -369,12 +379,15 @@ fn function_cast_types_by_name() -> &'static BTreeMap<String, SqlType> {
     TYPES.get_or_init(|| {
         let mut by_name = BTreeMap::new();
         for row in builtin_type_rows() {
+            if row.sql_type.is_array {
+                continue;
+            }
+            if row.oid != TEXT_TYPE_OID && !text_input_cast_target_oids().contains(&row.oid) {
+                continue;
+            }
             let sql_type = match row.typname.as_str() {
-                "int2" | "int4" | "int8" | "oid" | "bytea" | "float4" | "float8"
-                | "numeric" | "text" | "bool" => Some(row.sql_type),
                 "bit" => Some(SqlType::with_bit_len(SqlTypeKind::Bit, 1)),
-                "varbit" => Some(SqlType::new(SqlTypeKind::VarBit)),
-                _ => None,
+                _ => Some(row.sql_type),
             };
             if let Some(sql_type) = sql_type {
                 by_name.insert(row.typname.to_ascii_lowercase(), sql_type);
@@ -400,6 +413,17 @@ fn function_cast_type_aliases() -> &'static [(&'static str, &'static str)] {
         ("decimal", "numeric"),
         ("boolean", "bool"),
     ]
+}
+
+fn text_input_cast_target_oids() -> &'static BTreeSet<u32> {
+    static OIDS: OnceLock<BTreeSet<u32>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        bootstrap_pg_cast_rows()
+            .into_iter()
+            .filter(|row| row.castsource == TEXT_TYPE_OID && row.castmethod == 'i')
+            .map(|row| row.casttarget)
+            .collect()
+    })
 }
 
 fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, ScalarFunctionArity)> {
@@ -683,7 +707,42 @@ mod tests {
             resolve_function_cast_type("boolean"),
             Some(SqlType::new(SqlTypeKind::Bool))
         );
-        assert_eq!(resolve_function_cast_type("varchar"), None);
+        assert_eq!(
+            resolve_function_cast_type("varchar"),
+            Some(SqlType::new(SqlTypeKind::Varchar))
+        );
+        assert_eq!(
+            resolve_function_cast_type("jsonb"),
+            Some(SqlType::new(SqlTypeKind::Jsonb))
+        );
+        assert_eq!(
+            resolve_function_cast_type("jsonpath"),
+            Some(SqlType::new(SqlTypeKind::JsonPath))
+        );
+        assert_eq!(
+            resolve_function_cast_type("timestamp"),
+            Some(SqlType::new(SqlTypeKind::Timestamp))
+        );
+    }
+
+    #[test]
+    fn explicit_text_input_cast_exists_uses_pg_cast_catalog() {
+        assert!(explicit_text_input_cast_exists(SqlType::new(
+            SqlTypeKind::Jsonb
+        )));
+        assert!(explicit_text_input_cast_exists(SqlType::new(
+            SqlTypeKind::JsonPath
+        )));
+        assert!(explicit_text_input_cast_exists(SqlType::new(
+            SqlTypeKind::Timestamp
+        )));
+        assert!(explicit_text_input_cast_exists(SqlType::with_bit_len(
+            SqlTypeKind::Bit,
+            4
+        )));
+        assert!(!explicit_text_input_cast_exists(SqlType::array_of(
+            SqlType::new(SqlTypeKind::Int4)
+        )));
     }
 
     #[test]
