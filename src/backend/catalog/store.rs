@@ -2,13 +2,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use parking_lot::RwLock;
 use serde_json::Value as JsonValue;
 
 use crate::BufferPool;
 use crate::backend::access::heap::heapam::{
-    heap_flush, heap_insert, heap_scan_begin, heap_scan_next,
+    heap_delete_with_waiter, heap_flush, heap_insert, heap_insert_mvcc_with_cid, heap_scan_begin,
+    heap_scan_next, heap_update_with_waiter,
 };
-use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+use crate::backend::access::transam::xact::{
+    CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId, TransactionManager,
+};
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, column_desc,
 };
@@ -16,6 +20,7 @@ use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::pg_constraint::not_null_constraint_name;
 use crate::backend::executor::RelationDesc;
+use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::executor::value_io::decode_value;
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -30,6 +35,7 @@ use crate::include::catalog::{
     PgProcRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
     bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
 };
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::Value;
 
 const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
@@ -62,6 +68,23 @@ pub(crate) struct PhysicalCatalogRows {
 pub struct CatalogStore {
     base_dir: PathBuf,
     control_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CatalogMutationEffect {
+    pub touched_catalogs: Vec<BootstrapCatalogKind>,
+    pub created_rels: Vec<RelFileLocator>,
+    pub dropped_rels: Vec<RelFileLocator>,
+    pub touched_relation_oids: Vec<u32>,
+}
+
+pub struct CatalogWriteContext<'a> {
+    pub pool: &'a BufferPool<SmgrStorageBackend>,
+    pub txns: &'a RwLock<TransactionManager>,
+    pub xid: TransactionId,
+    pub cid: CommandId,
+    pub client_id: crate::ClientId,
+    pub waiter: Option<&'a TransactionWaiter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,8 +150,49 @@ impl CatalogStore {
         CatCache::from_physical(&self.base_dir)
     }
 
+    pub fn catcache_with_snapshot(
+        &self,
+        pool: &BufferPool<SmgrStorageBackend>,
+        txns: &TransactionManager,
+        snapshot: &Snapshot,
+        client_id: crate::ClientId,
+    ) -> Result<CatCache, CatalogError> {
+        let rows = load_physical_catalog_rows_visible(&self.base_dir, pool, txns, snapshot, client_id)?;
+        Ok(CatCache::from_rows(
+            rows.namespaces,
+            rows.classes,
+            rows.attributes,
+            rows.attrdefs,
+            rows.depends,
+            rows.indexes,
+            rows.ams,
+            rows.authids,
+            rows.auth_members,
+            rows.languages,
+            rows.constraints,
+            rows.operators,
+            rows.procs,
+            rows.casts,
+            rows.collations,
+            rows.databases,
+            rows.tablespaces,
+            rows.types,
+        ))
+    }
+
     pub fn relation(&self, name: &str) -> Result<Option<RelCacheEntry>, CatalogError> {
         Ok(self.relcache()?.get_by_name(name).cloned())
+    }
+
+    pub fn relcache_with_snapshot(
+        &self,
+        pool: &BufferPool<SmgrStorageBackend>,
+        txns: &TransactionManager,
+        snapshot: &Snapshot,
+        client_id: crate::ClientId,
+    ) -> Result<RelCache, CatalogError> {
+        let catcache = self.catcache_with_snapshot(pool, txns, snapshot, client_id)?;
+        RelCache::from_catcache(&catcache)
     }
 
     pub fn visible_table_names(&self) -> Result<Vec<String>, CatalogError> {
@@ -229,6 +293,84 @@ impl CatalogStore {
         Ok(dropped)
     }
 
+    pub fn create_table_mvcc(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        let name = name.into();
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let entry = catalog.create_table(name.clone(), desc)?;
+        let kinds = create_table_sync_kinds(&entry);
+        self.persist_control_state(&catalog)?;
+        let rows = physical_catalog_rows_for_entry(&name, &entry);
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rel(&mut effect.created_rels, entry.rel);
+        effect_record_oid(&mut effect.touched_relation_oids, entry.relation_oid);
+        Ok((entry, effect))
+    }
+
+    pub fn create_index_for_relation_mvcc(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        columns: &[String],
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        let index_name = index_name.into();
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let entry =
+            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?;
+        let kinds = create_index_sync_kinds();
+        self.persist_control_state(&catalog)?;
+        let rows = physical_catalog_rows_for_entry(&index_name, &entry);
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_rel(&mut effect.created_rels, entry.rel);
+        effect_record_oid(&mut effect.touched_relation_oids, entry.relation_oid);
+        Ok((entry, effect))
+    }
+
+    pub fn drop_relation_by_oid_mvcc(
+        &mut self,
+        relation_oid: u32,
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<(Vec<CatalogEntry>, CatalogMutationEffect), CatalogError> {
+        let catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let oids = drop_relation_oids_by_oid(&catalog, relation_oid)?;
+        let mut dropped = Vec::with_capacity(oids.len());
+        let mut rows = PhysicalCatalogRows::default();
+        for oid in oids {
+            let Some((name, entry)) = catalog
+                .entries()
+                .find(|(_, entry)| entry.relation_oid == oid)
+                .map(|(name, entry)| (name.to_string(), entry.clone()))
+            else {
+                continue;
+            };
+            extend_physical_catalog_rows(&mut rows, physical_catalog_rows_for_entry(&name, &entry));
+            dropped.push(entry);
+        }
+
+        let kinds = drop_relation_delete_kinds();
+        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        for entry in &dropped {
+            effect_record_rel(&mut effect.dropped_rels, entry.rel);
+            effect_record_oid(&mut effect.touched_relation_oids, entry.relation_oid);
+        }
+        Ok((dropped, effect))
+    }
+
     fn persist_catalog_kinds(
         &self,
         catalog: &Catalog,
@@ -303,6 +445,26 @@ impl CatalogStore {
         }
         Ok(catalog)
     }
+
+    fn catalog_snapshot_with_control_for_snapshot(
+        &self,
+        ctx: &CatalogWriteContext<'_>,
+    ) -> Result<Catalog, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let txns = ctx.txns.read();
+        let mut catalog =
+            load_catalog_from_visible_physical(&self.base_dir, ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        if self.control_path.exists() {
+            let control = load_control_file(&self.control_path)?;
+            catalog.next_oid = catalog.next_oid.max(control.next_oid);
+            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+        }
+        Ok(catalog)
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +495,26 @@ fn sync_physical_catalogs_kinds(
     let catcache = CatCache::from_catalog(catalog);
     let rows = physical_catalog_rows_from_catcache(&catcache);
     sync_catalog_rows_subset(base_dir, &rows, 1, kinds)
+}
+
+fn effect_record_catalog_kinds(effect: &mut CatalogMutationEffect, kinds: &[BootstrapCatalogKind]) {
+    for &kind in kinds {
+        if !effect.touched_catalogs.contains(&kind) {
+            effect.touched_catalogs.push(kind);
+        }
+    }
+}
+
+fn effect_record_rel(rels: &mut Vec<RelFileLocator>, rel: RelFileLocator) {
+    if !rels.contains(&rel) {
+        rels.push(rel);
+    }
+}
+
+fn effect_record_oid(oids: &mut Vec<u32>, oid: u32) {
+    if !oids.contains(&oid) {
+        oids.push(oid);
+    }
 }
 
 pub(crate) fn sync_catalog_rows(
@@ -544,6 +726,39 @@ fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
     ]
 }
 
+fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
+    vec![
+        BootstrapCatalogKind::PgIndex,
+        BootstrapCatalogKind::PgAttrdef,
+        BootstrapCatalogKind::PgConstraint,
+        BootstrapCatalogKind::PgType,
+        BootstrapCatalogKind::PgAttribute,
+        BootstrapCatalogKind::PgClass,
+        BootstrapCatalogKind::PgDepend,
+    ]
+}
+
+fn extend_physical_catalog_rows(target: &mut PhysicalCatalogRows, source: PhysicalCatalogRows) {
+    target.namespaces.extend(source.namespaces);
+    target.classes.extend(source.classes);
+    target.attributes.extend(source.attributes);
+    target.attrdefs.extend(source.attrdefs);
+    target.depends.extend(source.depends);
+    target.indexes.extend(source.indexes);
+    target.ams.extend(source.ams);
+    target.authids.extend(source.authids);
+    target.auth_members.extend(source.auth_members);
+    target.languages.extend(source.languages);
+    target.constraints.extend(source.constraints);
+    target.operators.extend(source.operators);
+    target.procs.extend(source.procs);
+    target.casts.extend(source.casts);
+    target.collations.extend(source.collations);
+    target.databases.extend(source.databases);
+    target.tablespaces.extend(source.tablespaces);
+    target.types.extend(source.types);
+}
+
 fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRows {
     PhysicalCatalogRows {
         namespaces: catcache.namespace_rows(),
@@ -671,6 +886,233 @@ fn insert_catalog_rows(
             .map_err(|e| CatalogError::Io(format!("catalog flush failed: {e:?}")))?;
     }
     Ok(())
+}
+
+fn insert_catalog_rows_subset_mvcc(
+    ctx: &CatalogWriteContext<'_>,
+    rows: &PhysicalCatalogRows,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    for &kind in kinds {
+        let desc = bootstrap_relation_desc(kind);
+        for values in catalog_row_values_for_kind(rows, kind) {
+            catalog_tuple_insert(
+                ctx,
+                RelFileLocator {
+                    spc_oid: 0,
+                    db_oid,
+                    rel_number: kind.relation_oid(),
+                },
+                &desc,
+                &values,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn delete_catalog_rows_subset_mvcc(
+    ctx: &CatalogWriteContext<'_>,
+    rows: &PhysicalCatalogRows,
+    db_oid: u32,
+    kinds: &[BootstrapCatalogKind],
+) -> Result<(), CatalogError> {
+    let snapshot = ctx
+        .txns
+        .read()
+        .snapshot_for_command(ctx.xid, ctx.cid)
+        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    for &kind in kinds {
+        let desc = bootstrap_relation_desc(kind);
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid,
+            rel_number: kind.relation_oid(),
+        };
+        for values in catalog_row_values_for_kind(rows, kind) {
+            catalog_tuple_delete_matching(
+                ctx,
+                kind,
+                rel,
+                &desc,
+                &values,
+                &snapshot,
+            )
+            .map_err(|err| CatalogError::Io(format!("catalog delete for {kind:?} failed: {err:?}")))?;
+        }
+    }
+    Ok(())
+}
+
+fn catalog_tuple_insert(
+    ctx: &CatalogWriteContext<'_>,
+    rel: RelFileLocator,
+    desc: &RelationDesc,
+    values: &[Value],
+) -> Result<(), CatalogError> {
+    let tuple = tuple_from_values(desc, values)
+        .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
+    heap_insert_mvcc_with_cid(
+        ctx.pool,
+        ctx.client_id,
+        rel,
+        ctx.xid,
+        ctx.cid,
+        &tuple,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple insert failed: {e:?}")))?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn catalog_tuple_update_matching(
+    ctx: &CatalogWriteContext<'_>,
+    kind: BootstrapCatalogKind,
+    rel: RelFileLocator,
+    desc: &RelationDesc,
+    old_values: &[Value],
+    new_values: &[Value],
+    snapshot: &Snapshot,
+) -> Result<(), CatalogError> {
+    let tid = find_catalog_tuple_tid(ctx, kind, rel, desc, old_values, snapshot)?
+        .ok_or(CatalogError::Corrupt("missing catalog tuple for update"))?;
+    let replacement = tuple_from_values(desc, new_values)
+        .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
+    let waiter = ctx.waiter.map(|waiter| (ctx.txns, waiter));
+    heap_update_with_waiter(
+        ctx.pool,
+        ctx.client_id,
+        rel,
+        ctx.txns,
+        ctx.xid,
+        ctx.cid,
+        tid,
+        &replacement,
+        waiter,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple update failed: {e:?}")))?;
+    Ok(())
+}
+
+fn catalog_tuple_delete_matching(
+    ctx: &CatalogWriteContext<'_>,
+    kind: BootstrapCatalogKind,
+    rel: RelFileLocator,
+    desc: &RelationDesc,
+    values: &[Value],
+    snapshot: &Snapshot,
+) -> Result<(), CatalogError> {
+    let tid = find_catalog_tuple_tid(ctx, kind, rel, desc, values, snapshot)?
+        .ok_or(CatalogError::Corrupt("missing catalog tuple for delete"))?;
+    let waiter = ctx.waiter.map(|waiter| (ctx.txns, waiter));
+    heap_delete_with_waiter(
+        ctx.pool,
+        ctx.client_id,
+        rel,
+        ctx.txns,
+        ctx.xid,
+        tid,
+        snapshot,
+        waiter,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
+    Ok(())
+}
+
+fn find_catalog_tuple_tid(
+    ctx: &CatalogWriteContext<'_>,
+    kind: BootstrapCatalogKind,
+    rel: RelFileLocator,
+    desc: &RelationDesc,
+    values: &[Value],
+    snapshot: &Snapshot,
+) -> Result<Option<ItemPointerData>, CatalogError> {
+    let txns = ctx.txns.read();
+    let mut scan = heap_scan_begin(ctx.pool, rel)
+        .map_err(|e| CatalogError::Io(format!("catalog scan begin failed: {e:?}")))?;
+    while let Some((tid, tuple)) = heap_scan_next(ctx.pool, ctx.client_id, &mut scan)
+        .map_err(|e| CatalogError::Io(format!("catalog scan failed: {e:?}")))?
+    {
+        if !snapshot.tuple_visible(&txns, &tuple) {
+            continue;
+        }
+        let decoded = decode_catalog_tuple_values(desc, &tuple)?;
+        if catalog_row_identity_matches(kind, &decoded, values) {
+            return Ok(Some(tid));
+        }
+    }
+    Ok(None)
+}
+
+fn catalog_row_identity_matches(
+    kind: BootstrapCatalogKind,
+    left: &[Value],
+    right: &[Value],
+) -> bool {
+    match kind {
+        BootstrapCatalogKind::PgClass | BootstrapCatalogKind::PgType | BootstrapCatalogKind::PgAttrdef => {
+            catalog_value_eq(left.first(), right.first())
+        }
+        BootstrapCatalogKind::PgAttribute => {
+            catalog_value_eq(left.first(), right.first())
+                && catalog_value_eq(left.get(3), right.get(3))
+        }
+        BootstrapCatalogKind::PgConstraint => catalog_value_eq(left.first(), right.first()),
+        BootstrapCatalogKind::PgDepend => {
+            catalog_value_eq(left.get(0), right.get(0))
+                && catalog_value_eq(left.get(1), right.get(1))
+                && catalog_value_eq(left.get(2), right.get(2))
+                && catalog_value_eq(left.get(3), right.get(3))
+                && catalog_value_eq(left.get(4), right.get(4))
+                && catalog_value_eq(left.get(5), right.get(5))
+                && catalog_value_eq(left.get(6), right.get(6))
+        }
+        BootstrapCatalogKind::PgIndex => catalog_value_eq(left.first(), right.first()),
+        _ => left == right,
+    }
+}
+
+fn catalog_value_eq(left: Option<&Value>, right: Option<&Value>) -> bool {
+    match (left, right) {
+        (Some(Value::Int16(a)), Some(Value::Int16(b))) => a == b,
+        (Some(Value::Int16(a)), Some(Value::Int32(b))) => i32::from(*a) == *b,
+        (Some(Value::Int16(a)), Some(Value::Int64(b))) => i64::from(*a) == *b,
+        (Some(Value::Int32(a)), Some(Value::Int16(b))) => *a == i32::from(*b),
+        (Some(Value::Int32(a)), Some(Value::Int32(b))) => a == b,
+        (Some(Value::Int32(a)), Some(Value::Int64(b))) => i64::from(*a) == *b,
+        (Some(Value::Int64(a)), Some(Value::Int16(b))) => *a == i64::from(*b),
+        (Some(Value::Int64(a)), Some(Value::Int32(b))) => *a == i64::from(*b),
+        (Some(Value::Int64(a)), Some(Value::Int64(b))) => a == b,
+        (Some(Value::Text(a)), Some(Value::Text(b))) => a == b,
+        (Some(Value::Text(a)), Some(Value::InternalChar(b))) => {
+            a.chars().next() == Some(char::from(*b))
+        }
+        (Some(Value::InternalChar(a)), Some(Value::Text(b))) => {
+            Some(char::from(*a)) == b.chars().next()
+        }
+        (Some(Value::InternalChar(a)), Some(Value::InternalChar(b))) => a == b,
+        (Some(Value::Bool(a)), Some(Value::Bool(b))) => a == b,
+        (Some(a), Some(b)) => a == b,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn decode_catalog_tuple_values(
+    desc: &RelationDesc,
+    tuple: &crate::include::access::htup::HeapTuple,
+) -> Result<Vec<Value>, CatalogError> {
+    let raw = tuple
+        .deform(&desc.attribute_descs())
+        .map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+    desc.columns
+        .iter()
+        .zip(raw.into_iter())
+        .map(|(column, datum)| {
+            decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+        })
+        .collect()
 }
 
 fn namespace_row_values(row: PgNamespaceRow) -> Vec<Value> {
@@ -924,6 +1366,24 @@ fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), Cat
 
 fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> {
     let rows = load_physical_catalog_rows(base_dir)?;
+    catalog_from_physical_rows(base_dir, rows)
+}
+
+fn load_catalog_from_visible_physical(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Catalog, CatalogError> {
+    let rows = load_physical_catalog_rows_visible(base_dir, pool, txns, snapshot, client_id)?;
+    catalog_from_physical_rows(base_dir, rows)
+}
+
+fn catalog_from_physical_rows(
+    base_dir: &Path,
+    rows: PhysicalCatalogRows,
+) -> Result<Catalog, CatalogError> {
     let namespace_rows = rows.namespaces;
     let type_rows = rows.types;
     let class_rows = rows.classes;
@@ -1087,6 +1547,39 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     catalog.constraints = constraint_rows;
     catalog.depends = depend_rows;
     Ok(catalog)
+}
+
+fn restore_missing_first_class_catalog_rows(
+    base_dir: &Path,
+    rows: &mut PhysicalCatalogRows,
+    missing_constraint: bool,
+    missing_depend: bool,
+) -> Result<(), CatalogError> {
+    if missing_constraint {
+        let catalog = catalog_from_physical_rows(base_dir, rows.clone())?;
+        rows.constraints = catalog
+            .entries()
+            .filter(|(_, entry)| entry.relkind == 'r')
+            .flat_map(|(name, entry)| {
+                derived_pg_constraint_rows(
+                    entry.relation_oid,
+                    name.rsplit('.').next().unwrap_or(name),
+                    entry.namespace_oid,
+                    &entry.desc,
+                )
+            })
+            .collect();
+    }
+
+    if missing_depend {
+        let catalog = catalog_from_physical_rows(base_dir, rows.clone())?;
+        rows.depends = catalog
+            .entries()
+            .flat_map(|(_, entry)| derived_pg_depend_rows(entry))
+            .collect();
+    }
+
+    Ok(())
 }
 
 fn load_legacy_default_exprs(
@@ -1417,7 +1910,7 @@ pub(crate) fn load_physical_catalog_rows(
         .collect::<Result<Vec<_>, _>>()?
     };
 
-    Ok(PhysicalCatalogRows {
+    let mut rows = PhysicalCatalogRows {
         namespaces: namespace_rows,
         classes: class_rows,
         attributes: attribute_rows,
@@ -1436,7 +1929,391 @@ pub(crate) fn load_physical_catalog_rows(
         databases: database_rows,
         tablespaces: tablespace_rows,
         types: type_rows,
-    })
+    };
+    restore_missing_first_class_catalog_rows(
+        base_dir,
+        &mut rows,
+        missing_constraint,
+        missing_depend,
+    )?;
+    Ok(rows)
+}
+
+pub(crate) fn load_physical_catalog_rows_visible(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<PhysicalCatalogRows, CatalogError> {
+    let mut smgr = MdStorageManager::new(base_dir);
+    let mut rels = BTreeMap::new();
+    let mut missing_attrdef = false;
+    let mut missing_depend = false;
+    let mut missing_index = false;
+    let mut missing_am = false;
+    let mut missing_authid = false;
+    let mut missing_auth_members = false;
+    let mut missing_language = false;
+    let mut missing_constraint = false;
+    let mut missing_operator = false;
+    let mut missing_proc = false;
+    let mut missing_cast = false;
+    let mut missing_collation = false;
+    let mut missing_database = false;
+    let mut missing_tablespace = false;
+    for kind in bootstrap_catalog_kinds() {
+        let rel = RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: kind.relation_oid(),
+        };
+        if !smgr.exists(rel, ForkNumber::Main) {
+            if kind == BootstrapCatalogKind::PgAttrdef {
+                missing_attrdef = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgDepend {
+                missing_depend = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgIndex {
+                missing_index = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAm {
+                missing_am = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAuthId {
+                missing_authid = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAuthMembers {
+                missing_auth_members = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgLanguage {
+                missing_language = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgConstraint {
+                missing_constraint = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgOperator {
+                missing_operator = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgProc {
+                missing_proc = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgCollation {
+                missing_collation = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgCast {
+                missing_cast = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgDatabase {
+                missing_database = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTablespace {
+                missing_tablespace = true;
+                continue;
+            }
+            return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
+        }
+        smgr.open(rel)
+            .map_err(|e| CatalogError::Io(e.to_string()))?;
+        rels.insert(kind, rel);
+    }
+
+    let namespace_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgNamespace],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgNamespace),
+    )?
+    .into_iter()
+    .map(namespace_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let type_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgType],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
+    )?
+    .into_iter()
+    .map(pg_type_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let class_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgClass],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgClass),
+    )?
+    .into_iter()
+    .map(pg_class_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let attribute_rows = scan_catalog_relation_visible(
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        rels[&BootstrapCatalogKind::PgAttribute],
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgAttribute),
+    )?
+    .into_iter()
+    .map(pg_attribute_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let database_rows = if missing_database {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgDatabase],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgDatabase),
+        )?
+        .into_iter()
+        .map(pg_database_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let authid_rows = if missing_authid {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgAuthId],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthId),
+        )?
+        .into_iter()
+        .map(pg_authid_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let auth_members_rows = if missing_auth_members {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgAuthMembers],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAuthMembers),
+        )?
+        .into_iter()
+        .map(pg_auth_members_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let language_rows = if missing_language {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgLanguage],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgLanguage),
+        )?
+        .into_iter()
+        .map(pg_language_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let constraint_rows = if missing_constraint {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgConstraint],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgConstraint),
+        )?
+        .into_iter()
+        .map(pg_constraint_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let operator_rows = if missing_operator {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgOperator],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgOperator),
+        )?
+        .into_iter()
+        .map(pg_operator_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let proc_rows = if missing_proc {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgProc],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgProc),
+        )?
+        .into_iter()
+        .map(pg_proc_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let collation_rows = if missing_collation {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgCollation],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgCollation),
+        )?
+        .into_iter()
+        .map(pg_collation_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let cast_rows = if missing_cast {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgCast],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgCast),
+        )?
+        .into_iter()
+        .map(pg_cast_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let attrdef_rows = if missing_attrdef {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgAttrdef],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAttrdef),
+        )?
+        .into_iter()
+        .map(pg_attrdef_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let depend_rows = if missing_depend {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgDepend],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgDepend),
+        )?
+        .into_iter()
+        .map(pg_depend_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let index_rows = if missing_index {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgIndex],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgIndex),
+        )?
+        .into_iter()
+        .map(pg_index_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let am_rows = if missing_am {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgAm],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAm),
+        )?
+        .into_iter()
+        .map(pg_am_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let tablespace_rows = if missing_tablespace {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgTablespace],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTablespace),
+        )?
+        .into_iter()
+        .map(pg_tablespace_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut rows = PhysicalCatalogRows {
+        namespaces: namespace_rows,
+        classes: class_rows,
+        attributes: attribute_rows,
+        attrdefs: attrdef_rows,
+        depends: depend_rows,
+        indexes: index_rows,
+        ams: am_rows,
+        authids: authid_rows,
+        auth_members: auth_members_rows,
+        languages: language_rows,
+        constraints: constraint_rows,
+        operators: operator_rows,
+        procs: proc_rows,
+        casts: cast_rows,
+        collations: collation_rows,
+        databases: database_rows,
+        tablespaces: tablespace_rows,
+        types: type_rows,
+    };
+    restore_missing_first_class_catalog_rows(
+        base_dir,
+        &mut rows,
+        missing_constraint,
+        missing_depend,
+    )?;
+    Ok(rows)
 }
 
 fn scan_catalog_relation(
@@ -1450,6 +2327,39 @@ fn scan_catalog_relation(
     while let Some((_tid, tuple)) = heap_scan_next(pool, INVALID_TRANSACTION_ID, &mut scan)
         .map_err(|e| CatalogError::Io(format!("{e:?}")))?
     {
+        let raw = tuple
+            .deform(&attr_descs)
+            .map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+        let row = desc
+            .columns
+            .iter()
+            .zip(raw.into_iter())
+            .map(|(column, datum)| {
+                decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn scan_catalog_relation_visible(
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+    rel: RelFileLocator,
+    desc: &RelationDesc,
+) -> Result<Vec<Vec<Value>>, CatalogError> {
+    let mut scan = heap_scan_begin(pool, rel).map_err(|e| CatalogError::Io(format!("{e:?}")))?;
+    let attr_descs = desc.attribute_descs();
+    let mut rows = Vec::new();
+    while let Some((_tid, tuple)) = heap_scan_next(pool, client_id, &mut scan)
+        .map_err(|e| CatalogError::Io(format!("{e:?}")))?
+    {
+        if !snapshot.tuple_visible(txns, &tuple) {
+            continue;
+        }
         let raw = tuple
             .deform(&attr_descs)
             .map_err(|e| CatalogError::Io(format!("{e:?}")))?;
