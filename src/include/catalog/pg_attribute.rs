@@ -3,8 +3,8 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
 use super::{
-    pg_attrdef_desc, pg_class_desc, pg_depend_desc, pg_index_desc, pg_namespace_desc,
-    pg_type_desc,
+    pg_am_desc, pg_attrdef_desc, pg_class_desc, pg_depend_desc, pg_index_desc,
+    pg_namespace_desc, pg_type_desc,
 };
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
@@ -15,7 +15,7 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID, PG_CLASS_RELATION_OID,
+    PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_ATTRIBUTE_RELATION_OID, PG_CLASS_RELATION_OID,
     PG_DEPEND_RELATION_OID,
     PG_INDEX_RELATION_OID,
     PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
@@ -53,6 +53,7 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
     rows.extend(attribute_rows_for_desc(PG_TYPE_RELATION_OID, &pg_type_desc()));
     rows.extend(attribute_rows_for_desc(PG_ATTRIBUTE_RELATION_OID, &pg_attribute_desc()));
     rows.extend(attribute_rows_for_desc(PG_CLASS_RELATION_OID, &pg_class_desc()));
+    rows.extend(attribute_rows_for_desc(PG_AM_RELATION_OID, &pg_am_desc()));
     rows.extend(attribute_rows_for_desc(PG_ATTRDEF_RELATION_OID, &pg_attrdef_desc()));
     rows.extend(attribute_rows_for_desc(PG_DEPEND_RELATION_OID, &pg_depend_desc()));
     rows.extend(attribute_rows_for_desc(PG_INDEX_RELATION_OID, &pg_index_desc()));
@@ -126,7 +127,7 @@ mod tests {
     #[test]
     fn bootstrap_pg_attribute_rows_cover_core_catalog_columns() {
         let rows = bootstrap_pg_attribute_rows();
-        assert_eq!(rows.len(), 38);
+        assert_eq!(rows.len(), 43);
         assert!(rows.iter().any(|row| {
             row.attrelid == PG_CLASS_RELATION_OID
                 && row.attname == "relkind"

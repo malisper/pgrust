@@ -177,6 +177,32 @@
             other => panic!("expected query result, got {:?}", other),
         }
 
+        match db
+            .execute(
+                1,
+                "select a.amname from pg_class c join pg_am a on a.oid = c.relam where c.relname = 'num_exp_add'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("heap".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
+        match db
+            .execute(
+                1,
+                "select a.amname from pg_class c join pg_am a on a.oid = c.relam where c.relname = 'num_exp_add_idx'",
+            )
+            .unwrap()
+        {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Text("btree".into())]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+
         match db.execute(1, "show tables").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Text("num_exp_add".into())]]);
