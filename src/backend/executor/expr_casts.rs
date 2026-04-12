@@ -1,15 +1,18 @@
+use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, parse_bit_text, render_bit_text};
 use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::node_types::*;
-use super::ExecError;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
+use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
 use num_traits::Signed;
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 pub(crate) struct InputErrorInfo {
     pub(crate) message: String,
@@ -63,21 +66,18 @@ fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError
     }
 
     let normalized: String = digits.chars().filter(|&ch| ch != '_').collect();
-    if normalized.is_empty()
-        || !normalized
-            .chars()
-            .all(|ch| ch.is_digit(base))
-    {
+    if normalized.is_empty() || !normalized.chars().all(|ch| ch.is_digit(base)) {
         return Err(ExecError::InvalidIntegerInput {
             ty,
             value: text.to_string(),
         });
     }
 
-    let magnitude = i128::from_str_radix(&normalized, base).map_err(|_| ExecError::InvalidIntegerInput {
-        ty,
-        value: text.to_string(),
-    })?;
+    let magnitude =
+        i128::from_str_radix(&normalized, base).map_err(|_| ExecError::InvalidIntegerInput {
+            ty,
+            value: text.to_string(),
+        })?;
     Ok(if negative { -magnitude } else { magnitude })
 }
 
@@ -128,7 +128,10 @@ fn cast_text_to_oid(text: &str) -> Result<Value, ExecError> {
 
 pub(crate) fn parse_bytea_text(text: &str) -> Result<Vec<u8>, ExecError> {
     if let Some(rest) = text.strip_prefix("\\x") {
-        let normalized: String = rest.chars().filter(|ch| !ch.is_ascii_whitespace()).collect();
+        let normalized: String = rest
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect();
         if normalized.len() % 2 != 0 {
             return Err(ExecError::InvalidByteaInput {
                 value: text.to_string(),
@@ -139,9 +142,11 @@ pub(crate) fn parse_bytea_text(text: &str) -> Result<Vec<u8>, ExecError> {
             let hex = std::str::from_utf8(chunk).map_err(|_| ExecError::InvalidByteaInput {
                 value: text.to_string(),
             })?;
-            out.push(u8::from_str_radix(hex, 16).map_err(|_| ExecError::InvalidByteaInput {
-                value: text.to_string(),
-            })?);
+            out.push(
+                u8::from_str_radix(hex, 16).map_err(|_| ExecError::InvalidByteaInput {
+                    value: text.to_string(),
+                })?,
+            );
         }
         return Ok(out);
     }
@@ -175,7 +180,8 @@ pub(crate) fn parse_bytea_text(text: &str) -> Result<Vec<u8>, ExecError> {
                 value: text.to_string(),
             });
         }
-        let value = (bytes[idx] - b'0') * 64 + (bytes[idx + 1] - b'0') * 8 + (bytes[idx + 2] - b'0');
+        let value =
+            (bytes[idx] - b'0') * 64 + (bytes[idx + 1] - b'0') * 8 + (bytes[idx + 2] - b'0');
         out.push(value);
         idx += 3;
     }
@@ -235,9 +241,7 @@ fn parse_internal_char_text(text: &str) -> u8 {
     if bytes.is_empty() {
         return 0;
     }
-    if bytes.len() == 4
-        && bytes[0] == b'\\'
-        && bytes[1..].iter().all(|b| (b'0'..=b'7').contains(b))
+    if bytes.len() == 4 && bytes[0] == b'\\' && bytes[1..].iter().all(|b| (b'0'..=b'7').contains(b))
     {
         return (bytes[1] - b'0') * 64 + (bytes[2] - b'0') * 8 + (bytes[3] - b'0');
     }
@@ -257,25 +261,37 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
         Ok(ty) => ty,
         Err(_) => return Ok(None),
     };
-    let supported = matches!(
-        parsed.kind,
-        SqlTypeKind::Int2
-            | SqlTypeKind::Int4
-            | SqlTypeKind::Int8
-            | SqlTypeKind::Oid
-            | SqlTypeKind::Bit
-            | SqlTypeKind::VarBit
-            | SqlTypeKind::Bytea
-            | SqlTypeKind::Float4
-            | SqlTypeKind::Float8
-            | SqlTypeKind::Text
-            | SqlTypeKind::Bool
-            | SqlTypeKind::Numeric
-            | SqlTypeKind::InternalChar
-            | SqlTypeKind::Char
-            | SqlTypeKind::Varchar
-    ) && !parsed.is_array;
-    Ok(supported.then_some(parsed))
+    Ok(input_type_name_supported(parsed).then_some(parsed))
+}
+
+fn input_type_name_supported(parsed: SqlType) -> bool {
+    if parsed.is_array {
+        return false;
+    }
+    if matches!(parsed.kind, SqlTypeKind::Text) {
+        return true;
+    }
+    let Some(type_oid) = builtin_type_oid(parsed) else {
+        return false;
+    };
+    explicit_text_input_target_oids().contains(&type_oid)
+}
+
+fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
+    builtin_type_rows().into_iter().find_map(|row| {
+        (!row.sql_type.is_array && row.sql_type.kind == sql_type.kind).then_some(row.oid)
+    })
+}
+
+fn explicit_text_input_target_oids() -> &'static BTreeSet<u32> {
+    static OIDS: OnceLock<BTreeSet<u32>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        bootstrap_pg_cast_rows()
+            .into_iter()
+            .filter(|row| row.castsource == TEXT_TYPE_OID && row.castmethod == 'i')
+            .map(|row| row.casttarget)
+            .collect()
+    })
 }
 
 fn input_error_message(err: &ExecError, text: &str) -> String {
@@ -349,9 +365,7 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::OidOutOfRange
         | ExecError::FloatOutOfRange { .. }
         | ExecError::FloatOverflow
-        | ExecError::FloatUnderflow => {
-            "22003"
-        }
+        | ExecError::FloatUnderflow => "22003",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::InvalidFloatInput { .. } => "22P02",
         _ => "XX000",
@@ -560,11 +574,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind:
                     SqlTypeKind::Int2
                     | SqlTypeKind::Int4
-            | SqlTypeKind::Int8
-            | SqlTypeKind::Oid
-            | SqlTypeKind::Bytea
-            | SqlTypeKind::Float4
-            | SqlTypeKind::Float8
+                    | SqlTypeKind::Int8
+                    | SqlTypeKind::Oid
+                    | SqlTypeKind::Bytea
+                    | SqlTypeKind::Float4
+                    | SqlTypeKind::Float8
                     | SqlTypeKind::Numeric,
                 ..
             } => Err(ExecError::TypeMismatch {
@@ -582,9 +596,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
         }
         Value::InternalChar(byte) => match ty.kind {
             SqlTypeKind::InternalChar => Ok(Value::InternalChar(byte)),
-            SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Text(
-                CompactString::from_owned(render_internal_char_text(byte)),
-            )),
+            SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Bit | SqlTypeKind::VarBit => {
+                Ok(Value::Text(CompactString::from_owned(
+                    render_internal_char_text(byte),
+                )))
+            }
             SqlTypeKind::Json => {
                 let rendered = render_internal_char_text(byte);
                 validate_json_text(&rendered)?;
@@ -763,10 +779,12 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Bit(bits) => match ty.kind {
-            SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(bits, ty, true)?)),
-            SqlTypeKind::Text | SqlTypeKind::Timestamp => {
-                Ok(Value::Text(CompactString::from_owned(render_bit_text(&bits))))
+            SqlTypeKind::Bit | SqlTypeKind::VarBit => {
+                Ok(Value::Bit(coerce_bit_string(bits, ty, true)?))
             }
+            SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(
+                CompactString::from_owned(render_bit_text(&bits)),
+            )),
             _ => Err(ExecError::TypeMismatch {
                 op: "::bit",
                 left: Value::Bit(bits),
@@ -781,9 +799,11 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
     match ty.kind {
         SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
-        SqlTypeKind::Bit | SqlTypeKind::VarBit => {
-            Ok(Value::Bit(coerce_bit_string(parse_bit_text(text)?, ty, explicit)?))
-        }
+        SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(
+            parse_bit_text(text)?,
+            ty,
+            explicit,
+        )?)),
         SqlTypeKind::Bytea => Ok(Value::Bytea(parse_bytea_text(text)?)),
         SqlTypeKind::Json => {
             validate_json_text(text)?;
@@ -798,14 +818,13 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         SqlTypeKind::Int4 => cast_text_to_int4(text),
         SqlTypeKind::Int8 => cast_text_to_int8(text),
         SqlTypeKind::Oid => cast_text_to_oid(text),
-        SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text, ty.kind)
-            .map(|v| {
-                Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
-                    (v as f32) as f64
-                } else {
-                    v
-                })
-            }),
+        SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text, ty.kind).map(|v| {
+            Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
+                (v as f32) as f64
+            } else {
+                v
+            })
+        }),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(
             parse_numeric_text(text)
                 .ok_or_else(|| ExecError::InvalidNumericInput(text.to_string()))?,
@@ -869,9 +888,7 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::Oid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())
-            .and_then(|rounded| {
-                Some(Value::Int64(rounded as i64))
-            })
+            .and_then(|rounded| Some(Value::Int64(rounded as i64)))
             .ok_or(ExecError::OidOutOfRange),
         SqlTypeKind::Bool => Err(ExecError::TypeMismatch {
             op: "::bool",
@@ -1006,10 +1023,16 @@ fn coerce_numeric_value(parsed: NumericValue, ty: SqlType) -> Result<NumericValu
     }
 }
 
-fn coerce_numeric_negative_scale(parsed: NumericValue, scale: i32) -> Result<NumericValue, ExecError> {
+fn coerce_numeric_negative_scale(
+    parsed: NumericValue,
+    scale: i32,
+) -> Result<NumericValue, ExecError> {
     let shift = scale.unsigned_abs();
     match parsed {
-        NumericValue::Finite { coeff, scale: current_scale } => {
+        NumericValue::Finite {
+            coeff,
+            scale: current_scale,
+        } => {
             let integer = coeff;
             let factor = pow10_bigint(current_scale.saturating_add(shift));
             let (quotient, remainder) = integer.div_rem(&factor);
@@ -1064,11 +1087,13 @@ fn parse_pg_float(text: &str, kind: SqlTypeKind) -> Result<f64, ExecError> {
 
     let normalized = trimmed.to_ascii_lowercase();
     match normalized.as_str() {
-        "nan" | "+nan" | "-nan" => return Ok(if matches!(kind, SqlTypeKind::Float4) {
-            f32::NAN as f64
-        } else {
-            f64::NAN
-        }),
+        "nan" | "+nan" | "-nan" => {
+            return Ok(if matches!(kind, SqlTypeKind::Float4) {
+                f32::NAN as f64
+            } else {
+                f64::NAN
+            });
+        }
         "inf" | "+inf" | "infinity" | "+infinity" => {
             return Ok(if matches!(kind, SqlTypeKind::Float4) {
                 f32::INFINITY as f64
@@ -1097,10 +1122,12 @@ fn parse_pg_float4(trimmed: &str, raw: &str) -> Result<f64, ExecError> {
     let parsed = match trimmed.parse::<f32>() {
         Ok(parsed) => parsed,
         Err(_) => {
-            let parsed64 = trimmed.parse::<f64>().map_err(|_| ExecError::InvalidFloatInput {
-                ty: "real",
-                value: raw.to_string(),
-            })?;
+            let parsed64 = trimmed
+                .parse::<f64>()
+                .map_err(|_| ExecError::InvalidFloatInput {
+                    ty: "real",
+                    value: raw.to_string(),
+                })?;
             if parsed64.is_infinite() {
                 return Err(ExecError::FloatOutOfRange {
                     ty: "real",
@@ -1131,10 +1158,12 @@ fn parse_pg_float4(trimmed: &str, raw: &str) -> Result<f64, ExecError> {
 }
 
 fn parse_pg_float8(trimmed: &str, raw: &str) -> Result<f64, ExecError> {
-    let parsed = trimmed.parse::<f64>().map_err(|_| ExecError::InvalidFloatInput {
-        ty: "double precision",
-        value: raw.to_string(),
-    })?;
+    let parsed = trimmed
+        .parse::<f64>()
+        .map_err(|_| ExecError::InvalidFloatInput {
+            ty: "double precision",
+            value: raw.to_string(),
+        })?;
 
     if parsed.is_infinite() {
         return Err(ExecError::FloatOutOfRange {
@@ -1180,7 +1209,7 @@ fn has_nonzero_digit(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cast_float_to_int, parse_pg_float};
+    use super::{cast_float_to_int, parse_input_type_name, parse_pg_float, soft_input_error_info};
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
 
@@ -1214,5 +1243,39 @@ mod tests {
             cast_float_to_int(9_223_372_036_854_775_808.0, int8),
             Err(ExecError::Int8OutOfRange)
         ));
+    }
+
+    #[test]
+    fn parse_input_type_name_uses_text_input_cast_surface() {
+        assert_eq!(
+            parse_input_type_name("jsonb").unwrap(),
+            Some(SqlType::new(SqlTypeKind::Jsonb))
+        );
+        assert_eq!(
+            parse_input_type_name("jsonpath").unwrap(),
+            Some(SqlType::new(SqlTypeKind::JsonPath))
+        );
+        assert_eq!(
+            parse_input_type_name("timestamp").unwrap(),
+            Some(SqlType::new(SqlTypeKind::Timestamp))
+        );
+        assert_eq!(
+            parse_input_type_name("varchar(4)").unwrap(),
+            Some(SqlType::with_char_len(SqlTypeKind::Varchar, 4))
+        );
+        assert_eq!(parse_input_type_name("int4[]").unwrap(), None);
+    }
+
+    #[test]
+    fn soft_input_error_info_supports_catalog_backed_input_types() {
+        assert!(soft_input_error_info("{\"a\":1}", "jsonb")
+            .unwrap()
+            .is_none());
+        assert!(soft_input_error_info("{\"a\":", "jsonb")
+            .unwrap()
+            .is_some());
+        assert!(soft_input_error_info("$.a", "jsonpath")
+            .unwrap()
+            .is_none());
     }
 }
