@@ -150,9 +150,21 @@
         let base = temp_dir("numeric_sql_noops");
         let db = Database::open(&base, 16).unwrap();
 
-        match db.execute(1, "select datname from pg_database").unwrap() {
+        match db
+            .execute(
+                1,
+                "select d.datname, t.spcname from pg_database d join pg_tablespace t on t.oid = d.dattablespace",
+            )
+            .unwrap()
+        {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Text("postgres".into())]]);
+                assert_eq!(
+                    rows,
+                    vec![vec![
+                        Value::Text("postgres".into()),
+                        Value::Text("pg_default".into()),
+                    ]]
+                );
             }
             other => panic!("expected query result, got {:?}", other),
         }

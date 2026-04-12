@@ -7,6 +7,7 @@ use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
 use crate::backend::catalog::pg_database::sort_pg_database_rows;
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
+use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_USER_OID, load_physical_catalog_rows};
 use crate::backend::catalog::pg_attribute::sort_pg_attribute_rows;
 use crate::backend::catalog::CatalogError;
@@ -21,11 +22,11 @@ use crate::include::catalog::{
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
     PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDatabaseRow, PgDependRow, PgIndexRow,
-    PgNamespaceRow, PgTypeRow,
+    PgNamespaceRow, PgTablespaceRow, PgTypeRow,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_namespace_rows, builtin_type_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +41,7 @@ pub struct CatCache {
     index_rows: Vec<PgIndexRow>,
     am_rows: Vec<PgAmRow>,
     database_rows: Vec<PgDatabaseRow>,
+    tablespace_rows: Vec<PgTablespaceRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
@@ -72,6 +74,8 @@ impl CatCache {
         sort_pg_am_rows(&mut cache.am_rows);
         cache.database_rows.extend(bootstrap_pg_database_rows());
         sort_pg_database_rows(&mut cache.database_rows);
+        cache.tablespace_rows.extend(bootstrap_pg_tablespace_rows());
+        sort_pg_tablespace_rows(&mut cache.tablespace_rows);
 
         for (name, entry) in catalog.entries() {
             if let Some((namespace, _)) = name.split_once('.')
@@ -193,6 +197,7 @@ impl CatCache {
             rows.indexes,
             rows.ams,
             rows.databases,
+            rows.tablespaces,
             rows.types,
         ))
     }
@@ -206,6 +211,7 @@ impl CatCache {
         index_rows: Vec<PgIndexRow>,
         am_rows: Vec<PgAmRow>,
         database_rows: Vec<PgDatabaseRow>,
+        tablespace_rows: Vec<PgTablespaceRow>,
         type_rows: Vec<PgTypeRow>,
     ) -> Self {
         let mut cache = Self::default();
@@ -248,6 +254,8 @@ impl CatCache {
         sort_pg_am_rows(&mut cache.am_rows);
         cache.database_rows = database_rows;
         sort_pg_database_rows(&mut cache.database_rows);
+        cache.tablespace_rows = tablespace_rows;
+        sort_pg_tablespace_rows(&mut cache.tablespace_rows);
         cache
     }
 
@@ -324,6 +332,10 @@ impl CatCache {
     pub fn database_rows(&self) -> Vec<PgDatabaseRow> {
         self.database_rows.clone()
     }
+
+    pub fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
+        self.tablespace_rows.clone()
+    }
 }
 pub fn normalize_catalog_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
@@ -392,8 +404,9 @@ mod tests {
     use crate::backend::executor::RelationDesc;
     use crate::include::catalog::{
         BTREE_AM_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
-        HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
-        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
+        CURRENT_DATABASE_NAME, DEFAULT_TABLESPACE_OID, HEAP_TABLE_AM_OID,
+        PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -512,6 +525,14 @@ mod tests {
             cache.class_by_name("people").map(|row| row.relam),
             Some(HEAP_TABLE_AM_OID)
         );
+        assert!(cache.database_rows().iter().any(|row| {
+            row.oid == 1
+                && row.datname == CURRENT_DATABASE_NAME
+                && row.dattablespace == DEFAULT_TABLESPACE_OID
+        }));
+        assert!(cache.tablespace_rows().iter().any(|row| {
+            row.oid == DEFAULT_TABLESPACE_OID && row.spcname == "pg_default"
+        }));
         assert!(cache.index_rows().iter().any(|row| {
             row.indexrelid == index.relation_oid
                 && row.indrelid == entry.relation_oid

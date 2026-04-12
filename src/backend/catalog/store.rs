@@ -17,7 +17,7 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgDatabaseRow,
-    PgDependRow, PgIndexRow, PgNamespaceRow, PgTypeRow, bootstrap_catalog_kinds,
+    PgDependRow, PgIndexRow, PgNamespaceRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
     bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
@@ -37,6 +37,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub indexes: Vec<PgIndexRow>,
     pub ams: Vec<PgAmRow>,
     pub databases: Vec<PgDatabaseRow>,
+    pub tablespaces: Vec<PgTablespaceRow>,
     pub types: Vec<PgTypeRow>,
 }
 
@@ -325,6 +326,20 @@ pub(crate) fn sync_catalog_rows(
         RelFileLocator {
             spc_oid: 0,
             db_oid,
+            rel_number: BootstrapCatalogKind::PgTablespace.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgTablespace),
+        rows.tablespaces
+            .iter()
+            .cloned()
+            .map(pg_tablespace_row_values)
+            .collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
             rel_number: BootstrapCatalogKind::PgType.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgType),
@@ -399,6 +414,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         indexes: catcache.index_rows(),
         ams: catcache.am_rows(),
         databases: catcache.database_rows(),
+        tablespaces: catcache.tablespace_rows(),
         types: catcache.type_rows(),
     }
 }
@@ -455,9 +471,14 @@ fn pg_database_row_values(row: PgDatabaseRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
         Value::Text(row.datname.into()),
+        Value::Int32(row.dattablespace as i32),
         Value::Bool(row.datistemplate),
         Value::Bool(row.datallowconn),
     ]
+}
+
+fn pg_tablespace_row_values(row: PgTablespaceRow) -> Vec<Value> {
+    vec![Value::Int32(row.oid as i32), Value::Text(row.spcname.into())]
 }
 
 fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
@@ -535,6 +556,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let index_rows = rows.indexes;
     let _am_rows = rows.ams;
     let _database_rows = rows.databases;
+    let _tablespace_rows = rows.tablespaces;
 
     let namespace_names = namespace_rows
         .iter()
@@ -699,6 +721,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut missing_index = false;
     let mut missing_am = false;
     let mut missing_database = false;
+    let mut missing_tablespace = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -724,6 +747,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             if kind == BootstrapCatalogKind::PgDatabase {
                 missing_database = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTablespace {
+                missing_tablespace = true;
                 continue;
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
@@ -825,6 +852,18 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         .map(pg_am_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let tablespace_rows = if missing_tablespace {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgTablespace],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTablespace),
+        )?
+        .into_iter()
+        .map(pg_tablespace_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     Ok(PhysicalCatalogRows {
         namespaces: namespace_rows,
@@ -835,6 +874,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         indexes: index_rows,
         ams: am_rows,
         databases: database_rows,
+        tablespaces: tablespace_rows,
         types: type_rows,
     })
 }
@@ -955,8 +995,16 @@ fn pg_database_row_from_values(values: Vec<Value>) -> Result<PgDatabaseRow, Cata
     Ok(PgDatabaseRow {
         oid: expect_oid(&values[0])?,
         datname: expect_text(&values[1])?,
-        datistemplate: expect_bool(&values[2])?,
-        datallowconn: expect_bool(&values[3])?,
+        dattablespace: expect_oid(&values[2])?,
+        datistemplate: expect_bool(&values[3])?,
+        datallowconn: expect_bool(&values[4])?,
+    })
+}
+
+fn pg_tablespace_row_from_values(values: Vec<Value>) -> Result<PgTablespaceRow, CatalogError> {
+    Ok(PgTablespaceRow {
+        oid: expect_oid(&values[0])?,
+        spcname: expect_text(&values[1])?,
     })
 }
 
@@ -1063,9 +1111,9 @@ mod tests {
     use crate::backend::storage::smgr::segment_path;
     use crate::include::catalog::{
         BTREE_AM_OID, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
-        CURRENT_DATABASE_NAME, HEAP_TABLE_AM_OID, PG_ATTRDEF_RELATION_OID,
-        PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
-        PUBLIC_NAMESPACE_OID,
+        CURRENT_DATABASE_NAME, DEFAULT_TABLESPACE_OID, HEAP_TABLE_AM_OID,
+        PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+        PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1308,8 +1356,24 @@ mod tests {
         assert!(rows.databases.iter().any(|row| {
             row.oid == 1
                 && row.datname == CURRENT_DATABASE_NAME
+                && row.dattablespace == DEFAULT_TABLESPACE_OID
                 && !row.datistemplate
                 && row.datallowconn
+        }));
+    }
+
+    #[test]
+    fn catalog_store_persists_pg_tablespace_rows() {
+        let base = temp_dir("tablespace_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+
+        assert!(rows.tablespaces.iter().any(|row| {
+            row.oid == DEFAULT_TABLESPACE_OID && row.spcname == "pg_default"
+        }));
+        assert!(rows.tablespaces.iter().any(|row| {
+            row.oid == crate::include::catalog::GLOBAL_TABLESPACE_OID
+                && row.spcname == "pg_global"
         }));
     }
 
@@ -1381,6 +1445,9 @@ mod tests {
         let am = catalog.get("pg_am").unwrap();
         let am_path = segment_path(&base, am.rel, ForkNumber::Main, 0);
         assert!(am_path.exists(), "pg_am relfile should exist");
+        let tablespace = catalog.get("pg_tablespace").unwrap();
+        let tablespace_path = segment_path(&base, tablespace.rel, ForkNumber::Main, 0);
+        assert!(tablespace_path.exists(), "pg_tablespace relfile should exist");
     }
 
     #[test]
@@ -1645,6 +1712,43 @@ mod tests {
 
         let rows = load_physical_catalog_rows(&base).unwrap();
         assert!(rows.databases.iter().any(|row| row.datname == CURRENT_DATABASE_NAME));
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_tablespace_relation() {
+        let base = temp_dir("missing_tablespace_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let tablespace_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgTablespace.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&tablespace_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(tablespace_path.exists(), "pg_tablespace relfile should be recreated");
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows.tablespaces.iter().any(|row| {
+            row.oid == DEFAULT_TABLESPACE_OID && row.spcname == "pg_default"
+        }));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 }
