@@ -165,6 +165,18 @@ if [[ "$USE_PGRUST_SETUP" == true ]]; then
         filtered_test_files+=("$sql_file")
     done
     TEST_FILES=("${filtered_test_files[@]}")
+else
+    TEST_SETUP_FILE="$SQL_DIR/test_setup.sql"
+    if [[ -f "$TEST_SETUP_FILE" ]]; then
+        ordered_test_files=("$TEST_SETUP_FILE")
+        for sql_file in "${TEST_FILES[@]}"; do
+            if [[ "$sql_file" == "$TEST_SETUP_FILE" ]]; then
+                continue
+            fi
+            ordered_test_files+=("$sql_file")
+        done
+        TEST_FILES=("${ordered_test_files[@]}")
+    fi
 fi
 
 TOTAL=0
