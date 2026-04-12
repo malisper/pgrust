@@ -327,7 +327,7 @@ pub(crate) fn sync_catalog_rows(
     sync_catalog_rows_subset(base_dir, rows, db_oid, &bootstrap_catalog_kinds())
 }
 
-fn sync_catalog_rows_subset(
+pub(crate) fn sync_catalog_rows_subset(
     base_dir: &Path,
     rows: &PhysicalCatalogRows,
     db_oid: u32,

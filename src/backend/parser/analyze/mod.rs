@@ -71,10 +71,17 @@ pub trait CatalogLookup {
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
-        self.type_rows().into_iter().find_map(|row| {
-            (row.sql_type.kind == sql_type.kind && row.sql_type.is_array == sql_type.is_array)
-                .then_some(row.oid)
-        })
+        let mut fallback = None;
+        for row in self.type_rows() {
+            if row.sql_type.kind != sql_type.kind || row.sql_type.is_array != sql_type.is_array {
+                continue;
+            }
+            if row.typrelid == 0 {
+                return Some(row.oid);
+            }
+            fallback.get_or_insert(row.oid);
+        }
+        fallback
     }
 }
 

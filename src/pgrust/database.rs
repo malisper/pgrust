@@ -12,7 +12,7 @@ use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_cata
 use crate::backend::catalog::catalog::{allocate_relation_object_oids, column_desc};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::derived_relation_depend_rows;
-use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows};
+use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows_subset};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
@@ -214,7 +214,7 @@ impl Database {
                 relcache.insert(name.clone(), temp.entry.clone());
                 relcache.insert(format!("pg_temp.{name}"), temp.entry.clone());
             }
-            for kind in bootstrap_catalog_kinds() {
+            for kind in temp_catalog_sync_kinds(namespace) {
                 let entry = Self::temp_catalog_entry(client_id, kind);
                 relcache.insert(kind.relation_name(), entry.clone());
                 relcache.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
@@ -365,6 +365,7 @@ impl Database {
                 });
 
                 if let Some(namespace) = self.temp_relations.read().get(&client_id) {
+                    let sync_kinds = temp_catalog_sync_kinds(namespace);
                     for (name, temp) in &namespace.tables {
                         rows.classes.push(PgClassRow {
                             oid: temp.entry.relation_oid,
@@ -426,9 +427,13 @@ impl Database {
                             &temp.entry.desc,
                         ));
                     }
+                    let _ = sync_catalog_rows_subset(
+                        &base_dir,
+                        &rows,
+                        temp_namespace_oid,
+                        &sync_kinds,
+                    );
                 }
-
-                let _ = sync_catalog_rows(&base_dir, &rows, temp_namespace_oid);
                 self.refresh_catalog_storage();
             }
         }
@@ -1340,6 +1345,38 @@ impl Database {
             client_id,
         })
     }
+}
+
+fn temp_catalog_sync_kinds(namespace: &TempNamespace) -> Vec<BootstrapCatalogKind> {
+    let mut kinds = vec![
+        BootstrapCatalogKind::PgNamespace,
+        BootstrapCatalogKind::PgClass,
+        BootstrapCatalogKind::PgType,
+        BootstrapCatalogKind::PgAttribute,
+        BootstrapCatalogKind::PgDepend,
+    ];
+
+    if namespace.tables.values().any(|temp| {
+        temp.entry
+            .desc
+            .columns
+            .iter()
+            .any(|column| column.default_expr.is_some())
+    }) {
+        kinds.push(BootstrapCatalogKind::PgAttrdef);
+    }
+
+    if namespace.tables.values().any(|temp| {
+        temp.entry
+            .desc
+            .columns
+            .iter()
+            .any(|column| !column.storage.nullable)
+    }) {
+        kinds.push(BootstrapCatalogKind::PgConstraint);
+    }
+
+    kinds
 }
 
 fn normalize_temp_lookup_name(table_name: &str) -> String {
