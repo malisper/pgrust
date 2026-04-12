@@ -294,6 +294,35 @@ impl Database {
         Some(rebuilt)
     }
 
+    fn apply_temp_relcache_overlay(&self, client_id: ClientId, relcache: &mut RelCache) {
+        if let Some(namespace) = self.temp_relations.read().get(&client_id) {
+            for (name, temp) in &namespace.tables {
+                relcache.insert(name.clone(), temp.entry.clone());
+                relcache.insert(format!("pg_temp.{name}"), temp.entry.clone());
+            }
+            for kind in temp_catalog_sync_kinds(namespace) {
+                let entry = Self::temp_catalog_entry(client_id, kind);
+                relcache.insert(kind.relation_name(), entry.clone());
+                relcache.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
+            }
+        }
+    }
+
+    fn cached_visible_catalog_for_autocommit(
+        &self,
+        client_id: ClientId,
+        configured_search_path: Option<&[String]>,
+    ) -> Option<VisibleCatalog> {
+        let cache = self.client_visible_cache_snapshot(client_id)?;
+        let mut relcache = cache.relcache;
+        self.apply_temp_relcache_overlay(client_id, &mut relcache);
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        Some(VisibleCatalog::new(
+            relcache.with_search_path(&search_path),
+            Some(cache.catcache),
+        ))
+    }
+
     fn snapshot_visible_state(
         &self,
         client_id: ClientId,
@@ -321,17 +350,7 @@ impl Database {
 
     fn raw_visible_relcache(&self, client_id: ClientId, txn_ctx: CatalogTxnContext) -> RelCache {
         let (mut relcache, _) = self.snapshot_visible_state(client_id, txn_ctx);
-        if let Some(namespace) = self.temp_relations.read().get(&client_id) {
-            for (name, temp) in &namespace.tables {
-                relcache.insert(name.clone(), temp.entry.clone());
-                relcache.insert(format!("pg_temp.{name}"), temp.entry.clone());
-            }
-            for kind in temp_catalog_sync_kinds(namespace) {
-                let entry = Self::temp_catalog_entry(client_id, kind);
-                relcache.insert(kind.relation_name(), entry.clone());
-                relcache.insert(format!("pg_catalog.{}", kind.relation_name()), entry);
-            }
-        }
+        self.apply_temp_relcache_overlay(client_id, &mut relcache);
         relcache
     }
 
@@ -457,10 +476,12 @@ impl Database {
         txn_ctx: CatalogTxnContext,
         configured_search_path: Option<&[String]>,
     ) -> RelCache {
-        if txn_ctx.is_none() && !self.has_active_temp_namespace(client_id) {
+        if txn_ctx.is_none() {
             if let Some(cache) = self.client_visible_cache_snapshot(client_id) {
+                let mut relcache = cache.relcache;
+                self.apply_temp_relcache_overlay(client_id, &mut relcache);
                 let search_path = self.effective_search_path(client_id, configured_search_path);
-                return cache.relcache.with_search_path(&search_path);
+                return relcache.with_search_path(&search_path);
             }
         }
         let relcache = self.raw_visible_relcache(client_id, txn_ctx);
@@ -1302,11 +1323,18 @@ impl Database {
             // narrow ALTER TABLE form until table reloptions are represented properly.
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) | Statement::ShowTables => {
-                if statement_needs_temp_catalog_sync(&stmt) {
+                let needs_temp_sync = statement_needs_temp_catalog_sync(&stmt);
+                if needs_temp_sync {
                     self.sync_visible_catalog_heaps(client_id);
                 }
-                let visible_catalog =
-                    self.visible_catalog_with_search_path(client_id, configured_search_path);
+                let visible_catalog = if !needs_temp_sync {
+                    self.cached_visible_catalog_for_autocommit(client_id, configured_search_path)
+                        .unwrap_or_else(|| {
+                            self.visible_catalog_with_search_path(client_id, configured_search_path)
+                        })
+                } else {
+                    self.visible_catalog_with_search_path(client_id, configured_search_path)
+                };
                 let (plan_or_stmt, rels) = {
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
@@ -1552,15 +1580,27 @@ impl Database {
         use crate::backend::executor::executor_start;
         use crate::backend::parser::build_plan;
 
+        let needs_temp_sync = select_statement_needs_temp_catalog_sync(select_stmt);
         let (plan, rels) = {
-            if statement_needs_temp_catalog_sync(&Statement::Select(select_stmt.clone())) {
+            if needs_temp_sync {
                 self.sync_visible_catalog_heaps(client_id);
             }
-            let visible_catalog = self.visible_catalog_with_txn_search_path(
-                client_id,
-                txn_ctx,
-                configured_search_path,
-            );
+            let visible_catalog = if txn_ctx.is_none() && !needs_temp_sync {
+                self.cached_visible_catalog_for_autocommit(client_id, configured_search_path)
+                    .unwrap_or_else(|| {
+                        self.visible_catalog_with_txn_search_path(
+                            client_id,
+                            txn_ctx,
+                            configured_search_path,
+                        )
+                    })
+            } else {
+                self.visible_catalog_with_txn_search_path(
+                    client_id,
+                    txn_ctx,
+                    configured_search_path,
+                )
+            };
             let plan = build_plan(select_stmt, &visible_catalog)?;
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
