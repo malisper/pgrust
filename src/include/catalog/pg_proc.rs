@@ -3,10 +3,9 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT8_TYPE_OID, JSONB_TYPE_OID,
-    JSON_TYPE_OID, NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, TEXT_TYPE_OID,
+    JSON_TYPE_OID, NUMERIC_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
+    TEXT_TYPE_OID,
 };
-
-pub const INTERNAL_LANGUAGE_OID: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -310,7 +309,7 @@ fn proc_row(
         proname: proname.into(),
         pronamespace: PG_CATALOG_NAMESPACE_OID,
         proowner: BOOTSTRAP_SUPERUSER_OID,
-        prolang: INTERNAL_LANGUAGE_OID,
+        prolang: PG_LANGUAGE_INTERNAL_OID,
         procost: 1.0,
         prorows: if proretset { 1000.0 } else { 0.0 },
         provariadic: 0,

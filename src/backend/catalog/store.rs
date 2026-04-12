@@ -18,8 +18,9 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
     PgCastRow, PgClassRow, PgCollationRow, PgDatabaseRow, PgDependRow, PgIndexRow,
-    PgNamespaceRow, PgProcRow, PgTablespaceRow, PgTypeRow, bootstrap_catalog_kinds,
-    bootstrap_composite_type_rows, bootstrap_relation_desc, builtin_type_rows,
+    PgLanguageRow, PgNamespaceRow, PgProcRow, PgTablespaceRow, PgTypeRow,
+    bootstrap_catalog_kinds, bootstrap_composite_type_rows, bootstrap_relation_desc,
+    builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::BufferPool;
@@ -39,6 +40,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub ams: Vec<PgAmRow>,
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
+    pub languages: Vec<PgLanguageRow>,
     pub procs: Vec<PgProcRow>,
     pub casts: Vec<PgCastRow>,
     pub collations: Vec<PgCollationRow>,
@@ -350,6 +352,20 @@ pub(crate) fn sync_catalog_rows(
         RelFileLocator {
             spc_oid: 0,
             db_oid,
+            rel_number: BootstrapCatalogKind::PgLanguage.relation_oid(),
+        },
+        &bootstrap_relation_desc(BootstrapCatalogKind::PgLanguage),
+        rows.languages
+            .iter()
+            .cloned()
+            .map(pg_language_row_values)
+            .collect(),
+    )?;
+    insert_catalog_rows(
+        &pool,
+        RelFileLocator {
+            spc_oid: 0,
+            db_oid,
             rel_number: BootstrapCatalogKind::PgProc.relation_oid(),
         },
         &bootstrap_relation_desc(BootstrapCatalogKind::PgProc),
@@ -483,6 +499,7 @@ fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> PhysicalCatalogRo
         ams: catcache.am_rows(),
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
+        languages: catcache.language_rows(),
         procs: catcache.proc_rows(),
         casts: catcache.cast_rows(),
         collations: catcache.collation_rows(),
@@ -581,6 +598,19 @@ fn pg_collation_row_values(row: PgCollationRow) -> Vec<Value> {
         Value::Text(row.collprovider.to_string().into()),
         Value::Bool(row.collisdeterministic),
         Value::Int32(row.collencoding),
+    ]
+}
+
+fn pg_language_row_values(row: PgLanguageRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.lanname.into()),
+        Value::Int32(row.lanowner as i32),
+        Value::Bool(row.lanispl),
+        Value::Bool(row.lanpltrusted),
+        Value::Int32(row.lanplcallfoid as i32),
+        Value::Int32(row.laninline as i32),
+        Value::Int32(row.lanvalidator as i32),
     ]
 }
 
@@ -717,6 +747,7 @@ fn load_catalog_from_physical(base_dir: &Path) -> Result<Catalog, CatalogError> 
     let _am_rows = rows.ams;
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
+    let _language_rows = rows.languages;
     let _proc_rows = rows.procs;
     let _cast_rows = rows.casts;
     let _collation_rows = rows.collations;
@@ -887,6 +918,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
     let mut missing_am = false;
     let mut missing_authid = false;
     let mut missing_auth_members = false;
+    let mut missing_language = false;
     let mut missing_proc = false;
     let mut missing_cast = false;
     let mut missing_collation = false;
@@ -921,6 +953,10 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
             }
             if kind == BootstrapCatalogKind::PgAuthMembers {
                 missing_auth_members = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgLanguage {
+                missing_language = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgProc {
@@ -1016,6 +1052,18 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         )?
         .into_iter()
         .map(pg_auth_members_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let language_rows = if missing_language {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgLanguage],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgLanguage),
+        )?
+        .into_iter()
+        .map(pg_language_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
     let proc_rows = if missing_proc {
@@ -1125,6 +1173,7 @@ pub(crate) fn load_physical_catalog_rows(base_dir: &Path) -> Result<PhysicalCata
         ams: am_rows,
         authids: authid_rows,
         auth_members: auth_members_rows,
+        languages: language_rows,
         procs: proc_rows,
         casts: cast_rows,
         collations: collation_rows,
@@ -1279,6 +1328,19 @@ fn pg_auth_members_row_from_values(values: Vec<Value>) -> Result<PgAuthMembersRo
         admin_option: expect_bool(&values[4])?,
         inherit_option: expect_bool(&values[5])?,
         set_option: expect_bool(&values[6])?,
+    })
+}
+
+fn pg_language_row_from_values(values: Vec<Value>) -> Result<PgLanguageRow, CatalogError> {
+    Ok(PgLanguageRow {
+        oid: expect_oid(&values[0])?,
+        lanname: expect_text(&values[1])?,
+        lanowner: expect_oid(&values[2])?,
+        lanispl: expect_bool(&values[3])?,
+        lanpltrusted: expect_bool(&values[4])?,
+        lanplcallfoid: expect_oid(&values[5])?,
+        laninline: expect_oid(&values[6])?,
+        lanvalidator: expect_oid(&values[7])?,
     })
 }
 
@@ -1486,8 +1548,8 @@ mod tests {
         C_COLLATION_OID, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
         DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID,
         JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
-        PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID,
-        PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+        PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
+        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1746,6 +1808,23 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_persists_pg_language_rows() {
+        let base = temp_dir("language_rows");
+        let _store = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(&base).unwrap();
+
+        assert!(rows.languages.iter().any(|row| {
+            row.oid == PG_LANGUAGE_INTERNAL_OID
+                && row.lanname == "internal"
+                && row.lanowner == BOOTSTRAP_SUPERUSER_OID
+        }));
+        assert!(rows
+            .languages
+            .iter()
+            .any(|row| row.lanname == "sql" && row.lanpltrusted));
+    }
+
+    #[test]
     fn catalog_store_persists_pg_proc_rows() {
         let base = temp_dir("proc_rows");
         let _store = CatalogStore::load(&base).unwrap();
@@ -1923,6 +2002,9 @@ mod tests {
         let collation = catalog.get("pg_collation").unwrap();
         let collation_path = segment_path(&base, collation.rel, ForkNumber::Main, 0);
         assert!(collation_path.exists(), "pg_collation relfile should exist");
+        let language = catalog.get("pg_language").unwrap();
+        let language_path = segment_path(&base, language.rel, ForkNumber::Main, 0);
+        assert!(language_path.exists(), "pg_language relfile should exist");
         let proc = catalog.get("pg_proc").unwrap();
         let proc_path = segment_path(&base, proc.rel, ForkNumber::Main, 0);
         assert!(proc_path.exists(), "pg_proc relfile should exist");
@@ -2387,6 +2469,44 @@ mod tests {
             .procs
             .iter()
             .any(|row| row.proname == "lower" && row.prorettype == TEXT_TYPE_OID));
+        assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
+    }
+
+    #[test]
+    fn catalog_store_rebuilds_missing_pg_language_relation() {
+        let base = temp_dir("missing_language_reload");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let entry = store
+            .create_table(
+                "people",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+                },
+            )
+            .unwrap();
+
+        let language_path = segment_path(
+            &base,
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: BootstrapCatalogKind::PgLanguage.relation_oid(),
+            },
+            ForkNumber::Main,
+            0,
+        );
+        fs::remove_file(&language_path).unwrap();
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let reopened_catalog = reopened.catalog_snapshot().unwrap();
+        assert!(reopened_catalog.get("people").is_some());
+        assert!(language_path.exists(), "pg_language relfile should be recreated");
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        assert!(rows
+            .languages
+            .iter()
+            .any(|row| row.oid == PG_LANGUAGE_INTERNAL_OID && row.lanname == "internal"));
         assert!(rows.classes.iter().any(|row| row.oid == entry.relation_oid));
     }
 
