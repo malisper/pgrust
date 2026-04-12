@@ -10,6 +10,7 @@ use crate::include::catalog::{
     INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID,
     JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
     JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
+    PG_NODE_TREE_TYPE_OID,
     PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
     PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID,
@@ -172,6 +173,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::JsonPath),
         ),
         builtin_type_row(
+            "pg_node_tree",
+            PG_NODE_TREE_TYPE_OID,
+            SqlType::new(SqlTypeKind::PgNodeTree),
+        ),
+        builtin_type_row(
             "_jsonpath",
             JSONPATH_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::JsonPath)),
@@ -227,6 +233,7 @@ fn composite_type_row(name: &str, oid: u32, relid: u32) -> PgTypeRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::include::catalog::PG_NODE_TREE_TYPE_OID;
 
     #[test]
     fn bootstrap_composite_types_match_core_catalogs() {
@@ -247,5 +254,14 @@ mod tests {
         assert_eq!(rows[2].oid, PG_PROC_ROWTYPE_OID);
         assert_eq!(rows[4].oid, PG_CLASS_ROWTYPE_OID);
         assert_eq!(rows[5].oid, PG_DATABASE_ROWTYPE_OID);
+    }
+
+    #[test]
+    fn builtin_types_include_pg_node_tree() {
+        assert!(builtin_type_rows().iter().any(|row| {
+            row.oid == PG_NODE_TREE_TYPE_OID
+                && row.typname == "pg_node_tree"
+                && row.sql_type == SqlType::new(SqlTypeKind::PgNodeTree)
+        }));
     }
 }

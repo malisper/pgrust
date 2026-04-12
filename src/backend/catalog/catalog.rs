@@ -70,6 +70,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::JsonPath => ScalarType::JsonPath,
         SqlTypeKind::Text
         | SqlTypeKind::Timestamp
+        | SqlTypeKind::PgNodeTree
         | SqlTypeKind::InternalChar
         | SqlTypeKind::Char
         | SqlTypeKind::Varchar => ScalarType::Text,

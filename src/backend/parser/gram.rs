@@ -39,6 +39,11 @@ pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
 
 pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
+    let lowered = sql.trim().to_ascii_lowercase();
+    match lowered.as_str() {
+        "pg_node_tree" => return Ok(SqlType::new(SqlTypeKind::PgNodeTree)),
+        _ => {}
+    }
     SqlParser::parse(Rule::type_name, &sql)
         .map_err(|e| map_pest_error("type name", e))
         .and_then(|mut pairs| {
@@ -1185,6 +1190,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "char",
         SqlTypeKind::Char => "bpchar",
         SqlTypeKind::Varchar => "varchar",

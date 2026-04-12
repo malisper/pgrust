@@ -611,6 +611,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Jsonb, true) => JSONB_ARRAY_TYPE_OID,
         (SqlTypeKind::JsonPath, false) => JSONPATH_TYPE_OID,
         (SqlTypeKind::JsonPath, true) => JSONPATH_ARRAY_TYPE_OID,
+        (SqlTypeKind::PgNodeTree, false) => crate::include::catalog::PG_NODE_TREE_TYPE_OID,
+        (SqlTypeKind::PgNodeTree, true) => unreachable!("pg_node_tree arrays are unsupported"),
     }
 }
 

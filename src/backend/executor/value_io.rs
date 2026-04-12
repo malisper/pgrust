@@ -532,6 +532,7 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
         }
         SqlTypeKind::Text
         | SqlTypeKind::Timestamp
+        | SqlTypeKind::PgNodeTree
         | SqlTypeKind::InternalChar
         | SqlTypeKind::Char
         | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::new(unsafe {
