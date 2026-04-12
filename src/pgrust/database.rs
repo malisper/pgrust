@@ -9,7 +9,7 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::access::transam::xlog::{WalBgWriter, WalError, WalWriter};
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
-use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::catalog::{allocate_relation_object_oids, column_desc};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::derived_relation_depend_rows;
 use crate::backend::catalog::store::{load_physical_catalog_rows, sync_catalog_rows};
@@ -466,12 +466,7 @@ impl Database {
             let relation_oid = namespace.next_oid.max(base_oid.saturating_add(1));
             let row_type_oid = relation_oid.saturating_add(1);
             let mut next_oid = row_type_oid.saturating_add(1);
-            for column in &mut desc.columns {
-                if column.default_expr.is_some() {
-                    column.attrdef_oid = Some(next_oid);
-                    next_oid = next_oid.saturating_add(1);
-                }
-            }
+            allocate_relation_object_oids(&mut desc, &mut next_oid);
             namespace.next_oid = next_oid;
             let entry = RelCacheEntry {
                 rel: RelFileLocator {
