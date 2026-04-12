@@ -807,6 +807,21 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
         int4_opclass.oid,
         crate::include::catalog::INT4_BTREE_OPCLASS_OID
     );
+    let int4_amops = crate::backend::utils::cache::lsyscache::amop_rows_for_family(
+        &db,
+        1,
+        None,
+        int4_opclass.opcfamily,
+    );
+    assert_eq!(int4_amops.len(), 5);
+    assert!(int4_amops.iter().any(|row| row.amopstrategy == 3));
+    let int4_amprocs = crate::backend::utils::cache::lsyscache::amproc_rows_for_family(
+        &db,
+        1,
+        None,
+        int4_opclass.opcfamily,
+    );
+    assert!(int4_amprocs.iter().any(|row| row.amprocnum == 1));
 
     db.execute(1, "create index items_idx on items (id)")
         .unwrap();
