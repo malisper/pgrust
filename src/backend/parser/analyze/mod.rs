@@ -11,7 +11,7 @@ use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, Plan,
-    QueryColumn, RelationDesc, TargetEntry, Value, cast_value,
+    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, Value, cast_value,
 };
 use crate::include::catalog::{
     PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
@@ -640,6 +640,13 @@ fn build_plan_with_outer(
     let needs_agg =
         !stmt.group_by.is_empty() || targets_contain_agg(&stmt.targets) || stmt.having.is_some();
 
+    if needs_agg && select_targets_contain_set_returning_call(&stmt.targets) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "select-list set-returning function in a non-aggregate query",
+            actual: "set-returning function in aggregate query".into(),
+        });
+    }
+
     let can_skip_scan_for_degenerate_having = needs_agg
         && stmt.group_by.is_empty()
         && !targets_contain_agg(&stmt.targets)
@@ -850,7 +857,7 @@ fn build_plan_with_outer(
             targets,
         })
     } else {
-        let targets = bind_select_targets(
+        let bound_targets = bind_select_targets(
             &stmt.targets,
             &scope,
             catalog,
@@ -859,46 +866,86 @@ fn build_plan_with_outer(
             &visible_ctes,
         )?;
 
-        if !stmt.order_by.is_empty() {
-            plan = Plan::OrderBy {
-                input: Box::new(plan),
-                items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                    bind_expr_with_outer_and_ctes(
-                        expr,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer.as_ref(),
-                        &visible_ctes,
-                    )
-                })?,
-            };
-        }
+        match bound_targets {
+            BoundSelectTargets::Plain(targets) => {
+                if !stmt.order_by.is_empty() {
+                    plan = Plan::OrderBy {
+                        input: Box::new(plan),
+                        items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                            bind_expr_with_outer_and_ctes(
+                                expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        })?,
+                    };
+                }
 
-        plan = maybe_rewrite_index_scan(plan, catalog);
+                plan = maybe_rewrite_index_scan(plan, catalog);
 
-        if stmt.limit.is_some() || stmt.offset.is_some() {
-            plan = Plan::Limit {
-                input: Box::new(plan),
-                limit: stmt.limit,
-                offset: stmt.offset.unwrap_or(0),
-            };
-        }
+                if stmt.limit.is_some() || stmt.offset.is_some() {
+                    plan = Plan::Limit {
+                        input: Box::new(plan),
+                        limit: stmt.limit,
+                        offset: stmt.offset.unwrap_or(0),
+                    };
+                }
 
-        // Optimization: skip Projection if it's an identity mapping (select *)
-        let is_identity = targets.len() == scope.columns.len()
-            && targets.iter().enumerate().all(|(i, t)| {
-                matches!(t.expr, Expr::Column(c) if c == i)
-                    && t.name == scope.columns[i].output_name
-            });
+                let is_identity = targets.len() == scope.columns.len()
+                    && targets.iter().enumerate().all(|(i, t)| {
+                        matches!(t.expr, Expr::Column(c) if c == i)
+                            && t.name == scope.columns[i].output_name
+                    });
 
-        if is_identity {
-            Ok(plan)
-        } else {
-            Ok(Plan::Projection {
-                input: Box::new(plan),
-                targets,
-            })
+                if is_identity {
+                    Ok(plan)
+                } else {
+                    Ok(Plan::Projection {
+                        input: Box::new(plan),
+                        targets,
+                    })
+                }
+            }
+            BoundSelectTargets::WithProjectSet {
+                project_targets,
+                final_targets,
+            } => {
+                plan = maybe_rewrite_index_scan(plan, catalog);
+                plan = Plan::ProjectSet {
+                    input: Box::new(plan),
+                    targets: project_targets,
+                };
+                plan = Plan::Projection {
+                    input: Box::new(plan),
+                    targets: final_targets.clone(),
+                };
+                if !stmt.order_by.is_empty() {
+                    plan = Plan::OrderBy {
+                        input: Box::new(plan),
+                        items: bind_order_by_items(&stmt.order_by, &final_targets, |expr| {
+                            bind_expr_with_outer_and_ctes(
+                                expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        })?,
+                    };
+                }
+                if stmt.limit.is_some() || stmt.offset.is_some() {
+                    plan = Plan::Limit {
+                        input: Box::new(plan),
+                        limit: stmt.limit,
+                        offset: stmt.offset.unwrap_or(0),
+                    };
+                }
+                Ok(plan)
+            }
         }
     }
 }

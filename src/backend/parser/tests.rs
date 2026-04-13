@@ -1815,7 +1815,12 @@ fn build_plan_for_unnest_uses_array_element_types() {
     let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[], ARRAY[1, 2])").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Unnest { output_columns, .. } => {
+        Plan::FunctionScan {
+            call: crate::include::nodes::plannodes::SetReturningCall::Unnest {
+                output_columns,
+                ..
+            },
+        } => {
             assert_eq!(output_columns.len(), 2);
             assert_eq!(
                 output_columns[0].sql_type,
@@ -1825,6 +1830,35 @@ fn build_plan_for_unnest_uses_array_element_types() {
         }
         other => panic!("expected unnest plan, got {other:?}"),
     }
+}
+
+#[test]
+fn build_plan_for_select_list_generate_series_uses_project_set() {
+    let stmt = parse_select("select generate_series(1, 3)").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { input, .. } => match *input {
+            Plan::ProjectSet { targets, .. } => {
+                assert_eq!(targets.len(), 1);
+                assert!(matches!(
+                    &targets[0],
+                    crate::include::nodes::plannodes::ProjectSetTarget::Set {
+                        call: crate::include::nodes::plannodes::SetReturningCall::GenerateSeries { .. },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected ProjectSet input, got {other:?}"),
+        },
+        other => panic!("expected projection over project set, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_for_select_list_json_each_is_rejected() {
+    let stmt = parse_select("select json_each('{\"a\":1}'::json)").unwrap();
+    let err = build_plan(&stmt, &catalog()).unwrap_err();
+    assert!(matches!(err, ParseError::UnexpectedToken { .. }));
 }
 
 #[test]

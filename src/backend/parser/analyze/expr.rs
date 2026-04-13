@@ -10,7 +10,9 @@ use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
     bind_shift_expr,
 };
-pub(crate) use self::targets::bind_select_targets;
+pub(crate) use self::targets::{
+    BoundSelectTargets, bind_select_targets, select_targets_contain_set_returning_call,
+};
 
 #[allow(dead_code)]
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {

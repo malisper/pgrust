@@ -4769,6 +4769,107 @@ fn generate_series_sources_can_cross_join_each_other() {
             other => panic!("expected query result, got {:?}", other),
         }
 }
+
+#[test]
+fn select_list_generate_series_expands_rows() {
+    let base = temp_dir("project_set_generate_series");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select generate_series(1, 3)").unwrap(),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn select_list_unnest_expands_rows() {
+    let base = temp_dir("project_set_unnest");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select unnest(ARRAY[1, 2, 3])",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn select_list_json_scalar_srfs_work() {
+    let base = temp_dir("project_set_json");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select json_object_keys('{\"a\":1,\"b\":2}'::json)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+        ],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select json_array_elements_text('[1,true,null]'::json)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("1".into())],
+            vec![Value::Text("true".into())],
+            vec![Value::Null],
+        ],
+    );
+}
+
+#[test]
+fn select_list_srfs_run_in_lockstep() {
+    let base = temp_dir("project_set_lockstep");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select generate_series(1, 2), unnest(ARRAY['a', 'b', 'c']::varchar[]) order by 1, 2",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Text("a".into())],
+            vec![Value::Int32(2), Value::Text("b".into())],
+            vec![Value::Null, Value::Text("c".into())],
+        ],
+    );
+}
+
+#[test]
+fn select_list_composite_srf_is_rejected() {
+    let base = temp_dir("project_set_composite_reject");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_each('{\"a\":1}'::json)",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExecError::Parse(ParseError::UnexpectedToken { .. })));
+}
 #[test]
 fn join_alias_hides_inner_relation_names() {
     let base = temp_dir("join_alias_hides_inner");

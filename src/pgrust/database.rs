@@ -1939,13 +1939,26 @@ fn collect_rels_from_plan(
                 collect_rels_from_expr(expr, rels);
             }
         }
-        Plan::GenerateSeries {
-            start, stop, step, ..
-        } => {
-            collect_rels_from_expr(start, rels);
-            collect_rels_from_expr(stop, rels);
-            collect_rels_from_expr(step, rels);
-        }
+        Plan::FunctionScan { call } => match call {
+            crate::include::nodes::plannodes::SetReturningCall::GenerateSeries {
+                start,
+                stop,
+                step,
+                ..
+            } => {
+                collect_rels_from_expr(start, rels);
+                collect_rels_from_expr(stop, rels);
+                collect_rels_from_expr(step, rels);
+            }
+            crate::include::nodes::plannodes::SetReturningCall::Unnest { args, .. } => {
+                for arg in args {
+                    collect_rels_from_expr(arg, rels);
+                }
+            }
+            crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction { arg, .. } => {
+                collect_rels_from_expr(arg, rels)
+            }
+        },
         Plan::Values { rows, .. } => {
             for row in rows {
                 for expr in row {
@@ -1953,12 +1966,42 @@ fn collect_rels_from_plan(
                 }
             }
         }
-        Plan::Unnest { args, .. } => {
-            for arg in args {
-                collect_rels_from_expr(arg, rels);
+        Plan::ProjectSet { input, targets } => {
+            collect_rels_from_plan(input, rels);
+            for target in targets {
+                match target {
+                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                        collect_rels_from_expr(&entry.expr, rels);
+                    }
+                    crate::include::nodes::plannodes::ProjectSetTarget::Set { call, .. } => {
+                        match call {
+                            crate::include::nodes::plannodes::SetReturningCall::GenerateSeries {
+                                start,
+                                stop,
+                                step,
+                                ..
+                            } => {
+                                collect_rels_from_expr(start, rels);
+                                collect_rels_from_expr(stop, rels);
+                                collect_rels_from_expr(step, rels);
+                            }
+                            crate::include::nodes::plannodes::SetReturningCall::Unnest {
+                                args,
+                                ..
+                            } => {
+                                for arg in args {
+                                    collect_rels_from_expr(arg, rels);
+                                }
+                            }
+                            crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction {
+                                arg,
+                                ..
+                            } => collect_rels_from_expr(arg, rels),
+                        }
+                    }
+                }
             }
         }
-        Plan::JsonTableFunction { arg, .. } => collect_rels_from_expr(arg, rels),
     }
 }
 

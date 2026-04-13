@@ -15,6 +15,7 @@ mod expr_string;
 pub(crate) mod jsonb;
 pub(crate) mod jsonpath;
 mod nodes;
+mod srf;
 mod startup;
 pub(crate) mod value_io;
 pub(crate) mod expr {

@@ -380,13 +380,15 @@ pub(super) fn bind_from_item_with_ctes(
                 };
                 let scope = scope_for_relation(Some(name), &desc);
                 Ok((
-                    Plan::GenerateSeries {
-                        start: coerce_bound_expr(start, start_type, common),
-                        stop: coerce_bound_expr(stop, stop_type, common),
-                        step,
-                        output: QueryColumn {
-                            name: "generate_series".to_string(),
-                            sql_type: common,
+                    Plan::FunctionScan {
+                        call: SetReturningCall::GenerateSeries {
+                            start: coerce_bound_expr(start, start_type, common),
+                            stop: coerce_bound_expr(stop, stop_type, common),
+                            step,
+                            output: QueryColumn {
+                                name: "generate_series".to_string(),
+                                sql_type: common,
+                            },
                         },
                     },
                     scope,
@@ -441,9 +443,11 @@ pub(super) fn bind_from_item_with_ctes(
                 };
                 let scope = scope_for_relation(Some(name), &desc);
                 Ok((
-                    Plan::Unnest {
-                        args: bound_args,
-                        output_columns,
+                    Plan::FunctionScan {
+                        call: SetReturningCall::Unnest {
+                            args: bound_args,
+                            output_columns,
+                        },
                     },
                     scope,
                 ))
@@ -613,10 +617,12 @@ pub(super) fn bind_from_item_with_ctes(
                     };
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
-                        Plan::JsonTableFunction {
-                            kind,
-                            arg,
-                            output_columns,
+                        Plan::FunctionScan {
+                            call: SetReturningCall::JsonTableFunction {
+                                kind,
+                                arg,
+                                output_columns,
+                            },
                         },
                         scope,
                     ))
