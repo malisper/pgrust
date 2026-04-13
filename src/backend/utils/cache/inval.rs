@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 
+use crate::ClientId;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::storage::smgr::StorageManager;
 use crate::backend::utils::cache::syscache::SessionCatalogState;
 use crate::include::catalog::BootstrapCatalogKind;
 use crate::pgrust::database::Database;
-use crate::ClientId;
 
 #[derive(Debug, Clone, Default)]
 pub struct CatalogInvalidation {
@@ -224,7 +224,10 @@ pub fn finalize_committed_catalog_effects(
         let rel = bootstrap_catalog_entry(kind).rel;
         let nblocks = db
             .pool
-            .with_storage_mut(|s| s.smgr.nblocks(rel, crate::backend::storage::smgr::ForkNumber::Main))
+            .with_storage_mut(|s| {
+                s.smgr
+                    .nblocks(rel, crate::backend::storage::smgr::ForkNumber::Main)
+            })
             .unwrap_or(0);
         for block in 0..nblocks {
             let _ = crate::backend::access::heap::heapam::heap_flush(&db.pool, 0, rel, block);
@@ -233,7 +236,8 @@ pub fn finalize_committed_catalog_effects(
     for effect in effects {
         for rel in &effect.dropped_rels {
             let _ = db.pool.invalidate_relation(*rel);
-            db.pool.with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
+            db.pool
+                .with_storage_mut(|s| s.smgr.unlink(*rel, None, false));
         }
     }
     for invalidation in invalidations {

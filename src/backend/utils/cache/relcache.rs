@@ -118,7 +118,8 @@ impl RelCache {
                     let Some(index) = catcache
                         .index_rows()
                         .into_iter()
-                        .find(|row| row.indexrelid == class.oid) else {
+                        .find(|row| row.indexrelid == class.oid)
+                    else {
                         return IndexRelCacheEntry {
                             indrelid: 0,
                             indnatts: 0,
@@ -181,10 +182,7 @@ impl RelCache {
                         indclass,
                         indcollation: index.indcollation.clone(),
                         indoption: index.indoption.clone(),
-                        opfamily_oids: resolved_opclasses
-                            .iter()
-                            .map(|row| row.opcfamily)
-                            .collect(),
+                        opfamily_oids: resolved_opclasses.iter().map(|row| row.opcfamily).collect(),
                         opcintype_oids: resolved_opclasses
                             .iter()
                             .map(|row| row.opcintype)

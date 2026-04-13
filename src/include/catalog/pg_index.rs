@@ -35,7 +35,11 @@ pub fn pg_index_desc() -> RelationDesc {
             column_desc("indnatts", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("indnkeyatts", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("indisunique", SqlType::new(SqlTypeKind::Bool), false),
-            column_desc("indnullsnotdistinct", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc(
+                "indnullsnotdistinct",
+                SqlType::new(SqlTypeKind::Bool),
+                false,
+            ),
             column_desc("indisprimary", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("indisexclusion", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("indimmediate", SqlType::new(SqlTypeKind::Bool), false),

@@ -1,7 +1,5 @@
 use super::*;
-use crate::include::catalog::{
-    TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
-};
+use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -11,7 +9,10 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         .copied()
 }
 
-pub(super) fn resolve_function_cast_type(catalog: &dyn CatalogLookup, name: &str) -> Option<SqlType> {
+pub(super) fn resolve_function_cast_type(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Option<SqlType> {
     let normalized = name.to_ascii_lowercase();
     for row in catalog.type_rows() {
         if row.typrelid != 0 || !row.typname.eq_ignore_ascii_case(&normalized) {
@@ -63,93 +64,97 @@ pub(super) fn validate_scalar_function_arity(
             ScalarFunctionArity::Exact(count) => args.len() == *count,
         })
         .unwrap_or_else(|| match func {
-        BuiltinScalarFunction::Random => args.is_empty(),
-        BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
-        BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
-        BuiltinScalarFunction::Abs
-        | BuiltinScalarFunction::Log10
-        | BuiltinScalarFunction::Length
-        | BuiltinScalarFunction::Lower
-        | BuiltinScalarFunction::Scale
-        | BuiltinScalarFunction::MinScale
-        | BuiltinScalarFunction::TrimScale
-        | BuiltinScalarFunction::NumericInc
-        | BuiltinScalarFunction::Factorial
-        | BuiltinScalarFunction::PgLsn
-        | BuiltinScalarFunction::Ceil
-        | BuiltinScalarFunction::Ceiling
-        | BuiltinScalarFunction::Floor
-        | BuiltinScalarFunction::Sign
-        | BuiltinScalarFunction::Sqrt
-        | BuiltinScalarFunction::Cbrt
-        | BuiltinScalarFunction::Exp
-        | BuiltinScalarFunction::Ln
-        | BuiltinScalarFunction::Sinh
-        | BuiltinScalarFunction::Cosh
-        | BuiltinScalarFunction::Tanh
-        | BuiltinScalarFunction::Asinh
-        | BuiltinScalarFunction::Acosh
-        | BuiltinScalarFunction::Atanh
-        | BuiltinScalarFunction::Sind
-        | BuiltinScalarFunction::Cosd
-        | BuiltinScalarFunction::Tand
-        | BuiltinScalarFunction::Cotd
-        | BuiltinScalarFunction::Asind
-        | BuiltinScalarFunction::Acosd
-        | BuiltinScalarFunction::Atand
-        | BuiltinScalarFunction::Float4Send
-        | BuiltinScalarFunction::Float8Send
-        | BuiltinScalarFunction::Erf
-        | BuiltinScalarFunction::Erfc
-        | BuiltinScalarFunction::Gamma
-        | BuiltinScalarFunction::Lgamma
-        | BuiltinScalarFunction::Md5
-        | BuiltinScalarFunction::BitcastIntegerToFloat4
-        | BuiltinScalarFunction::BitcastBigintToFloat8
-        | BuiltinScalarFunction::BpcharToText
-        | BuiltinScalarFunction::BitCount => args.len() == 1,
-        BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => matches!(args.len(), 1 | 2),
-        BuiltinScalarFunction::Log => matches!(args.len(), 1 | 2),
-        BuiltinScalarFunction::Power
-        | BuiltinScalarFunction::Atan2d
-        | BuiltinScalarFunction::BoolEq
-        | BuiltinScalarFunction::BoolNe
-        | BuiltinScalarFunction::Div
-        | BuiltinScalarFunction::Mod => args.len() == 2,
-        BuiltinScalarFunction::WidthBucket => args.len() == 4,
-        BuiltinScalarFunction::GetBit => args.len() == 2,
-        BuiltinScalarFunction::SetBit => args.len() == 3,
-        BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
-        BuiltinScalarFunction::Position
-        | BuiltinScalarFunction::ConvertFrom
-        | BuiltinScalarFunction::Left
-        | BuiltinScalarFunction::Repeat
-        | BuiltinScalarFunction::ToChar
-        | BuiltinScalarFunction::ToNumber
-        | BuiltinScalarFunction::PgInputIsValid
-        | BuiltinScalarFunction::PgInputErrorMessage
-        | BuiltinScalarFunction::PgInputErrorDetail
-        | BuiltinScalarFunction::PgInputErrorHint
-        | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
-        BuiltinScalarFunction::Substring => matches!(args.len(), 2 | 3),
-        BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
-        BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
-        BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
-        BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
-        BuiltinScalarFunction::JsonTypeof
-        | BuiltinScalarFunction::JsonArrayLength
-        | BuiltinScalarFunction::JsonbTypeof
-        | BuiltinScalarFunction::JsonbArrayLength => args.len() == 1,
-        BuiltinScalarFunction::JsonExtractPath
-        | BuiltinScalarFunction::JsonExtractPathText
-        | BuiltinScalarFunction::JsonbExtractPath
-        | BuiltinScalarFunction::JsonbExtractPathText => !args.is_empty(),
-        BuiltinScalarFunction::JsonbBuildArray | BuiltinScalarFunction::JsonbBuildObject => true,
-        BuiltinScalarFunction::JsonbPathExists
-        | BuiltinScalarFunction::JsonbPathMatch
-        | BuiltinScalarFunction::JsonbPathQueryArray
-        | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
-    });
+            BuiltinScalarFunction::Random => args.is_empty(),
+            BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
+            BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
+            BuiltinScalarFunction::Abs
+            | BuiltinScalarFunction::Log10
+            | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Scale
+            | BuiltinScalarFunction::MinScale
+            | BuiltinScalarFunction::TrimScale
+            | BuiltinScalarFunction::NumericInc
+            | BuiltinScalarFunction::Factorial
+            | BuiltinScalarFunction::PgLsn
+            | BuiltinScalarFunction::Ceil
+            | BuiltinScalarFunction::Ceiling
+            | BuiltinScalarFunction::Floor
+            | BuiltinScalarFunction::Sign
+            | BuiltinScalarFunction::Sqrt
+            | BuiltinScalarFunction::Cbrt
+            | BuiltinScalarFunction::Exp
+            | BuiltinScalarFunction::Ln
+            | BuiltinScalarFunction::Sinh
+            | BuiltinScalarFunction::Cosh
+            | BuiltinScalarFunction::Tanh
+            | BuiltinScalarFunction::Asinh
+            | BuiltinScalarFunction::Acosh
+            | BuiltinScalarFunction::Atanh
+            | BuiltinScalarFunction::Sind
+            | BuiltinScalarFunction::Cosd
+            | BuiltinScalarFunction::Tand
+            | BuiltinScalarFunction::Cotd
+            | BuiltinScalarFunction::Asind
+            | BuiltinScalarFunction::Acosd
+            | BuiltinScalarFunction::Atand
+            | BuiltinScalarFunction::Float4Send
+            | BuiltinScalarFunction::Float8Send
+            | BuiltinScalarFunction::Erf
+            | BuiltinScalarFunction::Erfc
+            | BuiltinScalarFunction::Gamma
+            | BuiltinScalarFunction::Lgamma
+            | BuiltinScalarFunction::Md5
+            | BuiltinScalarFunction::BitcastIntegerToFloat4
+            | BuiltinScalarFunction::BitcastBigintToFloat8
+            | BuiltinScalarFunction::BpcharToText
+            | BuiltinScalarFunction::BitCount => args.len() == 1,
+            BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => {
+                matches!(args.len(), 1 | 2)
+            }
+            BuiltinScalarFunction::Log => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::Power
+            | BuiltinScalarFunction::Atan2d
+            | BuiltinScalarFunction::BoolEq
+            | BuiltinScalarFunction::BoolNe
+            | BuiltinScalarFunction::Div
+            | BuiltinScalarFunction::Mod => args.len() == 2,
+            BuiltinScalarFunction::WidthBucket => args.len() == 4,
+            BuiltinScalarFunction::GetBit => args.len() == 2,
+            BuiltinScalarFunction::SetBit => args.len() == 3,
+            BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
+            BuiltinScalarFunction::Position
+            | BuiltinScalarFunction::ConvertFrom
+            | BuiltinScalarFunction::Left
+            | BuiltinScalarFunction::Repeat
+            | BuiltinScalarFunction::ToChar
+            | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::PgInputIsValid
+            | BuiltinScalarFunction::PgInputErrorMessage
+            | BuiltinScalarFunction::PgInputErrorDetail
+            | BuiltinScalarFunction::PgInputErrorHint
+            | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
+            BuiltinScalarFunction::Substring => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
+            BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
+            BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonTypeof
+            | BuiltinScalarFunction::JsonArrayLength
+            | BuiltinScalarFunction::JsonbTypeof
+            | BuiltinScalarFunction::JsonbArrayLength => args.len() == 1,
+            BuiltinScalarFunction::JsonExtractPath
+            | BuiltinScalarFunction::JsonExtractPathText
+            | BuiltinScalarFunction::JsonbExtractPath
+            | BuiltinScalarFunction::JsonbExtractPathText => !args.is_empty(),
+            BuiltinScalarFunction::JsonbBuildArray | BuiltinScalarFunction::JsonbBuildObject => {
+                true
+            }
+            BuiltinScalarFunction::JsonbPathExists
+            | BuiltinScalarFunction::JsonbPathMatch
+            | BuiltinScalarFunction::JsonbPathQueryArray
+            | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
+        });
 
     if valid {
         Ok(())
@@ -167,17 +172,17 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
         .find_map(|(candidate, count)| (*candidate == func).then_some(*count))
         .map(|count| args.len() == count)
         .unwrap_or_else(|| match func {
-        AggFunc::Count => args.len() <= 1,
-        AggFunc::Sum
-        | AggFunc::Avg
-        | AggFunc::Variance
-        | AggFunc::Stddev
-        | AggFunc::Min
-        | AggFunc::Max
-        | AggFunc::JsonAgg
-        | AggFunc::JsonbAgg => args.len() == 1,
-        AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => args.len() == 2,
-    });
+            AggFunc::Count => args.len() <= 1,
+            AggFunc::Sum
+            | AggFunc::Avg
+            | AggFunc::Variance
+            | AggFunc::Stddev
+            | AggFunc::Min
+            | AggFunc::Max
+            | AggFunc::JsonAgg
+            | AggFunc::JsonbAgg => args.len() == 1,
+            AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => args.len() == 2,
+        });
     if valid {
         Ok(())
     } else {
@@ -267,13 +272,19 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "jsonb_array_length",
             BuiltinScalarFunction::JsonbArrayLength,
         ),
-        ("jsonb_extract_path", BuiltinScalarFunction::JsonbExtractPath),
+        (
+            "jsonb_extract_path",
+            BuiltinScalarFunction::JsonbExtractPath,
+        ),
         (
             "jsonb_extract_path_text",
             BuiltinScalarFunction::JsonbExtractPathText,
         ),
         ("jsonb_build_array", BuiltinScalarFunction::JsonbBuildArray),
-        ("jsonb_build_object", BuiltinScalarFunction::JsonbBuildObject),
+        (
+            "jsonb_build_object",
+            BuiltinScalarFunction::JsonbBuildObject,
+        ),
         ("jsonb_path_exists", BuiltinScalarFunction::JsonbPathExists),
         ("jsonb_path_match", BuiltinScalarFunction::JsonbPathMatch),
         (
@@ -392,7 +403,10 @@ fn legacy_json_table_function_entries() -> &'static [(&'static str, JsonTableFun
         ("jsonb_object_keys", JsonTableFunction::JsonbObjectKeys),
         ("jsonb_each", JsonTableFunction::JsonbEach),
         ("jsonb_each_text", JsonTableFunction::JsonbEachText),
-        ("jsonb_array_elements", JsonTableFunction::JsonbArrayElements),
+        (
+            "jsonb_array_elements",
+            JsonTableFunction::JsonbArrayElements,
+        ),
         (
             "jsonb_array_elements_text",
             JsonTableFunction::JsonbArrayElementsText,
@@ -426,7 +440,10 @@ fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, Sca
                     continue;
                 }
                 if by_func.iter().all(|(candidate, _)| *candidate != func) {
-                    by_func.push((func, ScalarFunctionArity::Exact(row.pronargs.max(0) as usize)));
+                    by_func.push((
+                        func,
+                        ScalarFunctionArity::Exact(row.pronargs.max(0) as usize),
+                    ));
                 }
             }
         }
@@ -715,49 +732,64 @@ mod tests {
 
     #[test]
     fn explicit_text_input_cast_exists_uses_pg_cast_catalog() {
-        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::new(
-            SqlTypeKind::Jsonb
-        )));
-        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::new(
-            SqlTypeKind::JsonPath
-        )));
-        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::new(
-            SqlTypeKind::Timestamp
-        )));
-        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::with_bit_len(
-            SqlTypeKind::Bit,
-            4
-        )));
-        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::array_of(
-            SqlType::new(SqlTypeKind::Int4)
-        )));
-        assert!(explicit_text_input_cast_exists(&Catalog::default(), SqlType::array_of(
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
             SqlType::new(SqlTypeKind::Jsonb)
-        )));
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::new(SqlTypeKind::JsonPath)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::new(SqlTypeKind::Timestamp)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::with_bit_len(SqlTypeKind::Bit, 4)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::array_of(SqlType::new(SqlTypeKind::Jsonb))
+        ));
     }
 
     #[test]
     fn validate_scalar_function_arity_uses_pg_proc_for_exact_arity_rows() {
-        assert!(validate_scalar_function_arity(BuiltinScalarFunction::Lower, &[SqlExpr::Default]).is_ok());
+        assert!(
+            validate_scalar_function_arity(BuiltinScalarFunction::Lower, &[SqlExpr::Default])
+                .is_ok()
+        );
         assert!(validate_scalar_function_arity(BuiltinScalarFunction::Lower, &[]).is_err());
         assert!(validate_scalar_function_arity(BuiltinScalarFunction::Random, &[]).is_ok());
-        assert!(validate_scalar_function_arity(BuiltinScalarFunction::Random, &[SqlExpr::Default]).is_err());
-        assert!(validate_scalar_function_arity(
-            BuiltinScalarFunction::JsonBuildArray,
-            &[SqlExpr::Default, SqlExpr::Default]
-        )
-        .is_ok());
+        assert!(
+            validate_scalar_function_arity(BuiltinScalarFunction::Random, &[SqlExpr::Default])
+                .is_err()
+        );
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::JsonBuildArray,
+                &[SqlExpr::Default, SqlExpr::Default]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn validate_aggregate_arity_uses_pg_proc_for_exact_rows() {
         assert!(validate_aggregate_arity(AggFunc::Sum, &[SqlExpr::Default]).is_ok());
         assert!(validate_aggregate_arity(AggFunc::Sum, &[]).is_err());
-        assert!(validate_aggregate_arity(
-            AggFunc::JsonObjectAgg,
-            &[SqlExpr::Default, SqlExpr::Default]
-        )
-        .is_ok());
+        assert!(
+            validate_aggregate_arity(
+                AggFunc::JsonObjectAgg,
+                &[SqlExpr::Default, SqlExpr::Default]
+            )
+            .is_ok()
+        );
         assert!(validate_aggregate_arity(AggFunc::JsonObjectAgg, &[SqlExpr::Default]).is_err());
         assert!(validate_aggregate_arity(AggFunc::Count, &[]).is_ok());
     }
@@ -833,6 +865,9 @@ mod tests {
             Some(SqlType::new(SqlTypeKind::Jsonb))
         );
         assert_eq!(fixed_scalar_return_type(BuiltinScalarFunction::Abs), None);
-        assert_eq!(fixed_scalar_return_type(BuiltinScalarFunction::Substring), None);
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::Substring),
+            None
+        );
     }
 }

@@ -117,7 +117,11 @@ impl CatalogLookup for VisibleCatalog {
         })
     }
 
-    fn cast_by_source_target(&self, source_type_oid: u32, target_type_oid: u32) -> Option<PgCastRow> {
+    fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<PgCastRow> {
         if let Some(catcache) = &self.catcache {
             return catcache
                 .cast_by_source_target(source_type_oid, target_type_oid)

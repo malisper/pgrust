@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::ClientId;
 use crate::backend::access::transam::xact::{
     CommandId, INVALID_TRANSACTION_ID, Snapshot, TransactionId,
 };
@@ -15,7 +16,6 @@ use crate::include::catalog::{
     PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow,
 };
 use crate::pgrust::database::Database;
-use crate::ClientId;
 
 #[derive(Debug, Default, Clone)]
 pub struct SessionCatalogState {
