@@ -95,6 +95,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Abs
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::ArrayNdims
+            | BuiltinScalarFunction::ArrayDims
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Scale
@@ -147,7 +149,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Div
             | BuiltinScalarFunction::Mod => args.len() == 2,
             BuiltinScalarFunction::WidthBucket => args.len() == 4,
-            BuiltinScalarFunction::GetBit => args.len() == 2,
+            BuiltinScalarFunction::GetBit | BuiltinScalarFunction::ArrayLower => args.len() == 2,
             BuiltinScalarFunction::SetBit => args.len() == 3,
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
             BuiltinScalarFunction::BTrim
@@ -589,6 +591,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
+        ("array_ndims", BuiltinScalarFunction::ArrayNdims),
+        ("array_dims", BuiltinScalarFunction::ArrayDims),
+        ("array_lower", BuiltinScalarFunction::ArrayLower),
         ("lower", BuiltinScalarFunction::Lower),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
@@ -805,6 +810,24 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         {
             by_func.push((BuiltinScalarFunction::Unistr, SqlType::new(SqlTypeKind::Text)));
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::ArrayNdims)
+        {
+            by_func.push((BuiltinScalarFunction::ArrayNdims, SqlType::new(SqlTypeKind::Int4)));
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::ArrayDims)
+        {
+            by_func.push((BuiltinScalarFunction::ArrayDims, SqlType::new(SqlTypeKind::Text)));
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::ArrayLower)
+        {
+            by_func.push((BuiltinScalarFunction::ArrayLower, SqlType::new(SqlTypeKind::Int4)));
+        }
         by_func
     })
 }
@@ -849,6 +872,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::RPad
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Length
+            | BuiltinScalarFunction::ArrayNdims
+            | BuiltinScalarFunction::ArrayDims
+            | BuiltinScalarFunction::ArrayLower
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Ascii
