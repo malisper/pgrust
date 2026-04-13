@@ -1212,10 +1212,19 @@ fn handle_copy_done(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    state
+    let copy_sql = if let Some(columns) = &copy.columns {
+        format!("copy {} ({}) from stdin", copy.table_name, columns.join(", "))
+    } else {
+        format!("copy {} from stdin", copy.table_name)
+    };
+    if let Err(e) = state
         .session
         .copy_from_rows_into(db, &copy.table_name, copy.columns.as_deref(), &rows)
-        .map_err(|e| io::Error::other(format_exec_error(&e)))?;
+    {
+        send_exec_error(stream, &copy_sql, &e)?;
+        send_ready_for_query(stream, state.session.ready_status())?;
+        return Ok(());
+    }
 
     send_command_complete(stream, "COPY")?;
     send_ready_for_query(stream, state.session.ready_status())?;
