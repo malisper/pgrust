@@ -163,6 +163,7 @@ fn render_value(value: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Value::PgArray(array) => pgrust::backend::executor::format_array_value_text(array),
         Value::Null => "NULL".into(),
     }
 }

@@ -384,7 +384,7 @@ fn json_object_agg_key(key: &Value) -> String {
             }
         }
         Value::JsonPath(v) => v.to_string(),
-        Value::Array(_) => value_to_json_text(key),
+        Value::Array(_) | Value::PgArray(_) => value_to_json_text(key),
     }
 }
 
@@ -417,6 +417,7 @@ fn value_to_json_text(value: &Value) -> String {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }
         Value::Array(items) => render_json_array(items),
+        Value::PgArray(array) => render_json_array(&array.to_nested_values()),
     }
 }
 

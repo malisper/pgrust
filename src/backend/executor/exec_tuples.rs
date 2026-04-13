@@ -6,6 +6,7 @@ use super::expr_casts::parse_text_array_literal_with_op;
 use super::exec_expr::parse_numeric_text;
 use super::value_io::missing_column_value;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
 use crate::include::access::htup::HEAP_NATTS_MASK;
 
@@ -492,8 +493,33 @@ fn decode_array_value(
             details: "array payload too short".into(),
         });
     }
-    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let ndim = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let mut offset = 4usize;
+    let mut dimensions = Vec::with_capacity(ndim);
+    for _ in 0..ndim {
+        if offset + 8 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array dimension header truncated".into(),
+            });
+        }
+        let length = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        let lower_bound = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        dimensions.push(ArrayDimension {
+            lower_bound,
+            length,
+        });
+    }
+    if offset + 4 > bytes.len() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array element count header truncated".into(),
+        });
+    }
+    let count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         if offset + 4 > bytes.len() {
@@ -506,35 +532,6 @@ fn decode_array_value(
         offset += 4;
         if len == -1 {
             items.push(Value::Null);
-            continue;
-        }
-        if len == -2 {
-            if offset + 4 > bytes.len() {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "nested array length header truncated".into(),
-                });
-            }
-            let nested_len = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-            offset += 4;
-            if nested_len < 0 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "nested array payload has invalid length".into(),
-                });
-            }
-            let nested_len = nested_len as usize;
-            if offset + nested_len > bytes.len() {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "nested array payload truncated".into(),
-                });
-            }
-            items.push(decode_array_value(
-                element_type,
-                &bytes[offset..offset + nested_len],
-            )?);
-            offset += nested_len;
             continue;
         }
         let len = len as usize;
@@ -555,7 +552,9 @@ fn decode_array_value(
         );
         offset += len;
     }
-    Ok(Value::Array(items))
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        dimensions, items,
+    )))
 }
 
 fn decode_scalar_array_element(

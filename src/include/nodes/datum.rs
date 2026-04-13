@@ -10,6 +10,186 @@ pub struct BitString {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayDimension {
+    pub lower_bound: i32,
+    pub length: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArrayValue {
+    pub dimensions: Vec<ArrayDimension>,
+    pub elements: Vec<Value>,
+}
+
+impl ArrayValue {
+    pub fn empty() -> Self {
+        Self {
+            dimensions: Vec::new(),
+            elements: Vec::new(),
+        }
+    }
+
+    pub fn from_1d(elements: Vec<Value>) -> Self {
+        if elements.is_empty() {
+            Self::empty()
+        } else {
+            Self {
+                dimensions: vec![ArrayDimension {
+                    lower_bound: 1,
+                    length: elements.len(),
+                }],
+                elements,
+            }
+        }
+    }
+
+    pub fn from_dimensions(dimensions: Vec<ArrayDimension>, elements: Vec<Value>) -> Self {
+        Self {
+            dimensions,
+            elements,
+        }
+    }
+
+    pub fn ndim(&self) -> usize {
+        self.dimensions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    pub fn lower_bound(&self, dim: usize) -> Option<i32> {
+        self.dimensions.get(dim).map(|dim| dim.lower_bound)
+    }
+
+    pub fn upper_bound(&self, dim: usize) -> Option<i32> {
+        self.dimensions
+            .get(dim)
+            .map(|entry| entry.lower_bound + entry.length as i32 - 1)
+    }
+
+    pub fn axis_len(&self, dim: usize) -> Option<usize> {
+        self.dimensions.get(dim).map(|dim| dim.length)
+    }
+
+    pub fn shape(&self) -> Vec<usize> {
+        self.dimensions.iter().map(|dim| dim.length).collect()
+    }
+
+    pub fn to_owned_value(&self) -> Self {
+        Self {
+            dimensions: self.dimensions.clone(),
+            elements: self.elements.iter().map(Value::to_owned_value).collect(),
+        }
+    }
+
+    pub fn from_nested_values(
+        values: Vec<Value>,
+        lower_bounds: Vec<i32>,
+    ) -> Result<Self, String> {
+        let mut lengths = Vec::new();
+        let mut elements = Vec::new();
+        flatten_nested_values(values, 0, &mut lengths, &mut elements)?;
+        if lengths.is_empty() {
+            return Ok(Self::empty());
+        }
+        let dimensions = lengths
+            .into_iter()
+            .enumerate()
+            .map(|(idx, length)| ArrayDimension {
+                lower_bound: lower_bounds.get(idx).copied().unwrap_or(1),
+                length,
+            })
+            .collect();
+        Ok(Self {
+            dimensions,
+            elements,
+        })
+    }
+
+    pub fn to_nested_values(&self) -> Vec<Value> {
+        if self.dimensions.is_empty() {
+            return Vec::new();
+        }
+        let mut offset = 0usize;
+        build_nested_values(self, 0, &mut offset)
+    }
+}
+
+fn flatten_nested_values(
+    values: Vec<Value>,
+    depth: usize,
+    lengths: &mut Vec<usize>,
+    elements: &mut Vec<Value>,
+) -> Result<(), String> {
+    set_array_length(lengths, depth, values.len())?;
+    if values.is_empty() {
+        return Ok(());
+    }
+    let all_arrays = values
+        .iter()
+        .all(|value| matches!(value, Value::Array(_) | Value::PgArray(_)));
+    let any_arrays = values
+        .iter()
+        .any(|value| matches!(value, Value::Array(_) | Value::PgArray(_)));
+    if any_arrays && !all_arrays {
+        return Err("multidimensional arrays must have matching extents".into());
+    }
+    if all_arrays {
+        for value in values {
+            let nested = match value {
+                Value::Array(values) => values,
+                Value::PgArray(array) => array.to_nested_values(),
+                _ => unreachable!(),
+            };
+            flatten_nested_values(nested, depth + 1, lengths, elements)?;
+        }
+        return Ok(());
+    }
+    elements.extend(values);
+    Ok(())
+}
+
+fn set_array_length(lengths: &mut Vec<usize>, depth: usize, length: usize) -> Result<(), String> {
+    if let Some(existing) = lengths.get(depth) {
+        if *existing != length {
+            return Err("multidimensional arrays must have matching extents".into());
+        }
+        return Ok(());
+    }
+    lengths.push(length);
+    Ok(())
+}
+
+fn build_nested_values(array: &ArrayValue, depth: usize, offset: &mut usize) -> Vec<Value> {
+    let len = array.dimensions[depth].length;
+    if depth + 1 == array.dimensions.len() {
+        let mut out = Vec::with_capacity(len);
+        for _ in 0..len {
+            out.push(array.elements[*offset].clone());
+            *offset += 1;
+        }
+        return out;
+    }
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        let nested = ArrayValue {
+            dimensions: array.dimensions[depth + 1..].to_vec(),
+            elements: {
+                let start = *offset;
+                let width = array.dimensions[depth + 1..]
+                    .iter()
+                    .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
+                *offset += width;
+                array.elements[start..start + width].to_vec()
+            },
+        };
+        out.push(Value::PgArray(nested));
+    }
+    out
+}
+
 impl BitString {
     pub fn new(bit_len: i32, mut bytes: Vec<u8>) -> Self {
         let required = Self::byte_len(bit_len);
@@ -59,6 +239,7 @@ pub enum Value {
     InternalChar(u8),
     Bool(bool),
     Array(Vec<Value>),
+    PgArray(ArrayValue),
     Null,
 }
 
@@ -337,6 +518,7 @@ impl Value {
             Value::Array(values) => {
                 Value::Array(values.iter().map(Value::to_owned_value).collect())
             }
+            Value::PgArray(array) => Value::PgArray(array.to_owned_value()),
             Value::Null => Value::Null,
         }
     }
@@ -350,6 +532,10 @@ impl Value {
                 *v = Value::Text(CompactString::new(s));
             } else if let Value::Array(items) = v {
                 for item in items.iter_mut() {
+                    *item = item.to_owned_value();
+                }
+            } else if let Value::PgArray(array) = v {
+                for item in array.elements.iter_mut() {
                     *item = item.to_owned_value();
                 }
             }
@@ -373,6 +559,7 @@ impl PartialEq for Value {
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::PgArray(a), Value::PgArray(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
                 a.as_text().unwrap() == b.as_text().unwrap()
@@ -449,6 +636,10 @@ impl std::hash::Hash for Value {
             Value::Array(values) => {
                 7u8.hash(state);
                 values.hash(state);
+            }
+            Value::PgArray(array) => {
+                15u8.hash(state);
+                array.hash(state);
             }
             Value::Null => {
                 8u8.hash(state);

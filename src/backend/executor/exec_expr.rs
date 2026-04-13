@@ -1071,52 +1071,123 @@ fn apply_array_subscripts(
     value: Value,
     subscripts: &[ResolvedArraySubscript],
 ) -> Result<Value, ExecError> {
-    let mut current = value;
-    for subscript in subscripts {
-        current = apply_single_array_subscript(current, subscript)?;
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
     }
-    Ok(current)
+    let array = normalize_array_value(&value).ok_or_else(|| ExecError::TypeMismatch {
+        op: "array subscript",
+        left: value.clone(),
+        right: Value::Null,
+    })?;
+    if array.dimensions.is_empty() {
+        return Ok(Value::PgArray(ArrayValue::empty()));
+    }
+    let any_slice = subscripts.iter().any(|subscript| subscript.upper.is_some());
+    apply_array_subscripts_to_value(&array, subscripts, any_slice)
 }
 
-fn apply_single_array_subscript(
-    value: Value,
-    subscript: &ResolvedArraySubscript,
+fn apply_array_subscripts_to_value(
+    array: &ArrayValue,
+    subscripts: &[ResolvedArraySubscript],
+    any_slice: bool,
 ) -> Result<Value, ExecError> {
-    match value {
-        Value::Null => Ok(Value::Null),
-        Value::Array(items) => {
-            if let Some(upper) = &subscript.upper {
-                let Some(start) = array_subscript_index(subscript.lower.as_ref())? else {
+    let mut selectors = Vec::with_capacity(array.ndim());
+    let mut result_dimensions = Vec::new();
+    for (dim_idx, dim) in array.dimensions.iter().enumerate() {
+        if let Some(subscript) = subscripts.get(dim_idx) {
+            if subscript.upper.is_some() || any_slice {
+                let lower = match subscript.upper.as_ref() {
+                    Some(_) => array_subscript_index(subscript.lower.as_ref())?,
+                    None => Some(dim.lower_bound),
+                };
+                let upper = match subscript.upper.as_ref() {
+                    Some(upper) => array_subscript_index(Some(upper))?,
+                    None => array_subscript_index(subscript.lower.as_ref())?,
+                };
+                let (Some(lower), Some(upper)) = (lower, upper) else {
                     return Ok(Value::Null);
                 };
-                let Some(end) = array_subscript_index(Some(upper))? else {
-                    return Ok(Value::Null);
+                let clamped_lower = lower.max(dim.lower_bound);
+                let clamped_upper = upper.min(dim.lower_bound + dim.length as i32 - 1);
+                let length = if clamped_upper < clamped_lower {
+                    0
+                } else {
+                    (clamped_upper - clamped_lower + 1) as usize
                 };
-                if items.is_empty() {
-                    return Ok(Value::Array(Vec::new()));
-                }
-                let start = start.max(1) as usize;
-                let end = end.max(0) as usize;
-                if start == 0 || start > items.len() || end < start {
-                    return Ok(Value::Array(Vec::new()));
-                }
-                let end = end.min(items.len());
-                Ok(Value::Array(items[start - 1..end].to_vec()))
+                selectors.push(ArraySelector::Slice {
+                    lower: clamped_lower,
+                    upper: clamped_upper,
+                });
+                result_dimensions.push(ArrayDimension {
+                    lower_bound: clamped_lower,
+                    length,
+                });
             } else {
                 let Some(index) = array_subscript_index(subscript.lower.as_ref())? else {
                     return Ok(Value::Null);
                 };
-                if index < 1 || index as usize > items.len() {
-                    return Ok(Value::Null);
-                }
-                Ok(items[index as usize - 1].clone())
+                selectors.push(ArraySelector::Index(index));
             }
+        } else {
+            selectors.push(ArraySelector::Slice {
+                lower: dim.lower_bound,
+                upper: dim.lower_bound + dim.length as i32 - 1,
+            });
+            result_dimensions.push(dim.clone());
         }
-        other => Err(ExecError::TypeMismatch {
-            op: "array subscript",
-            left: other,
-            right: Value::Null,
-        }),
+    }
+
+    let mut matched = Vec::new();
+    for (offset, item) in array.elements.iter().enumerate() {
+        let coords = linear_index_to_coords(offset, &array.dimensions);
+        if coords_match_selectors(&coords, &selectors) {
+            matched.push(item.clone());
+        }
+    }
+    if result_dimensions.is_empty() {
+        return Ok(matched.into_iter().next().unwrap_or(Value::Null));
+    }
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        result_dimensions,
+        matched,
+    )))
+}
+
+#[derive(Clone)]
+enum ArraySelector {
+    Index(i32),
+    Slice { lower: i32, upper: i32 },
+}
+
+fn coords_match_selectors(coords: &[i32], selectors: &[ArraySelector]) -> bool {
+    coords.iter().zip(selectors.iter()).all(|(coord, selector)| match selector {
+        ArraySelector::Index(index) => coord == index,
+        ArraySelector::Slice { lower, upper } => coord >= lower && coord <= upper,
+    })
+}
+
+fn linear_index_to_coords(offset: usize, dimensions: &[ArrayDimension]) -> Vec<i32> {
+    if dimensions.is_empty() {
+        return Vec::new();
+    }
+    let mut coords = vec![0; dimensions.len()];
+    let mut remaining = offset;
+    for dim_idx in 0..dimensions.len() {
+        let stride = dimensions[dim_idx + 1..]
+            .iter()
+            .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
+        let axis_offset = if stride == 0 { 0 } else { remaining / stride };
+        coords[dim_idx] = dimensions[dim_idx].lower_bound + axis_offset as i32;
+        remaining %= stride.max(1);
+    }
+    coords
+}
+
+fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
+    match value {
+        Value::PgArray(array) => Some(array.clone()),
+        Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
+        _ => None,
     }
 }
 

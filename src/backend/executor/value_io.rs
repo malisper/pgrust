@@ -73,7 +73,11 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
         (ScalarType::Array(_), Value::Array(items)) => Ok(TupleValue::Bytes(encode_array_bytes(
             column.sql_type.element_type(),
-            &items,
+            &ArrayValue::from_1d(items),
+        )?)),
+        (ScalarType::Array(_), Value::PgArray(array)) => Ok(TupleValue::Bytes(encode_array_bytes(
+            column.sql_type.element_type(),
+            &array,
         )?)),
         (_, other) => Err(ExecError::TypeMismatch {
             op: "assignment",
@@ -94,6 +98,17 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
                     coerced.push(coerce_assignment_value(item, element_type)?);
                 }
                 Ok(Value::Array(coerced))
+            }
+            Value::PgArray(array) => {
+                let element_type = target.element_type();
+                let mut coerced = Vec::with_capacity(array.elements.len());
+                for item in &array.elements {
+                    coerced.push(coerce_assignment_value(item, element_type)?);
+                }
+                Ok(Value::PgArray(ArrayValue::from_dimensions(
+                    array.dimensions.clone(),
+                    coerced,
+                )))
             }
             other => match other.as_text() {
                 Some(text) => parse_text_array_literal_with_options(
@@ -142,6 +157,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
         Value::Array(items) => Ok(Value::Array(items.clone())),
+        Value::PgArray(array) => Ok(Value::PgArray(array.clone())),
     }
 }
 
@@ -370,24 +386,23 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn encode_array_bytes(element_type: SqlType, items: &[Value]) -> Result<Vec<u8>, ExecError> {
+fn encode_array_bytes(element_type: SqlType, array: &ArrayValue) -> Result<Vec<u8>, ExecError> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(items.len() as u32).to_le_bytes());
-    for item in items {
+    bytes.extend_from_slice(&(array.dimensions.len() as u32).to_le_bytes());
+    for dim in &array.dimensions {
+        bytes.extend_from_slice(&(dim.length as u32).to_le_bytes());
+        bytes.extend_from_slice(&dim.lower_bound.to_le_bytes());
+    }
+    bytes.extend_from_slice(&(array.elements.len() as u32).to_le_bytes());
+    for item in &array.elements {
         match item {
             Value::Null => bytes.extend_from_slice(&(-1_i32).to_le_bytes()),
-            Value::Array(nested) => {
-                let payload = encode_array_bytes(element_type, nested)?;
-                bytes.extend_from_slice(&(-2_i32).to_le_bytes());
-                bytes.extend_from_slice(&(payload.len() as i32).to_le_bytes());
-                bytes.extend_from_slice(&payload);
-            }
             _ => {
                 let payload = encode_array_element(element_type, item)?;
                 bytes.extend_from_slice(&(payload.len() as i32).to_le_bytes());
                 bytes.extend_from_slice(&payload);
             }
-        }
+        };
     }
     Ok(bytes)
 }
@@ -412,9 +427,15 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
         Value::InternalChar(v) => Ok(vec![v]),
-        Value::Float64(v) => Ok(v.to_string().into_bytes()),
+        Value::Float64(v) => {
+            if matches!(element_type.kind, SqlTypeKind::Float4) {
+                Ok((v as f32).to_le_bytes().to_vec())
+            } else {
+                Ok(v.to_le_bytes().to_vec())
+            }
+        }
         Value::JsonPath(text) => Ok(text.as_bytes().to_vec()),
-        Value::Array(_) => Err(ExecError::TypeMismatch {
+        Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
             op: "array element",
             left: coerced,
             right: Value::Null,
@@ -430,8 +451,33 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
             details: "array payload too short".into(),
         });
     }
-    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let ndim = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let mut offset = 4usize;
+    let mut dimensions = Vec::with_capacity(ndim);
+    for _ in 0..ndim {
+        if offset + 8 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array dimension header truncated".into(),
+            });
+        }
+        let length = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        let lower_bound = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        dimensions.push(ArrayDimension {
+            lower_bound,
+            length,
+        });
+    }
+    if offset + 4 > bytes.len() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array element count header truncated".into(),
+        });
+    }
+    let count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         if offset + 4 > bytes.len() {
@@ -444,35 +490,6 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
         offset += 4;
         if len == -1 {
             items.push(Value::Null);
-            continue;
-        }
-        if len == -2 {
-            if offset + 4 > bytes.len() {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "nested array length header truncated".into(),
-                });
-            }
-            let nested_len = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-            offset += 4;
-            if nested_len < 0 {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "nested array payload has invalid length".into(),
-                });
-            }
-            let nested_len = nested_len as usize;
-            if offset + nested_len > bytes.len() {
-                return Err(ExecError::InvalidStorageValue {
-                    column: "<array>".into(),
-                    details: "nested array payload truncated".into(),
-                });
-            }
-            items.push(decode_array_bytes(
-                element_type,
-                &bytes[offset..offset + nested_len],
-            )?);
-            offset += nested_len;
             continue;
         }
         let len = len as usize;
@@ -488,7 +505,9 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
         )?);
         offset += len;
     }
-    Ok(Value::Array(items))
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        dimensions, items,
+    )))
 }
 
 fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, ExecError> {
@@ -601,11 +620,45 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
 }
 
 pub(crate) fn format_array_text(items: &[Value]) -> String {
+    match ArrayValue::from_nested_values(items.to_vec(), vec![1]) {
+        Ok(array) => format_array_value_text(&array),
+        Err(_) => format_array_value_text(&ArrayValue::from_1d(items.to_vec())),
+    }
+}
+
+pub fn format_array_value_text(array: &ArrayValue) -> String {
+    if array.dimensions.is_empty() {
+        return "{}".into();
+    }
+    let mut out = String::new();
+    if array.dimensions.iter().any(|dim| dim.lower_bound != 1) {
+        for dim in &array.dimensions {
+            let upper = dim.lower_bound + dim.length as i32 - 1;
+            out.push('[');
+            out.push_str(&dim.lower_bound.to_string());
+            out.push(':');
+            out.push_str(&upper.to_string());
+            out.push(']');
+        }
+        out.push('=');
+    }
+    out.push_str(&format_array_values_nested(array, 0, &mut 0usize));
+    out
+}
+
+fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usize) -> String {
     let mut out = String::from("{");
-    for (idx, item) in items.iter().enumerate() {
+    let len = array.dimensions[depth].length;
+    for idx in 0..len {
         if idx > 0 {
             out.push(',');
         }
+        if depth + 1 < array.dimensions.len() {
+            out.push_str(&format_array_values_nested(array, depth + 1, offset));
+            continue;
+        }
+        let item = &array.elements[*offset];
+        *offset += 1;
         match item {
             Value::Null => out.push_str("NULL"),
             Value::Int16(v) => out.push_str(&v.to_string()),
@@ -672,6 +725,7 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
                 push_array_text_element(&mut out, &rendered);
             }
             Value::Array(nested) => out.push_str(&format_array_text(nested)),
+            Value::PgArray(nested) => out.push_str(&format_array_value_text(nested)),
         }
     }
     out.push('}');

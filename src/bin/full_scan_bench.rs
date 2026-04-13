@@ -281,6 +281,7 @@ fn value_checksum(value: &Value) -> i64 {
         Value::InternalChar(v) => i64::from(*v),
         Value::Bool(v) => i64::from(*v),
         Value::Array(items) => items.iter().map(value_checksum).sum(),
+        Value::PgArray(array) => array.elements.iter().map(value_checksum).sum(),
         Value::Null => 0,
     }
 }

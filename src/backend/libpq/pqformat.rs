@@ -384,6 +384,11 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
+            Value::PgArray(array) => {
+                let rendered = crate::backend::executor::value_io::format_array_value_text(array);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
         }
     }
 
