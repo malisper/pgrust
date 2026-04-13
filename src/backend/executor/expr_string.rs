@@ -13,7 +13,6 @@ use crate::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
 use encoding_rs::Encoding;
 use md5::{Digest, Md5};
-use regex::{Captures, Regex, RegexBuilder};
 use sha2::{Sha224, Sha256, Sha384, Sha512};
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -675,7 +674,9 @@ pub(super) fn eval_replace_function(values: &[Value]) -> Result<Value, ExecError
     let text = expect_text_arg("replace", text_value, from_value)?;
     let from = expect_text_arg("replace", from_value, to_value)?;
     let to = expect_text_arg("replace", to_value, text_value)?;
-    Ok(Value::Text(CompactString::from_owned(text.replace(from, to))))
+    Ok(Value::Text(CompactString::from_owned(
+        text.replace(from, to),
+    )))
 }
 
 pub(super) fn eval_split_part_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -772,7 +773,9 @@ pub(super) fn eval_ascii_function(values: &[Value]) -> Result<Value, ExecError> 
         return Ok(Value::Null);
     }
     let text = expect_text_arg("ascii", text_value, &Value::Null)?;
-    Ok(Value::Int32(text.chars().next().map(|ch| ch as i32).unwrap_or(0)))
+    Ok(Value::Int32(
+        text.chars().next().map(|ch| ch as i32).unwrap_or(0),
+    ))
 }
 
 pub(super) fn eval_chr_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -795,10 +798,7 @@ pub(super) fn eval_chr_function(values: &[Value]) -> Result<Value, ExecError> {
     Ok(Value::Text(CompactString::from_owned(ch.to_string())))
 }
 
-pub(super) fn eval_trim_function(
-    op: &'static str,
-    values: &[Value],
-) -> Result<Value, ExecError> {
+pub(super) fn eval_trim_function(op: &'static str, values: &[Value]) -> Result<Value, ExecError> {
     let Some(source) = values.first() else {
         return Ok(Value::Null);
     };
@@ -960,62 +960,9 @@ pub(super) fn eval_bytea_substring(values: &[Value]) -> Result<Value, ExecError>
             }
         }
     };
-    Ok(Value::Bytea(bytes[start_idx..start_idx + take_len].to_vec()))
-}
-
-pub(super) fn eval_sql_regex_substring(values: &[Value]) -> Result<Value, ExecError> {
-    if values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(Value::Null);
-    }
-    let (text, pattern) = regex_text_pattern_pair("substring", values)?;
-    let regex = Regex::new(pattern).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
-    let Some(captures) = regex.captures(text) else {
-        return Ok(Value::Null);
-    };
-    let matched = if captures.len() > 1 {
-        captures.get(1)
-    } else {
-        captures.get(0)
-    };
-    Ok(match matched {
-        Some(value) => Value::Text(CompactString::from(value.as_str())),
-        None => Value::Null,
-    })
-}
-
-pub(super) fn eval_similar_substring(values: &[Value]) -> Result<Value, ExecError> {
-    let Some(text_value) = values.first() else {
-        return Ok(Value::Null);
-    };
-    let Some(pattern_value) = values.get(1) else {
-        return Ok(Value::Null);
-    };
-    if matches!(text_value, Value::Null) || matches!(pattern_value, Value::Null) {
-        return Ok(Value::Null);
-    }
-    if matches!(values.get(2), Some(Value::Null)) {
-        return Ok(Value::Null);
-    }
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "substring similar",
-        left: text_value.clone(),
-        right: pattern_value.clone(),
-    })?;
-    let pattern_text = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "substring similar",
-        left: text_value.clone(),
-        right: pattern_value.clone(),
-    })?;
-    let escape_char = parse_similar_escape_arg(text_value, values.get(2))?;
-    let regex_pattern = similar_substring_regex(pattern_text, escape_char)?;
-    let regex = Regex::new(&regex_pattern).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
-    let Some(captures) = regex.captures(text) else {
-        return Ok(Value::Null);
-    };
-    Ok(match captures.name("middle") {
-        Some(value) => Value::Text(CompactString::from(value.as_str())),
-        None => Value::Null,
-    })
+    Ok(Value::Bytea(
+        bytes[start_idx..start_idx + take_len].to_vec(),
+    ))
 }
 
 pub(super) fn eval_like(
@@ -1093,218 +1040,6 @@ pub(super) fn eval_like(
     Ok(Value::Bool(if negated { !matched } else { matched }))
 }
 
-pub(super) fn eval_similar(
-    left: &Value,
-    pattern: &Value,
-    escape: Option<&Value>,
-    negated: bool,
-) -> Result<Value, ExecError> {
-    if matches!(left, Value::Null) || matches!(pattern, Value::Null) {
-        return Ok(Value::Null);
-    }
-    let text = left.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "similar to",
-        left: left.clone(),
-        right: pattern.clone(),
-    })?;
-    let pattern_text = pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "similar to",
-        left: left.clone(),
-        right: pattern.clone(),
-    })?;
-    let escape_char = match escape {
-        Some(Value::Null) => return Ok(Value::Null),
-        Some(value) => {
-            let escape_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "similar to",
-                left: left.clone(),
-                right: value.clone(),
-            })?;
-            if escape_text.is_empty() {
-                None
-            } else {
-                let mut chars = escape_text.chars();
-                let ch = chars.next().ok_or_else(|| ExecError::InvalidRegex("invalid escape string".into()))?;
-                if chars.next().is_some() {
-                    return Err(ExecError::InvalidRegex("invalid escape string".into()));
-                }
-                Some(ch)
-            }
-        }
-        None => Some('\\'),
-    };
-    let regex_pattern = similar_to_regex(pattern_text, escape_char)?;
-    let regex = Regex::new(&regex_pattern).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
-    Ok(Value::Bool(if negated {
-        !regex.is_match(text)
-    } else {
-        regex.is_match(text)
-    }))
-}
-
-pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
-    let Some(text) = values.first() else {
-        return Ok(Value::Null);
-    };
-    let Some(pattern) = values.get(1) else {
-        return Ok(Value::Null);
-    };
-    if matches!(text, Value::Null) || matches!(pattern, Value::Null) {
-        return Ok(Value::Null);
-    }
-    let flags = if let Some(Value::Null) = values.get(2) {
-        return Ok(Value::Null);
-    } else {
-        values.get(2).and_then(Value::as_text).unwrap_or("")
-    };
-    let regex = build_regex_with_policy(
-        pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
-            op: "regexp_like",
-            left: text.clone(),
-            right: pattern.clone(),
-        })?,
-        flags,
-        RegexGlobalPolicy::Reject,
-    )?;
-    let haystack = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "regexp_like",
-        left: text.clone(),
-        right: pattern.clone(),
-    })?;
-    Ok(Value::Bool(regex.is_match(haystack)))
-}
-
-pub(super) fn eval_regexp_count(values: &[Value]) -> Result<Value, ExecError> {
-    if values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(Value::Null);
-    }
-    let (text, pattern, start, flags) = regex_count_args(values)?;
-    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
-    let subject = slice_from_char_start(text, start)?;
-    Ok(Value::Int32(regex.find_iter(subject).count() as i32))
-}
-
-pub(super) fn eval_regexp_instr(values: &[Value]) -> Result<Value, ExecError> {
-    if values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(Value::Null);
-    }
-    let (text, pattern, start, nth, return_end, flags, subexpr) = regex_instr_args(values)?;
-    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
-    let subject = slice_from_char_start(text, start)?;
-    let Some((captures, base_offset)) =
-        nth_capture_match(&regex, subject, nth, start, subexpr)?
-    else {
-        return Ok(Value::Int32(0));
-    };
-    let Some(matched) = capture_by_index(&captures, subexpr) else {
-        return Ok(Value::Int32(0));
-    };
-    let pos = if return_end == 1 {
-        char_index_from_byte(subject, matched.end()) + base_offset + 1
-    } else {
-        char_index_from_byte(subject, matched.start()) + base_offset + 1
-    };
-    Ok(Value::Int32(pos as i32))
-}
-
-pub(super) fn eval_regexp_substr(values: &[Value]) -> Result<Value, ExecError> {
-    if values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(Value::Null);
-    }
-    let (text, pattern, start, nth, flags, subexpr) = regex_substr_args(values)?;
-    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
-    let subject = slice_from_char_start(text, start)?;
-    let Some((captures, _)) = nth_capture_match(&regex, subject, nth, start, subexpr)? else {
-        return Ok(Value::Null);
-    };
-    let Some(matched) = capture_by_index(&captures, subexpr) else {
-        return Ok(Value::Null);
-    };
-    Ok(Value::Text(CompactString::from(matched.as_str())))
-}
-
-pub(super) fn eval_regexp_replace(values: &[Value]) -> Result<Value, ExecError> {
-    let Some(text_value) = values.first() else {
-        return Ok(Value::Null);
-    };
-    let Some(pattern_value) = values.get(1) else {
-        return Ok(Value::Null);
-    };
-    let Some(replacement_value) = values.get(2) else {
-        return Ok(Value::Null);
-    };
-    if matches!(text_value, Value::Null)
-        || matches!(pattern_value, Value::Null)
-        || matches!(replacement_value, Value::Null)
-    {
-        return Ok(Value::Null);
-    }
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "regexp_replace",
-        left: text_value.clone(),
-        right: pattern_value.clone(),
-    })?;
-    let pattern = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "regexp_replace",
-        left: text_value.clone(),
-        right: pattern_value.clone(),
-    })?;
-    let replacement = replacement_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "regexp_replace",
-        left: text_value.clone(),
-        right: replacement_value.clone(),
-    })?;
-    let (start, nth, flags) = regexp_replace_options(values)?;
-    let (regex, global) = build_regex_and_global(pattern, flags, RegexGlobalPolicy::Allow)?;
-    let expanded = translate_regexp_replacement(replacement);
-    let start_byte = byte_index_from_char_start(text, start)?;
-    let prefix = &text[..start_byte];
-    let subject = &text[start_byte..];
-    let replaced_subject = if global || nth == 0 {
-        regex.replace_all(subject, expanded.as_str()).to_string()
-    } else {
-        replace_nth_match(&regex, subject, nth, expanded.as_str())
-    };
-    let replaced = format!("{prefix}{replaced_subject}");
-    Ok(Value::Text(CompactString::from_owned(replaced)))
-}
-
-pub(super) fn eval_regexp_split_to_array(values: &[Value]) -> Result<Value, ExecError> {
-    if values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(Value::Null);
-    }
-    let (text, pattern, flags) = regex_text_pattern_flags_only("regexp_split_to_array", values)?;
-    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
-    Ok(Value::Array(
-        regex
-            .split(text)
-            .map(|part| Value::Text(CompactString::from(part)))
-            .collect(),
-    ))
-}
-
-pub(super) fn eval_regexp_matches_rows(values: &[Value]) -> Result<Vec<Value>, ExecError> {
-    let (text, pattern, flags) = regex_text_pattern_flags_only("regexp_matches", values)?;
-    let (regex, global) = build_regex_and_global(pattern, flags, RegexGlobalPolicy::Allow)?;
-    let mut rows = Vec::new();
-    for captures in regex.captures_iter(text) {
-        rows.push(Value::Array(captures_to_array(&captures)));
-        if !global {
-            break;
-        }
-    }
-    Ok(rows)
-}
-
-pub(super) fn eval_regexp_split_to_table_rows(values: &[Value]) -> Result<Vec<Value>, ExecError> {
-    let (text, pattern, flags) = regex_text_pattern_flags_only("regexp_split_to_table", values)?;
-    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
-    Ok(regex
-        .split(text)
-        .map(|part| Value::Text(CompactString::from(part)))
-        .collect())
-}
-
 pub(super) fn eval_md5_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
         return Ok(Value::Null);
@@ -1378,7 +1113,7 @@ pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError>
         _ => {
             return Err(ExecError::RaiseException(format!(
                 "unrecognized encoding: \"{format}\""
-            )))
+            )));
         }
     };
     Ok(Value::Text(CompactString::from_owned(rendered)))
@@ -1405,7 +1140,7 @@ pub(super) fn eval_decode_function(values: &[Value]) -> Result<Value, ExecError>
         _ => {
             return Err(ExecError::RaiseException(format!(
                 "unrecognized encoding: \"{format}\""
-            )))
+            )));
         }
     };
     Ok(Value::Bytea(bytes))
@@ -1434,7 +1169,9 @@ pub(super) fn eval_crc32_function(values: &[Value]) -> Result<Value, ExecError> 
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
-    Ok(Value::Int64(crc32fast::hash(&coerce_hash_bytes("crc32", value)?) as i64))
+    Ok(Value::Int64(
+        crc32fast::hash(&coerce_hash_bytes("crc32", value)?) as i64,
+    ))
 }
 
 pub(super) fn eval_crc32c_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -1444,7 +1181,9 @@ pub(super) fn eval_crc32c_function(values: &[Value]) -> Result<Value, ExecError>
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
-    Ok(Value::Int64(crc32c::crc32c(&coerce_hash_bytes("crc32c", value)?) as i64))
+    Ok(Value::Int64(
+        crc32c::crc32c(&coerce_hash_bytes("crc32c", value)?) as i64,
+    ))
 }
 
 pub(super) fn eval_bpchar_to_text_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -1641,7 +1380,9 @@ pub(super) fn eval_bit_count_bytes(values: &[Value]) -> Result<Value, ExecError>
         return Ok(Value::Null);
     }
     let bytes = expect_bytea_arg("bit_count", bytes_value, &Value::Null)?;
-    Ok(Value::Int64(bytes.iter().map(|byte| byte.count_ones() as i64).sum()))
+    Ok(Value::Int64(
+        bytes.iter().map(|byte| byte.count_ones() as i64).sum(),
+    ))
 }
 
 pub(super) fn eval_get_byte(values: &[Value]) -> Result<Value, ExecError> {
@@ -1765,7 +1506,12 @@ fn trim_bytes<'a>(input: &'a [u8], chars: &[u8], leading: bool, trailing: bool) 
     &input[start..end]
 }
 
-fn like_match_text(text: &str, pattern: &str, escape: Option<char>, case_insensitive: bool) -> bool {
+fn like_match_text(
+    text: &str,
+    pattern: &str,
+    escape: Option<char>,
+    case_insensitive: bool,
+) -> bool {
     let text: Vec<char> = if case_insensitive {
         text.to_lowercase().chars().collect()
     } else {
@@ -1872,532 +1618,8 @@ fn like_match_bytes(text: &[u8], pattern: &[u8], escape: Option<&[u8]>) -> Resul
     Ok(pi == pattern.len())
 }
 
-#[derive(Clone, Copy)]
-enum RegexGlobalPolicy {
-    Allow,
-    Reject,
-}
-
-fn build_regex_with_policy(
-    pattern: &str,
-    flags: &str,
-    global_policy: RegexGlobalPolicy,
-) -> Result<Regex, ExecError> {
-    build_regex_and_global(pattern, flags, global_policy).map(|(regex, _)| regex)
-}
-
-fn similar_to_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecError> {
-    let mut out = String::from("^(?:");
-    let mut chars = pattern.chars().peekable();
-    let mut after_escape = false;
-    let mut bracket_depth = 0usize;
-    let mut charclass_pos = 0usize;
-    while let Some(ch) = chars.next() {
-        if after_escape {
-            out.push('\\');
-            out.push(ch);
-            after_escape = false;
-            if bracket_depth > 0 {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        if Some(ch) == escape {
-            after_escape = true;
-            continue;
-        }
-        if bracket_depth > 0 {
-            if ch == '\\' {
-                out.push('\\');
-            }
-            out.push(ch);
-            if ch == ']' && charclass_pos > 2 {
-                bracket_depth = bracket_depth.saturating_sub(1);
-            } else if ch == '[' {
-                bracket_depth += 1;
-                charclass_pos = 3;
-            } else if ch == '^' {
-                charclass_pos += 1;
-            } else {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        match ch {
-            '[' => {
-                out.push('[');
-                bracket_depth = 1;
-                charclass_pos = 1;
-            }
-            '%' => out.push_str(".*"),
-            '_' => out.push('.'),
-            '(' => out.push_str("(?:"),
-            '\\' | '.' | '^' | '$' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    if after_escape {
-        return Err(ExecError::InvalidRegex("invalid regular expression: escape character at end of pattern".into()));
-    }
-    out.push(')');
-    out.push('$');
-    Ok(out)
-}
-
-fn parse_similar_escape_arg(
-    left: &Value,
-    escape: Option<&Value>,
-) -> Result<Option<char>, ExecError> {
-    match escape {
-        Some(Value::Null) => Ok(None),
-        Some(value) => {
-            let escape_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "substring similar",
-                left: left.clone(),
-                right: value.clone(),
-            })?;
-            if escape_text.is_empty() {
-                Ok(None)
-            } else {
-                let mut chars = escape_text.chars();
-                let ch = chars
-                    .next()
-                    .ok_or_else(|| ExecError::InvalidRegex("invalid escape string".into()))?;
-                if chars.next().is_some() {
-                    return Err(ExecError::InvalidRegex("invalid escape string".into()));
-                }
-                Ok(Some(ch))
-            }
-        }
-        None => Ok(Some('\\')),
-    }
-}
-
-fn similar_substring_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecError> {
-    let (prefix, middle, suffix) = split_similar_substring_pattern(pattern, escape)?;
-    Ok(format!(
-        "^(?:{})(?P<middle>{})(?:{})$",
-        similar_fragment_to_regex(&prefix, escape, true)?,
-        similar_fragment_to_regex(&middle, escape, false)?,
-        similar_fragment_to_regex(&suffix, escape, true)?,
-    ))
-}
-
-fn split_similar_substring_pattern(
-    pattern: &str,
-    escape: Option<char>,
-) -> Result<(String, String, String), ExecError> {
-    let mut separators = Vec::new();
-    let mut chars = pattern.char_indices().peekable();
-    let mut bracket_depth = 0usize;
-    let mut charclass_pos = 0usize;
-    while let Some((idx, ch)) = chars.next() {
-        if bracket_depth > 0 {
-            if ch == ']' && charclass_pos > 2 {
-                bracket_depth = bracket_depth.saturating_sub(1);
-            } else if ch == '[' {
-                bracket_depth += 1;
-                charclass_pos = 3;
-            } else if ch == '^' {
-                charclass_pos += 1;
-            } else {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        if Some(ch) == escape {
-            if let Some((_, next)) = chars.peek().copied() {
-                if next == '"' {
-                    separators.push(idx);
-                    chars.next();
-                    continue;
-                }
-            }
-            continue;
-        }
-        match ch {
-            '[' => {
-                bracket_depth = 1;
-                charclass_pos = 1;
-            }
-            _ => {}
-        }
-    }
-    if separators.len() > 2 {
-        return Err(ExecError::InvalidRegex(
-            "SQL regular expression may not contain more than two escape-double-quote separators"
-                .into(),
-        ));
-    }
-    if separators.is_empty() {
-        return Ok((String::new(), pattern.to_string(), String::new()));
-    }
-    if separators.len() == 1 {
-        let separator = separators[0];
-        return Ok((
-            String::new(),
-            format!(
-                "{}{}",
-                &pattern[..separator],
-                &pattern[separator + escape.unwrap_or('\\').len_utf8() + '"'.len_utf8()..]
-            ),
-            String::new(),
-        ));
-    }
-    let first = separators[0];
-    let second = separators[1];
-    Ok((
-        pattern[..first].to_string(),
-        pattern[first + escape.unwrap_or('\\').len_utf8() + '"'.len_utf8()..second].to_string(),
-        pattern[second + escape.unwrap_or('\\').len_utf8() + '"'.len_utf8()..].to_string(),
-    ))
-}
-
-fn similar_fragment_to_regex(
-    pattern: &str,
-    escape: Option<char>,
-    non_greedy_wildcards: bool,
-) -> Result<String, ExecError> {
-    let mut out = String::new();
-    let mut chars = pattern.chars().peekable();
-    let mut after_escape = false;
-    let mut bracket_depth = 0usize;
-    let mut charclass_pos = 0usize;
-    while let Some(ch) = chars.next() {
-        if after_escape {
-            out.push('\\');
-            out.push(ch);
-            after_escape = false;
-            if bracket_depth > 0 {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        if Some(ch) == escape {
-            after_escape = true;
-            continue;
-        }
-        if bracket_depth > 0 {
-            if ch == '\\' {
-                out.push('\\');
-            }
-            out.push(ch);
-            if ch == ']' && charclass_pos > 2 {
-                bracket_depth = bracket_depth.saturating_sub(1);
-            } else if ch == '[' {
-                bracket_depth += 1;
-                charclass_pos = 3;
-            } else if ch == '^' {
-                charclass_pos += 1;
-            } else {
-                charclass_pos = 3;
-            }
-            continue;
-        }
-        match ch {
-            '[' => {
-                out.push('[');
-                bracket_depth = 1;
-                charclass_pos = 1;
-            }
-            '%' => {
-                if non_greedy_wildcards {
-                    out.push_str(".*?");
-                } else {
-                    out.push_str(".*");
-                }
-            }
-            '_' => out.push('.'),
-            '(' => out.push_str("(?:"),
-            '\\' | '.' | '^' | '$' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    if after_escape {
-        return Err(ExecError::InvalidRegex(
-            "invalid regular expression: escape character at end of pattern".into(),
-        ));
-    }
-    Ok(out)
-}
-
-fn build_regex_and_global(
-    pattern: &str,
-    flags: &str,
-    global_policy: RegexGlobalPolicy,
-) -> Result<(Regex, bool), ExecError> {
-    let mut builder = RegexBuilder::new(pattern);
-    let mut global = false;
-    for flag in flags.chars() {
-        match flag {
-            'i' => {
-                builder.case_insensitive(true);
-            }
-            's' => {
-                builder.dot_matches_new_line(true);
-            }
-            'm' => {
-                builder.multi_line(true);
-            }
-            'x' => {
-                builder.ignore_whitespace(true);
-            }
-            'n' => {
-                builder.multi_line(true);
-            }
-            'g' => match global_policy {
-                RegexGlobalPolicy::Allow => global = true,
-                RegexGlobalPolicy::Reject => {
-                    return Err(ExecError::InvalidRegex(
-                        "regular expression option g is not supported for this function".into(),
-                    ));
-                }
-            },
-            other => {
-                return Err(ExecError::InvalidRegex(format!(
-                    "invalid regular expression option: {other}"
-                )));
-            }
-        };
-    }
-    let regex = builder
-        .build()
-        .map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
-    Ok((regex, global))
-}
-
-fn translate_regexp_replacement(replacement: &str) -> String {
-    let mut out = String::new();
-    let chars: Vec<char> = replacement.chars().collect();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '\\' {
-            if i + 1 >= chars.len() {
-                break;
-            }
-            match chars[i + 1] {
-                '&' => out.push_str("${0}"),
-                '1'..='9' => {
-                    out.push('$');
-                    out.push(chars[i + 1]);
-                }
-                '\\' => out.push('\\'),
-                other => out.push(other),
-            }
-            i += 2;
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    out
-}
-
 fn normalize_encoding_label(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
-}
-
-fn regex_text_pattern_flags_only<'a>(
-    op: &'static str,
-    values: &'a [Value],
-) -> Result<(&'a str, &'a str, &'a str), ExecError> {
-    let Some(text) = values.first() else {
-        return Ok(("", "", ""));
-    };
-    let Some(pattern) = values.get(1) else {
-        return Ok(("", "", ""));
-    };
-    if matches!(text, Value::Null) || matches!(pattern, Value::Null) {
-        return Ok(("", "", ""));
-    }
-    let flags = match values.get(2) {
-        Some(Value::Null) => return Ok(("", "", "")),
-        Some(value) => value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-            op,
-            left: text.clone(),
-            right: value.clone(),
-        })?,
-        None => "",
-    };
-    let text_value = text;
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op,
-        left: text_value.clone(),
-        right: pattern.clone(),
-    })?;
-    let pattern_value = pattern;
-    let pattern = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op,
-        left: text_value.clone(),
-        right: pattern_value.clone(),
-    })?;
-    Ok((text, pattern, flags))
-}
-
-fn regex_count_args(values: &[Value]) -> Result<(&str, &str, i32, &str), ExecError> {
-    let (text, pattern) = regex_text_pattern_pair("regexp_count", values)?;
-    let start = optional_regex_i32_arg("regexp_count", values.get(2), 1)?;
-    let flags = optional_regex_text_arg("regexp_count", values.get(3), "")?;
-    if start <= 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"start\": {start}"
-        )));
-    }
-    Ok((text, pattern, start, flags))
-}
-
-fn regex_instr_args(values: &[Value]) -> Result<(&str, &str, i32, i32, i32, &str, usize), ExecError> {
-    let (text, pattern) = regex_text_pattern_pair("regexp_instr", values)?;
-    let start = optional_regex_i32_arg("regexp_instr", values.get(2), 1)?;
-    let nth = optional_regex_i32_arg("regexp_instr", values.get(3), 1)?;
-    let return_end = optional_regex_i32_arg("regexp_instr", values.get(4), 0)?;
-    let flags = optional_regex_text_arg("regexp_instr", values.get(5), "")?;
-    let subexpr = optional_regex_i32_arg("regexp_instr", values.get(6), 0)?;
-    if start <= 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"start\": {start}"
-        )));
-    }
-    if nth <= 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"n\": {nth}"
-        )));
-    }
-    if !matches!(return_end, 0 | 1) {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"endoption\": {return_end}"
-        )));
-    }
-    if subexpr < 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"subexpr\": {subexpr}"
-        )));
-    }
-    Ok((text, pattern, start, nth, return_end, flags, subexpr as usize))
-}
-
-fn regex_substr_args(values: &[Value]) -> Result<(&str, &str, i32, i32, &str, usize), ExecError> {
-    let (text, pattern) = regex_text_pattern_pair("regexp_substr", values)?;
-    let start = optional_regex_i32_arg("regexp_substr", values.get(2), 1)?;
-    let nth = optional_regex_i32_arg("regexp_substr", values.get(3), 1)?;
-    let flags = optional_regex_text_arg("regexp_substr", values.get(4), "")?;
-    let subexpr = optional_regex_i32_arg("regexp_substr", values.get(5), 0)?;
-    if start <= 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"start\": {start}"
-        )));
-    }
-    if nth <= 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"n\": {nth}"
-        )));
-    }
-    if subexpr < 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"subexpr\": {subexpr}"
-        )));
-    }
-    Ok((text, pattern, start, nth, flags, subexpr as usize))
-}
-
-fn regexp_replace_options(values: &[Value]) -> Result<(i32, i32, &str), ExecError> {
-    let mut start = 1;
-    let mut nth = 1;
-    let mut flags = "";
-    match values.len() {
-        4 => match values[3] {
-            Value::Int32(v) => start = v,
-            Value::Null => return Ok((1, 1, "")),
-            _ => flags = values[3].as_text().ok_or_else(|| ExecError::TypeMismatch {
-                op: "regexp_replace",
-                left: values[0].clone(),
-                right: values[3].clone(),
-            })?,
-        },
-        5 => {
-            start = optional_regex_i32_arg("regexp_replace", values.get(3), 1)?;
-            nth = optional_regex_i32_arg("regexp_replace", values.get(4), 1)?;
-        }
-        6 => {
-            start = optional_regex_i32_arg("regexp_replace", values.get(3), 1)?;
-            nth = optional_regex_i32_arg("regexp_replace", values.get(4), 1)?;
-            flags = optional_regex_text_arg("regexp_replace", values.get(5), "")?;
-        }
-        _ => {}
-    }
-    if start <= 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"start\": {start}"
-        )));
-    }
-    if nth < 0 {
-        return Err(ExecError::RaiseException(format!(
-            "invalid value for parameter \"n\": {nth}"
-        )));
-    }
-    Ok((start, nth, flags))
-}
-
-fn regex_text_pattern_pair<'a>(
-    op: &'static str,
-    values: &'a [Value],
-) -> Result<(&'a str, &'a str), ExecError> {
-    let Some(text_value) = values.first() else {
-        return Ok(("", ""));
-    };
-    let Some(pattern_value) = values.get(1) else {
-        return Ok(("", ""));
-    };
-    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op,
-        left: text_value.clone(),
-        right: pattern_value.clone(),
-    })?;
-    let pattern = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op,
-        left: text_value.clone(),
-        right: pattern_value.clone(),
-    })?;
-    Ok((text, pattern))
-}
-
-fn optional_regex_i32_arg(
-    op: &'static str,
-    value: Option<&Value>,
-    default: i32,
-) -> Result<i32, ExecError> {
-    match value {
-        None => Ok(default),
-        Some(Value::Null) => Ok(default),
-        Some(Value::Int32(v)) => Ok(*v),
-        Some(other) => Err(ExecError::TypeMismatch {
-            op,
-            left: other.clone(),
-            right: Value::Int32(default),
-        }),
-    }
-}
-
-fn optional_regex_text_arg<'a>(
-    op: &'static str,
-    value: Option<&'a Value>,
-    default: &'a str,
-) -> Result<&'a str, ExecError> {
-    match value {
-        None => Ok(default),
-        Some(Value::Null) => Ok(default),
-        Some(value) => value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-            op,
-            left: value.clone(),
-            right: Value::Text(default.into()),
-        }),
-    }
 }
 
 fn eval_pad_function(op: &'static str, values: &[Value], left: bool) -> Result<Value, ExecError> {
@@ -2467,7 +1689,9 @@ where
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
-    Ok(Value::Bytea(D::digest(coerce_hash_bytes(op, value)?).to_vec()))
+    Ok(Value::Bytea(
+        D::digest(coerce_hash_bytes(op, value)?).to_vec(),
+    ))
 }
 
 fn coerce_hash_bytes(op: &'static str, value: &Value) -> Result<Vec<u8>, ExecError> {
@@ -2563,83 +1787,4 @@ fn validate_bytea_bit_index(bytes: &[u8], index: i32) -> Result<(), ExecError> {
         return Err(ExecError::BitIndexOutOfRange { index, max_index });
     }
     Ok(())
-}
-
-fn slice_from_char_start(text: &str, start: i32) -> Result<&str, ExecError> {
-    let start_byte = byte_index_from_char_start(text, start)?;
-    Ok(&text[start_byte..])
-}
-
-fn byte_index_from_char_start(text: &str, start: i32) -> Result<usize, ExecError> {
-    if start <= 0 {
-        return Err(ExecError::RaiseException(
-            "regex start position must be greater than zero".into(),
-        ));
-    }
-    if start == 1 {
-        return Ok(0);
-    }
-    let char_index = (start - 1) as usize;
-    Ok(text
-        .char_indices()
-        .nth(char_index)
-        .map(|(idx, _)| idx)
-        .unwrap_or(text.len()))
-}
-
-fn char_index_from_byte(text: &str, byte_index: usize) -> usize {
-    text[..byte_index].chars().count()
-}
-
-fn nth_capture_match<'a>(
-    regex: &Regex,
-    subject: &'a str,
-    nth: i32,
-    start: i32,
-    subexpr: usize,
-) -> Result<Option<(Captures<'a>, usize)>, ExecError> {
-    let base_offset = (start - 1) as usize;
-    for (idx, captures) in regex.captures_iter(subject).enumerate() {
-        if idx + 1 == nth as usize {
-            if subexpr >= captures.len() {
-                return Ok(None);
-            }
-            return Ok(Some((captures, base_offset)));
-        }
-    }
-    Ok(None)
-}
-
-fn capture_by_index<'a>(captures: &'a Captures<'a>, index: usize) -> Option<regex::Match<'a>> {
-    captures.get(index)
-}
-
-fn captures_to_array(captures: &Captures<'_>) -> Vec<Value> {
-    if captures.len() <= 1 {
-        return vec![Value::Text(CompactString::from(
-            captures.get(0).map(|m| m.as_str()).unwrap_or(""),
-        ))];
-    }
-    (1..captures.len())
-        .map(|idx| {
-            captures
-                .get(idx)
-                .map(|m| Value::Text(CompactString::from(m.as_str())))
-                .unwrap_or(Value::Null)
-        })
-        .collect()
-}
-
-fn replace_nth_match(regex: &Regex, subject: &str, nth: i32, replacement: &str) -> String {
-    for (idx, captures) in regex.captures_iter(subject).enumerate() {
-        if idx + 1 == nth as usize {
-            let matched = captures.get(0).unwrap();
-            let mut out = String::with_capacity(subject.len() + replacement.len());
-            out.push_str(&subject[..matched.start()]);
-            captures.expand(replacement, &mut out);
-            out.push_str(&subject[matched.end()..]);
-            return out;
-        }
-    }
-    subject.to_string()
 }

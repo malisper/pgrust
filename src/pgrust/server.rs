@@ -531,10 +531,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             rows,
-            vec![vec![
-                Some("{\"a,b\",\"c\"}".into()),
-                Some("{1,NULL,3}".into())
-            ]]
+            vec![vec![Some("{\"a,b\",c}".into()), Some("{1,NULL,3}".into())]]
         );
         stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();

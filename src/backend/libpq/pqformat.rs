@@ -35,6 +35,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
             format!("function {signature} does not exist")
         }
         ExecError::Parse(p) => p.to_string(),
+        ExecError::Regex(err) => err.message.clone(),
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
         ExecError::UniqueViolation { constraint } => {
@@ -483,9 +484,11 @@ pub(crate) fn send_error(
     w: &mut impl Write,
     sqlstate: &str,
     message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
-    send_error_with_hint(w, sqlstate, message, None, position)
+    send_error_with_fields(w, sqlstate, message, detail, hint, position)
 }
 
 pub(crate) fn send_error_with_hint(

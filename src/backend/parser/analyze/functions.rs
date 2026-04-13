@@ -179,10 +179,13 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgInputErrorDetail
             | BuiltinScalarFunction::PgInputErrorHint
             | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
+            BuiltinScalarFunction::RegexpMatch => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Replace
             | BuiltinScalarFunction::Translate
             | BuiltinScalarFunction::SplitPart => args.len() == 3,
-            BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => {
+                matches!(args.len(), 2 | 3)
+            }
             BuiltinScalarFunction::RegexpReplace => matches!(args.len(), 3..=6),
             BuiltinScalarFunction::RegexpCount => matches!(args.len(), 2..=4),
             BuiltinScalarFunction::RegexpInstr => matches!(args.len(), 2..=7),
@@ -421,10 +424,7 @@ fn lower_named_function_args(
         });
     }
 
-    Ok(lowered
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>())
+    Ok(lowered.into_iter().flatten().collect::<Vec<_>>())
 }
 
 fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
@@ -608,6 +608,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("btrim", BuiltinScalarFunction::BTrim),
         ("ltrim", BuiltinScalarFunction::LTrim),
         ("rtrim", BuiltinScalarFunction::RTrim),
+        ("regexp_match", BuiltinScalarFunction::RegexpMatch),
         ("regexp_like", BuiltinScalarFunction::RegexpLike),
         ("regexp_replace", BuiltinScalarFunction::RegexpReplace),
         ("regexp_count", BuiltinScalarFunction::RegexpCount),
@@ -874,6 +875,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Crc32c
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::RegexpMatch
             | BuiltinScalarFunction::RegexpReplace
             | BuiltinScalarFunction::RegexpCount
             | BuiltinScalarFunction::RegexpInstr
@@ -922,6 +924,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
+            | BuiltinScalarFunction::RegexpMatch
             | BuiltinScalarFunction::RegexpReplace
             | BuiltinScalarFunction::RegexpCount
             | BuiltinScalarFunction::RegexpInstr
