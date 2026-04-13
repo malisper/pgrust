@@ -129,6 +129,17 @@ pub(crate) fn eval_json_builtin_function(
             BuiltinScalarFunction::JsonObject => Ok(Value::Json(CompactString::from_owned(
                 render_json_object_function(values)?,
             ))),
+            BuiltinScalarFunction::JsonStripNulls => {
+                let strip_in_arrays = parse_optional_bool_flag(values.get(1), false, "json_strip_nulls")?;
+                let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
+                let parsed = match json {
+                    ParsedJsonValue::Json(json) => json,
+                    ParsedJsonValue::Jsonb(jsonb) => jsonb.to_serde(),
+                };
+                Ok(Value::Json(CompactString::from_owned(
+                    strip_json_nulls(&parsed, strip_in_arrays).to_string(),
+                )))
+            }
             BuiltinScalarFunction::JsonTypeof => {
                 let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
                 Ok(Value::Text(CompactString::new(json.typeof_name())))
@@ -244,6 +255,108 @@ pub(crate) fn eval_json_builtin_function(
                     &pairs,
                 )?)))
             }
+            BuiltinScalarFunction::JsonbObject => {
+                Ok(Value::Jsonb(encode_jsonb(&render_jsonb_object_function(values)?)))
+            }
+            BuiltinScalarFunction::JsonbStripNulls => {
+                let strip_in_arrays = parse_optional_bool_flag(values.get(1), false, "jsonb_strip_nulls")?;
+                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_strip_nulls")?;
+                Ok(Value::Jsonb(encode_jsonb(&strip_jsonb_nulls(
+                    &json,
+                    strip_in_arrays,
+                ))))
+            }
+            BuiltinScalarFunction::JsonbPretty => {
+                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_pretty")?;
+                Ok(Value::Text(CompactString::from_owned(
+                    serde_json::to_string_pretty(&json.to_serde()).unwrap(),
+                )))
+            }
+            BuiltinScalarFunction::JsonbDelete => {
+                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_delete")?;
+                Ok(Value::Jsonb(encode_jsonb(&apply_jsonb_delete(
+                    &json,
+                    values.get(1).unwrap_or(&Value::Null),
+                )?)))
+            }
+            BuiltinScalarFunction::JsonbDeletePath => {
+                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_delete_path")?;
+                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_delete_path")?;
+                Ok(Value::Jsonb(encode_jsonb(&delete_jsonb_path(&json, &path))))
+            }
+            BuiltinScalarFunction::JsonbSet => {
+                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_set")?;
+                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_set")?;
+                let replacement =
+                    parse_jsonb_target(values.get(2).unwrap_or(&Value::Null), "jsonb_set")?;
+                let create_missing =
+                    parse_optional_bool_flag(values.get(3), true, "jsonb_set")?;
+                Ok(Value::Jsonb(encode_jsonb(&set_jsonb_path(
+                    &json,
+                    &path,
+                    replacement,
+                    create_missing,
+                    false,
+                    false,
+                )?)))
+            }
+            BuiltinScalarFunction::JsonbSetLax => {
+                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_set_lax")?;
+                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_set_lax")?;
+                let create_missing =
+                    parse_optional_bool_flag(values.get(3), true, "jsonb_set_lax")?;
+                match values.get(2).unwrap_or(&Value::Null) {
+                    Value::Null => {
+                        let treatment = parse_jsonb_set_lax_treatment(values.get(4))?;
+                        let result = match treatment.as_str() {
+                            "use_json_null" => set_jsonb_path(
+                                &json,
+                                &path,
+                                JsonbValue::Null,
+                                create_missing,
+                                false,
+                                false,
+                            )?,
+                            "delete_key" => delete_jsonb_path(&json, &path),
+                            "return_target" => json,
+                            "raise_exception" => {
+                                return Err(ExecError::RaiseException(
+                                    "JSON value must not be null".into(),
+                                ));
+                            }
+                            _ => unreachable!(),
+                        };
+                        Ok(Value::Jsonb(encode_jsonb(&result)))
+                    }
+                    value => {
+                        let replacement = parse_jsonb_target(value, "jsonb_set_lax")?;
+                        Ok(Value::Jsonb(encode_jsonb(&set_jsonb_path(
+                            &json,
+                            &path,
+                            replacement,
+                            create_missing,
+                            false,
+                            false,
+                        )?)))
+                    }
+                }
+            }
+            BuiltinScalarFunction::JsonbInsert => {
+                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_insert")?;
+                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_insert")?;
+                let replacement =
+                    parse_jsonb_target(values.get(2).unwrap_or(&Value::Null), "jsonb_insert")?;
+                let insert_after =
+                    parse_optional_bool_flag(values.get(3), false, "jsonb_insert")?;
+                Ok(Value::Jsonb(encode_jsonb(&set_jsonb_path(
+                    &json,
+                    &path,
+                    replacement,
+                    true,
+                    insert_after,
+                    true,
+                )?)))
+            }
             BuiltinScalarFunction::JsonbPathExists => {
                 eval_jsonpath_function(values, JsonPathFunctionKind::Exists)
             }
@@ -267,16 +380,25 @@ pub(crate) fn eval_json_builtin_function(
         | BuiltinScalarFunction::JsonBuildArray
         | BuiltinScalarFunction::JsonBuildObject
         | BuiltinScalarFunction::JsonObject
+        | BuiltinScalarFunction::JsonStripNulls
         | BuiltinScalarFunction::JsonTypeof
         | BuiltinScalarFunction::JsonbTypeof
         | BuiltinScalarFunction::JsonArrayLength
         | BuiltinScalarFunction::JsonbArrayLength
         | BuiltinScalarFunction::JsonExtractPath
         | BuiltinScalarFunction::JsonExtractPathText
+        | BuiltinScalarFunction::JsonbObject
+        | BuiltinScalarFunction::JsonbStripNulls
+        | BuiltinScalarFunction::JsonbPretty
         | BuiltinScalarFunction::JsonbExtractPath
         | BuiltinScalarFunction::JsonbExtractPathText
         | BuiltinScalarFunction::JsonbBuildArray
         | BuiltinScalarFunction::JsonbBuildObject
+        | BuiltinScalarFunction::JsonbDelete
+        | BuiltinScalarFunction::JsonbDeletePath
+        | BuiltinScalarFunction::JsonbSet
+        | BuiltinScalarFunction::JsonbSetLax
+        | BuiltinScalarFunction::JsonbInsert
         | BuiltinScalarFunction::JsonbPathExists
         | BuiltinScalarFunction::JsonbPathMatch
         | BuiltinScalarFunction::JsonbPathQueryArray
@@ -342,6 +464,61 @@ fn render_json_object_function(values: &[Value]) -> Result<String, ExecError> {
         _ => Err(ExecError::InvalidStorageValue {
             column: "json".into(),
             details: "json_object expects one or two array arguments".into(),
+        }),
+    }
+}
+
+fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecError> {
+    match values {
+        [single] => {
+            let items = array_values_for_json_object(single, "jsonb_object")?;
+            if items.iter().all(|item| matches!(item, Value::Array(_))) {
+                let mut pairs = Vec::with_capacity(items.len());
+                for item in items {
+                    let Value::Array(parts) = item else {
+                        unreachable!();
+                    };
+                    if parts.len() != 2 {
+                        return Err(ExecError::InvalidStorageValue {
+                            column: "jsonb".into(),
+                            details: "array must have two columns".into(),
+                        });
+                    }
+                    pairs.push((jsonb_builder_key(&parts[0])?, parts[1].clone()));
+                }
+                return jsonb_object_from_pairs(&pairs);
+            }
+            if items.len() % 2 != 0 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "jsonb".into(),
+                    details: "argument list must have even number of elements".into(),
+                });
+            }
+            let pairs = items
+                .chunks(2)
+                .map(|chunk| Ok((jsonb_builder_key(&chunk[0])?, chunk[1].clone())))
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            jsonb_object_from_pairs(&pairs)
+        }
+        [keys, vals] => {
+            let keys = array_values_for_json_object(keys, "jsonb_object")?;
+            let vals = array_values_for_json_object(vals, "jsonb_object")?;
+            if keys.len() != vals.len() {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "jsonb".into(),
+                    details: "mismatched array dimensions".into(),
+                });
+            }
+            let pairs = keys
+                .into_iter()
+                .zip(vals)
+                .map(|(k, v)| Ok((jsonb_builder_key(&k)?, v)))
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            jsonb_object_from_pairs(&pairs)
+        }
+        _ => Err(ExecError::InvalidStorageValue {
+            column: "jsonb".into(),
+            details: "jsonb_object expects one or two array arguments".into(),
         }),
     }
 }
@@ -672,6 +849,393 @@ fn parse_json_path_args(args: &[Value]) -> Result<Vec<String>, ExecError> {
             }),
         })
         .collect()
+}
+
+fn parse_optional_bool_flag(
+    value: Option<&Value>,
+    default: bool,
+    op: &'static str,
+) -> Result<bool, ExecError> {
+    match value {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(other) => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Bool(default),
+        }),
+    }
+}
+
+fn parse_jsonb_target(value: &Value, op: &'static str) -> Result<JsonbValue, ExecError> {
+    match value {
+        Value::Null => Ok(JsonbValue::Null),
+        Value::Jsonb(bytes) => decode_jsonb(bytes),
+        Value::Json(text) => JsonbValue::from_serde(parse_json_text(text.as_str())?),
+        Value::Text(text) => decode_jsonb(&parse_jsonb_text(text.as_str())?),
+        Value::TextRef(_, _) => decode_jsonb(&parse_jsonb_text(value.as_text().unwrap())?),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn parse_jsonb_path_arg(value: &Value, op: &'static str) -> Result<Vec<Option<String>>, ExecError> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Null => Ok(None),
+                Value::Text(_) | Value::TextRef(_, _) => {
+                    Ok(Some(item.as_text().unwrap().to_string()))
+                }
+                other => Err(ExecError::TypeMismatch {
+                    op,
+                    left: other.clone(),
+                    right: Value::Null,
+                }),
+            })
+            .collect(),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn parse_jsonb_set_lax_treatment(value: Option<&Value>) -> Result<String, ExecError> {
+    match value {
+        None | Some(Value::Null) => Ok("use_json_null".into()),
+        Some(Value::Text(text)) => Ok(text.to_ascii_lowercase()),
+        Some(Value::TextRef(_, _)) => Ok(value.unwrap().as_text().unwrap().to_ascii_lowercase()),
+        Some(other) => Err(ExecError::TypeMismatch {
+            op: "jsonb_set_lax",
+            left: other.clone(),
+            right: Value::Text("use_json_null".into()),
+        }),
+    }
+}
+
+fn strip_json_nulls(value: &SerdeJsonValue, strip_in_arrays: bool) -> SerdeJsonValue {
+    match value {
+        SerdeJsonValue::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                if matches!(value, SerdeJsonValue::Null) {
+                    continue;
+                }
+                out.insert(key.clone(), strip_json_nulls(value, strip_in_arrays));
+            }
+            SerdeJsonValue::Object(out)
+        }
+        SerdeJsonValue::Array(items) => {
+            let mut out = Vec::new();
+            for item in items {
+                if strip_in_arrays && matches!(item, SerdeJsonValue::Null) {
+                    continue;
+                }
+                out.push(strip_json_nulls(item, strip_in_arrays));
+            }
+            SerdeJsonValue::Array(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn strip_jsonb_nulls(value: &JsonbValue, strip_in_arrays: bool) -> JsonbValue {
+    match value {
+        JsonbValue::Object(items) => JsonbValue::Object(
+            items.iter()
+                .filter_map(|(key, value)| {
+                    (!matches!(value, JsonbValue::Null)).then_some((
+                        key.clone(),
+                        strip_jsonb_nulls(value, strip_in_arrays),
+                    ))
+                })
+                .collect(),
+        ),
+        JsonbValue::Array(items) => JsonbValue::Array(
+            items.iter()
+                .filter_map(|item| {
+                    if strip_in_arrays && matches!(item, JsonbValue::Null) {
+                        None
+                    } else {
+                        Some(strip_jsonb_nulls(item, strip_in_arrays))
+                    }
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn apply_jsonb_delete(target: &JsonbValue, key: &Value) -> Result<JsonbValue, ExecError> {
+    Ok(match key {
+        Value::Text(_) | Value::TextRef(_, _) => {
+            let key = key.as_text().unwrap();
+            match target {
+                JsonbValue::Object(items) => JsonbValue::Object(
+                    items.iter()
+                        .filter(|(name, _)| name != key)
+                        .cloned()
+                        .collect(),
+                ),
+                JsonbValue::Array(items) => JsonbValue::Array(
+                    items.iter()
+                        .filter(|item| !matches!(item, JsonbValue::String(text) if text == key))
+                        .cloned()
+                        .collect(),
+                ),
+                other => other.clone(),
+            }
+        }
+        Value::Int16(index) => delete_jsonb_array_index(target, i32::from(*index)),
+        Value::Int32(index) => delete_jsonb_array_index(target, *index),
+        Value::Int64(index) => delete_jsonb_array_index(target, i32::try_from(*index).unwrap_or(i32::MIN)),
+        Value::Array(keys) => {
+            let mut result = target.clone();
+            for key in keys {
+                let text = match key {
+                    Value::Null => continue,
+                    Value::Text(_) | Value::TextRef(_, _) => key.as_text().unwrap(),
+                    other => {
+                        return Err(ExecError::TypeMismatch {
+                            op: "jsonb_delete",
+                            left: other.clone(),
+                            right: Value::Null,
+                        });
+                    }
+                };
+                result = apply_jsonb_delete(&result, &Value::Text(CompactString::new(text)))?;
+            }
+            result
+        }
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "jsonb_delete",
+                left: other.clone(),
+                right: Value::Null,
+            });
+        }
+    })
+}
+
+fn delete_jsonb_array_index(target: &JsonbValue, index: i32) -> JsonbValue {
+    let JsonbValue::Array(items) = target else {
+        return target.clone();
+    };
+    let Some(index) = normalize_array_index(items.len(), index) else {
+        return JsonbValue::Array(items.clone());
+    };
+    let mut out = items.clone();
+    out.remove(index);
+    JsonbValue::Array(out)
+}
+
+fn delete_jsonb_path(target: &JsonbValue, path: &[Option<String>]) -> JsonbValue {
+    if path.is_empty() || path.iter().any(|step| step.is_none()) {
+        return target.clone();
+    }
+    delete_jsonb_path_inner(target, path)
+}
+
+fn delete_jsonb_path_inner(target: &JsonbValue, path: &[Option<String>]) -> JsonbValue {
+    let step = path[0].as_ref().unwrap();
+    if path.len() == 1 {
+        return match target {
+            JsonbValue::Object(items) => JsonbValue::Object(
+                items.iter()
+                    .filter(|(key, _)| key != step)
+                    .cloned()
+                    .collect(),
+            ),
+            JsonbValue::Array(items) => {
+                let Some(index) = parse_jsonb_array_index(step, items.len()) else {
+                    return JsonbValue::Array(items.clone());
+                };
+                let mut out = items.clone();
+                out.remove(index);
+                JsonbValue::Array(out)
+            }
+            other => other.clone(),
+        };
+    }
+    match target {
+        JsonbValue::Object(items) => JsonbValue::Object(
+            items.iter()
+                .map(|(key, value)| {
+                    if key == step {
+                        (key.clone(), delete_jsonb_path_inner(value, &path[1..]))
+                    } else {
+                        (key.clone(), value.clone())
+                    }
+                })
+                .collect(),
+        ),
+        JsonbValue::Array(items) => {
+            let Some(index) = parse_jsonb_array_index(step, items.len()) else {
+                return JsonbValue::Array(items.clone());
+            };
+            let mut out = items.clone();
+            out[index] = delete_jsonb_path_inner(&out[index], &path[1..]);
+            JsonbValue::Array(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn set_jsonb_path(
+    target: &JsonbValue,
+    path: &[Option<String>],
+    replacement: JsonbValue,
+    create_missing: bool,
+    insert_after: bool,
+    insert_mode: bool,
+) -> Result<JsonbValue, ExecError> {
+    if path.is_empty() || path.iter().any(|step| step.is_none()) {
+        return Ok(target.clone());
+    }
+    set_jsonb_path_inner(
+        target,
+        path,
+        replacement,
+        create_missing,
+        insert_after,
+        insert_mode,
+    )
+}
+
+fn set_jsonb_path_inner(
+    target: &JsonbValue,
+    path: &[Option<String>],
+    replacement: JsonbValue,
+    create_missing: bool,
+    insert_after: bool,
+    insert_mode: bool,
+) -> Result<JsonbValue, ExecError> {
+    let step = path[0].as_ref().unwrap();
+    if path.len() == 1 {
+        return match target {
+            JsonbValue::Object(items) => {
+                let mut out = items.clone();
+                if let Some((_, value)) = out.iter_mut().find(|(key, _)| key == step) {
+                    if insert_after {
+                        return Err(ExecError::InvalidStorageValue {
+                            column: "jsonb".into(),
+                            details: "cannot replace existing key".into(),
+                        });
+                    }
+                    *value = replacement;
+                } else if create_missing {
+                    out.push((step.clone(), replacement));
+                }
+                Ok(JsonbValue::Object(out))
+            }
+            JsonbValue::Array(items) => {
+                let mut out = items.clone();
+                match parse_array_insert_target(step, items.len()) {
+                    Some((index, in_range)) => {
+                        if insert_mode {
+                            let insert_at = if insert_after && in_range {
+                                index + 1
+                            } else {
+                                index
+                            };
+                            out.insert(insert_at.min(out.len()), replacement);
+                        } else if insert_after {
+                            let insert_at = if in_range { index + 1 } else { index };
+                            out.insert(insert_at.min(out.len()), replacement);
+                        } else if in_range {
+                            out[index] = replacement;
+                        } else if create_missing {
+                            out.insert(index.min(out.len()), replacement);
+                        }
+                        Ok(JsonbValue::Array(out))
+                    }
+                    None => Ok(JsonbValue::Array(out)),
+                }
+            }
+            _ => Err(ExecError::InvalidStorageValue {
+                column: "jsonb".into(),
+                details: "cannot set path in scalar".into(),
+            }),
+        };
+    }
+
+    match target {
+        JsonbValue::Object(items) => {
+            let mut out = items.clone();
+            if let Some((_, value)) = out.iter_mut().find(|(key, _)| key == step) {
+                *value = set_jsonb_path_inner(
+                    value,
+                    &path[1..],
+                    replacement,
+                    create_missing,
+                    insert_after,
+                    insert_mode,
+                )?;
+                Ok(JsonbValue::Object(out))
+            } else {
+                Ok(JsonbValue::Object(out))
+            }
+        }
+        JsonbValue::Array(items) => {
+            let Some(index) = parse_jsonb_array_index(step, items.len()) else {
+                return Ok(JsonbValue::Array(items.clone()));
+            };
+            let mut out = items.clone();
+            out[index] = set_jsonb_path_inner(
+                &out[index],
+                &path[1..],
+                replacement,
+                create_missing,
+                insert_after,
+                insert_mode,
+            )?;
+            Ok(JsonbValue::Array(out))
+        }
+        _ => Err(ExecError::InvalidStorageValue {
+            column: "jsonb".into(),
+            details: "cannot set path in scalar".into(),
+        }),
+    }
+}
+
+fn normalize_array_index(len: usize, index: i32) -> Option<usize> {
+    let len_i32 = i32::try_from(len).ok()?;
+    let idx = if index < 0 { len_i32 + index } else { index };
+    if idx < 0 || idx >= len_i32 {
+        None
+    } else {
+        usize::try_from(idx).ok()
+    }
+}
+
+fn parse_jsonb_array_index(step: &str, len: usize) -> Option<usize> {
+    let index = step.parse::<i32>().ok()?;
+    normalize_array_index(len, index)
+}
+
+fn parse_array_insert_target(step: &str, len: usize) -> Option<(usize, bool)> {
+    let index = step.parse::<i32>().ok()?;
+    let len_i32 = i32::try_from(len).ok()?;
+    if index < 0 {
+        let idx = len_i32 + index;
+        if idx < 0 {
+            Some((0, false))
+        } else if idx >= len_i32 {
+            Some((len, false))
+        } else {
+            usize::try_from(idx).ok().map(|idx| (idx, true))
+        }
+    } else if index >= len_i32 {
+        Some((len, false))
+    } else {
+        usize::try_from(index).ok().map(|idx| (idx, true))
+    }
 }
 
 fn parse_json_path_value(
