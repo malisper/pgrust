@@ -2490,3 +2490,23 @@ fn parse_like_and_trim_syntax() {
         other => panic!("expected select statement, got {other:?}"),
     }
 }
+
+#[test]
+fn parse_trim_without_explicit_trim_chars() {
+    let stmt = parse_select(
+        "select trim(both from '  bunch  '), trim(leading from '  bunch  '), trim(trailing from '  bunch  ')",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::FuncCall { name, args } if name == "btrim" && args.len() == 1
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::FuncCall { name, args } if name == "ltrim" && args.len() == 1
+    ));
+    assert!(matches!(
+        &stmt.targets[2].expr,
+        SqlExpr::FuncCall { name, args } if name == "rtrim" && args.len() == 1
+    ));
+}

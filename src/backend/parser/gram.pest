@@ -179,9 +179,13 @@ named_function_arg = { identifier ~ ("=>" | ":=") ~ expr }
 position_expr = { ^"position" ~ "(" ~ concat_expr ~ kw_in ~ concat_expr ~ ")" }
 substring_expr = { ^"substring" ~ "(" ~ expr_until_from ~ kw_from ~ expr ~ (kw_for ~ expr)? ~ ")" }
 overlay_expr = { ^"overlay" ~ "(" ~ expr_until_placing ~ kw_placing ~ expr_until_from ~ kw_from ~ expr ~ (kw_for ~ expr)? ~ ")" }
-trim_expr = { ^"trim" ~ "(" ~ trim_spec? ~ trim_arguments ~ ")" }
+trim_expr = { ^"trim" ~ "(" ~ trim_variant ~ ")" }
+trim_variant = { trim_spec_chars_from | trim_spec_from | trim_chars_from | trim_source_only }
+trim_spec_chars_from = { trim_spec ~ expr ~ kw_from ~ expr }
+trim_spec_from = { trim_spec ~ kw_from ~ expr }
+trim_chars_from = { expr ~ kw_from ~ expr }
+trim_source_only = { expr }
 trim_spec = { kw_both | kw_leading | kw_trailing }
-trim_arguments = { expr ~ (kw_from ~ expr)? | kw_from ~ expr }
 typed_string_literal = { type_name ~ quoted_string_literal }
 expr_until_from = @{ (!kw_from_atom ~ ANY)+ }
 expr_until_placing = @{ (!kw_placing_atom ~ ANY)+ }

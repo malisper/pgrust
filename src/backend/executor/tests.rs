@@ -5910,6 +5910,41 @@ fn trim_like_and_regexp_string_functions_work() {
 }
 
 #[test]
+fn trim_without_explicit_trim_chars_and_text_substring_work() {
+    let base = temp_dir("strings_trim_substring_text");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+            "select trim(both from '  bunch o blanks  '), trim(leading from '  bunch o blanks  '), trim(trailing from '  bunch o blanks  '), substring('1234567890' from 3), substring('1234567890' from 4 for 3), substring('string' from -10 for 2147483646)",
+        )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Text("bunch o blanks".into()));
+            assert_eq!(rows[0][1], Value::Text("bunch o blanks  ".into()));
+            assert_eq!(rows[0][2], Value::Text("  bunch o blanks".into()));
+            assert_eq!(rows[0][3], Value::Text("34567890".into()));
+            assert_eq!(rows[0][4], Value::Text("456".into()));
+            assert_eq!(rows[0][5], Value::Text("string".into()));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select substring('string' from -10 for -2147483646)",
+    )
+    .expect_err("negative length should error");
+    assert!(matches!(err, ExecError::NegativeSubstringLength));
+}
+
+#[test]
 fn trim_supports_bytea_arguments() {
     let base = temp_dir("strings_trim_bytea");
     let txns = TransactionManager::new_durable(&base).unwrap();
