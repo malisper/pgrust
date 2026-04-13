@@ -11,8 +11,12 @@ use crate::backend::access::transam::xact::{
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions,
 };
+use crate::backend::catalog::indexing::{
+    insert_bootstrap_system_indexes, rebuild_system_catalog_indexes,
+};
 use crate::backend::catalog::loader::{
-    load_catalog_from_physical, load_catalog_from_visible_physical, load_physical_catalog_rows_visible,
+    load_catalog_from_physical, load_catalog_from_visible_physical,
+    load_physical_catalog_rows_visible,
 };
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
@@ -24,9 +28,9 @@ use crate::backend::catalog::rows::{
     physical_catalog_rows_for_catalog_entry, physical_catalog_rows_from_catcache,
 };
 use crate::backend::executor::RelationDesc;
-use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
+use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
@@ -56,13 +60,13 @@ pub struct CatalogMutationEffect {
     pub full_reset: bool,
 }
 
-pub struct CatalogWriteContext<'a> {
-    pub pool: &'a BufferPool<SmgrStorageBackend>,
-    pub txns: &'a RwLock<TransactionManager>,
+pub struct CatalogWriteContext {
+    pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
+    pub txns: std::sync::Arc<RwLock<TransactionManager>>,
     pub xid: TransactionId,
     pub cid: CommandId,
     pub client_id: crate::ClientId,
-    pub waiter: Option<&'a TransactionWaiter>,
+    pub waiter: Option<std::sync::Arc<TransactionWaiter>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +88,7 @@ impl CatalogStore {
         let (mut catalog, control) = if control_path.exists() {
             let control = load_control_file(&control_path)?;
             let mut catalog = load_catalog_from_physical(&base_dir)?;
+            insert_bootstrap_system_indexes(&mut catalog);
             catalog.next_oid = catalog.next_oid.max(control.next_oid);
             catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
             (catalog, control)
@@ -135,7 +140,8 @@ impl CatalogStore {
         snapshot: &Snapshot,
         client_id: crate::ClientId,
     ) -> Result<CatCache, CatalogError> {
-        let rows = load_physical_catalog_rows_visible(&self.base_dir, pool, txns, snapshot, client_id)?;
+        let rows =
+            load_physical_catalog_rows_visible(&self.base_dir, pool, txns, snapshot, client_id)?;
         Ok(CatCache::from_rows(
             rows.namespaces,
             rows.classes,
@@ -232,7 +238,13 @@ impl CatalogStore {
             indcollation: Vec::new(),
             indoption: Vec::new(),
         };
-        self.create_index_for_relation_with_options(index_name, relation_oid, unique, columns, &options)
+        self.create_index_for_relation_with_options(
+            index_name,
+            relation_oid,
+            unique,
+            columns,
+            &options,
+        )
     }
 
     pub fn create_index_for_relation_with_options(
@@ -304,9 +316,16 @@ impl CatalogStore {
         &mut self,
         name: impl Into<String>,
         desc: RelationDesc,
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
-        self.create_table_mvcc_with_options(name, desc, crate::include::catalog::PUBLIC_NAMESPACE_OID, 1, 'p', ctx)
+        self.create_table_mvcc_with_options(
+            name,
+            desc,
+            crate::include::catalog::PUBLIC_NAMESPACE_OID,
+            1,
+            'p',
+            ctx,
+        )
     }
 
     pub fn create_table_mvcc_with_options(
@@ -316,12 +335,17 @@ impl CatalogStore {
         namespace_oid: u32,
         db_oid: u32,
         relpersistence: char,
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
-        let entry =
-            catalog.create_table_with_options(name.clone(), desc, namespace_oid, db_oid, relpersistence)?;
+        let entry = catalog.create_table_with_options(
+            name.clone(),
+            desc,
+            namespace_oid,
+            db_oid,
+            relpersistence,
+        )?;
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_state(&catalog)?;
         let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
@@ -340,7 +364,7 @@ impl CatalogStore {
         &mut self,
         namespace_oid: u32,
         namespace_name: &str,
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let rows = PhysicalCatalogRows {
             namespaces: vec![PgNamespaceRow {
@@ -362,7 +386,7 @@ impl CatalogStore {
         &mut self,
         namespace_oid: u32,
         namespace_name: &str,
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let rows = PhysicalCatalogRows {
             namespaces: vec![PgNamespaceRow {
@@ -386,7 +410,7 @@ impl CatalogStore {
         relation_oid: u32,
         unique: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let options = CatalogIndexBuildOptions {
             am_oid: crate::include::catalog::BTREE_AM_OID,
@@ -411,7 +435,7 @@ impl CatalogStore {
         unique: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         options: &CatalogIndexBuildOptions,
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
@@ -447,7 +471,7 @@ impl CatalogStore {
     pub fn drop_relation_by_oid_mvcc(
         &mut self,
         relation_oid: u32,
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<(Vec<CatalogEntry>, CatalogMutationEffect), CatalogError> {
         let catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
         let oids = drop_relation_oids_by_oid(&catalog, relation_oid)?;
@@ -482,6 +506,33 @@ impl CatalogStore {
         Ok((dropped, effect))
     }
 
+    pub fn set_index_ready_valid_mvcc(
+        &mut self,
+        relation_oid: u32,
+        indisready: bool,
+        indisvalid: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (name, old_entry, new_entry) =
+            catalog.set_index_ready_valid(relation_oid, indisready, indisvalid)?;
+        self.persist_control_state(&catalog)?;
+
+        let kinds = vec![BootstrapCatalogKind::PgIndex];
+        let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if let Some(index_meta) = &new_entry.index_meta {
+            effect_record_oid(&mut effect.relation_oids, index_meta.indrelid);
+        }
+        Ok(effect)
+    }
+
     fn persist_catalog_kinds(
         &self,
         catalog: &Catalog,
@@ -503,7 +554,10 @@ impl CatalogStore {
     }
 }
 
-fn drop_relation_oids_by_oid(catalog: &Catalog, relation_oid: u32) -> Result<Vec<u32>, CatalogError> {
+fn drop_relation_oids_by_oid(
+    catalog: &Catalog,
+    relation_oid: u32,
+) -> Result<Vec<u32>, CatalogError> {
     let entry = catalog
         .get_by_oid(relation_oid)
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
@@ -512,7 +566,13 @@ fn drop_relation_oids_by_oid(catalog: &Catalog, relation_oid: u32) -> Result<Vec
     }
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
-    collect_relation_drop_oids(catalog, catalog.depend_rows(), relation_oid, &mut seen, &mut order);
+    collect_relation_drop_oids(
+        catalog,
+        catalog.depend_rows(),
+        relation_oid,
+        &mut seen,
+        &mut order,
+    );
     Ok(order)
 }
 
@@ -559,7 +619,7 @@ impl CatalogStore {
 
     fn catalog_snapshot_with_control_for_snapshot(
         &self,
-        ctx: &CatalogWriteContext<'_>,
+        ctx: &CatalogWriteContext,
     ) -> Result<Catalog, CatalogError> {
         let snapshot = ctx
             .txns
@@ -567,8 +627,13 @@ impl CatalogStore {
             .snapshot_for_command(ctx.xid, ctx.cid)
             .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
         let txns = ctx.txns.read();
-        let mut catalog =
-            load_catalog_from_visible_physical(&self.base_dir, ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let mut catalog = load_catalog_from_visible_physical(
+            &self.base_dir,
+            &ctx.pool,
+            &txns,
+            &snapshot,
+            ctx.client_id,
+        )?;
         if self.control_path.exists() {
             let control = load_control_file(&self.control_path)?;
             catalog.next_oid = catalog.next_oid.max(control.next_oid);
@@ -605,7 +670,8 @@ fn sync_physical_catalogs_kinds(
 ) -> Result<(), CatalogError> {
     let catcache = CatCache::from_catalog(catalog);
     let rows = physical_catalog_rows_from_catcache(&catcache);
-    sync_catalog_rows_subset(base_dir, &rows, 1, kinds)
+    sync_catalog_rows_subset(base_dir, &rows, 1, kinds)?;
+    rebuild_system_catalog_indexes(base_dir)
 }
 
 fn effect_record_catalog_kinds(effect: &mut CatalogMutationEffect, kinds: &[BootstrapCatalogKind]) {
@@ -666,16 +732,16 @@ mod tests {
     use super::*;
     use crate::backend::catalog::column_desc;
     use crate::backend::catalog::loader::load_physical_catalog_rows;
-    use crate::backend::storage::smgr::segment_path;
     use crate::backend::storage::smgr::ForkNumber;
+    use crate::backend::storage::smgr::segment_path;
     use crate::include::catalog::{
         BOOTSTRAP_SUPERUSER_NAME, BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, C_COLLATION_OID,
         CURRENT_DATABASE_NAME, DEFAULT_COLLATION_OID, DEFAULT_TABLESPACE_OID, DEPENDENCY_AUTO,
         DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID,
         JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
         PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
-        PG_TYPE_RELATION_OID,
-        POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID, VARCHAR_TYPE_OID,
+        PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID,
+        VARCHAR_TYPE_OID,
     };
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
@@ -1119,7 +1185,10 @@ mod tests {
             reopened_entry.desc.columns[0].not_null_constraint_oid,
             Some(constraint_oid)
         );
-        assert_eq!(reopened_catalog.next_oid(), constraint_oid.saturating_add(1));
+        assert_eq!(
+            reopened_catalog.next_oid(),
+            constraint_oid.saturating_add(1)
+        );
         assert!(rows.constraints.iter().any(|row| {
             row.oid == constraint_oid
                 && row.conname == "people_id_not_null"
@@ -1164,14 +1233,16 @@ mod tests {
         assert!(rows.constraints.iter().any(|row| {
             row.oid == constraint_oid && row.conname == "people_id_custom_not_null"
         }));
-        assert!(rows
-            .constraints
-            .iter()
-            .all(|row| row.oid != constraint_oid || row.conname != "people_id_not_null"));
-        assert!(rows
-            .depends
-            .iter()
-            .any(|row| row.objid == constraint_oid && row.deptype == DEPENDENCY_INTERNAL));
+        assert!(
+            rows.constraints
+                .iter()
+                .all(|row| row.oid != constraint_oid || row.conname != "people_id_not_null")
+        );
+        assert!(
+            rows.depends
+                .iter()
+                .any(|row| row.objid == constraint_oid && row.deptype == DEPENDENCY_INTERNAL)
+        );
     }
 
     #[test]
@@ -1475,10 +1546,12 @@ mod tests {
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
         assert!(reopened_catalog.get("notes").is_none());
-        assert!(reopened_catalog
-            .constraint_rows()
-            .iter()
-            .all(|row| row.conrelid != entry.relation_oid));
+        assert!(
+            reopened_catalog
+                .constraint_rows()
+                .iter()
+                .all(|row| row.conrelid != entry.relation_oid)
+        );
         assert!(reopened_catalog.depend_rows().iter().all(|row| {
             row.objid != entry.relation_oid
                 && row.refobjid != entry.relation_oid
@@ -1487,10 +1560,11 @@ mod tests {
         }));
 
         let rows = load_physical_catalog_rows(&base).unwrap();
-        assert!(rows
-            .constraints
-            .iter()
-            .all(|row| row.conrelid != entry.relation_oid));
+        assert!(
+            rows.constraints
+                .iter()
+                .all(|row| row.conrelid != entry.relation_oid)
+        );
         assert!(rows.depends.iter().all(|row| {
             row.objid != entry.relation_oid
                 && row.refobjid != entry.relation_oid

@@ -1,20 +1,249 @@
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
+use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::indexing::probe_system_catalog_rows_visible;
+use crate::backend::catalog::rowcodec::{
+    namespace_row_from_values, pg_am_row_from_values, pg_amop_row_from_values,
+    pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
+    pg_class_row_from_values, pg_collation_row_from_values, pg_index_row_from_values,
+    pg_opclass_row_from_values, pg_opfamily_row_from_values, pg_type_row_from_values,
+};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
-    ensure_am_rows, ensure_amop_rows, ensure_amproc_rows, ensure_attrdef_rows,
-    ensure_attribute_rows, ensure_class_rows, ensure_collation_rows, ensure_index_rows,
-    ensure_namespace_rows, ensure_opclass_rows, ensure_opfamily_rows, ensure_type_rows,
+    catalog_snapshot_for_lookup, ensure_class_rows, ensure_type_rows,
 };
+use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
+use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgOpclassRow,
     PgOpfamilyRow, PgTypeRow,
 };
+use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{Database, TempNamespace};
 use crate::{RelFileLocator, backend::utils::cache::catcache::normalize_catalog_name};
+
+const PG_NAMESPACE_NSPNAME_INDEX_OID: u32 = 2684;
+const PG_NAMESPACE_OID_INDEX_OID: u32 = 2685;
+const PG_CLASS_OID_INDEX_OID: u32 = 2662;
+const PG_CLASS_RELNAME_NSP_INDEX_OID: u32 = 2663;
+const PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID: u32 = 2659;
+const PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID: u32 = 2656;
+const PG_TYPE_OID_INDEX_OID: u32 = 2703;
+const PG_INDEX_INDRELID_INDEX_OID: u32 = 2678;
+const PG_INDEX_INDEXRELID_INDEX_OID: u32 = 2679;
+const PG_AM_NAME_INDEX_OID: u32 = 2651;
+const PG_AM_OID_INDEX_OID: u32 = 2652;
+const PG_AMOP_FAM_STRAT_INDEX_OID: u32 = 2653;
+const PG_AMPROC_FAM_PROC_INDEX_OID: u32 = 2655;
+const PG_OPCLASS_AM_NAME_NSP_INDEX_OID: u32 = 2686;
+const PG_OPCLASS_OID_INDEX_OID: u32 = 2687;
+const PG_OPFAMILY_OID_INDEX_OID: u32 = 2755;
+const PG_COLLATION_OID_INDEX_OID: u32 = 3085;
+
+fn eq_key(attribute_number: i16, argument: Value) -> ScanKeyData {
+    ScanKeyData {
+        attribute_number,
+        strategy: BT_EQUAL_STRATEGY_NUMBER,
+        argument,
+    }
+}
+
+fn oid_value(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
+
+fn probe_rows<T>(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    index_relation_oid: u32,
+    key_data: Vec<ScanKeyData>,
+    decode: fn(Vec<Value>) -> Result<T, CatalogError>,
+) -> Vec<T> {
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    probe_system_catalog_rows_visible(
+        &db.pool,
+        &db.txns,
+        &snapshot,
+        client_id,
+        index_relation_oid,
+        key_data,
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|values| decode(values).ok())
+    .collect()
+}
+
+fn probe_first_row<T>(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    index_relation_oid: u32,
+    key_data: Vec<ScanKeyData>,
+    decode: fn(Vec<Value>) -> Result<T, CatalogError>,
+) -> Option<T> {
+    probe_rows(db, client_id, txn_ctx, index_relation_oid, key_data, decode)
+        .into_iter()
+        .next()
+}
+
+fn namespace_row_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+) -> Option<crate::include::catalog::PgNamespaceRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_NAMESPACE_NSPNAME_INDEX_OID,
+        vec![eq_key(1, Value::Text(name.to_ascii_lowercase().into()))],
+        namespace_row_from_values,
+    )
+}
+
+fn namespace_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<crate::include::catalog::PgNamespaceRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_NAMESPACE_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(oid))],
+        namespace_row_from_values,
+    )
+}
+
+fn class_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<crate::include::catalog::PgClassRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_CLASS_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(oid))],
+        pg_class_row_from_values,
+    )
+}
+
+fn class_row_by_name_namespace(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relname: &str,
+    namespace_oid: u32,
+) -> Option<crate::include::catalog::PgClassRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_CLASS_RELNAME_NSP_INDEX_OID,
+        vec![
+            eq_key(1, Value::Text(relname.to_ascii_lowercase().into())),
+            eq_key(2, oid_value(namespace_oid)),
+        ],
+        pg_class_row_from_values,
+    )
+}
+
+fn attribute_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<crate::include::catalog::PgAttributeRow> {
+    let mut rows = probe_rows(
+        db,
+        client_id,
+        txn_ctx,
+        PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID,
+        vec![eq_key(1, oid_value(relation_oid))],
+        pg_attribute_row_from_values,
+    );
+    rows.sort_by_key(|row| row.attnum);
+    rows
+}
+
+fn attrdef_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<crate::include::catalog::PgAttrdefRow> {
+    let mut rows = probe_rows(
+        db,
+        client_id,
+        txn_ctx,
+        PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID,
+        vec![eq_key(1, oid_value(relation_oid))],
+        pg_attrdef_row_from_values,
+    );
+    rows.sort_by_key(|row| row.adnum);
+    rows
+}
+
+fn type_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgTypeRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_TYPE_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(oid))],
+        pg_type_row_from_values,
+    )
+}
+
+fn opclass_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgOpclassRow> {
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_OPCLASS_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(oid))],
+        pg_opclass_row_from_values,
+    )
+}
+
+fn opclass_rows_for_am(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    am_oid: u32,
+) -> Vec<PgOpclassRow> {
+    probe_rows(
+        db,
+        client_id,
+        txn_ctx,
+        PG_OPCLASS_AM_NAME_NSP_INDEX_OID,
+        vec![eq_key(1, oid_value(am_oid))],
+        pg_opclass_row_from_values,
+    )
+}
 
 pub struct LazyCatalogLookup<'a> {
     pub db: &'a Database,
@@ -33,11 +262,7 @@ fn namespace_oid_for_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<u32> {
-    let normalized = name.to_ascii_lowercase();
-    ensure_namespace_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.nspname.eq_ignore_ascii_case(&normalized))
-        .map(|row| row.oid)
+    namespace_row_by_name(db, client_id, txn_ctx, name).map(|row| row.oid)
 }
 
 fn type_for_oid(
@@ -46,9 +271,7 @@ fn type_for_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    ensure_type_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == oid)
+    type_row_by_oid(db, client_id, txn_ctx, oid)
 }
 
 pub fn access_method_row_by_name(
@@ -57,9 +280,14 @@ pub fn access_method_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     amname: &str,
 ) -> Option<PgAmRow> {
-    ensure_am_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.amname.eq_ignore_ascii_case(amname))
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_AM_NAME_INDEX_OID,
+        vec![eq_key(1, Value::Text(amname.to_ascii_lowercase().into()))],
+        pg_am_row_from_values,
+    )
 }
 
 pub fn access_method_row_by_oid(
@@ -68,9 +296,14 @@ pub fn access_method_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     am_oid: u32,
 ) -> Option<PgAmRow> {
-    ensure_am_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == am_oid)
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_AM_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(am_oid))],
+        pg_am_row_from_values,
+    )
 }
 
 pub fn default_opclass_for_am_and_type(
@@ -80,7 +313,7 @@ pub fn default_opclass_for_am_and_type(
     am_oid: u32,
     input_type_oid: u32,
 ) -> Option<PgOpclassRow> {
-    ensure_opclass_rows(db, client_id, txn_ctx)
+    opclass_rows_for_am(db, client_id, txn_ctx, am_oid)
         .into_iter()
         .find(|row| row.opcmethod == am_oid && row.opcdefault && row.opcintype == input_type_oid)
 }
@@ -91,9 +324,14 @@ pub fn opfamily_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Option<PgOpfamilyRow> {
-    ensure_opfamily_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == family_oid)
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_OPFAMILY_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(family_oid))],
+        pg_opfamily_row_from_values,
+    )
 }
 
 pub fn collation_row_by_oid(
@@ -102,9 +340,14 @@ pub fn collation_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     collation_oid: u32,
 ) -> Option<PgCollationRow> {
-    ensure_collation_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == collation_oid)
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_COLLATION_OID_INDEX_OID,
+        vec![eq_key(1, oid_value(collation_oid))],
+        pg_collation_row_from_values,
+    )
 }
 
 pub fn amop_rows_for_family(
@@ -113,10 +356,14 @@ pub fn amop_rows_for_family(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Vec<PgAmopRow> {
-    ensure_amop_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .filter(|row| row.amopfamily == family_oid)
-        .collect()
+    probe_rows(
+        db,
+        client_id,
+        txn_ctx,
+        PG_AMOP_FAM_STRAT_INDEX_OID,
+        vec![eq_key(1, oid_value(family_oid))],
+        pg_amop_row_from_values,
+    )
 }
 
 pub fn amproc_rows_for_family(
@@ -125,10 +372,14 @@ pub fn amproc_rows_for_family(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Vec<PgAmprocRow> {
-    ensure_amproc_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .filter(|row| row.amprocfamily == family_oid)
-        .collect()
+    probe_rows(
+        db,
+        client_id,
+        txn_ctx,
+        PG_AMPROC_FAM_PROC_INDEX_OID,
+        vec![eq_key(1, oid_value(family_oid))],
+        pg_amproc_row_from_values,
+    )
 }
 
 pub fn index_row_by_indexrelid(
@@ -137,9 +388,14 @@ pub fn index_row_by_indexrelid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Option<PgIndexRow> {
-    ensure_index_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.indexrelid == relation_oid)
+    probe_first_row(
+        db,
+        client_id,
+        txn_ctx,
+        PG_INDEX_INDEXRELID_INDEX_OID,
+        vec![eq_key(1, oid_value(relation_oid))],
+        pg_index_row_from_values,
+    )
 }
 
 pub fn index_relation_oids_for_heap(
@@ -148,9 +404,15 @@ pub fn index_relation_oids_for_heap(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<u32> {
-    ensure_index_rows(db, client_id, txn_ctx)
+    probe_rows(
+        db,
+        client_id,
+        txn_ctx,
+        PG_INDEX_INDRELID_INDEX_OID,
+        vec![eq_key(1, oid_value(relation_oid))],
+        pg_index_row_from_values,
+    )
         .into_iter()
-        .filter(|row| row.indrelid == relation_oid)
         .map(|row| row.indexrelid)
         .collect()
 }
@@ -185,17 +447,14 @@ pub fn relation_entry_by_oid(
         return Some(entry);
     }
 
-    let class = ensure_class_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == relation_oid)?;
+    let class = class_row_by_oid(db, client_id, txn_ctx, relation_oid)?;
     if db.other_session_temp_namespace_oid(client_id, class.relnamespace) {
         return None;
     }
 
-    let attrdefs = ensure_attrdef_rows(db, client_id, txn_ctx);
-    let columns = ensure_attribute_rows(db, client_id, txn_ctx)
+    let attrdefs = attrdef_rows_for_relation(db, client_id, txn_ctx, relation_oid);
+    let columns = attribute_rows_for_relation(db, client_id, txn_ctx, relation_oid)
         .into_iter()
-        .filter(|attr| attr.attrelid == relation_oid)
         .map(|attr| {
             let sql_type = type_for_oid(db, client_id, txn_ctx, attr.atttypid)?.sql_type;
             let mut desc = column_desc(
@@ -220,11 +479,10 @@ pub fn relation_entry_by_oid(
     let index = if class.relkind == 'i' {
         index_row_by_indexrelid(db, client_id, txn_ctx, relation_oid).map(|index_row| {
             let am_row = access_method_row_by_oid(db, client_id, txn_ctx, class.relam);
-            let opclass_rows = ensure_opclass_rows(db, client_id, txn_ctx);
             let indclass = index_row.indclass.clone();
             let resolved_opclasses = indclass
                 .iter()
-                .filter_map(|oid| opclass_rows.iter().find(|row| row.oid == *oid))
+                .filter_map(|oid| opclass_row_by_oid(db, client_id, txn_ctx, *oid))
                 .collect::<Vec<_>>();
             IndexRelCacheEntry {
                 indrelid: index_row.indrelid,
@@ -296,11 +554,7 @@ pub fn lookup_any_relation(
             schema.to_string()
         };
         let namespace_oid = namespace_oid_for_name(db, client_id, txn_ctx, &schema_name)?;
-        let class = ensure_class_rows(db, client_id, txn_ctx)
-            .into_iter()
-            .find(|row| {
-                row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(relname)
-            })?;
+        let class = class_row_by_name_namespace(db, client_id, txn_ctx, relname, namespace_oid)?;
         let entry = relation_entry_by_oid(db, client_id, txn_ctx, class.oid)?;
         return Some(BoundRelation {
             rel: entry.rel,
@@ -337,11 +591,8 @@ pub fn lookup_any_relation(
         let Some(namespace_oid) = namespace_oid_for_name(db, client_id, txn_ctx, schema) else {
             continue;
         };
-        let Some(class) = ensure_class_rows(db, client_id, txn_ctx)
-            .into_iter()
-            .find(|row| {
-                row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&normalized)
-            })
+        let Some(class) =
+            class_row_by_name_namespace(db, client_id, txn_ctx, &normalized, namespace_oid)
         else {
             continue;
         };
@@ -377,10 +628,7 @@ pub fn relation_namespace_name(
     relation_oid: u32,
 ) -> Option<String> {
     let entry = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid)?;
-    ensure_namespace_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == entry.namespace_oid)
-        .map(|row| row.nspname)
+    namespace_row_by_oid(db, client_id, txn_ctx, entry.namespace_oid).map(|row| row.nspname)
 }
 
 pub fn relation_display_name(
@@ -391,29 +639,25 @@ pub fn relation_display_name(
     relation_oid: u32,
 ) -> Option<String> {
     let entry = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid)?;
-    let class = ensure_class_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == relation_oid)?;
+    let class = class_row_by_oid(db, client_id, txn_ctx, relation_oid)?;
     let namespace = relation_namespace_name(db, client_id, txn_ctx, relation_oid)?;
+    if namespace.starts_with("pg_temp_") {
+        return Some(format!("{namespace}.{}", class.relname));
+    }
     let search_path = db.effective_search_path(client_id, configured_search_path);
-    let first_match = ensure_class_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .filter(|row| row.relname.eq_ignore_ascii_case(&class.relname))
-        .filter_map(|row| relation_entry_by_oid(db, client_id, txn_ctx, row.oid).map(|e| (row, e)))
-        .find_map(|(row, visible_entry)| {
+    let first_match = search_path.iter().find_map(|schema| {
+        let namespace_oid = namespace_oid_for_name(db, client_id, txn_ctx, schema)?;
+        let row = class_row_by_name_namespace(db, client_id, txn_ctx, &class.relname, namespace_oid)?;
+        let visible_entry = relation_entry_by_oid(db, client_id, txn_ctx, row.oid)?;
+        Some((row, visible_entry))
+    }).and_then(|(row, visible_entry)| {
             visible_entry
                 .relkind
                 .eq(&entry.relkind)
                 .then_some(())
-                .and_then(|_| {
-                    search_path.iter().position(|schema| {
-                        namespace_oid_for_name(db, client_id, txn_ctx, schema)
-                            == Some(visible_entry.namespace_oid)
-                    })
-                })
-                .map(|position| (position, row.relnamespace))
+                .map(|_| row.relnamespace)
         });
-    if let Some((_, visible_namespace_oid)) = first_match
+    if let Some(visible_namespace_oid) = first_match
         && visible_namespace_oid == entry.namespace_oid
     {
         Some(class.relname)
@@ -428,9 +672,7 @@ pub fn has_index_on_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> bool {
-    ensure_index_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .any(|row| row.indrelid == relation_oid)
+    !index_relation_oids_for_heap(db, client_id, txn_ctx, relation_oid).is_empty()
 }
 
 pub fn access_method_name_for_relation(
@@ -439,12 +681,8 @@ pub fn access_method_name_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Option<String> {
-    let class = ensure_class_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == relation_oid)?;
-    ensure_am_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == class.relam)
+    let class = class_row_by_oid(db, client_id, txn_ctx, relation_oid)?;
+    access_method_row_by_oid(db, client_id, txn_ctx, class.relam)
         .map(|row| row.amname)
         .or_else(|| match class.relkind {
             'r' => Some("heap".to_string()),
@@ -497,7 +735,9 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .filter_map(|index_oid| {
                 let entry = relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
                 let index_meta = entry.index.as_ref()?.clone();
+                let class = class_row_by_oid(self.db, self.client_id, self.txn_ctx, entry.relation_oid)?;
                 Some(crate::backend::parser::BoundIndexRelation {
+                    name: class.relname,
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
                     desc: entry.desc,

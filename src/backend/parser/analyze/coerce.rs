@@ -64,6 +64,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "integer",
         SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
         SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",
@@ -117,7 +118,7 @@ pub(super) fn is_bit_string_type(ty: SqlType) -> bool {
 pub(super) fn is_text_like_type(ty: SqlType) -> bool {
     matches!(
         ty.element_type().kind,
-        SqlTypeKind::Text | SqlTypeKind::Char | SqlTypeKind::Varchar
+        SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
     )
 }
 

@@ -20,7 +20,7 @@ pub fn pg_database_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("datname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("datname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("datdba", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("dattablespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("datistemplate", SqlType::new(SqlTypeKind::Bool), false),

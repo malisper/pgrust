@@ -93,7 +93,7 @@ pub fn pg_proc_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("proname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("proname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("pronamespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("proowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("prolang", SqlType::new(SqlTypeKind::Oid), false),
@@ -119,9 +119,7 @@ pub fn pg_proc_desc() -> RelationDesc {
             column_desc("pronargs", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("pronargdefaults", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("prorettype", SqlType::new(SqlTypeKind::Oid), false),
-            // :HACK: PostgreSQL stores `proargtypes` as oidvector. Until pgrust has
-            // oidvector and pseudo-type catalog support, keep a textified signature.
-            column_desc("proargtypes", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("proargtypes", SqlType::new(SqlTypeKind::OidVector), false),
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
         ],
     }

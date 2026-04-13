@@ -17,7 +17,7 @@ pub fn pg_tablespace_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("spcname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("spcname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("spcowner", SqlType::new(SqlTypeKind::Oid), false),
         ],
     }

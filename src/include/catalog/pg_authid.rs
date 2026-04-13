@@ -23,7 +23,7 @@ pub fn pg_authid_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("rolname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("rolname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("rolsuper", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("rolinherit", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("rolcreaterole", SqlType::new(SqlTypeKind::Bool), false),

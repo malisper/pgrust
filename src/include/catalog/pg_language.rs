@@ -23,7 +23,7 @@ pub fn pg_language_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("lanname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("lanname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("lanowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("lanispl", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("lanpltrusted", SqlType::new(SqlTypeKind::Bool), false),

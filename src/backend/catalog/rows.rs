@@ -4,11 +4,10 @@ use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::{CatCache, format_indkey, sql_type_oid};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAttrdefRow, PgAttributeRow,
-    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgOperatorRow, PgProcRow, PgTablespaceRow,
-    PgTypeRow,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTypeRow,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -169,6 +168,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         reltype: entry.row_type_oid,
         relowner: BOOTSTRAP_SUPERUSER_OID,
         relam: crate::include::catalog::relam_for_relkind(entry.relkind),
+        reltablespace: 0,
         relfilenode: entry.rel.rel_number,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
@@ -186,15 +186,22 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
     }
 
     rows.attributes
-        .extend(entry.desc.columns.iter().enumerate().map(|(idx, column)| PgAttributeRow {
-            attrelid: entry.relation_oid,
-            attname: column.name.clone(),
-            atttypid: sql_type_oid(column.sql_type),
-            attnum: idx.saturating_add(1) as i16,
-            attnotnull: !column.storage.nullable,
-            atttypmod: column.sql_type.typmod,
-            sql_type: column.sql_type,
-        }));
+        .extend(
+            entry
+                .desc
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, column)| PgAttributeRow {
+                    attrelid: entry.relation_oid,
+                    attname: column.name.clone(),
+                    atttypid: sql_type_oid(column.sql_type),
+                    attnum: idx.saturating_add(1) as i16,
+                    attnotnull: !column.storage.nullable,
+                    atttypmod: column.sql_type.typmod,
+                    sql_type: column.sql_type,
+                }),
+        );
 
     rows.attrdefs.extend(
         entry

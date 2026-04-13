@@ -1,9 +1,9 @@
-use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
-use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::access::htup::AttributeAlign;
 pub use crate::backend::catalog::state::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions, CatalogIndexMeta,
 };
+use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
+use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::access::htup::AttributeAlign;
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();
@@ -60,6 +60,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Int2Vector => ScalarType::Text,
         SqlTypeKind::Int4 => ScalarType::Int32,
         SqlTypeKind::Int8 => ScalarType::Int64,
+        SqlTypeKind::Name => ScalarType::Text,
         SqlTypeKind::Oid => ScalarType::Int32,
         SqlTypeKind::OidVector => ScalarType::Text,
         SqlTypeKind::Bit | SqlTypeKind::VarBit => ScalarType::BitString,

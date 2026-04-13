@@ -38,7 +38,7 @@ pub fn pg_constraint_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("conname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("conname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("connamespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("contype", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("condeferrable", SqlType::new(SqlTypeKind::Bool), false),
