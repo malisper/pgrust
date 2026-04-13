@@ -183,6 +183,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             }
             match resolved {
                 Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
+                Some(BuiltinScalarFunction::ArrayNdims)
+                | Some(BuiltinScalarFunction::ArrayLower) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::ArrayDims) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)

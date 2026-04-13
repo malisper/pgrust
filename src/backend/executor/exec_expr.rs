@@ -736,6 +736,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::TrimScale => eval_trim_scale_function(&values),
         BuiltinScalarFunction::NumericInc => eval_numeric_inc_function(&values),
         BuiltinScalarFunction::Factorial => eval_factorial_function(&values),
+        BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
+        BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
+        BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
         BuiltinScalarFunction::PgLsn => eval_pg_lsn_function(&values),
         BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
         BuiltinScalarFunction::Round => eval_round_function(&values),
@@ -1079,10 +1082,17 @@ fn apply_array_subscripts(
         left: value.clone(),
         right: Value::Null,
     })?;
-    if array.dimensions.is_empty() {
-        return Ok(Value::PgArray(ArrayValue::empty()));
-    }
     let any_slice = subscripts.iter().any(|subscript| subscript.upper.is_some());
+    if subscripts.len() > array.ndim() {
+        return Ok(Value::Null);
+    }
+    if array.dimensions.is_empty() {
+        return if any_slice {
+            Ok(Value::PgArray(ArrayValue::empty()))
+        } else {
+            Ok(Value::Null)
+        };
+    }
     apply_array_subscripts_to_value(&array, subscripts, any_slice)
 }
 
@@ -1189,6 +1199,81 @@ fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
         Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
         _ => None,
     }
+}
+
+fn eval_array_ndims_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => Ok(normalize_array_value(value)
+            .and_then(|array| (!array.dimensions.is_empty()).then_some(Value::Int32(array.ndim() as i32)))
+            .unwrap_or(Value::Null)),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_ndims(array)",
+            actual: format!("ArrayNdims({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_array_dims_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let Some(array) = normalize_array_value(value) else {
+                return Ok(Value::Null);
+            };
+            if array.dimensions.is_empty() {
+                return Ok(Value::Null);
+            }
+            let mut out = String::new();
+            for dim in &array.dimensions {
+                let upper = dim.lower_bound + dim.length as i32 - 1;
+                out.push('[');
+                out.push_str(&dim.lower_bound.to_string());
+                out.push(':');
+                out.push_str(&upper.to_string());
+                out.push(']');
+            }
+            Ok(Value::Text(out.into()))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_dims(array)",
+            actual: format!("ArrayDims({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_array_lower_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [value, Value::Int16(dim)] => eval_array_lower_value(value, *dim as i32),
+        [value, Value::Int32(dim)] => eval_array_lower_value(value, *dim),
+        [value, Value::Int64(dim)] => {
+            let dim = i32::try_from(*dim).map_err(|_| ExecError::Int4OutOfRange)?;
+            eval_array_lower_value(value, dim)
+        }
+        [value, other] => Err(ExecError::TypeMismatch {
+            op: "array_lower",
+            left: value.clone(),
+            right: other.clone(),
+        }),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_lower(array, dimension)",
+            actual: format!("ArrayLower({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_array_lower_value(value: &Value, dimension: i32) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(value) else {
+        return Ok(Value::Null);
+    };
+    if dimension < 1 {
+        return Ok(Value::Null);
+    }
+    Ok(array
+        .lower_bound((dimension - 1) as usize)
+        .map(Value::Int32)
+        .unwrap_or(Value::Null))
 }
 
 fn array_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {

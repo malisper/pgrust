@@ -12,7 +12,7 @@ use super::expr_bit::{
 use super::expr_bool::order_bool_values;
 use super::expr_casts::cast_value;
 use super::node_types::*;
-use super::value_io::format_array_text;
+use super::value_io::{format_array_text, format_array_value_text};
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
@@ -156,6 +156,10 @@ pub(crate) fn compare_values(
         }
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
         (Value::Array(l), Value::Array(r)) => Ok(Value::Bool(l == r)),
+        (Value::PgArray(l), Value::PgArray(r)) => Ok(Value::Bool(l == r)),
+        (Value::PgArray(l), Value::Array(r)) | (Value::Array(r), Value::PgArray(l)) => {
+            Ok(Value::Bool(*l == ArrayValue::from_1d(r.clone())))
+        }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
 }
@@ -200,6 +204,10 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
         (Value::Array(l), Value::Array(r)) => l != r,
+        (Value::PgArray(l), Value::PgArray(r)) => l != r,
+        (Value::PgArray(l), Value::Array(r)) | (Value::Array(r), Value::PgArray(l)) => {
+            *l != ArrayValue::from_1d(r.clone())
+        }
         _ => true,
     }
 }
@@ -603,6 +611,21 @@ pub(crate) fn order_values(
                 ">=" => left >= right,
                 _ => unreachable!(),
             }))
+        }
+        (Value::PgArray(l), Value::PgArray(r)) => {
+            let left = format_array_value_text(l);
+            let right = format_array_value_text(r);
+            Ok(Value::Bool(compare_ord(left, right, op)))
+        }
+        (Value::PgArray(l), Value::Array(r)) => {
+            let left = format_array_value_text(l);
+            let right = format_array_text(r);
+            Ok(Value::Bool(compare_ord(left, right, op)))
+        }
+        (Value::Array(l), Value::PgArray(r)) => {
+            let left = format_array_text(l);
+            let right = format_array_value_text(r);
+            Ok(Value::Bool(compare_ord(left, right, op)))
         }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }

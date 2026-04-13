@@ -1022,7 +1022,7 @@ fn validate_catalog_backed_explicit_cast(
     if source_type.is_array || !is_text_like_type(source_type) {
         return Ok(());
     }
-    if target_type.is_array && explicit_text_input_cast_exists(catalog, target_type.element_type()) {
+    if target_type.is_array {
         return Ok(());
     }
     if explicit_text_input_cast_exists(catalog, target_type) {
@@ -2921,6 +2921,27 @@ fn bind_scalar_function_call(
                 args: vec![
                     coerce_bound_expr(bound_args[0].clone(), left_type, text_type),
                     coerce_bound_expr(bound_args[1].clone(), right_type, text_type),
+                ],
+            })
+        }
+        BuiltinScalarFunction::ArrayNdims | BuiltinScalarFunction::ArrayDims => Ok(Expr::FuncCall {
+            func,
+            args: vec![bound_args[0].clone()],
+        }),
+        BuiltinScalarFunction::ArrayLower => {
+            let dim_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(bound_args[1].clone(), dim_type, SqlType::new(SqlTypeKind::Int4)),
                 ],
             })
         }
