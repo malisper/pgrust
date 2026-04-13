@@ -136,17 +136,22 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::GetBit => args.len() == 2,
             BuiltinScalarFunction::SetBit => args.len() == 3,
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
+            BuiltinScalarFunction::BTrim
+            | BuiltinScalarFunction::LTrim
+            | BuiltinScalarFunction::RTrim => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::Position
             | BuiltinScalarFunction::ConvertFrom
             | BuiltinScalarFunction::Left
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::RegexpLike
             | BuiltinScalarFunction::PgInputIsValid
             | BuiltinScalarFunction::PgInputErrorMessage
             | BuiltinScalarFunction::PgInputErrorDetail
             | BuiltinScalarFunction::PgInputErrorHint
             | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
+            BuiltinScalarFunction::RegexpReplace => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::Substring => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
@@ -542,6 +547,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("position", BuiltinScalarFunction::Position),
         ("substring", BuiltinScalarFunction::Substring),
         ("overlay", BuiltinScalarFunction::Overlay),
+        ("trim", BuiltinScalarFunction::BTrim),
+        ("btrim", BuiltinScalarFunction::BTrim),
+        ("ltrim", BuiltinScalarFunction::LTrim),
+        ("rtrim", BuiltinScalarFunction::RTrim),
+        ("regexp_like", BuiltinScalarFunction::RegexpLike),
+        ("regexp_replace", BuiltinScalarFunction::RegexpReplace),
         ("get_bit", BuiltinScalarFunction::GetBit),
         ("set_bit", BuiltinScalarFunction::SetBit),
         ("bit_count", BuiltinScalarFunction::BitCount),
@@ -756,10 +767,14 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Length
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Position
+            | BuiltinScalarFunction::BTrim
+            | BuiltinScalarFunction::LTrim
+            | BuiltinScalarFunction::RTrim
             | BuiltinScalarFunction::ConvertFrom
             | BuiltinScalarFunction::Md5
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
+            | BuiltinScalarFunction::RegexpReplace
             | BuiltinScalarFunction::Scale
             | BuiltinScalarFunction::MinScale
             | BuiltinScalarFunction::TrimScale
@@ -793,6 +808,10 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Round
             | BuiltinScalarFunction::Substring
             | BuiltinScalarFunction::Overlay
+            | BuiltinScalarFunction::BTrim
+            | BuiltinScalarFunction::LTrim
+            | BuiltinScalarFunction::RTrim
+            | BuiltinScalarFunction::RegexpReplace
             | BuiltinScalarFunction::ArrayToJson
             | BuiltinScalarFunction::JsonBuildArray
             | BuiltinScalarFunction::JsonBuildObject

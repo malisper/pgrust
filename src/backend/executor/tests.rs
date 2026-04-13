@@ -5873,6 +5873,63 @@ fn jsonb_set_lax_accepts_named_sql_args() {
 }
 
 #[test]
+fn trim_like_and_regexp_string_functions_work() {
+    let base = temp_dir("strings_trim_like_regexp");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select trim(leading 'x' from 'xxxabc'), \
+                trim(trailing 'x' from 'abcxxx'), \
+                'hawkeye' like 'h%eye', \
+                'hawkeye' ilike 'H%', \
+                'h%' like 'h#%' escape '#', \
+                regexp_like('Steven', '^Ste(v|ph)en$'), \
+                regexp_replace('AAA aaa', 'A+', 'Z', 'gi')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("abc".into()),
+                    Value::Text("abc".into()),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Text("Z Z".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn trim_supports_bytea_arguments() {
+    let base = temp_dir("strings_trim_bytea");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select trim(E'\\\\000'::bytea from E'\\\\000Tom\\\\000'::bytea)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bytea(b"Tom".to_vec())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn generate_series_accepts_named_sql_args_in_from() {
     let base = temp_dir("generate_series_named_args");
     let txns = TransactionManager::new_durable(&base).unwrap();

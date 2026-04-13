@@ -602,6 +602,13 @@ pub enum SqlExpr {
     Gt(Box<SqlExpr>, Box<SqlExpr>),
     GtEq(Box<SqlExpr>, Box<SqlExpr>),
     RegexMatch(Box<SqlExpr>, Box<SqlExpr>),
+    Like {
+        expr: Box<SqlExpr>,
+        pattern: Box<SqlExpr>,
+        escape: Option<Box<SqlExpr>>,
+        case_insensitive: bool,
+        negated: bool,
+    },
     And(Box<SqlExpr>, Box<SqlExpr>),
     Or(Box<SqlExpr>, Box<SqlExpr>),
     Not(Box<SqlExpr>),

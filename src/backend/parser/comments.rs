@@ -132,6 +132,63 @@ pub(crate) fn strip_sql_comments_preserving_layout(sql: &str) -> String {
     String::from_utf8(out).expect("comment stripping preserves UTF-8")
 }
 
+pub(crate) fn normalize_string_continuation_preserving_layout(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            let (mut merged, next) = parse_plain_string_literal(sql, i);
+            i = next;
+
+            loop {
+                let mut j = i;
+                let mut saw_newline = false;
+                while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+                    saw_newline |= matches!(bytes[j], b'\r' | b'\n');
+                    j += 1;
+                }
+                if saw_newline && j < bytes.len() && bytes[j] == b'\'' {
+                    let (continued, next_continued) = parse_plain_string_literal(sql, j);
+                    merged.push_str(&continued);
+                    i = next_continued;
+                    continue;
+                }
+                break;
+            }
+            out.push_str(&render_sql_string_literal(&merged));
+        } else if starts_escape_string(bytes, i) || starts_unicode_string(bytes, i) {
+            let quote = i + 1 + usize::from(bytes[i + 1] == b'&');
+            let next = parse_delimited_token_end(bytes, quote, b'\'');
+            out.push_str(&sql[i..next]);
+            i = next;
+        } else if starts_unicode_identifier(bytes, i) {
+            let next = parse_delimited_token_end(bytes, i + 2, b'"');
+            out.push_str(&sql[i..next]);
+            i = next;
+        } else if bytes[i] == b'"' {
+            let next = parse_delimited_token_end(bytes, i, b'"');
+            out.push_str(&sql[i..next]);
+            i = next;
+        } else if let Some((tag, len)) = parse_dollar_tag(bytes, i) {
+            let mut j = i + len;
+            while j < bytes.len() && !matches_dollar_end(bytes, j, &tag) {
+                j += sql[j..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            }
+            let end = if j < bytes.len() { j + tag.len() + 2 } else { bytes.len() };
+            out.push_str(&sql[i..end]);
+            i = end;
+        } else {
+            let ch = sql[i..].chars().next().expect("valid utf-8");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    out
+}
+
 pub(crate) fn normalize_position_syntax_preserving_layout(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut out = sql.as_bytes().to_vec();
@@ -210,6 +267,75 @@ pub(crate) fn normalize_position_syntax_preserving_layout(sql: &str) -> String {
     }
 
     String::from_utf8(out).expect("position normalization preserves UTF-8")
+}
+
+fn parse_plain_string_literal(sql: &str, start: usize) -> (String, usize) {
+    let bytes = sql.as_bytes();
+    let mut i = start + 1;
+    let mut out = String::new();
+    while i < bytes.len() {
+        let ch = sql[i..].chars().next().expect("valid utf-8");
+        if ch == '\'' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                out.push('\'');
+                i += 2;
+            } else {
+                return (out, i + 1);
+            }
+        } else {
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    (out, bytes.len())
+}
+
+fn parse_delimited_token_end(bytes: &[u8], start: usize, delimiter: u8) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == delimiter {
+            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn starts_escape_string(bytes: &[u8], i: usize) -> bool {
+    i + 1 < bytes.len() && matches!(bytes[i], b'e' | b'E') && bytes[i + 1] == b'\''
+}
+
+fn starts_unicode_string(bytes: &[u8], i: usize) -> bool {
+    i + 2 < bytes.len()
+        && matches!(bytes[i], b'u' | b'U')
+        && bytes[i + 1] == b'&'
+        && bytes[i + 2] == b'\''
+}
+
+fn starts_unicode_identifier(bytes: &[u8], i: usize) -> bool {
+    i + 2 < bytes.len()
+        && matches!(bytes[i], b'u' | b'U')
+        && bytes[i + 1] == b'&'
+        && bytes[i + 2] == b'"'
+}
+
+fn render_sql_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 pub(crate) fn sql_is_effectively_empty_after_comments(sql: &str) -> bool {

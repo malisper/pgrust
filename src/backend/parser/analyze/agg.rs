@@ -54,6 +54,16 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::Or(l, r)
         | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_agg(expr)
+                || expr_contains_agg(pattern)
+                || escape.as_ref().is_some_and(|e| expr_contains_agg(e))
+        }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
         | SqlExpr::BitNot(inner)
@@ -122,6 +132,16 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => {
             expr_references_input_scope(l) || expr_references_input_scope(r)
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_input_scope(expr)
+                || expr_references_input_scope(pattern)
+                || escape.as_ref().is_some_and(|e| expr_references_input_scope(e))
         }
         SqlExpr::Cast(inner, _)
         | SqlExpr::UnaryPlus(inner)
@@ -209,6 +229,18 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlFunct
         | SqlExpr::IsNotDistinctFrom(l, r) => {
             collect_aggs(l, aggs);
             collect_aggs(r, aggs);
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_aggs(expr, aggs);
+            collect_aggs(pattern, aggs);
+            if let Some(escape) = escape {
+                collect_aggs(escape, aggs);
+            }
         }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)

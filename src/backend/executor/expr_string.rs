@@ -5,6 +5,7 @@ use super::node_types::Value;
 use crate::pgrust::compact_string::CompactString;
 use encoding_rs::Encoding;
 use md5::{Digest, Md5};
+use regex::{Regex, RegexBuilder};
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
@@ -183,6 +184,210 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
 }
 
+pub(super) fn eval_trim_function(
+    op: &'static str,
+    values: &[Value],
+) -> Result<Value, ExecError> {
+    let Some(source) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(source, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let trim_chars = values.get(1);
+    match source {
+        Value::Bytea(bytes) => {
+            let chars = match trim_chars {
+                Some(Value::Null) => return Ok(Value::Null),
+                Some(Value::Bytea(chars)) => chars.as_slice(),
+                None => b" ",
+                Some(other) => {
+                    return Err(ExecError::TypeMismatch {
+                        op,
+                        left: source.clone(),
+                        right: other.clone(),
+                    });
+                }
+            };
+            Ok(Value::Bytea(match op {
+                "btrim" => trim_bytes(bytes, chars, true, true).to_vec(),
+                "ltrim" => trim_bytes(bytes, chars, true, false).to_vec(),
+                "rtrim" => trim_bytes(bytes, chars, false, true).to_vec(),
+                _ => unreachable!(),
+            }))
+        }
+        _ => {
+            let text = source.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op,
+                left: source.clone(),
+                right: trim_chars.cloned().unwrap_or(Value::Null),
+            })?;
+            let chars = match trim_chars {
+                Some(Value::Null) => return Ok(Value::Null),
+                Some(value) => value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                    op,
+                    left: source.clone(),
+                    right: value.clone(),
+                })?,
+                None => " ",
+            };
+            Ok(Value::Text(CompactString::from_owned(match op {
+                "btrim" => text.trim_matches(|c| chars.contains(c)).to_string(),
+                "ltrim" => text.trim_start_matches(|c| chars.contains(c)).to_string(),
+                "rtrim" => text.trim_end_matches(|c| chars.contains(c)).to_string(),
+                _ => unreachable!(),
+            })))
+        }
+    }
+}
+
+pub(super) fn eval_like(
+    left: &Value,
+    pattern: &Value,
+    escape: Option<&Value>,
+    case_insensitive: bool,
+    negated: bool,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(pattern, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let matched = match (left, pattern, escape) {
+        (Value::Bytea(text), Value::Bytea(pattern), escape) => {
+            if case_insensitive {
+                return Err(ExecError::TypeMismatch {
+                    op: "ilike",
+                    left: left.clone(),
+                    right: Value::Bytea(pattern.clone()),
+                });
+            }
+            let escape = match escape {
+                Some(Value::Null) => return Ok(Value::Null),
+                Some(Value::Bytea(bytes)) => Some(bytes.as_slice()),
+                None => None,
+                Some(other) => {
+                    return Err(ExecError::TypeMismatch {
+                        op: "like",
+                        left: left.clone(),
+                        right: other.clone(),
+                    });
+                }
+            };
+            like_match_bytes(text, pattern, escape)?
+        }
+        (_, _, Some(Value::Null)) => return Ok(Value::Null),
+        _ => {
+            let text = left.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: if case_insensitive { "ilike" } else { "like" },
+                left: left.clone(),
+                right: pattern.clone(),
+            })?;
+            let pattern_text = pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: if case_insensitive { "ilike" } else { "like" },
+                left: left.clone(),
+                right: pattern.clone(),
+            })?;
+            let escape = match escape {
+                Some(value) => {
+                    let escape_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                        op: if case_insensitive { "ilike" } else { "like" },
+                        left: left.clone(),
+                        right: value.clone(),
+                    })?;
+                    let mut chars = escape_text.chars();
+                    let Some(ch) = chars.next() else {
+                        return Ok(Value::Bool(if negated {
+                            !like_match_text(text, pattern_text, None, case_insensitive)
+                        } else {
+                            like_match_text(text, pattern_text, None, case_insensitive)
+                        }));
+                    };
+                    if chars.next().is_some() {
+                        return Err(ExecError::InvalidRegex(
+                            "ESCAPE expression must be empty or one character".into(),
+                        ));
+                    }
+                    Some(ch)
+                }
+                None => None,
+            };
+            like_match_text(text, pattern_text, escape, case_insensitive)
+        }
+    };
+    Ok(Value::Bool(if negated { !matched } else { matched }))
+}
+
+pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(pattern) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text, Value::Null) || matches!(pattern, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let flags = if let Some(Value::Null) = values.get(2) {
+        return Ok(Value::Null);
+    } else {
+        values.get(2).and_then(Value::as_text).unwrap_or("")
+    };
+    let regex = build_regex(pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "regexp_like",
+        left: text.clone(),
+        right: pattern.clone(),
+    })?, flags)?;
+    let haystack = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "regexp_like",
+        left: text.clone(),
+        right: pattern.clone(),
+    })?;
+    Ok(Value::Bool(regex.is_match(haystack)))
+}
+
+pub(super) fn eval_regexp_replace(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(pattern) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(replacement) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text, Value::Null) || matches!(pattern, Value::Null) || matches!(replacement, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let flags = if let Some(Value::Null) = values.get(3) {
+        return Ok(Value::Null);
+    } else {
+        values.get(3).and_then(Value::as_text).unwrap_or("")
+    };
+    let regex = build_regex(pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "regexp_replace",
+        left: text.clone(),
+        right: pattern.clone(),
+    })?, flags)?;
+    let replacement = replacement.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "regexp_replace",
+        left: text.clone(),
+        right: replacement.clone(),
+    })?;
+    let expanded = translate_regexp_replacement(replacement);
+    let haystack = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "regexp_replace",
+        left: text.clone(),
+        right: pattern.clone(),
+    })?;
+    let replaced = if flags.contains('g') {
+        regex
+            .replace_all(haystack, expanded.as_str())
+            .to_string()
+    } else {
+        regex.replace(haystack, expanded.as_str()).to_string()
+    };
+    Ok(Value::Text(CompactString::from_owned(replaced)))
+}
+
 pub(super) fn eval_md5_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
         return Ok(Value::Null);
@@ -319,6 +524,188 @@ fn decode_hex_text_bytes(raw: &str) -> Option<Vec<u8>> {
         out.push(u8::from_str_radix(hex, 16).ok()?);
     }
     Some(out)
+}
+
+fn trim_bytes<'a>(input: &'a [u8], chars: &[u8], leading: bool, trailing: bool) -> &'a [u8] {
+    let mut start = 0usize;
+    let mut end = input.len();
+    if leading {
+        while start < end && chars.contains(&input[start]) {
+            start += 1;
+        }
+    }
+    if trailing {
+        while end > start && chars.contains(&input[end - 1]) {
+            end -= 1;
+        }
+    }
+    &input[start..end]
+}
+
+fn like_match_text(text: &str, pattern: &str, escape: Option<char>, case_insensitive: bool) -> bool {
+    let text: Vec<char> = if case_insensitive {
+        text.to_lowercase().chars().collect()
+    } else {
+        text.chars().collect()
+    };
+    let pattern: Vec<char> = if case_insensitive {
+        pattern.to_lowercase().chars().collect()
+    } else {
+        pattern.chars().collect()
+    };
+    like_match_chars(&text, &pattern, escape)
+}
+
+fn like_match_chars(text: &[char], pattern: &[char], escape: Option<char>) -> bool {
+    let mut ti = 0usize;
+    let mut pi = 0usize;
+    let mut last_percent = None::<usize>;
+    let mut last_match = 0usize;
+    while ti < text.len() {
+        if pi < pattern.len() {
+            let pat = pattern[pi];
+            if Some(pat) == escape {
+                if pi + 1 >= pattern.len() {
+                    return false;
+                }
+                if text[ti] == pattern[pi + 1] {
+                    ti += 1;
+                    pi += 2;
+                    continue;
+                }
+            } else if pat == '_' || pat == text[ti] {
+                ti += 1;
+                pi += 1;
+                continue;
+            } else if pat == '%' {
+                last_percent = Some(pi);
+                pi += 1;
+                last_match = ti;
+                continue;
+            }
+        }
+        if let Some(percent) = last_percent {
+            pi = percent + 1;
+            last_match += 1;
+            ti = last_match;
+        } else {
+            return false;
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == '%' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+fn like_match_bytes(text: &[u8], pattern: &[u8], escape: Option<&[u8]>) -> Result<bool, ExecError> {
+    let escape = match escape {
+        Some([]) | None => None,
+        Some([byte]) => Some(*byte),
+        Some(_) => {
+            return Err(ExecError::InvalidRegex(
+                "ESCAPE expression must be empty or one character".into(),
+            ));
+        }
+    };
+    let mut ti = 0usize;
+    let mut pi = 0usize;
+    let mut last_percent = None::<usize>;
+    let mut last_match = 0usize;
+    while ti < text.len() {
+        if pi < pattern.len() {
+            let pat = pattern[pi];
+            if Some(pat) == escape {
+                if pi + 1 >= pattern.len() {
+                    return Ok(false);
+                }
+                if text[ti] == pattern[pi + 1] {
+                    ti += 1;
+                    pi += 2;
+                    continue;
+                }
+            } else if pat == b'_' || pat == text[ti] {
+                ti += 1;
+                pi += 1;
+                continue;
+            } else if pat == b'%' {
+                last_percent = Some(pi);
+                pi += 1;
+                last_match = ti;
+                continue;
+            }
+        }
+        if let Some(percent) = last_percent {
+            pi = percent + 1;
+            last_match += 1;
+            ti = last_match;
+        } else {
+            return Ok(false);
+        }
+    }
+    while pi < pattern.len() && pattern[pi] == b'%' {
+        pi += 1;
+    }
+    Ok(pi == pattern.len())
+}
+
+fn build_regex(pattern: &str, flags: &str) -> Result<Regex, ExecError> {
+    let mut builder = RegexBuilder::new(pattern);
+    for flag in flags.chars() {
+        match flag {
+            'i' => {
+                builder.case_insensitive(true);
+            }
+            's' => {
+                builder.dot_matches_new_line(true);
+            }
+            'm' => {
+                builder.multi_line(true);
+            }
+            'x' => {
+                builder.ignore_whitespace(true);
+            }
+            'n' => {
+                builder.multi_line(true);
+            }
+            'g' => {}
+            other => {
+                return Err(ExecError::InvalidRegex(format!(
+                    "invalid regular expression option: {other}"
+                )));
+            }
+        };
+    }
+    builder
+        .build()
+        .map_err(|e| ExecError::InvalidRegex(e.to_string()))
+}
+
+fn translate_regexp_replacement(replacement: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = replacement.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            if i + 1 >= chars.len() {
+                break;
+            }
+            match chars[i + 1] {
+                '&' => out.push_str("${0}"),
+                '1'..='9' => {
+                    out.push('$');
+                    out.push(chars[i + 1]);
+                }
+                '\\' => out.push('\\'),
+                other => out.push(other),
+            }
+            i += 2;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn normalize_encoding_label(name: &str) -> String {
