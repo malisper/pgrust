@@ -277,9 +277,9 @@ pub(crate) fn parse_text_array_literal_with_options(
     op: &'static str,
     explicit: bool,
 ) -> Result<Value, ExecError> {
-    let input = strip_array_bounds_prefix(raw).unwrap_or(raw);
+    let (lower_bounds, input) = parse_array_bounds_prefix(raw);
     if input == "{}" {
-        return Ok(Value::Array(Vec::new()));
+        return Ok(Value::PgArray(ArrayValue::empty()));
     }
     if !input.starts_with('{') || !input.ends_with('}') {
         return Err(ExecError::TypeMismatch {
@@ -298,15 +298,50 @@ pub(crate) fn parse_text_array_literal_with_options(
             right: Value::Text(raw.into()),
         });
     }
-    Ok(value)
+    let nested = match value {
+        Value::Array(values) => values,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left: other,
+                right: Value::Null,
+            });
+        }
+    };
+    ArrayValue::from_nested_values(nested, lower_bounds)
+        .map(Value::PgArray)
+        .map_err(|_| ExecError::TypeMismatch {
+            op,
+            left: Value::Null,
+            right: Value::Text(raw.into()),
+        })
 }
 
-fn strip_array_bounds_prefix(raw: &str) -> Option<&str> {
+fn parse_array_bounds_prefix(raw: &str) -> (Vec<i32>, &str) {
     if !raw.starts_with('[') {
-        return None;
+        return (Vec::new(), raw);
     }
-    let equals = raw.find('=')?;
-    Some(&raw[equals + 1..])
+    let Some(equals) = raw.find('=') else {
+        return (Vec::new(), raw);
+    };
+    let bounds = &raw[..equals];
+    let mut lower_bounds = Vec::new();
+    let mut remaining = bounds;
+    while let Some(rest) = remaining.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return (Vec::new(), raw);
+        };
+        let part = &rest[..end];
+        let Some((lower, _upper)) = part.split_once(':') else {
+            return (Vec::new(), raw);
+        };
+        let Ok(lower) = lower.trim().parse::<i32>() else {
+            return (Vec::new(), raw);
+        };
+        lower_bounds.push(lower);
+        remaining = &rest[end + 1..];
+    }
+    (lower_bounds, &raw[equals + 1..])
 }
 
 struct ArrayTextParser<'a> {
@@ -619,6 +654,17 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     casted.push(cast_value(item, element_type)?);
                 }
                 Ok(Value::Array(casted))
+            }
+            Value::PgArray(array) => {
+                let element_type = ty.element_type();
+                let mut casted = Vec::with_capacity(array.elements.len());
+                for item in array.elements {
+                    casted.push(cast_value(item, element_type)?);
+                }
+                Ok(Value::PgArray(ArrayValue::from_dimensions(
+                    array.dimensions,
+                    casted,
+                )))
             }
             other => match other.as_text() {
                 Some(text) => parse_text_array_literal(text, ty.element_type()),
@@ -1012,6 +1058,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             }),
         },
         Value::Array(items) => Ok(Value::Array(items)),
+        Value::PgArray(array) => Ok(Value::PgArray(array)),
     }
 }
 

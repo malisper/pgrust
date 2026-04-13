@@ -190,5 +190,6 @@ fn render_raise_value(value: &Value) -> String {
             let elems = values.iter().map(render_raise_value).collect::<Vec<_>>();
             format!("{{{}}}", elems.join(","))
         }
+        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
     }
 }

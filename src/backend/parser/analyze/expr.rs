@@ -1022,6 +1022,9 @@ fn validate_catalog_backed_explicit_cast(
     if source_type.is_array || !is_text_like_type(source_type) {
         return Ok(());
     }
+    if target_type.is_array && explicit_text_input_cast_exists(catalog, target_type.element_type()) {
+        return Ok(());
+    }
     if explicit_text_input_cast_exists(catalog, target_type) {
         return Ok(());
     }

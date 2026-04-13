@@ -30,6 +30,7 @@ use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::coerce_assignment_value;
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start, Expr};
 use crate::include::access::itemptr::ItemPointerData;
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::execnodes::*;
 
 pub(crate) fn execute_explain(
@@ -569,18 +570,8 @@ fn assign_array_value(
     if subscripts.is_empty() {
         return Ok(replacement);
     }
-    let mut items = match current {
-        Value::Null => Vec::new(),
-        Value::Array(items) => items,
-        other => {
-            return Err(ExecError::TypeMismatch {
-                op: "array assignment",
-                left: other,
-                right: replacement,
-            });
-        }
-    };
     let subscript = &subscripts[0];
+    let (mut lower_bound, mut items) = assignment_top_level(current)?;
     if subscript.upper.is_some() {
         let Some(start) = assignment_subscript_index(subscript.lower.as_ref())? else {
             return Err(ExecError::InvalidStorageValue {
@@ -594,37 +585,29 @@ fn assign_array_value(
                 details: "array subscript in assignment must not be null".into(),
             });
         };
-        let Value::Array(replacement_items) = replacement else {
-            return Err(ExecError::TypeMismatch {
-                op: "array slice assignment",
-                left: Value::Null,
-                right: replacement,
-            });
-        };
-        let start = start.max(1) as usize;
-        let end = end.max(0) as usize;
-        if end < start {
-            return Ok(Value::Array(items));
+        let replacement_items = assignment_replacement_items(replacement.clone())?;
+        if items.is_empty() {
+            lower_bound = start;
         }
-        if items.len() < end {
-            items.resize(end, Value::Null);
-        }
-        let span = end - start + 1;
+        extend_assignment_items(&mut lower_bound, &mut items, start, end);
+        let start_idx = (start - lower_bound) as usize;
+        let end_idx = (end - lower_bound) as usize;
+        let span = end_idx - start_idx + 1;
         if replacement_items.len() != span {
             return Err(ExecError::TypeMismatch {
                 op: "array slice assignment",
-                left: Value::Array(items),
-                right: Value::Array(replacement_items),
+                left: build_assignment_array_value(lower_bound, items.clone())?,
+                right: replacement,
             });
         }
         for (idx, item) in replacement_items.into_iter().enumerate() {
-            items[start - 1 + idx] = if subscripts.len() == 1 {
+            items[start_idx + idx] = if subscripts.len() == 1 {
                 item
             } else {
-                assign_array_value(items[start - 1 + idx].clone(), &subscripts[1..], item)?
+                assign_array_value(items[start_idx + idx].clone(), &subscripts[1..], item)?
             };
         }
-        Ok(Value::Array(items))
+        build_assignment_array_value(lower_bound, items)
     } else {
         let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
             return Err(ExecError::InvalidStorageValue {
@@ -632,17 +615,135 @@ fn assign_array_value(
                 details: "array subscript in assignment must not be null".into(),
             });
         };
-        let index = index.max(1) as usize;
-        if items.len() < index {
-            items.resize(index, Value::Null);
+        if items.is_empty() {
+            lower_bound = index;
         }
-        items[index - 1] = if subscripts.len() == 1 {
+        extend_assignment_items(&mut lower_bound, &mut items, index, index);
+        let index = (index - lower_bound) as usize;
+        items[index] = if subscripts.len() == 1 {
             replacement
         } else {
-            assign_array_value(items[index - 1].clone(), &subscripts[1..], replacement)?
+            assign_array_value(items[index].clone(), &subscripts[1..], replacement)?
         };
-        Ok(Value::Array(items))
+        build_assignment_array_value(lower_bound, items)
     }
+}
+
+fn assignment_top_level(current: Value) -> Result<(i32, Vec<Value>), ExecError> {
+    match current {
+        Value::Null => Ok((1, Vec::new())),
+        Value::Array(items) => Ok((1, items)),
+        Value::PgArray(array) => Ok((
+            array.lower_bound(0).unwrap_or(1),
+            assignment_top_level_items(&array),
+        )),
+        other => Err(ExecError::TypeMismatch {
+            op: "array assignment",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn assignment_top_level_items(array: &ArrayValue) -> Vec<Value> {
+    if array.dimensions.len() <= 1 {
+        return array.elements.clone();
+    }
+    let child_dims = array.dimensions[1..].to_vec();
+    let child_width = child_dims
+        .iter()
+        .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
+    let mut out = Vec::with_capacity(array.dimensions[0].length);
+    for idx in 0..array.dimensions[0].length {
+        let start = idx * child_width;
+        out.push(Value::PgArray(ArrayValue::from_dimensions(
+            child_dims.clone(),
+            array.elements[start..start + child_width].to_vec(),
+        )));
+    }
+    out
+}
+
+fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, ExecError> {
+    match replacement {
+        Value::Array(items) => Ok(items),
+        Value::PgArray(array) => Ok(assignment_top_level_items(&array)),
+        other => Err(ExecError::TypeMismatch {
+            op: "array slice assignment",
+            left: Value::Null,
+            right: other,
+        }),
+    }
+}
+
+fn extend_assignment_items(
+    lower_bound: &mut i32,
+    items: &mut Vec<Value>,
+    start: i32,
+    end: i32,
+) {
+    if items.is_empty() {
+        *lower_bound = start;
+    }
+    if start < *lower_bound {
+        let prepend = (*lower_bound - start) as usize;
+        items.splice(0..0, std::iter::repeat_n(Value::Null, prepend));
+        *lower_bound = start;
+    }
+    let upper_bound = *lower_bound + items.len() as i32 - 1;
+    if end > upper_bound {
+        items.resize(items.len() + (end - upper_bound) as usize, Value::Null);
+    }
+}
+
+fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<Value, ExecError> {
+    if items.is_empty() {
+        return Ok(Value::PgArray(ArrayValue::empty()));
+    }
+    let child_arrays = items
+        .iter()
+        .filter_map(|item| match item {
+            Value::PgArray(array) => Some(Some(array.clone())),
+            Value::Array(values) => Some(ArrayValue::from_nested_values(values.clone(), vec![1]).ok()),
+            Value::Null => Some(None),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if child_arrays.len() != items.len() {
+        return Ok(Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound,
+                length: items.len(),
+            }],
+            items,
+        )));
+    }
+    let Some(template) = child_arrays.iter().find_map(|entry| entry.clone()) else {
+        return Ok(Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound,
+                length: items.len(),
+            }],
+            items,
+        )));
+    };
+    let child_width = template.elements.len();
+    let mut elements = Vec::with_capacity(items.len() * child_width);
+    for entry in child_arrays {
+        match entry {
+            Some(array) => elements.extend(array.elements),
+            None => elements.extend(std::iter::repeat_n(Value::Null, child_width)),
+        }
+    }
+    let mut dimensions = vec![ArrayDimension {
+        lower_bound,
+        length: items.len(),
+    }];
+    dimensions.extend(template.dimensions);
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        dimensions,
+        elements,
+    )))
 }
 
 fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {

@@ -46,6 +46,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::Const(Value::TextRef(_, _))
         | SqlExpr::Const(Value::Null) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Array(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+        SqlExpr::Const(Value::PgArray(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Float8),
         SqlExpr::ArraySubscript { array, subscripts } => {
             let array_type = infer_sql_expr_type_with_ctes(

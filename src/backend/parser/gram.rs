@@ -1490,6 +1490,26 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
             }
         }
         Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
+        Rule::array_type_alias => {
+            let base = match pair.as_str().trim_start_matches('_').to_ascii_lowercase().as_str() {
+                "int2" | "smallint" => SqlType::new(SqlTypeKind::Int2),
+                "int4" | "int" | "integer" => SqlType::new(SqlTypeKind::Int4),
+                "int8" | "bigint" => SqlType::new(SqlTypeKind::Int8),
+                "oid" => SqlType::new(SqlTypeKind::Oid),
+                "name" => SqlType::new(SqlTypeKind::Name),
+                "text" => SqlType::new(SqlTypeKind::Text),
+                "bool" | "boolean" => SqlType::new(SqlTypeKind::Bool),
+                "bytea" => SqlType::new(SqlTypeKind::Bytea),
+                "float4" | "real" => SqlType::new(SqlTypeKind::Float4),
+                "float8" => SqlType::new(SqlTypeKind::Float8),
+                "timestamp" => SqlType::new(SqlTypeKind::Timestamp),
+                "json" => SqlType::new(SqlTypeKind::Json),
+                "jsonb" => SqlType::new(SqlTypeKind::Jsonb),
+                "jsonpath" => SqlType::new(SqlTypeKind::JsonPath),
+                other => panic!("unsupported array type alias: {other}"),
+            };
+            SqlType::array_of(base)
+        }
         Rule::kw_int2 | Rule::kw_smallint => SqlType::new(SqlTypeKind::Int2),
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
         Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
