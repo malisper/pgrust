@@ -409,6 +409,10 @@ impl PlanNode for NestedLoopJoinState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if matches!(self.kind, JoinType::Cross) {
+            return exec_cross_join(self, ctx);
+        }
+
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.right.exec_proc_node(ctx)? {
@@ -514,6 +518,57 @@ impl PlanNode for NestedLoopJoinState {
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         format_explain_lines(&*self.left, indent, analyze, lines);
         format_explain_lines(&*self.right, indent, analyze, lines);
+    }
+}
+
+fn exec_cross_join<'a>(
+    state: &'a mut NestedLoopJoinState,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    if state.left_rows.is_none() {
+        let mut rows = Vec::new();
+        while let Some(slot) = state.left.exec_proc_node(ctx)? {
+            let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            rows.push(TupleSlot::virtual_row(values));
+        }
+        state.left_rows = Some(rows);
+    }
+
+    loop {
+        if state.current_right.is_none() {
+            match state.right.exec_proc_node(ctx)? {
+                Some(slot) => {
+                    let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                    state.current_right = Some(TupleSlot::virtual_row(values));
+                    state.left_index = 0;
+                }
+                None => return Ok(None),
+            }
+        }
+
+        let left_rows = state.left_rows.as_ref().unwrap();
+        while state.left_index < left_rows.len() {
+            let li = state.left_index;
+            state.left_index += 1;
+
+            let left = &left_rows[li];
+            let right = state.current_right.as_ref().unwrap();
+            let mut combined_values: Vec<Value> = left.tts_values.clone();
+            combined_values.extend(right.tts_values.iter().cloned());
+            let nvalid = combined_values.len();
+            state.slot.tts_values = combined_values;
+            state.slot.tts_nvalid = nvalid;
+            state.slot.kind = SlotKind::Virtual;
+            state.slot.decode_offset = 0;
+
+            match eval_expr(&state.on, &mut state.slot, ctx)? {
+                Value::Bool(true) => return Ok(Some(&mut state.slot)),
+                Value::Bool(false) | Value::Null => {}
+                other => return Err(ExecError::NonBoolQual(other)),
+            }
+        }
+
+        state.current_right = None;
     }
 }
 
