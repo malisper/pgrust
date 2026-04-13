@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use crate::backend::access::heap::heapam::{
-    heap_fetch, heap_fetch_visible, heap_scan_begin_visible, heap_scan_next_visible,
+    heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
 };
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::{
@@ -14,7 +14,7 @@ use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::value_io::decode_value;
+use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::storage::page::bufpage::page_header;
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::include::access::amapi::{
@@ -698,11 +698,13 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
         let mut row_values = Vec::with_capacity(ctx.heap_desc.columns.len());
-        for (column, datum) in ctx.heap_desc.columns.iter().zip(datums.into_iter()) {
-            row_values.push(
-                decode_value(column, datum)
-                    .map_err(|err| CatalogError::Io(format!("heap decode failed: {err:?}")))?,
-            );
+        for (index, column) in ctx.heap_desc.columns.iter().enumerate() {
+            row_values.push(if let Some(datum) = datums.get(index) {
+                decode_value(column, *datum)
+                    .map_err(|err| CatalogError::Io(format!("heap decode failed: {err:?}")))?
+            } else {
+                missing_column_value(column)
+            });
         }
         let key_values = key_values_from_heap_row(
             &ctx.heap_desc,

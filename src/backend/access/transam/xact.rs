@@ -668,7 +668,6 @@ mod tests {
 
     #[test]
     fn hint_roundtrip_committed_insert_becomes_fast_path() {
-        use crate::include::access::htup::{HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED};
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();
         txns.commit(inserter).unwrap();
@@ -689,7 +688,6 @@ mod tests {
 
     #[test]
     fn hint_roundtrip_deleted_tuple_stays_invisible() {
-        use crate::include::access::htup::{HEAP_XMAX_COMMITTED, HEAP_XMIN_COMMITTED};
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();
         txns.commit(inserter).unwrap();
@@ -710,7 +708,6 @@ mod tests {
 
     #[test]
     fn hint_roundtrip_aborted_insert_stays_invisible() {
-        use crate::include::access::htup::HEAP_XMIN_INVALID;
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();
         txns.abort(inserter).unwrap();
@@ -729,7 +726,6 @@ mod tests {
 
     #[test]
     fn hint_roundtrip_aborted_delete_stays_visible() {
-        use crate::include::access::htup::{HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED};
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();
         txns.commit(inserter).unwrap();
@@ -752,9 +748,6 @@ mod tests {
 
     #[test]
     fn hint_roundtrip_update_old_version_invisible_new_version_visible() {
-        use crate::include::access::htup::{
-            HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED,
-        };
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();
         txns.commit(inserter).unwrap();
@@ -781,7 +774,6 @@ mod tests {
 
     #[test]
     fn hint_roundtrip_update_in_progress_old_still_visible() {
-        use crate::include::access::htup::HEAP_XMIN_COMMITTED;
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();
         txns.commit(inserter).unwrap();
@@ -855,9 +847,6 @@ mod tests {
         // A tuple's xmax (delete) committed AFTER snapshot was taken. Another scan
         // sets HEAP_XMAX_COMMITTED. The original snapshot should still see the tuple
         // (delete not yet visible to it).
-        use crate::include::access::htup::{
-            HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED,
-        };
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();
         txns.commit(inserter).unwrap();
@@ -1162,7 +1151,6 @@ mod tests {
         );
     }
 
-    #[test]
     // ---- Exhaustive permutation test ----
 
     /// Test ALL combinations of (xmin status, xmax status, hint bits) to ensure
@@ -1186,13 +1174,6 @@ mod tests {
         let in_progress_xid = txns.begin();
         let my_xid = txns.begin();
         let snapshot = txns.snapshot(my_xid).unwrap();
-
-        struct Case {
-            label: &'static str,
-            xmin: u32,
-            xmax: u32,
-            base_infomask: u16,
-        }
 
         let xmin_cases = [
             ("xmin=0(bootstrap)", INVALID_TRANSACTION_ID),
@@ -1293,6 +1274,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn snapshot_uses_xmax_boundary_for_future_xids() {
         let mut txns = TransactionManager::default();
         let committed = txns.begin();

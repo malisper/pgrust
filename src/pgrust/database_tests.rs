@@ -42,27 +42,6 @@ fn start_deadlock_checker() {}
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Run a test body with a timeout. If it doesn't complete within the
-/// timeout, panic with a deadlock message. This catches deadlocks in
-/// setup code that `join_all_with_timeout` wouldn't detect.
-fn with_test_timeout<F: FnOnce() + Send + 'static>(f: F) {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let handle = thread::spawn(move || {
-        f();
-        let _ = tx.send(());
-    });
-    match rx.recv_timeout(TEST_TIMEOUT) {
-        Ok(()) => {
-            handle.join().unwrap();
-        }
-        Err(_) => {
-            #[cfg(feature = "deadlock_detection")]
-            log_deadlocks();
-            panic!("test timed out after {TEST_TIMEOUT:?} — likely deadlock");
-        }
-    }
-}
-
 fn join_all_with_timeout(handles: Vec<thread::JoinHandle<()>>, timeout: Duration) {
     start_deadlock_checker();
     let deadline = Instant::now() + timeout;

@@ -24,6 +24,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::Value;
 
+#[allow(dead_code)]
 pub(crate) fn sync_catalog_rows(
     base_dir: &Path,
     rows: &PhysicalCatalogRows,

@@ -277,15 +277,6 @@ fn outer_column_is_grouped(index: usize, scope: &BoundScope, group_by_exprs: &[S
     })
 }
 
-pub(super) fn bind_from_item(
-    stmt: &FromItem,
-    catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-) -> Result<(Plan, BoundScope), ParseError> {
-    bind_from_item_with_ctes(stmt, catalog, outer_scopes, grouped_outer, &[])
-}
-
 pub(super) fn bind_from_item_with_ctes(
     stmt: &FromItem,
     catalog: &dyn CatalogLookup,
