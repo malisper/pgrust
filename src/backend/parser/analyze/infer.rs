@@ -189,6 +189,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     SqlType::new(SqlTypeKind::Jsonb)
                 }
                 Some(BuiltinScalarFunction::GetDatabaseEncoding)
+                | Some(BuiltinScalarFunction::Initcap)
                 | Some(BuiltinScalarFunction::JsonTypeof)
                 | Some(BuiltinScalarFunction::JsonExtractPathText)
                 | Some(BuiltinScalarFunction::JsonbPretty)
@@ -200,25 +201,45 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::LTrim)
                 | Some(BuiltinScalarFunction::RTrim)
                 | Some(BuiltinScalarFunction::Left)
+                | Some(BuiltinScalarFunction::LPad)
+                | Some(BuiltinScalarFunction::RPad)
                 | Some(BuiltinScalarFunction::Repeat)
                 | Some(BuiltinScalarFunction::Md5)
+                | Some(BuiltinScalarFunction::Chr)
+                | Some(BuiltinScalarFunction::Replace)
+                | Some(BuiltinScalarFunction::SplitPart)
+                | Some(BuiltinScalarFunction::Translate)
                 | Some(BuiltinScalarFunction::ConvertFrom)
+                | Some(BuiltinScalarFunction::Encode)
                 | Some(BuiltinScalarFunction::RegexpSubstr)
                 | Some(BuiltinScalarFunction::RegexpReplace)
                 | Some(BuiltinScalarFunction::SimilarSubstring)
                 | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::Decode)
+                | Some(BuiltinScalarFunction::Sha224)
+                | Some(BuiltinScalarFunction::Sha256)
+                | Some(BuiltinScalarFunction::Sha384)
+                | Some(BuiltinScalarFunction::Sha512)
+                | Some(BuiltinScalarFunction::Reverse) => SqlType::new(SqlTypeKind::Bytea),
                 Some(BuiltinScalarFunction::Length)
+                | Some(BuiltinScalarFunction::Ascii)
                 | Some(BuiltinScalarFunction::RegexpCount)
                 | Some(BuiltinScalarFunction::RegexpInstr)
                 | Some(BuiltinScalarFunction::JsonArrayLength)
                 | Some(BuiltinScalarFunction::JsonbArrayLength)
                 | Some(BuiltinScalarFunction::Scale)
                 | Some(BuiltinScalarFunction::MinScale)
-                | Some(BuiltinScalarFunction::WidthBucket) => SqlType::new(SqlTypeKind::Int4),
+                | Some(BuiltinScalarFunction::WidthBucket)
+                | Some(BuiltinScalarFunction::GetByte) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::Crc32)
+                | Some(BuiltinScalarFunction::Crc32c)
+                | Some(BuiltinScalarFunction::BitCount) => SqlType::new(SqlTypeKind::Int8),
                 Some(BuiltinScalarFunction::RegexpSplitToArray) => {
                     SqlType::array_of(SqlType::new(SqlTypeKind::Text))
                 }
-                Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::Position | BuiltinScalarFunction::Strpos) => {
+                    SqlType::new(SqlTypeKind::Int4)
+                }
                 Some(
                     BuiltinScalarFunction::Substring
                     | BuiltinScalarFunction::Overlay,
@@ -235,7 +256,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     })
                 }
                 Some(BuiltinScalarFunction::GetBit) => SqlType::new(SqlTypeKind::Int4),
-                Some(BuiltinScalarFunction::SetBit) => {
+                Some(BuiltinScalarFunction::SetBit | BuiltinScalarFunction::SetByte) => {
                     function_arg_values(args).next().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
                         infer_sql_expr_type_with_ctes(
                             arg,
@@ -247,7 +268,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         )
                     })
                 }
-                Some(BuiltinScalarFunction::BitCount) => SqlType::new(SqlTypeKind::Int8),
                 Some(BuiltinScalarFunction::JsonbPathExists)
                 | Some(BuiltinScalarFunction::JsonbPathMatch)
                 | Some(BuiltinScalarFunction::RegexpLike) => SqlType::new(SqlTypeKind::Bool),

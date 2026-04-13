@@ -34,12 +34,20 @@ use super::expr_ops::{
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_string::{
-    eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
-    eval_length_function, eval_like, eval_lower_function, eval_md5_function,
-    eval_position_function, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
-    eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr, eval_repeat_function,
-    eval_similar, eval_similar_substring, eval_sql_regex_substring, eval_text_substring,
-    eval_to_char_function, eval_to_number_function, eval_trim_function,
+    eval_ascii_function, eval_bpchar_to_text_function, eval_bytea_overlay,
+    eval_bytea_position_function, eval_bytea_substring, eval_chr_function,
+    eval_convert_from_function, eval_crc32_function, eval_crc32c_function,
+    eval_decode_function, eval_encode_function, eval_get_bit_bytes, eval_get_byte,
+    eval_initcap_function, eval_left_function, eval_length_function, eval_like,
+    eval_lower_function, eval_lpad_function, eval_md5_function, eval_position_function,
+    eval_rpad_function, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
+    eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr,
+    eval_repeat_function, eval_replace_function, eval_reverse_function,
+    eval_set_bit_bytes, eval_set_byte, eval_sha224_function, eval_sha256_function,
+    eval_sha384_function, eval_sha512_function, eval_similar, eval_similar_substring,
+    eval_split_part_function, eval_sql_regex_substring, eval_strpos_function, eval_text_substring,
+    eval_to_char_function, eval_to_number_function, eval_translate_function,
+    eval_trim_function, eval_bit_count_bytes,
 };
 use super::node_types::*;
 pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
@@ -482,16 +490,26 @@ fn eval_plpgsql_builtin_function(
             _ => eval_length_function(&values),
         },
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
+        BuiltinScalarFunction::LPad => eval_lpad_function(&values),
+        BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
+        BuiltinScalarFunction::Replace => eval_replace_function(&values),
+        BuiltinScalarFunction::SplitPart => eval_split_part_function(&values),
+        BuiltinScalarFunction::Translate => eval_translate_function(&values),
+        BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
+        BuiltinScalarFunction::Chr => eval_chr_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
+        BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
         BuiltinScalarFunction::Position => match values.as_slice() {
             [Value::Bit(needle), Value::Bit(haystack)] => {
                 Ok(Value::Int32(eval_bit_position(needle, haystack)))
             }
+            [Value::Bytea(_), Value::Bytea(_)] => eval_bytea_position_function(&values),
             _ => eval_position_function(&values),
         },
         BuiltinScalarFunction::Substring => match values.as_slice() {
@@ -500,6 +518,9 @@ fn eval_plpgsql_builtin_function(
             }
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
+            }
+            [Value::Bytea(_), Value::Int32(_)] | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                eval_bytea_substring(&values)
             }
             [Value::Text(_), Value::Text(_)] => eval_sql_regex_substring(&values),
             _ => eval_text_substring(&values),
@@ -520,6 +541,10 @@ fn eval_plpgsql_builtin_function(
                 *start,
                 Some(*len),
             )?)),
+            [Value::Bytea(_), Value::Bytea(_), Value::Int32(_)]
+            | [Value::Bytea(_), Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                eval_bytea_overlay(&values)
+            }
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -529,6 +554,7 @@ fn eval_plpgsql_builtin_function(
             [Value::Bit(bits), Value::Int32(index)] => {
                 Ok(Value::Int32(eval_get_bit(bits, *index)?))
             }
+            [Value::Bytea(_), Value::Int32(_)] => eval_get_bit_bytes(&values),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -540,6 +566,7 @@ fn eval_plpgsql_builtin_function(
                 Value::Int32(index),
                 Value::Int32(new_value),
             ] => Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?)),
+            [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_set_bit_bytes(&values),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -547,13 +574,25 @@ fn eval_plpgsql_builtin_function(
         },
         BuiltinScalarFunction::BitCount => match values.as_slice() {
             [Value::Bit(bits)] => Ok(Value::Int64(eval_bit_count(bits))),
+            [Value::Bytea(_)] => eval_bit_count_bytes(&values),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
             })),
         },
+        BuiltinScalarFunction::GetByte => eval_get_byte(&values),
+        BuiltinScalarFunction::SetByte => eval_set_byte(&values),
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
+        BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
+        BuiltinScalarFunction::Encode => eval_encode_function(&values),
+        BuiltinScalarFunction::Decode => eval_decode_function(&values),
+        BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),
+        BuiltinScalarFunction::Sha256 => eval_sha256_function(&values),
+        BuiltinScalarFunction::Sha384 => eval_sha384_function(&values),
+        BuiltinScalarFunction::Sha512 => eval_sha512_function(&values),
+        BuiltinScalarFunction::Crc32 => eval_crc32_function(&values),
+        BuiltinScalarFunction::Crc32c => eval_crc32c_function(&values),
         BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
         BuiltinScalarFunction::RegexpCount => eval_regexp_count(&values),
@@ -754,17 +793,28 @@ fn eval_builtin_function(
             _ => eval_length_function(&values),
         },
         BuiltinScalarFunction::Left => eval_left_function(&values),
+        BuiltinScalarFunction::LPad => eval_lpad_function(&values),
+        BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
+        BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
+        BuiltinScalarFunction::Replace => eval_replace_function(&values),
+        BuiltinScalarFunction::SplitPart => eval_split_part_function(&values),
+        BuiltinScalarFunction::Translate => eval_translate_function(&values),
+        BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
+        BuiltinScalarFunction::Chr => eval_chr_function(&values),
+        BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
         BuiltinScalarFunction::Position => match values.as_slice() {
             [Value::Bit(needle), Value::Bit(haystack)] => {
                 Ok(Value::Int32(eval_bit_position(needle, haystack)))
             }
+            [Value::Bytea(_), Value::Bytea(_)] => eval_bytea_position_function(&values),
             _ => eval_position_function(&values),
         },
         BuiltinScalarFunction::Substring => match values.as_slice() {
@@ -773,6 +823,9 @@ fn eval_builtin_function(
             }
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
+            }
+            [Value::Bytea(_), Value::Int32(_)] | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                eval_bytea_substring(&values)
             }
             [Value::Text(_), Value::Text(_)] => eval_sql_regex_substring(&values),
             _ => eval_text_substring(&values),
@@ -793,12 +846,17 @@ fn eval_builtin_function(
                 *start,
                 Some(*len),
             )?)),
+            [Value::Bytea(_), Value::Bytea(_), Value::Int32(_)]
+            | [Value::Bytea(_), Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
+                eval_bytea_overlay(&values)
+            }
             _ => unreachable!("validated bit overlay arguments"),
         },
         BuiltinScalarFunction::GetBit => match values.as_slice() {
             [Value::Bit(bits), Value::Int32(index)] => {
                 Ok(Value::Int32(eval_get_bit(bits, *index)?))
             }
+            [Value::Bytea(_), Value::Int32(_)] => eval_get_bit_bytes(&values),
             _ => unreachable!("validated get_bit arguments"),
         },
         BuiltinScalarFunction::SetBit => match values.as_slice() {
@@ -807,13 +865,25 @@ fn eval_builtin_function(
                 Value::Int32(index),
                 Value::Int32(new_value),
             ] => Ok(Value::Bit(eval_set_bit(bits, *index, *new_value)?)),
+            [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_set_bit_bytes(&values),
             _ => unreachable!("validated set_bit arguments"),
         },
         BuiltinScalarFunction::BitCount => match values.as_slice() {
             [Value::Bit(bits)] => Ok(Value::Int64(eval_bit_count(bits))),
+            [Value::Bytea(_)] => eval_bit_count_bytes(&values),
             _ => unreachable!("validated bit_count arguments"),
         },
+        BuiltinScalarFunction::GetByte => eval_get_byte(&values),
+        BuiltinScalarFunction::SetByte => eval_set_byte(&values),
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
+        BuiltinScalarFunction::Encode => eval_encode_function(&values),
+        BuiltinScalarFunction::Decode => eval_decode_function(&values),
+        BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),
+        BuiltinScalarFunction::Sha256 => eval_sha256_function(&values),
+        BuiltinScalarFunction::Sha384 => eval_sha384_function(&values),
+        BuiltinScalarFunction::Sha512 => eval_sha512_function(&values),
+        BuiltinScalarFunction::Crc32 => eval_crc32_function(&values),
+        BuiltinScalarFunction::Crc32c => eval_crc32c_function(&values),
         BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
         BuiltinScalarFunction::RegexpCount => eval_regexp_count(&values),

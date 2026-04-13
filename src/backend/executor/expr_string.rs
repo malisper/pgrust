@@ -1,11 +1,16 @@
 use super::ExecError;
+use super::expr_casts::parse_bytea_text;
 use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::parse_numeric_text;
 use super::node_types::Value;
+use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::session::ByteaOutputFormat;
+use base64::Engine as _;
 use encoding_rs::Encoding;
 use md5::{Digest, Md5};
 use regex::{Captures, Regex, RegexBuilder};
+use sha2::{Sha224, Sha256, Sha384, Sha512};
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
@@ -184,6 +189,171 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
 }
 
+pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("initcap", text_value, &Value::Null)?;
+    let mut out = String::with_capacity(text.len());
+    let mut capitalize = true;
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            if capitalize {
+                out.extend(ch.to_uppercase());
+                capitalize = false;
+            } else {
+                out.extend(ch.to_lowercase());
+            }
+        } else {
+            capitalize = true;
+            out.push(ch);
+        }
+    }
+    Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+pub(super) fn eval_replace_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(from_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(to_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null)
+        || matches!(from_value, Value::Null)
+        || matches!(to_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("replace", text_value, from_value)?;
+    let from = expect_text_arg("replace", from_value, to_value)?;
+    let to = expect_text_arg("replace", to_value, text_value)?;
+    Ok(Value::Text(CompactString::from_owned(text.replace(from, to))))
+}
+
+pub(super) fn eval_split_part_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(delim_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(index_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null)
+        || matches!(delim_value, Value::Null)
+        || matches!(index_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("split_part", text_value, delim_value)?;
+    let delim = expect_text_arg("split_part", delim_value, index_value)?;
+    let field = expect_i32_arg("split_part", index_value, text_value)?;
+    if field == 0 {
+        return Err(ExecError::RaiseException(
+            "field position must not be zero".into(),
+        ));
+    }
+    let parts: Vec<&str> = if delim.is_empty() {
+        text.char_indices()
+            .map(|(idx, ch)| &text[idx..idx + ch.len_utf8()])
+            .collect()
+    } else {
+        text.split(delim).collect()
+    };
+    let result = if field > 0 {
+        parts.get((field - 1) as usize).copied().unwrap_or("")
+    } else {
+        let index = parts.len() as i32 + field;
+        if index < 0 {
+            ""
+        } else {
+            parts.get(index as usize).copied().unwrap_or("")
+        }
+    };
+    Ok(Value::Text(CompactString::from(result)))
+}
+
+pub(super) fn eval_lpad_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_pad_function("lpad", values, true)
+}
+
+pub(super) fn eval_rpad_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_pad_function("rpad", values, false)
+}
+
+pub(super) fn eval_translate_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(from_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(to_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null)
+        || matches!(from_value, Value::Null)
+        || matches!(to_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("translate", text_value, from_value)?;
+    let from = expect_text_arg("translate", from_value, to_value)?;
+    let to = expect_text_arg("translate", to_value, text_value)?;
+    let from_chars: Vec<char> = from.chars().collect();
+    let to_chars: Vec<char> = to.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if let Some(idx) = from_chars.iter().position(|candidate| *candidate == ch) {
+            if let Some(replacement) = to_chars.get(idx) {
+                out.push(*replacement);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+pub(super) fn eval_ascii_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("ascii", text_value, &Value::Null)?;
+    Ok(Value::Int32(text.chars().next().map(|ch| ch as i32).unwrap_or(0)))
+}
+
+pub(super) fn eval_chr_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let code = expect_i32_arg("chr", value, &Value::Null)?;
+    if code == 0 {
+        return Err(ExecError::RaiseException(
+            "null character not permitted".into(),
+        ));
+    }
+    let code_u32 = u32::try_from(code)
+        .map_err(|_| ExecError::RaiseException("requested character too large".into()))?;
+    let ch = char::from_u32(code_u32)
+        .ok_or_else(|| ExecError::RaiseException("requested character too large".into()))?;
+    Ok(Value::Text(CompactString::from_owned(ch.to_string())))
+}
+
 pub(super) fn eval_trim_function(
     op: &'static str,
     values: &[Value],
@@ -307,6 +477,49 @@ pub(super) fn eval_text_substring(values: &[Value]) -> Result<Value, ExecError> 
     Ok(Value::Text(CompactString::from_owned(
         chars[start_idx..start_idx + take_len].iter().collect(),
     )))
+}
+
+pub(super) fn eval_bytea_substring(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(start_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null) || matches!(start_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let bytes = expect_bytea_arg("substring", bytes_value, start_value)?;
+    let start = expect_i32_arg("substring", start_value, bytes_value)?;
+    let len = match values.get(2) {
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(value) => Some(expect_i32_arg("substring", value, bytes_value)?),
+        None => None,
+    };
+    if let Some(len) = len
+        && len < 0
+    {
+        return Err(ExecError::NegativeSubstringLength);
+    }
+    let start_i64 = i64::from(start);
+    let start_idx = if start_i64 <= 1 {
+        0usize
+    } else {
+        usize::min((start_i64 - 1) as usize, bytes.len())
+    };
+    let take_len = match len {
+        None => bytes.len().saturating_sub(start_idx),
+        Some(len) => {
+            let skipped_before_start = if start_i64 < 1 { 1 - start_i64 } else { 0 };
+            let adjusted = i64::from(len) - skipped_before_start;
+            if adjusted <= 0 {
+                0
+            } else {
+                usize::min(adjusted as usize, bytes.len().saturating_sub(start_idx))
+            }
+        }
+    };
+    Ok(Value::Bytea(bytes[start_idx..start_idx + take_len].to_vec()))
 }
 
 pub(super) fn eval_sql_regex_substring(values: &[Value]) -> Result<Value, ExecError> {
@@ -676,6 +889,106 @@ pub(super) fn eval_md5_function(values: &[Value]) -> Result<Value, ExecError> {
     ))))
 }
 
+pub(super) fn eval_reverse_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let mut bytes = expect_bytea_arg("reverse", value, &Value::Null)?.to_vec();
+    bytes.reverse();
+    Ok(Value::Bytea(bytes))
+}
+
+pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(format_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null) || matches!(format_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let bytes = expect_bytea_arg("encode", bytes_value, format_value)?;
+    let format = expect_text_arg("encode", format_value, bytes_value)?.to_ascii_lowercase();
+    let rendered = match format.as_str() {
+        "hex" => encode_hex_bytes(bytes),
+        "escape" => format_bytea_text(bytes, ByteaOutputFormat::Escape),
+        "base64" => base64::engine::general_purpose::STANDARD.encode(bytes),
+        _ => {
+            return Err(ExecError::RaiseException(format!(
+                "unrecognized encoding: \"{format}\""
+            )))
+        }
+    };
+    Ok(Value::Text(CompactString::from_owned(rendered)))
+}
+
+pub(super) fn eval_decode_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(format_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(format_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("decode", text_value, format_value)?;
+    let format = expect_text_arg("decode", format_value, text_value)?.to_ascii_lowercase();
+    let bytes = match format.as_str() {
+        "hex" => decode_hex_blob(text)?,
+        "escape" => parse_bytea_text(text)?,
+        "base64" => base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(|_| ExecError::RaiseException("invalid base64 end sequence".into()))?,
+        _ => {
+            return Err(ExecError::RaiseException(format!(
+                "unrecognized encoding: \"{format}\""
+            )))
+        }
+    };
+    Ok(Value::Bytea(bytes))
+}
+
+pub(super) fn eval_sha224_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_sha2_function::<Sha224>("sha224", values)
+}
+
+pub(super) fn eval_sha256_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_sha2_function::<Sha256>("sha256", values)
+}
+
+pub(super) fn eval_sha384_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_sha2_function::<Sha384>("sha384", values)
+}
+
+pub(super) fn eval_sha512_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_sha2_function::<Sha512>("sha512", values)
+}
+
+pub(super) fn eval_crc32_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Int64(crc32fast::hash(&coerce_hash_bytes("crc32", value)?) as i64))
+}
+
+pub(super) fn eval_crc32c_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Int64(crc32c::crc32c(&coerce_hash_bytes("crc32c", value)?) as i64))
+}
+
 pub(super) fn eval_bpchar_to_text_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
@@ -727,6 +1040,195 @@ pub(super) fn eval_position_function(values: &[Value]) -> Result<Value, ExecErro
         .map(|idx| haystack[..idx].chars().count() as i32 + 1)
         .unwrap_or(0);
     Ok(Value::Int32(position))
+}
+
+pub(super) fn eval_strpos_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(substring_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(substring_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("strpos", text_value, substring_value)?;
+    let substring = expect_text_arg("strpos", substring_value, text_value)?;
+    if substring.is_empty() {
+        return Ok(Value::Int32(1));
+    }
+    let position = text
+        .find(substring)
+        .map(|idx| text[..idx].chars().count() as i32 + 1)
+        .unwrap_or(0);
+    Ok(Value::Int32(position))
+}
+
+pub(super) fn eval_bytea_position_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(needle_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(haystack_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(needle_value, Value::Null) || matches!(haystack_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let needle = expect_bytea_arg("position", needle_value, haystack_value)?;
+    let haystack = expect_bytea_arg("position", haystack_value, needle_value)?;
+    if needle.is_empty() {
+        return Ok(Value::Int32(1));
+    }
+    let position = haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|idx| idx as i32 + 1)
+        .unwrap_or(0);
+    Ok(Value::Int32(position))
+}
+
+pub(super) fn eval_bytea_overlay(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(place_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(start_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null)
+        || matches!(place_value, Value::Null)
+        || matches!(start_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let bytes = expect_bytea_arg("overlay", bytes_value, place_value)?;
+    let place = expect_bytea_arg("overlay", place_value, bytes_value)?;
+    let start = expect_i32_arg("overlay", start_value, bytes_value)?;
+    let len = match values.get(3) {
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(value) => Some(expect_i32_arg("overlay", value, bytes_value)?),
+        None => None,
+    };
+    let replace_len = len.unwrap_or(place.len() as i32);
+    if replace_len < 0 {
+        return Err(ExecError::NegativeSubstringLength);
+    }
+    let prefix_len = (start - 1).max(0).min(bytes.len() as i32) as usize;
+    let suffix_start = (start - 1)
+        .saturating_add(replace_len)
+        .max(0)
+        .min(bytes.len() as i32) as usize;
+    let mut out =
+        Vec::with_capacity(prefix_len + place.len() + bytes.len().saturating_sub(suffix_start));
+    out.extend_from_slice(&bytes[..prefix_len]);
+    out.extend_from_slice(place);
+    out.extend_from_slice(&bytes[suffix_start..]);
+    Ok(Value::Bytea(out))
+}
+
+pub(super) fn eval_get_bit_bytes(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(index_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null) || matches!(index_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let bytes = expect_bytea_arg("get_bit", bytes_value, index_value)?;
+    let index = expect_i32_arg("get_bit", index_value, bytes_value)?;
+    validate_bytea_bit_index(bytes, index)?;
+    let byte = bytes[(index / 8) as usize];
+    let shift = 7 - (index % 8) as u8;
+    Ok(Value::Int32(((byte >> shift) & 1) as i32))
+}
+
+pub(super) fn eval_set_bit_bytes(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(index_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(new_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null)
+        || matches!(index_value, Value::Null)
+        || matches!(new_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let mut bytes = expect_bytea_arg("set_bit", bytes_value, index_value)?.to_vec();
+    let index = expect_i32_arg("set_bit", index_value, bytes_value)?;
+    let bit = expect_i32_arg("set_bit", new_value, bytes_value)?;
+    validate_bytea_bit_index(&bytes, index)?;
+    let mask = 1u8 << (7 - (index % 8) as u8);
+    if bit == 0 {
+        bytes[(index / 8) as usize] &= !mask;
+    } else {
+        bytes[(index / 8) as usize] |= mask;
+    }
+    Ok(Value::Bytea(bytes))
+}
+
+pub(super) fn eval_bit_count_bytes(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let bytes = expect_bytea_arg("bit_count", bytes_value, &Value::Null)?;
+    Ok(Value::Int64(bytes.iter().map(|byte| byte.count_ones() as i64).sum()))
+}
+
+pub(super) fn eval_get_byte(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(index_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null) || matches!(index_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let bytes = expect_bytea_arg("get_byte", bytes_value, index_value)?;
+    let index = expect_i32_arg("get_byte", index_value, bytes_value)?;
+    validate_bytea_index(bytes, index, "get_byte")?;
+    Ok(Value::Int32(bytes[index as usize] as i32))
+}
+
+pub(super) fn eval_set_byte(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(bytes_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(index_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(new_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(bytes_value, Value::Null)
+        || matches!(index_value, Value::Null)
+        || matches!(new_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let mut bytes = expect_bytea_arg("set_byte", bytes_value, index_value)?.to_vec();
+    let index = expect_i32_arg("set_byte", index_value, bytes_value)?;
+    let new_byte = expect_i32_arg("set_byte", new_value, bytes_value)?;
+    validate_bytea_index(&bytes, index, "set_byte")?;
+    if !(0..=255).contains(&new_byte) {
+        return Err(ExecError::RaiseException(format!(
+            "new byte must be between 0 and 255: {new_byte}"
+        )));
+    }
+    bytes[index as usize] = new_byte as u8;
+    Ok(Value::Bytea(bytes))
 }
 
 pub(super) fn eval_convert_from_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -1438,6 +1940,171 @@ fn optional_regex_text_arg<'a>(
             right: Value::Text(default.into()),
         }),
     }
+}
+
+fn eval_pad_function(op: &'static str, values: &[Value], left: bool) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(len_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(len_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg(op, text_value, len_value)?;
+    let target_len = expect_i32_arg(op, len_value, text_value)?;
+    let fill = match values.get(2) {
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(value) => expect_text_arg(op, value, text_value)?,
+        None => " ",
+    };
+    if target_len <= 0 {
+        return Ok(Value::Text(CompactString::new("")));
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    let target_len = target_len as usize;
+    if chars.len() >= target_len {
+        if left {
+            chars.truncate(target_len);
+        } else {
+            chars = chars[..target_len].to_vec();
+        }
+        return Ok(Value::Text(CompactString::from_owned(
+            chars.into_iter().collect(),
+        )));
+    }
+    if fill.is_empty() {
+        return Ok(Value::Text(CompactString::from_owned(
+            chars.into_iter().collect(),
+        )));
+    }
+    let fill_chars: Vec<char> = fill.chars().collect();
+    let mut needed = target_len - chars.len();
+    let mut pad = Vec::with_capacity(needed);
+    while needed > 0 {
+        for ch in &fill_chars {
+            if needed == 0 {
+                break;
+            }
+            pad.push(*ch);
+            needed -= 1;
+        }
+    }
+    let out: String = if left {
+        pad.into_iter().chain(chars).collect()
+    } else {
+        chars.into_iter().chain(pad).collect()
+    };
+    Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+fn eval_sha2_function<D>(op: &'static str, values: &[Value]) -> Result<Value, ExecError>
+where
+    D: sha2::Digest,
+{
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Bytea(D::digest(coerce_hash_bytes(op, value)?).to_vec()))
+}
+
+fn coerce_hash_bytes(op: &'static str, value: &Value) -> Result<Vec<u8>, ExecError> {
+    match value {
+        Value::Text(text) => Ok(text.as_bytes().to_vec()),
+        Value::TextRef(_, _) => Ok(value.as_text().unwrap().as_bytes().to_vec()),
+        Value::Bytea(bytes) => Ok(bytes.clone()),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn encode_hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn decode_hex_blob(text: &str) -> Result<Vec<u8>, ExecError> {
+    if text.len() % 2 != 0 {
+        return Err(ExecError::RaiseException(
+            "invalid hexadecimal data: odd number of digits".into(),
+        ));
+    }
+    text.as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let pair = std::str::from_utf8(chunk)
+                .map_err(|_| ExecError::RaiseException("invalid hexadecimal digit".into()))?;
+            u8::from_str_radix(pair, 16)
+                .map_err(|_| ExecError::RaiseException("invalid hexadecimal digit".into()))
+        })
+        .collect()
+}
+
+fn expect_text_arg<'a>(
+    op: &'static str,
+    value: &'a Value,
+    right: &Value,
+) -> Result<&'a str, ExecError> {
+    value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: value.clone(),
+        right: right.clone(),
+    })
+}
+
+fn expect_bytea_arg<'a>(
+    op: &'static str,
+    value: &'a Value,
+    right: &Value,
+) -> Result<&'a [u8], ExecError> {
+    match value {
+        Value::Bytea(bytes) => Ok(bytes.as_slice()),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: right.clone(),
+        }),
+    }
+}
+
+fn expect_i32_arg(op: &'static str, value: &Value, left: &Value) -> Result<i32, ExecError> {
+    match value {
+        Value::Int32(v) => Ok(*v),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: left.clone(),
+            right: other.clone(),
+        }),
+    }
+}
+
+fn validate_bytea_index(bytes: &[u8], index: i32, op: &'static str) -> Result<(), ExecError> {
+    if !(0..bytes.len() as i32).contains(&index) {
+        return Err(ExecError::RaiseException(format!(
+            "{op} index {index} out of valid range, 0..{}",
+            bytes.len().saturating_sub(1)
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bytea_bit_index(bytes: &[u8], index: i32) -> Result<(), ExecError> {
+    let max_index = (bytes.len() as i32).saturating_mul(8).saturating_sub(1);
+    if index < 0 || index > max_index {
+        return Err(ExecError::BitIndexOutOfRange { index, max_index });
+    }
+    Ok(())
 }
 
 fn slice_from_char_start(text: &str, start: i32) -> Result<&str, ExecError> {
