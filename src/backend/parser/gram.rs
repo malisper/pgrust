@@ -893,7 +893,9 @@ fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatemen
             | Rule::string_literal
             | Rule::unicode_string_literal
             | Rule::escape_string_literal
-            | Rule::dollar_string_literal => comment = Some(Some(decode_string_literal_pair(part)?)),
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
             Rule::kw_null => comment = Some(None),
             _ => {}
         }
@@ -1754,7 +1756,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             .trim(),
                     )?;
                     let pattern = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-                    let mut args = vec![SqlFunctionArg::positional(value), SqlFunctionArg::positional(pattern)];
+                    let mut args = vec![
+                        SqlFunctionArg::positional(value),
+                        SqlFunctionArg::positional(pattern),
+                    ];
                     if let Some(escape_clause) = inner.next() {
                         let expr = escape_clause
                             .into_inner()
@@ -1813,7 +1818,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let literal = decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let literal =
+                decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             Ok(SqlExpr::Cast(
                 Box::new(SqlExpr::Const(Value::Text(literal.into()))),
                 ty,
@@ -2143,10 +2149,7 @@ fn fold_infix(
 }
 
 fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
-    if raw.len() >= 2
-        && matches!(raw.as_bytes()[0], b'u' | b'U')
-        && raw.as_bytes()[1] == b'&'
-    {
+    if raw.len() >= 2 && matches!(raw.as_bytes()[0], b'u' | b'U') && raw.as_bytes()[1] == b'&' {
         return decode_unicode_string_literal(raw);
     }
 

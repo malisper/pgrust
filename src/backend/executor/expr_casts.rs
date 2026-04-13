@@ -479,9 +479,7 @@ pub(crate) fn soft_input_error_info(
         | SqlTypeKind::VarBit
         | SqlTypeKind::Name
         | SqlTypeKind::Char
-        | SqlTypeKind::Varchar => {
-            cast_text_value(text, ty, false)
-        }
+        | SqlTypeKind::Varchar => cast_text_value(text, ty, false),
         _ => cast_value(Value::Text(text.into()), ty),
     };
     match parsed {
@@ -922,9 +920,9 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
         SqlTypeKind::JsonPath => Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?)),
-        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
-            coerce_character_string(text, ty, explicit)?,
-        ))),
+        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(
+            CompactString::from_owned(coerce_character_string(text, ty, explicit)?),
+        )),
         SqlTypeKind::Int2 => cast_text_to_int2(text),
         SqlTypeKind::Int4 => cast_text_to_int4(text),
         SqlTypeKind::Int8 => cast_text_to_int8(text),

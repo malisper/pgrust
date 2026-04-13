@@ -130,7 +130,8 @@ pub(crate) fn eval_json_builtin_function(
                 render_json_object_function(values)?,
             ))),
             BuiltinScalarFunction::JsonStripNulls => {
-                let strip_in_arrays = parse_optional_bool_flag(values.get(1), false, "json_strip_nulls")?;
+                let strip_in_arrays =
+                    parse_optional_bool_flag(values.get(1), false, "json_strip_nulls")?;
                 let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
                 let parsed = match json {
                     ParsedJsonValue::Json(json) => json,
@@ -255,42 +256,54 @@ pub(crate) fn eval_json_builtin_function(
                     &pairs,
                 )?)))
             }
-            BuiltinScalarFunction::JsonbObject => {
-                Ok(Value::Jsonb(encode_jsonb(&render_jsonb_object_function(values)?)))
-            }
+            BuiltinScalarFunction::JsonbObject => Ok(Value::Jsonb(encode_jsonb(
+                &render_jsonb_object_function(values)?,
+            ))),
             BuiltinScalarFunction::JsonbStripNulls => {
-                let strip_in_arrays = parse_optional_bool_flag(values.get(1), false, "jsonb_strip_nulls")?;
-                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_strip_nulls")?;
+                let strip_in_arrays =
+                    parse_optional_bool_flag(values.get(1), false, "jsonb_strip_nulls")?;
+                let json = parse_jsonb_target(
+                    values.first().unwrap_or(&Value::Null),
+                    "jsonb_strip_nulls",
+                )?;
                 Ok(Value::Jsonb(encode_jsonb(&strip_jsonb_nulls(
                     &json,
                     strip_in_arrays,
                 ))))
             }
             BuiltinScalarFunction::JsonbPretty => {
-                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_pretty")?;
+                let json =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_pretty")?;
                 Ok(Value::Text(CompactString::from_owned(
                     serde_json::to_string_pretty(&json.to_serde()).unwrap(),
                 )))
             }
             BuiltinScalarFunction::JsonbDelete => {
-                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_delete")?;
+                let json =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_delete")?;
                 Ok(Value::Jsonb(encode_jsonb(&apply_jsonb_delete(
                     &json,
                     values.get(1).unwrap_or(&Value::Null),
                 )?)))
             }
             BuiltinScalarFunction::JsonbDeletePath => {
-                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_delete_path")?;
-                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_delete_path")?;
+                let json = parse_jsonb_target(
+                    values.first().unwrap_or(&Value::Null),
+                    "jsonb_delete_path",
+                )?;
+                let path = parse_jsonb_path_arg(
+                    values.get(1).unwrap_or(&Value::Null),
+                    "jsonb_delete_path",
+                )?;
                 Ok(Value::Jsonb(encode_jsonb(&delete_jsonb_path(&json, &path))))
             }
             BuiltinScalarFunction::JsonbSet => {
                 let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_set")?;
-                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_set")?;
+                let path =
+                    parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_set")?;
                 let replacement =
                     parse_jsonb_target(values.get(2).unwrap_or(&Value::Null), "jsonb_set")?;
-                let create_missing =
-                    parse_optional_bool_flag(values.get(3), true, "jsonb_set")?;
+                let create_missing = parse_optional_bool_flag(values.get(3), true, "jsonb_set")?;
                 Ok(Value::Jsonb(encode_jsonb(&set_jsonb_path(
                     &json,
                     &path,
@@ -301,8 +314,10 @@ pub(crate) fn eval_json_builtin_function(
                 )?)))
             }
             BuiltinScalarFunction::JsonbSetLax => {
-                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_set_lax")?;
-                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_set_lax")?;
+                let json =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_set_lax")?;
+                let path =
+                    parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_set_lax")?;
                 let create_missing =
                     parse_optional_bool_flag(values.get(3), true, "jsonb_set_lax")?;
                 match values.get(2).unwrap_or(&Value::Null) {
@@ -342,12 +357,13 @@ pub(crate) fn eval_json_builtin_function(
                 }
             }
             BuiltinScalarFunction::JsonbInsert => {
-                let json = parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_insert")?;
-                let path = parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_insert")?;
+                let json =
+                    parse_jsonb_target(values.first().unwrap_or(&Value::Null), "jsonb_insert")?;
+                let path =
+                    parse_jsonb_path_arg(values.get(1).unwrap_or(&Value::Null), "jsonb_insert")?;
                 let replacement =
                     parse_jsonb_target(values.get(2).unwrap_or(&Value::Null), "jsonb_insert")?;
-                let insert_after =
-                    parse_optional_bool_flag(values.get(3), false, "jsonb_insert")?;
+                let insert_after = parse_optional_bool_flag(values.get(3), false, "jsonb_insert")?;
                 Ok(Value::Jsonb(encode_jsonb(&set_jsonb_path(
                     &json,
                     &path,
@@ -948,17 +964,17 @@ fn strip_json_nulls(value: &SerdeJsonValue, strip_in_arrays: bool) -> SerdeJsonV
 fn strip_jsonb_nulls(value: &JsonbValue, strip_in_arrays: bool) -> JsonbValue {
     match value {
         JsonbValue::Object(items) => JsonbValue::Object(
-            items.iter()
+            items
+                .iter()
                 .filter_map(|(key, value)| {
-                    (!matches!(value, JsonbValue::Null)).then_some((
-                        key.clone(),
-                        strip_jsonb_nulls(value, strip_in_arrays),
-                    ))
+                    (!matches!(value, JsonbValue::Null))
+                        .then_some((key.clone(), strip_jsonb_nulls(value, strip_in_arrays)))
                 })
                 .collect(),
         ),
         JsonbValue::Array(items) => JsonbValue::Array(
-            items.iter()
+            items
+                .iter()
                 .filter_map(|item| {
                     if strip_in_arrays && matches!(item, JsonbValue::Null) {
                         None
@@ -978,13 +994,15 @@ fn apply_jsonb_delete(target: &JsonbValue, key: &Value) -> Result<JsonbValue, Ex
             let key = key.as_text().unwrap();
             match target {
                 JsonbValue::Object(items) => JsonbValue::Object(
-                    items.iter()
+                    items
+                        .iter()
                         .filter(|(name, _)| name != key)
                         .cloned()
                         .collect(),
                 ),
                 JsonbValue::Array(items) => JsonbValue::Array(
-                    items.iter()
+                    items
+                        .iter()
                         .filter(|item| !matches!(item, JsonbValue::String(text) if text == key))
                         .cloned()
                         .collect(),
@@ -994,7 +1012,9 @@ fn apply_jsonb_delete(target: &JsonbValue, key: &Value) -> Result<JsonbValue, Ex
         }
         Value::Int16(index) => delete_jsonb_array_index(target, i32::from(*index)),
         Value::Int32(index) => delete_jsonb_array_index(target, *index),
-        Value::Int64(index) => delete_jsonb_array_index(target, i32::try_from(*index).unwrap_or(i32::MIN)),
+        Value::Int64(index) => {
+            delete_jsonb_array_index(target, i32::try_from(*index).unwrap_or(i32::MIN))
+        }
         Value::Array(keys) => {
             let mut result = target.clone();
             for key in keys {
@@ -1047,7 +1067,8 @@ fn delete_jsonb_path_inner(target: &JsonbValue, path: &[Option<String>]) -> Json
     if path.len() == 1 {
         return match target {
             JsonbValue::Object(items) => JsonbValue::Object(
-                items.iter()
+                items
+                    .iter()
                     .filter(|(key, _)| key != step)
                     .cloned()
                     .collect(),
@@ -1065,7 +1086,8 @@ fn delete_jsonb_path_inner(target: &JsonbValue, path: &[Option<String>]) -> Json
     }
     match target {
         JsonbValue::Object(items) => JsonbValue::Object(
-            items.iter()
+            items
+                .iter()
                 .map(|(key, value)| {
                     if key == step {
                         (key.clone(), delete_jsonb_path_inner(value, &path[1..]))
@@ -1365,7 +1387,8 @@ pub(crate) fn eval_json_table_function(
     }
 
     let value = eval_expr(
-        args.first().ok_or_else(|| ExecError::RaiseException("missing json function argument".into()))?,
+        args.first()
+            .ok_or_else(|| ExecError::RaiseException("missing json function argument".into()))?,
         slot,
         ctx,
     )?;

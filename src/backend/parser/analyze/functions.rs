@@ -176,7 +176,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Replace
             | BuiltinScalarFunction::Translate
             | BuiltinScalarFunction::SplitPart => args.len() == 3,
-            BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => {
+                matches!(args.len(), 2 | 3)
+            }
             BuiltinScalarFunction::RegexpReplace => matches!(args.len(), 3..=6),
             BuiltinScalarFunction::RegexpCount => matches!(args.len(), 2..=4),
             BuiltinScalarFunction::RegexpInstr => matches!(args.len(), 2..=7),
@@ -415,10 +417,7 @@ fn lower_named_function_args(
         });
     }
 
-    Ok(lowered
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>())
+    Ok(lowered.into_iter().flatten().collect::<Vec<_>>())
 }
 
 fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {

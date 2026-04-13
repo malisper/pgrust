@@ -49,8 +49,8 @@ use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager,
 };
-use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::catalog::Catalog;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,

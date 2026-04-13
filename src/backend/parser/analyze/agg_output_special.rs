@@ -219,10 +219,20 @@ pub(super) fn bind_grouped_func_call(
         .collect::<Result<Vec<_>, _>>()?;
     match func {
         BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
-            let left_type =
-                infer_sql_expr_type(&lowered_args[0], input_scope, catalog, outer_scopes, grouped_outer);
-            let right_type =
-                infer_sql_expr_type(&lowered_args[1], input_scope, catalog, outer_scopes, grouped_outer);
+            let left_type = infer_sql_expr_type(
+                &lowered_args[0],
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let right_type = infer_sql_expr_type(
+                &lowered_args[1],
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
             if !should_use_text_concat(&lowered_args[0], left_type, &lowered_args[0], left_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text argument",
@@ -252,8 +262,13 @@ pub(super) fn bind_grouped_func_call(
             })
         }
         BuiltinScalarFunction::Lower => {
-            let arg_type =
-                infer_sql_expr_type(&lowered_args[0], input_scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = infer_sql_expr_type(
+                &lowered_args[0],
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
             Ok(Expr::FuncCall {
                 func,
                 args: vec![coerce_bound_expr(
