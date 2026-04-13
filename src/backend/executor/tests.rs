@@ -5900,6 +5900,63 @@ fn generate_series_accepts_named_sql_args_in_from() {
 }
 
 #[test]
+fn jsonb_path_query_works_in_select_list_and_from() {
+    let base = temp_dir("jsonb_path_query_srf");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('[{\"a\":1},{\"a\":2},{\"a\":3}]'::jsonb, '$[*].a')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("2").unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("3").unwrap()
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from jsonb_path_query(target => '[{\"a\":1},{\"a\":2},{\"a\":3}]'::jsonb, path => '$[*] ? (@.a > $min).a', vars => '{\"min\":1}'::jsonb)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("2").unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("3").unwrap()
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_arithmetic_recursive_and_subscripts_work() {
     let base = temp_dir("jsonpath_extended");
     let txns = TransactionManager::new_durable(&base).unwrap();

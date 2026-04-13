@@ -16,8 +16,8 @@ pub(crate) fn eval_set_returning_call(
             output,
         } => eval_generate_series(start, stop, step, output.sql_type.kind, slot, ctx),
         SetReturningCall::Unnest { args, .. } => eval_unnest(args, slot, ctx),
-        SetReturningCall::JsonTableFunction { kind, arg, .. } => {
-            eval_json_table_function(*kind, arg, slot, ctx)
+        SetReturningCall::JsonTableFunction { kind, args, .. } => {
+            eval_json_table_function(*kind, args, slot, ctx)
         }
     }
 }
@@ -52,6 +52,9 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
             }
             crate::include::nodes::plannodes::JsonTableFunction::ArrayElementsText => {
                 "json_array_elements_text"
+            }
+            crate::include::nodes::plannodes::JsonTableFunction::JsonbPathQuery => {
+                "jsonb_path_query"
             }
             crate::include::nodes::plannodes::JsonTableFunction::JsonbObjectKeys => {
                 "jsonb_object_keys"

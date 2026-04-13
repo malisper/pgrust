@@ -286,6 +286,7 @@ fn set_returning_function_name(name: &str) -> Option<&str> {
         | "jsonb_object_keys"
         | "jsonb_each"
         | "jsonb_each_text"
+        | "jsonb_path_query"
         | "jsonb_array_elements"
         | "jsonb_array_elements_text" => Some(name),
         _ => None,
@@ -440,20 +441,19 @@ fn bind_select_list_srf_call(
                 expected: "supported set-returning function",
                 actual: other.to_string(),
             })?;
-            if args.len() != 1 {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "single json argument",
-                    actual: format!("{other} with {} arguments", args.len()),
-                });
-            }
-            let arg = bind_expr_with_outer_and_ctes(
-                &args[0],
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?;
+            let bound_args = args
+                .iter()
+                .map(|arg| {
+                    bind_expr_with_outer_and_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let output_columns = match kind {
                 JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
                 JsonTableFunction::ArrayElements => vec![QueryColumn {
@@ -463,6 +463,10 @@ fn bind_select_list_srf_call(
                 JsonTableFunction::ArrayElementsText => {
                     vec![QueryColumn::text("json_array_elements_text")]
                 }
+                JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
+                    name: "jsonb_path_query".into(),
+                    sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                }],
                 JsonTableFunction::JsonbObjectKeys => vec![QueryColumn::text("jsonb_object_keys")],
                 JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
                     name: "jsonb_array_elements".into(),
@@ -484,7 +488,7 @@ fn bind_select_list_srf_call(
             Ok((
                 SetReturningCall::JsonTableFunction {
                     kind,
-                    arg,
+                    args: bound_args,
                     output_columns: output_columns.clone(),
                 },
                 output_columns[0].sql_type,

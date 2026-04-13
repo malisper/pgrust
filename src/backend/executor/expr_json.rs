@@ -1352,11 +1352,23 @@ fn value_to_json_text(value: &Value, pretty: bool) -> String {
 
 pub(crate) fn eval_json_table_function(
     kind: JsonTableFunction,
-    arg: &Expr,
+    args: &[Expr],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let value = eval_expr(arg, slot, ctx)?;
+    if kind == JsonTableFunction::JsonbPathQuery {
+        let values = args
+            .iter()
+            .map(|arg| eval_expr(arg, slot, ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        return eval_jsonb_path_query_rows(&values);
+    }
+
+    let value = eval_expr(
+        args.first().ok_or_else(|| ExecError::RaiseException("missing json function argument".into()))?,
+        slot,
+        ctx,
+    )?;
     if matches!(value, Value::Null) {
         return Ok(Vec::new());
     }
@@ -1541,6 +1553,7 @@ pub(crate) fn eval_json_table_function(
                     JsonTableFunction::EachText => "json_each_text",
                     JsonTableFunction::ArrayElements => "json_array_elements",
                     JsonTableFunction::ArrayElementsText => "json_array_elements_text",
+                    JsonTableFunction::JsonbPathQuery => "jsonb_path_query",
                     JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
                     JsonTableFunction::JsonbEach => "jsonb_each",
                     JsonTableFunction::JsonbEachText => "jsonb_each_text",
@@ -1559,6 +1572,7 @@ pub(crate) fn eval_json_table_function(
                     JsonTableFunction::EachText => "json_each_text",
                     JsonTableFunction::ArrayElements => "json_array_elements",
                     JsonTableFunction::ArrayElementsText => "json_array_elements_text",
+                    JsonTableFunction::JsonbPathQuery => "jsonb_path_query",
                     JsonTableFunction::JsonbObjectKeys => "jsonb_object_keys",
                     JsonTableFunction::JsonbEach => "jsonb_each",
                     JsonTableFunction::JsonbEachText => "jsonb_each_text",
@@ -1571,4 +1585,44 @@ pub(crate) fn eval_json_table_function(
         }
     }
     Ok(rows)
+}
+
+fn eval_jsonb_path_query_rows(values: &[Value]) -> Result<Vec<TupleSlot>, ExecError> {
+    let target = values.first().unwrap_or(&Value::Null);
+    let path = values.get(1).unwrap_or(&Value::Null);
+    if matches!(target, Value::Null) || matches!(path, Value::Null) {
+        return Ok(Vec::new());
+    }
+    let silent = values
+        .get(3)
+        .map(|value| match value {
+            Value::Bool(flag) => Ok(*flag),
+            Value::Null => Ok(false),
+            other => Err(ExecError::TypeMismatch {
+                op: "jsonpath silent",
+                left: other.clone(),
+                right: Value::Bool(false),
+            }),
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let target = parse_jsonpath_target_value(target)?;
+    let parsed = parse_jsonpath(parse_jsonpath_value_text(path)?.as_str())?;
+    let vars_json = match values.get(2) {
+        Some(Value::Null) | None => None,
+        Some(value) => Some(parse_jsonpath_target_value(value)?),
+    };
+    let eval_ctx = JsonPathEvaluationContext {
+        root: &target,
+        vars: vars_json.as_ref(),
+    };
+    let result = evaluate_jsonpath(&parsed, &eval_ctx);
+    match result {
+        Ok(items) => Ok(items
+            .into_iter()
+            .map(|item| TupleSlot::virtual_row(vec![jsonb_to_value(&item)]))
+            .collect()),
+        Err(_) if silent => Ok(Vec::new()),
+        Err(err) => Err(err),
+    }
 }
