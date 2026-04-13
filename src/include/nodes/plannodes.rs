@@ -333,6 +333,12 @@ pub enum Expr {
         case_insensitive: bool,
         negated: bool,
     },
+    Similar {
+        expr: Box<Expr>,
+        pattern: Box<Expr>,
+        escape: Option<Box<Expr>>,
+        negated: bool,
+    },
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),

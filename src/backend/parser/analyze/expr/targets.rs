@@ -249,6 +249,18 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
                 visit_nested_srfs(escape, info);
             }
         }
+        SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            visit_nested_srfs(expr, info);
+            visit_nested_srfs(pattern, info);
+            if let Some(escape) = escape {
+                visit_nested_srfs(escape, info);
+            }
+        }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
         | SqlExpr::BitNot(inner)

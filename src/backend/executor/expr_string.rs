@@ -384,6 +384,55 @@ pub(super) fn eval_like(
     Ok(Value::Bool(if negated { !matched } else { matched }))
 }
 
+pub(super) fn eval_similar(
+    left: &Value,
+    pattern: &Value,
+    escape: Option<&Value>,
+    negated: bool,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(pattern, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = left.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "similar to",
+        left: left.clone(),
+        right: pattern.clone(),
+    })?;
+    let pattern_text = pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "similar to",
+        left: left.clone(),
+        right: pattern.clone(),
+    })?;
+    let escape_char = match escape {
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(value) => {
+            let escape_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "similar to",
+                left: left.clone(),
+                right: value.clone(),
+            })?;
+            if escape_text.is_empty() {
+                None
+            } else {
+                let mut chars = escape_text.chars();
+                let ch = chars.next().ok_or_else(|| ExecError::InvalidRegex("invalid escape string".into()))?;
+                if chars.next().is_some() {
+                    return Err(ExecError::InvalidRegex("invalid escape string".into()));
+                }
+                Some(ch)
+            }
+        }
+        None => Some('\\'),
+    };
+    let regex_pattern = similar_to_regex(pattern_text, escape_char)?;
+    let regex = Regex::new(&regex_pattern).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
+    Ok(Value::Bool(if negated {
+        !regex.is_match(text)
+    } else {
+        regex.is_match(text)
+    }))
+}
+
 pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
     let Some(text) = values.first() else {
         return Ok(Value::Null);
@@ -820,6 +869,67 @@ fn build_regex_with_policy(
     global_policy: RegexGlobalPolicy,
 ) -> Result<Regex, ExecError> {
     build_regex_and_global(pattern, flags, global_policy).map(|(regex, _)| regex)
+}
+
+fn similar_to_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecError> {
+    let mut out = String::from("^(?:");
+    let mut chars = pattern.chars().peekable();
+    let mut after_escape = false;
+    let mut bracket_depth = 0usize;
+    let mut charclass_pos = 0usize;
+    while let Some(ch) = chars.next() {
+        if after_escape {
+            out.push('\\');
+            out.push(ch);
+            after_escape = false;
+            if bracket_depth > 0 {
+                charclass_pos = 3;
+            }
+            continue;
+        }
+        if Some(ch) == escape {
+            after_escape = true;
+            continue;
+        }
+        if bracket_depth > 0 {
+            if ch == '\\' {
+                out.push('\\');
+            }
+            out.push(ch);
+            if ch == ']' && charclass_pos > 2 {
+                bracket_depth = bracket_depth.saturating_sub(1);
+            } else if ch == '[' {
+                bracket_depth += 1;
+                charclass_pos = 3;
+            } else if ch == '^' {
+                charclass_pos += 1;
+            } else {
+                charclass_pos = 3;
+            }
+            continue;
+        }
+        match ch {
+            '[' => {
+                out.push('[');
+                bracket_depth = 1;
+                charclass_pos = 1;
+            }
+            '%' => out.push_str(".*"),
+            '_' => out.push('.'),
+            '(' => out.push_str("(?:"),
+            '\\' | '.' | '^' | '$' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    if after_escape {
+        return Err(ExecError::InvalidRegex("invalid regular expression: escape character at end of pattern".into()));
+    }
+    out.push(')');
+    out.push('$');
+    Ok(out)
 }
 
 fn build_regex_and_global(

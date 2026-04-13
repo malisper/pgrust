@@ -86,6 +86,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::GtEq(_, _)
         | SqlExpr::RegexMatch(_, _)
         | SqlExpr::Like { .. }
+        | SqlExpr::Similar { .. }
         | SqlExpr::And(_, _)
         | SqlExpr::Or(_, _)
         | SqlExpr::Not(_)

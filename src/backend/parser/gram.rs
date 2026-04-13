@@ -1596,6 +1596,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     })
                 }
                 Rule::like_suffix => build_like_predicate(left, next),
+                Rule::similar_suffix => build_similar_predicate(left, next),
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
@@ -1971,6 +1972,36 @@ fn build_like_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
         pattern: Box::new(pattern.ok_or(ParseError::UnexpectedEof)?),
         escape,
         case_insensitive,
+        negated,
+    })
+}
+
+fn build_similar_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut negated = false;
+    let mut pattern = None;
+    let mut escape = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::concat_expr => {
+                if pattern.is_none() {
+                    pattern = Some(build_expr(part)?);
+                }
+            }
+            Rule::escape_clause => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::concat_expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                escape = Some(Box::new(build_expr(expr)?));
+            }
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::Similar {
+        expr: Box::new(left),
+        pattern: Box::new(pattern.ok_or(ParseError::UnexpectedEof)?),
+        escape,
         negated,
     })
 }
