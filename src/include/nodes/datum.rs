@@ -117,6 +117,14 @@ impl ArrayValue {
     }
 }
 
+pub fn array_value_from_value(value: &Value) -> Option<ArrayValue> {
+    match value {
+        Value::Array(items) => ArrayValue::from_nested_values(items.clone(), vec![1]).ok(),
+        Value::PgArray(array) => Some(array.clone()),
+        _ => None,
+    }
+}
+
 fn flatten_nested_values(
     values: Vec<Value>,
     depth: usize,
@@ -597,10 +605,17 @@ impl Value {
             }
         }
     }
+
+    pub fn as_array_value(&self) -> Option<ArrayValue> {
+        array_value_from_value(self)
+    }
 }
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
+        if let (Some(left), Some(right)) = (self.as_array_value(), other.as_array_value()) {
+            return left == right;
+        }
         match (self, other) {
             (Value::Int16(a), Value::Int16(b)) => a == b,
             (Value::Int32(a), Value::Int32(b)) => a == b,
@@ -658,8 +673,6 @@ impl PartialEq for Value {
             (Value::JsonPath(a), Value::JsonPath(b)) => a == b,
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Array(a), Value::Array(b)) => a == b,
-            (Value::PgArray(a), Value::PgArray(b)) => a == b,
             (Value::Null, Value::Null) => true,
             (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
                 a.as_text().unwrap() == b.as_text().unwrap()
@@ -673,6 +686,11 @@ impl Eq for Value {}
 
 impl std::hash::Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        if let Some(array) = self.as_array_value() {
+            7u8.hash(state);
+            array.hash(state);
+            return;
+        }
         match self {
             Value::Int16(v) => {
                 0u8.hash(state);
@@ -783,14 +801,7 @@ impl std::hash::Hash for Value {
                 6u8.hash(state);
                 v.hash(state);
             }
-            Value::Array(values) => {
-                7u8.hash(state);
-                values.hash(state);
-            }
-            Value::PgArray(array) => {
-                15u8.hash(state);
-                array.hash(state);
-            }
+            Value::Array(_) | Value::PgArray(_) => unreachable!("array values hashed above"),
             Value::Null => {
                 8u8.hash(state);
             }

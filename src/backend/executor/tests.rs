@@ -4806,7 +4806,10 @@ fn typed_empty_array_selects_as_empty_value() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Array(vec![])]]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::PgArray(crate::include::nodes::datum::ArrayValue::empty())]]
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }

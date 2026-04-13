@@ -2364,13 +2364,18 @@ fn copy_from_rows_parses_quoted_array_text_and_empty_arrays() {
                 vec![
                     vec![
                         Value::Int32(1),
-                        Value::Array(vec![Value::Text("a,b".into()), Value::Text("c\"d".into())]),
-                        Value::Array(vec![]),
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Text("a,b".into()),
+                            Value::Text("c\"d".into()),
+                        ])),
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::empty()),
                     ],
                     vec![
                         Value::Int32(2),
-                        Value::Array(vec![]),
-                        Value::Array(vec![Value::Null]),
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::empty()),
+                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Null,
+                        ])),
                     ],
                 ]
             );

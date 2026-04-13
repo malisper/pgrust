@@ -235,7 +235,7 @@ pub fn eval_expr(
             for expr in elements {
                 values.push(cast_value(eval_expr(expr, slot, ctx)?, element_type)?);
             }
-            Ok(Value::Array(values))
+            Ok(Value::PgArray(ArrayValue::from_1d(values)))
         }
         Expr::ArrayOverlap(left, right) => {
             eval_array_overlap(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
@@ -465,7 +465,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             for expr in elements {
                 values.push(cast_value(eval_plpgsql_expr(expr, slot)?, element_type)?);
             }
-            Ok(Value::Array(values))
+            Ok(Value::PgArray(ArrayValue::from_1d(values)))
         }
         Expr::FuncCall {
             func,
@@ -1006,6 +1006,19 @@ fn eval_jsonb_exists_list(
     }
     let keys = match right {
         Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_text()
+                    .map(|text| text.to_string())
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op,
+                        left: left.clone(),
+                        right: item.clone(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Value::PgArray(array) => array
+            .elements
             .iter()
             .map(|item| {
                 item.as_text()
