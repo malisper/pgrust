@@ -248,15 +248,6 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     }
 }
 
-pub(crate) fn send_data_row(
-    w: &mut impl Write,
-    values: &[Value],
-    buf: &mut Vec<u8>,
-    float_format: FloatFormatOptions,
-) -> io::Result<()> {
-    send_typed_data_row(w, values, &[], buf, float_format)
-}
-
 pub(crate) fn send_typed_data_row(
     w: &mut impl Write,
     values: &[Value],

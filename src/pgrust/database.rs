@@ -109,6 +109,7 @@ pub(crate) struct TempNamespace {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) enum TempMutationEffect {
     Create {
         name: String,
@@ -214,6 +215,7 @@ impl Database {
         Self::temp_db_oid(client_id)
     }
 
+    #[cfg(test)]
     fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
         self.temp_relations.read().contains_key(&client_id)
     }
@@ -339,6 +341,7 @@ impl Database {
         constraint_rows_for_relation(self, client_id, txn_ctx, relation_oid)
     }
 
+    #[cfg(test)]
     pub(crate) fn temp_entry(
         &self,
         client_id: ClientId,

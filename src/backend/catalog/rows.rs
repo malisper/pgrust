@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::backend::utils::cache::catcache::{CatCache, format_indkey, sql_type_oid};
+use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,

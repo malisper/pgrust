@@ -420,7 +420,6 @@ fn numeric_gcd(
     right: &crate::include::nodes::datum::NumericValue,
 ) -> crate::include::nodes::datum::NumericValue {
     use crate::include::nodes::datum::NumericValue;
-    use num_bigint::BigInt;
     match (left, right) {
         (NumericValue::NaN, _) | (_, NumericValue::NaN) => NumericValue::NaN,
         (

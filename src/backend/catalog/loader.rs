@@ -14,7 +14,7 @@ use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_constraint::not_null_constraint_name;
 use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::rowcodec::{
-    namespace_row_from_values, parse_indkey, pg_am_row_from_values, pg_amop_row_from_values,
+    namespace_row_from_values, pg_am_row_from_values, pg_amop_row_from_values,
     pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
     pg_auth_members_row_from_values, pg_authid_row_from_values, pg_cast_row_from_values,
     pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
