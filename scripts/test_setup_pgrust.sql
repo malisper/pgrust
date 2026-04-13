@@ -181,6 +181,44 @@ CREATE TABLE tenk2 (
 );
 INSERT INTO tenk2 SELECT * FROM tenk1;
 
+--
+-- Shared index-capable fixtures for pgrust regression coverage.
+--
+-- Keep these separate from PostgreSQL's canonical create_index.sql object
+-- names so later regression files can still create their own indexes.
+--
+
+CREATE TABLE pgrust_index_tbl (
+  id int4 not null,
+  bucket int4 not null,
+  payload text
+);
+INSERT INTO pgrust_index_tbl (id, bucket, payload) VALUES
+  (1::int4, 1::int4, 'alpha'),
+  (2::int4, 1::int4, 'beta'),
+  (3::int4, 2::int4, 'gamma'),
+  (4::int4, 2::int4, 'delta'),
+  (5::int4, 3::int4, 'epsilon'),
+  (6::int4, 3::int4, 'zeta'),
+  (7::int4, 4::int4, 'eta'),
+  (8::int4, 4::int4, 'theta');
+
+CREATE INDEX pgrust_index_tbl_id_idx ON pgrust_index_tbl (id);
+CREATE INDEX pgrust_index_tbl_bucket_id_idx ON pgrust_index_tbl (bucket, id);
+
+CREATE TABLE pgrust_unique_tbl (
+  id int4,
+  note text
+);
+INSERT INTO pgrust_unique_tbl (id, note) VALUES
+  (1::int4, 'one'),
+  (2::int4, 'two'),
+  (3::int4, 'three'),
+  (NULL, 'null-a'),
+  (NULL, 'null-b');
+
+CREATE UNIQUE INDEX pgrust_unique_tbl_id_key ON pgrust_unique_tbl (id);
+
 CREATE TABLE person (
   name text,
   age int4,
