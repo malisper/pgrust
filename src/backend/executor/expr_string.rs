@@ -309,6 +309,61 @@ pub(super) fn eval_text_substring(values: &[Value]) -> Result<Value, ExecError> 
     )))
 }
 
+pub(super) fn eval_sql_regex_substring(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (text, pattern) = regex_text_pattern_pair("substring", values)?;
+    let regex = Regex::new(pattern).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
+    let Some(captures) = regex.captures(text) else {
+        return Ok(Value::Null);
+    };
+    let matched = if captures.len() > 1 {
+        captures.get(1)
+    } else {
+        captures.get(0)
+    };
+    Ok(match matched {
+        Some(value) => Value::Text(CompactString::from(value.as_str())),
+        None => Value::Null,
+    })
+}
+
+pub(super) fn eval_similar_substring(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(pattern_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(pattern_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if matches!(values.get(2), Some(Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "substring similar",
+        left: text_value.clone(),
+        right: pattern_value.clone(),
+    })?;
+    let pattern_text = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "substring similar",
+        left: text_value.clone(),
+        right: pattern_value.clone(),
+    })?;
+    let escape_char = parse_similar_escape_arg(text_value, values.get(2))?;
+    let regex_pattern = similar_substring_regex(pattern_text, escape_char)?;
+    let regex = Regex::new(&regex_pattern).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
+    let Some(captures) = regex.captures(text) else {
+        return Ok(Value::Null);
+    };
+    Ok(match captures.name("middle") {
+        Some(value) => Value::Text(CompactString::from(value.as_str())),
+        None => Value::Null,
+    })
+}
+
 pub(super) fn eval_like(
     left: &Value,
     pattern: &Value,
@@ -929,6 +984,186 @@ fn similar_to_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecE
     }
     out.push(')');
     out.push('$');
+    Ok(out)
+}
+
+fn parse_similar_escape_arg(
+    left: &Value,
+    escape: Option<&Value>,
+) -> Result<Option<char>, ExecError> {
+    match escape {
+        Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let escape_text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "substring similar",
+                left: left.clone(),
+                right: value.clone(),
+            })?;
+            if escape_text.is_empty() {
+                Ok(None)
+            } else {
+                let mut chars = escape_text.chars();
+                let ch = chars
+                    .next()
+                    .ok_or_else(|| ExecError::InvalidRegex("invalid escape string".into()))?;
+                if chars.next().is_some() {
+                    return Err(ExecError::InvalidRegex("invalid escape string".into()));
+                }
+                Ok(Some(ch))
+            }
+        }
+        None => Ok(Some('\\')),
+    }
+}
+
+fn similar_substring_regex(pattern: &str, escape: Option<char>) -> Result<String, ExecError> {
+    let (prefix, middle, suffix) = split_similar_substring_pattern(pattern, escape)?;
+    Ok(format!(
+        "^(?:{})(?P<middle>{})(?:{})$",
+        similar_fragment_to_regex(&prefix, escape, true)?,
+        similar_fragment_to_regex(&middle, escape, false)?,
+        similar_fragment_to_regex(&suffix, escape, true)?,
+    ))
+}
+
+fn split_similar_substring_pattern(
+    pattern: &str,
+    escape: Option<char>,
+) -> Result<(String, String, String), ExecError> {
+    let mut separators = Vec::new();
+    let mut chars = pattern.char_indices().peekable();
+    let mut bracket_depth = 0usize;
+    let mut charclass_pos = 0usize;
+    while let Some((idx, ch)) = chars.next() {
+        if bracket_depth > 0 {
+            if ch == ']' && charclass_pos > 2 {
+                bracket_depth = bracket_depth.saturating_sub(1);
+            } else if ch == '[' {
+                bracket_depth += 1;
+                charclass_pos = 3;
+            } else if ch == '^' {
+                charclass_pos += 1;
+            } else {
+                charclass_pos = 3;
+            }
+            continue;
+        }
+        if Some(ch) == escape {
+            if let Some((_, next)) = chars.peek().copied() {
+                if next == '"' {
+                    separators.push(idx);
+                    chars.next();
+                    continue;
+                }
+            }
+            continue;
+        }
+        match ch {
+            '[' => {
+                bracket_depth = 1;
+                charclass_pos = 1;
+            }
+            _ => {}
+        }
+    }
+    if separators.len() > 2 {
+        return Err(ExecError::InvalidRegex(
+            "SQL regular expression may not contain more than two escape-double-quote separators"
+                .into(),
+        ));
+    }
+    if separators.is_empty() {
+        return Ok((String::new(), pattern.to_string(), String::new()));
+    }
+    if separators.len() == 1 {
+        let separator = separators[0];
+        return Ok((
+            String::new(),
+            format!(
+                "{}{}",
+                &pattern[..separator],
+                &pattern[separator + escape.unwrap_or('\\').len_utf8() + '"'.len_utf8()..]
+            ),
+            String::new(),
+        ));
+    }
+    let first = separators[0];
+    let second = separators[1];
+    Ok((
+        pattern[..first].to_string(),
+        pattern[first + escape.unwrap_or('\\').len_utf8() + '"'.len_utf8()..second].to_string(),
+        pattern[second + escape.unwrap_or('\\').len_utf8() + '"'.len_utf8()..].to_string(),
+    ))
+}
+
+fn similar_fragment_to_regex(
+    pattern: &str,
+    escape: Option<char>,
+    non_greedy_wildcards: bool,
+) -> Result<String, ExecError> {
+    let mut out = String::new();
+    let mut chars = pattern.chars().peekable();
+    let mut after_escape = false;
+    let mut bracket_depth = 0usize;
+    let mut charclass_pos = 0usize;
+    while let Some(ch) = chars.next() {
+        if after_escape {
+            out.push('\\');
+            out.push(ch);
+            after_escape = false;
+            if bracket_depth > 0 {
+                charclass_pos = 3;
+            }
+            continue;
+        }
+        if Some(ch) == escape {
+            after_escape = true;
+            continue;
+        }
+        if bracket_depth > 0 {
+            if ch == '\\' {
+                out.push('\\');
+            }
+            out.push(ch);
+            if ch == ']' && charclass_pos > 2 {
+                bracket_depth = bracket_depth.saturating_sub(1);
+            } else if ch == '[' {
+                bracket_depth += 1;
+                charclass_pos = 3;
+            } else if ch == '^' {
+                charclass_pos += 1;
+            } else {
+                charclass_pos = 3;
+            }
+            continue;
+        }
+        match ch {
+            '[' => {
+                out.push('[');
+                bracket_depth = 1;
+                charclass_pos = 1;
+            }
+            '%' => {
+                if non_greedy_wildcards {
+                    out.push_str(".*?");
+                } else {
+                    out.push_str(".*");
+                }
+            }
+            '_' => out.push('.'),
+            '(' => out.push_str("(?:"),
+            '\\' | '.' | '^' | '$' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    if after_escape {
+        return Err(ExecError::InvalidRegex(
+            "invalid regular expression: escape character at end of pattern".into(),
+        ));
+    }
     Ok(out)
 }
 

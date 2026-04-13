@@ -1118,11 +1118,108 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !(is_bit_string_type(value_type) || value_type.kind == SqlTypeKind::Text)
-                || !is_integer_family(start_type)
-            {
+            if is_bit_string_type(value_type) {
+                if !is_integer_family(start_type) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "substring(bit, int4[, int4])",
+                        actual: format!(
+                            "{func:?}({}, {})",
+                            sql_type_name(value_type),
+                            sql_type_name(start_type)
+                        ),
+                    });
+                }
+                let mut coerced = vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        start_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ];
+                if let Some(len_arg) = args.get(2) {
+                    let len_type = infer_sql_expr_type_with_ctes(
+                        len_arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    if !is_integer_family(len_type) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "integer length argument",
+                            actual: sql_type_name(len_type),
+                        });
+                    }
+                    coerced.push(coerce_bound_expr(
+                        bound_args[2].clone(),
+                        len_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ));
+                }
+                return Ok(Expr::FuncCall {
+                    func,
+                    args: coerced,
+                });
+            }
+            if value_type.kind != SqlTypeKind::Text {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "substring(text|bit, int4[, int4])",
+                    expected: "substring(text, int4[, int4]) or substring(text, text[, text])",
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(value_type),
+                        sql_type_name(start_type)
+                    ),
+                });
+            }
+            let text_target = coerce_bound_expr(
+                bound_args[0].clone(),
+                value_type,
+                SqlType::new(SqlTypeKind::Text),
+            );
+            if start_type.kind == SqlTypeKind::Text {
+                let mut coerced = vec![
+                    text_target,
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        start_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                ];
+                if let Some(third_arg) = args.get(2) {
+                    let third_type = infer_sql_expr_type_with_ctes(
+                        third_arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    if third_type.kind != SqlTypeKind::Text {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "text escape argument",
+                            actual: sql_type_name(third_type),
+                        });
+                    }
+                    coerced.push(coerce_bound_expr(
+                        bound_args[2].clone(),
+                        third_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ));
+                    return Ok(Expr::FuncCall {
+                        func: BuiltinScalarFunction::SimilarSubstring,
+                        args: coerced,
+                    });
+                }
+                return Ok(Expr::FuncCall {
+                    func,
+                    args: coerced,
+                });
+            }
+            if !is_integer_family(start_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "substring(text, int4[, int4]) or substring(text, text[, text])",
                     actual: format!(
                         "{func:?}({}, {})",
                         sql_type_name(value_type),
@@ -1131,15 +1228,7 @@ fn bind_scalar_function_call(
                 });
             }
             let mut coerced = vec![
-                if value_type.kind == SqlTypeKind::Text {
-                    coerce_bound_expr(
-                        bound_args[0].clone(),
-                        value_type,
-                        SqlType::new(SqlTypeKind::Text),
-                    )
-                } else {
-                    bound_args[0].clone()
-                },
+                text_target,
                 coerce_bound_expr(
                     bound_args[1].clone(),
                     start_type,
@@ -1165,6 +1254,71 @@ fn bind_scalar_function_call(
                     bound_args[2].clone(),
                     len_type,
                     SqlType::new(SqlTypeKind::Int4),
+                ));
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: coerced,
+            })
+        }
+        BuiltinScalarFunction::SimilarSubstring => {
+            let value_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let pattern_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if value_type.kind != SqlTypeKind::Text || pattern_type.kind != SqlTypeKind::Text {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "substring(text similar text escape text)",
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(value_type),
+                        sql_type_name(pattern_type)
+                    ),
+                });
+            }
+            let mut coerced = vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    value_type,
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    pattern_type,
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+            ];
+            if let Some(escape_arg) = args.get(2) {
+                let escape_type = infer_sql_expr_type_with_ctes(
+                    escape_arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                if escape_type.kind != SqlTypeKind::Text {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "text escape argument",
+                        actual: sql_type_name(escape_type),
+                    });
+                }
+                coerced.push(coerce_bound_expr(
+                    bound_args[2].clone(),
+                    escape_type,
+                    SqlType::new(SqlTypeKind::Text),
                 ));
             }
             Ok(Expr::FuncCall {

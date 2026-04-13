@@ -166,6 +166,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::RegexpSubstr => matches!(args.len(), 2..=6),
             BuiltinScalarFunction::RegexpSplitToArray => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Substring => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::SimilarSubstring => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
@@ -559,6 +560,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("lower", BuiltinScalarFunction::Lower),
         ("position", BuiltinScalarFunction::Position),
         ("substring", BuiltinScalarFunction::Substring),
+        ("similar_substring", BuiltinScalarFunction::SimilarSubstring),
         ("overlay", BuiltinScalarFunction::Overlay),
         ("trim", BuiltinScalarFunction::BTrim),
         ("btrim", BuiltinScalarFunction::BTrim),
@@ -787,6 +789,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Length
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Position
+            | BuiltinScalarFunction::SimilarSubstring
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
@@ -831,6 +834,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Trunc
             | BuiltinScalarFunction::Round
             | BuiltinScalarFunction::Substring
+            | BuiltinScalarFunction::SimilarSubstring
             | BuiltinScalarFunction::Overlay
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
