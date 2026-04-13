@@ -1,104 +1,343 @@
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::datetime::{
-    DateTimeKeyword, current_postgres_timestamp_usecs, format_date_ymd, format_offset,
-    format_time_usecs, parse_date_parts, parse_keyword, parse_offset_seconds,
-    parse_time_components, split_timestamp_date_time, time_usecs_from_hms,
-    timestamp_parts_from_usecs, timezone_offset_seconds, today_pg_days,
+    DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
+    days_from_ymd, format_date_ymd, format_offset, format_time_usecs, is_bc_token,
+    is_weekday_token, month_number, named_timezone_offset_seconds, parse_date_token_with_config,
+    parse_keyword, parse_time_components, parse_timezone_spec, split_time_and_offset,
+    time_usecs_from_hms, timestamp_parts_from_usecs, timezone_offset_seconds, today_pg_days,
 };
-use crate::include::nodes::datetime::{TimestampADT, TimestampTzADT};
+use crate::include::nodes::datetime::{TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};
 
-pub fn parse_timestamp_text(text: &str, config: &DateTimeConfig) -> Option<TimestampADT> {
-    let trimmed = text.trim();
-    let keyword_text = trimmed.split_whitespace().next().unwrap_or(trimmed);
-    match parse_keyword(keyword_text) {
-        Some(DateTimeKeyword::Now) => return Some(TimestampADT(current_postgres_timestamp_usecs())),
-        Some(DateTimeKeyword::Today) => {
-            return Some(TimestampADT(today_pg_days(config) as i64
-                * crate::include::nodes::datetime::USECS_PER_DAY));
+fn tokenize_timestamp(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    for token in text.split_whitespace() {
+        if let Some((date, time)) = token.split_once('T') {
+            if !date.is_empty()
+                && !time.is_empty()
+                && parse_date_token_with_config(date, &DateTimeConfig::default())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                tokens.push(date);
+                tokens.push(time);
+                continue;
+            }
         }
-        Some(DateTimeKeyword::Tomorrow) => {
-            return Some(TimestampADT(
-                (today_pg_days(config) as i64 + 1) * crate::include::nodes::datetime::USECS_PER_DAY,
-            ));
-        }
-        Some(DateTimeKeyword::Yesterday) => {
-            return Some(TimestampADT(
-                (today_pg_days(config) as i64 - 1) * crate::include::nodes::datetime::USECS_PER_DAY,
-            ));
-        }
-        Some(DateTimeKeyword::Epoch) => {
-            let (year, month, day) = (1970, 1, 1);
-            let date = crate::backend::utils::time::datetime::days_from_ymd(year, month, day)?;
-            return Some(TimestampADT(date as i64 * crate::include::nodes::datetime::USECS_PER_DAY));
-        }
-        Some(DateTimeKeyword::Infinity) => {
-            return Some(TimestampADT(crate::include::nodes::datetime::TIMESTAMP_NOEND));
-        }
-        Some(DateTimeKeyword::NegInfinity) => {
-            return Some(TimestampADT(crate::include::nodes::datetime::TIMESTAMP_NOBEGIN));
-        }
-        None => {}
+        tokens.push(token);
     }
-    if let Some((year, month, day)) = parse_date_parts(trimmed) {
-        let pg_days = crate::backend::utils::time::datetime::days_from_ymd(year, month, day)?;
-        return Some(TimestampADT(
-            pg_days as i64 * crate::include::nodes::datetime::USECS_PER_DAY,
-        ));
-    }
-    let (date_text, time_text) = split_timestamp_date_time(text)?;
-    let (year, month, day) = parse_date_parts(date_text)?;
-    let pg_days = crate::backend::utils::time::datetime::days_from_ymd(year, month, day)?;
-    let time_text = time_text.trim();
-    let (time_text, _) = if let Some((main, zone)) = time_text.rsplit_once(' ') {
-        if parse_offset_seconds(zone).is_some() {
-            (main.trim(), Some(zone.trim()))
-        } else {
-            crate::backend::utils::time::datetime::split_time_and_offset(time_text)
-        }
-    } else {
-        crate::backend::utils::time::datetime::split_time_and_offset(time_text)
-    };
-    let (hour, minute, second, micros) = parse_time_components(time_text)?;
-    let time_usecs = time_usecs_from_hms(hour, minute, second, micros)?;
-    Some(TimestampADT(
-        pg_days as i64 * crate::include::nodes::datetime::USECS_PER_DAY + time_usecs,
-    ))
+    tokens
 }
 
-pub fn parse_timestamptz_text(text: &str, config: &DateTimeConfig) -> Option<TimestampTzADT> {
+fn split_meridiem_suffix(text: &str) -> (&str, Option<&str>) {
+    if text.len() >= 2 {
+        let suffix = &text[text.len() - 2..];
+        if suffix.eq_ignore_ascii_case("am") || suffix.eq_ignore_ascii_case("pm") {
+            return (&text[..text.len() - 2], Some(suffix));
+        }
+    }
+    (text, None)
+}
+
+fn apply_meridiem(hour: u32, meridiem: Option<&str>) -> Option<u32> {
+    match meridiem.map(|value| value.to_ascii_lowercase()) {
+        None => Some(hour),
+        Some(value) if !(1..=12).contains(&hour) => None,
+        Some(value) if value == "am" => Some(if hour == 12 { 0 } else { hour }),
+        Some(value) if value == "pm" => Some(if hour == 12 { 12 } else { hour + 12 }),
+        _ => None,
+    }
+}
+
+fn parse_compact_time_components(text: &str) -> Option<(u32, u32, u32, i64)> {
+    let (main, fraction) = match text.split_once('.') {
+        Some((main, fraction)) => (main, Some(fraction)),
+        None => (text, None),
+    };
+    if !main.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let (hour, minute, second) = match main.len() {
+        4 => (
+            main[0..2].parse::<u32>().ok()?,
+            main[2..4].parse::<u32>().ok()?,
+            0,
+        ),
+        6 => (
+            main[0..2].parse::<u32>().ok()?,
+            main[2..4].parse::<u32>().ok()?,
+            main[4..6].parse::<u32>().ok()?,
+        ),
+        _ => return None,
+    };
+    let micros = match fraction {
+        Some(fraction) => crate::backend::utils::time::datetime::parse_fraction_to_usecs(fraction)?,
+        None => 0,
+    };
+    if hour > 24 || minute > 59 || second > 59 {
+        return None;
+    }
+    Some((hour, minute, second, micros))
+}
+
+fn is_time_token_candidate(token: &str) -> bool {
+    let trimmed = token.trim();
+    trimmed.contains(':')
+        || matches!(split_meridiem_suffix(trimmed), (_, Some(_)))
+        || trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '+' | '-'))
+}
+
+fn parse_time_token(
+    token: &str,
+) -> Result<Option<(i64, Option<TimeZoneSpec>)>, DateTimeParseError> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let (main, inline_offset) = split_time_and_offset(trimmed);
+    let (main, meridiem) = split_meridiem_suffix(main);
+    let components = if main.contains(':') {
+        parse_time_components(main)
+    } else {
+        parse_compact_time_components(main)
+    };
+    let Some((hour, minute, second, micros)) = components else {
+        return Ok(None);
+    };
+    let hour = apply_meridiem(hour, meridiem).ok_or(DateTimeParseError::Invalid)?;
+    let time_usecs = time_usecs_from_hms(hour, minute, second, micros)
+        .ok_or(DateTimeParseError::FieldOutOfRange)?;
+    let zone = match inline_offset {
+        Some(zone_text) => parse_timezone_spec(zone_text)?,
+        None => None,
+    };
+    Ok(Some((time_usecs, zone)))
+}
+
+fn parse_date_tokens(
+    tokens: &[&str],
+    config: &DateTimeConfig,
+) -> Result<(i32, u32, u32), DateTimeParseError> {
+    match tokens {
+        [single] => {
+            parse_date_token_with_config(single, config)?.ok_or(DateTimeParseError::Invalid)
+        }
+        [first, second, third] => {
+            if let Some(month) = month_number(first) {
+                let day = second
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let year = third
+                    .parse::<i32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                return days_from_ymd(year, month, day)
+                    .map(|_| (year, month, day))
+                    .ok_or(DateTimeParseError::FieldOutOfRange);
+            }
+            if let Some(month) = month_number(second) {
+                let day = first
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let year = third
+                    .parse::<i32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                return days_from_ymd(year, month, day)
+                    .map(|_| (year, month, day))
+                    .ok_or(DateTimeParseError::FieldOutOfRange);
+            }
+            let joined = tokens.join("-");
+            parse_date_token_with_config(&joined, config)?.ok_or(DateTimeParseError::Invalid)
+        }
+        _ => Err(DateTimeParseError::Invalid),
+    }
+}
+
+fn extract_timestamp_parts(
+    text: &str,
+    config: &DateTimeConfig,
+) -> Result<(i32, i64, Option<TimeZoneSpec>), DateTimeParseError> {
+    let mut tokens = tokenize_timestamp(text);
+    if tokens.is_empty() {
+        return Err(DateTimeParseError::Invalid);
+    }
+
+    if let Some(keyword) = parse_keyword(tokens[0]) {
+        for token in &tokens[1..] {
+            if parse_timezone_spec(token)?.is_some() {
+                continue;
+            }
+            if is_weekday_token(token) {
+                continue;
+            }
+            return Err(DateTimeParseError::Invalid);
+        }
+        let days = match keyword {
+            DateTimeKeyword::Today | DateTimeKeyword::Now => today_pg_days(config),
+            DateTimeKeyword::Tomorrow => today_pg_days(config) + 1,
+            DateTimeKeyword::Yesterday => today_pg_days(config) - 1,
+            DateTimeKeyword::Epoch => {
+                days_from_ymd(1970, 1, 1).ok_or(DateTimeParseError::Invalid)?
+            }
+            DateTimeKeyword::Infinity | DateTimeKeyword::NegInfinity => {
+                return Err(DateTimeParseError::Invalid);
+            }
+        };
+        let time_usecs = if matches!(keyword, DateTimeKeyword::Now) {
+            current_postgres_timestamp_usecs().rem_euclid(USECS_PER_DAY)
+        } else {
+            0
+        };
+        return Ok((days, time_usecs, None));
+    }
+
+    tokens.retain(|token| !is_weekday_token(token));
+
+    let mut bc = false;
+    tokens.retain(|token| {
+        if is_bc_token(token) {
+            bc = true;
+            false
+        } else {
+            true
+        }
+    });
+
+    let mut zone = None;
+    if tokens.len() > 1 {
+        if let Some(last) = tokens.last().copied() {
+            if let Some(spec) = parse_timezone_spec(last)? {
+                zone = Some(spec);
+                tokens.pop();
+            }
+        }
+    }
+
+    let time_index = tokens
+        .iter()
+        .position(|token| {
+            let trimmed = token.trim();
+            trimmed.contains(':') || split_meridiem_suffix(trimmed).1.is_some()
+        })
+        .or_else(|| {
+            (tokens.len() >= 2).then(|| {
+                tokens
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, token)| is_time_token_candidate(token).then_some(index))
+            })?
+        });
+
+    let mut time_usecs = 0;
+    if let Some(index) = time_index {
+        let (_, token) = tokens
+            .iter()
+            .enumerate()
+            .find(|(candidate, _)| *candidate == index)
+            .ok_or(DateTimeParseError::Invalid)?;
+        let (parsed_time, inline_zone) =
+            parse_time_token(token)?.ok_or(DateTimeParseError::Invalid)?;
+        if zone.is_some() && inline_zone.is_some() {
+            return Err(DateTimeParseError::Invalid);
+        }
+        time_usecs = parsed_time;
+        zone = zone.or(inline_zone);
+        tokens.remove(index);
+    }
+
+    let (mut year, month, day) = parse_date_tokens(&tokens, config)?;
+    if bc {
+        if year <= 0 {
+            return Err(DateTimeParseError::FieldOutOfRange);
+        }
+        year = 1 - year;
+    }
+    let days = days_from_ymd(year, month, day).ok_or(DateTimeParseError::FieldOutOfRange)?;
+    Ok((days, time_usecs, zone))
+}
+
+fn timezone_spec_offset(
+    spec: Option<TimeZoneSpec>,
+    config: &DateTimeConfig,
+) -> Result<i32, DateTimeParseError> {
+    match spec {
+        Some(TimeZoneSpec::FixedOffset(offset)) => Ok(offset),
+        Some(TimeZoneSpec::Named(name)) => named_timezone_offset_seconds(&name).ok_or(
+            DateTimeParseError::UnknownTimeZone(name.to_ascii_lowercase()),
+        ),
+        None => Ok(timezone_offset_seconds(config)),
+    }
+}
+
+fn timestamp_keyword_value(
+    trimmed: &str,
+    config: &DateTimeConfig,
+) -> Option<Result<TimestampADT, DateTimeParseError>> {
+    match parse_keyword(trimmed) {
+        Some(DateTimeKeyword::Now) => Some(Ok(TimestampADT(current_postgres_timestamp_usecs()))),
+        Some(DateTimeKeyword::Today) => Some(Ok(TimestampADT(
+            today_pg_days(config) as i64 * USECS_PER_DAY,
+        ))),
+        Some(DateTimeKeyword::Tomorrow) => Some(Ok(TimestampADT(
+            (today_pg_days(config) as i64 + 1) * USECS_PER_DAY,
+        ))),
+        Some(DateTimeKeyword::Yesterday) => Some(Ok(TimestampADT(
+            (today_pg_days(config) as i64 - 1) * USECS_PER_DAY,
+        ))),
+        Some(DateTimeKeyword::Epoch) => days_from_ymd(1970, 1, 1)
+            .map(|days| TimestampADT(days as i64 * USECS_PER_DAY))
+            .map(Ok),
+        Some(DateTimeKeyword::Infinity) => Some(Ok(TimestampADT(
+            crate::include::nodes::datetime::TIMESTAMP_NOEND,
+        ))),
+        Some(DateTimeKeyword::NegInfinity) => Some(Ok(TimestampADT(
+            crate::include::nodes::datetime::TIMESTAMP_NOBEGIN,
+        ))),
+        None => None,
+    }
+}
+
+pub fn parse_timestamp_text(
+    text: &str,
+    config: &DateTimeConfig,
+) -> Result<TimestampADT, DateTimeParseError> {
     let trimmed = text.trim();
-    match parse_keyword(trimmed.split_whitespace().next().unwrap_or(trimmed)) {
-        Some(DateTimeKeyword::Now) => return Some(TimestampTzADT(current_postgres_timestamp_usecs())),
+    if let Some(value) = timestamp_keyword_value(trimmed, config) {
+        return value;
+    }
+    let (days, time_usecs, _) = extract_timestamp_parts(trimmed, config)?;
+    Ok(TimestampADT(days as i64 * USECS_PER_DAY + time_usecs))
+}
+
+pub fn parse_timestamptz_text(
+    text: &str,
+    config: &DateTimeConfig,
+) -> Result<TimestampTzADT, DateTimeParseError> {
+    let trimmed = text.trim();
+    match parse_keyword(trimmed) {
+        Some(DateTimeKeyword::Now) => {
+            return Ok(TimestampTzADT(current_postgres_timestamp_usecs()));
+        }
         Some(DateTimeKeyword::Infinity) => {
-            return Some(TimestampTzADT(crate::include::nodes::datetime::TIMESTAMP_NOEND));
+            return Ok(TimestampTzADT(
+                crate::include::nodes::datetime::TIMESTAMP_NOEND,
+            ));
         }
         Some(DateTimeKeyword::NegInfinity) => {
-            return Some(TimestampTzADT(crate::include::nodes::datetime::TIMESTAMP_NOBEGIN));
+            return Ok(TimestampTzADT(
+                crate::include::nodes::datetime::TIMESTAMP_NOBEGIN,
+            ));
         }
         _ => {}
     }
-    let (date_text, time_text) = split_timestamp_date_time(text)?;
-    let (year, month, day) = parse_date_parts(date_text)?;
-    let pg_days = crate::backend::utils::time::datetime::days_from_ymd(year, month, day)?;
-    let time_text = time_text.trim();
-    let (time_main, offset_text) = if let Some((main, zone)) = time_text.rsplit_once(' ') {
-        if parse_offset_seconds(zone).is_some() {
-            (main.trim(), Some(zone.trim()))
-        } else {
-            crate::backend::utils::time::datetime::split_time_and_offset(time_text)
-        }
-    } else {
-        crate::backend::utils::time::datetime::split_time_and_offset(time_text)
-    };
-    let (hour, minute, second, micros) = parse_time_components(time_main)?;
-    let time_usecs = time_usecs_from_hms(hour, minute, second, micros)?;
-    let offset_seconds = offset_text
-        .and_then(parse_offset_seconds)
-        .unwrap_or_else(|| timezone_offset_seconds(config));
-    Some(TimestampTzADT(
-        pg_days as i64 * crate::include::nodes::datetime::USECS_PER_DAY
-            + time_usecs
-            - offset_seconds as i64 * crate::include::nodes::datetime::USECS_PER_SEC,
+
+    let (days, time_usecs, zone) = extract_timestamp_parts(trimmed, config)?;
+    let offset_seconds = timezone_spec_offset(zone, config)?;
+    Ok(TimestampTzADT(
+        days as i64 * USECS_PER_DAY + time_usecs - offset_seconds as i64 * USECS_PER_SEC,
     ))
 }
 
@@ -110,7 +349,11 @@ pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> S
         return "-infinity".into();
     }
     let (days, time_usecs) = timestamp_parts_from_usecs(value.0);
-    format!("{} {}", format_date_ymd(days), format_time_usecs(time_usecs))
+    format!(
+        "{} {}",
+        format_date_ymd(days),
+        format_time_usecs(time_usecs)
+    )
 }
 
 pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -> String {
@@ -121,7 +364,7 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
         return "-infinity".into();
     }
     let offset_seconds = timezone_offset_seconds(config);
-    let adjusted = value.0 + offset_seconds as i64 * crate::include::nodes::datetime::USECS_PER_SEC;
+    let adjusted = value.0 + offset_seconds as i64 * USECS_PER_SEC;
     let (days, time_usecs) = timestamp_parts_from_usecs(adjusted);
     format!(
         "{} {}{}",
@@ -129,4 +372,44 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
         format_time_usecs(time_usecs),
         format_offset(offset_seconds)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_verbose_and_compact_timestamp_inputs() {
+        let config = DateTimeConfig::default();
+        for input in [
+            "Mon Feb 10 17:32:01 1997 PST",
+            "Mon Feb 10 17:32:01.000001 1997 PST",
+            "19970210 173201 -0800",
+            "2000-03-15 08:14:01 GMT+8",
+            "Feb 10 17:32:01 1997 -0800",
+            "Feb 10 5:32PM 1997",
+            "1997/02/10 17:32:01-0800",
+            "Feb-10-1997 17:32:01 PST",
+            "02-10-1997 17:32:01 PST",
+            "19970210 173201 PST",
+            "97FEB10 5:32:01PM UTC",
+            "97/02/10 17:32:01 UTC",
+            "1997.041 17:32:01 UTC",
+            "19970210 173201 America/New_York",
+            "Feb 16 17:32:01 0097 BC",
+        ] {
+            assert!(parse_timestamp_text(input, &config).is_ok(), "{input}");
+        }
+    }
+
+    #[test]
+    fn reports_unknown_timezone_separately() {
+        let config = DateTimeConfig::default();
+        assert_eq!(
+            parse_timestamp_text("19970710 173201 America/Does_not_exist", &config),
+            Err(DateTimeParseError::UnknownTimeZone(
+                "america/does_not_exist".into()
+            ))
+        );
+    }
 }

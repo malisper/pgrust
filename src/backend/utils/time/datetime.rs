@@ -1,8 +1,9 @@
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::guc_datetime::{DateOrder, DateTimeConfig};
 use crate::include::nodes::datetime::{
     POSTGRES_EPOCH_JDATE, SECS_PER_DAY, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
     USECS_PER_SEC,
 };
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +17,19 @@ pub enum DateTimeKeyword {
     NegInfinity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DateTimeParseError {
+    Invalid,
+    FieldOutOfRange,
+    UnknownTimeZone(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeZoneSpec {
+    FixedOffset(i32),
+    Named(String),
+}
+
 pub fn parse_keyword(text: &str) -> Option<DateTimeKeyword> {
     match text.trim().to_ascii_lowercase().as_str() {
         "epoch" => Some(DateTimeKeyword::Epoch),
@@ -26,6 +40,61 @@ pub fn parse_keyword(text: &str) -> Option<DateTimeKeyword> {
         "infinity" | "+infinity" => Some(DateTimeKeyword::Infinity),
         "-infinity" => Some(DateTimeKeyword::NegInfinity),
         _ => None,
+    }
+}
+
+pub fn month_number(token: &str) -> Option<u32> {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "jan" | "january" => Some(1),
+        "feb" | "february" => Some(2),
+        "mar" | "march" => Some(3),
+        "apr" | "april" => Some(4),
+        "may" => Some(5),
+        "jun" | "june" => Some(6),
+        "jul" | "july" => Some(7),
+        "aug" | "august" => Some(8),
+        "sep" | "sept" | "september" => Some(9),
+        "oct" | "october" => Some(10),
+        "nov" | "november" => Some(11),
+        "dec" | "december" => Some(12),
+        _ => None,
+    }
+}
+
+pub fn is_weekday_token(token: &str) -> bool {
+    matches!(
+        token.trim().to_ascii_lowercase().as_str(),
+        "mon"
+            | "monday"
+            | "tue"
+            | "tues"
+            | "tuesday"
+            | "wed"
+            | "wednesday"
+            | "thu"
+            | "thur"
+            | "thurs"
+            | "thursday"
+            | "fri"
+            | "friday"
+            | "sat"
+            | "saturday"
+            | "sun"
+            | "sunday"
+    )
+}
+
+pub fn is_bc_token(token: &str) -> bool {
+    matches!(token.trim().to_ascii_lowercase().as_str(), "bc" | "b.c.")
+}
+
+pub fn expand_two_digit_year(year: i32) -> i32 {
+    if (0..=69).contains(&year) {
+        year + 2000
+    } else if (70..=99).contains(&year) {
+        year + 1900
+    } else {
+        year
     }
 }
 
@@ -68,7 +137,11 @@ pub fn days_from_ymd(year: i32, month: u32, day: u32) -> Option<i32> {
         return None;
     }
     let year_adj = year - i32::from(month <= 2);
-    let era = if year_adj >= 0 { year_adj } else { year_adj - 399 } / 400;
+    let era = if year_adj >= 0 {
+        year_adj
+    } else {
+        year_adj - 399
+    } / 400;
     let yoe = year_adj - era * 400;
     let month = month as i32;
     let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
@@ -120,6 +193,239 @@ pub fn parse_date_parts(text: &str) -> Option<(i32, u32, u32)> {
     Some((year, month, day))
 }
 
+fn validate_date(year: i32, month: u32, day: u32) -> Result<(i32, u32, u32), DateTimeParseError> {
+    if days_from_ymd(year, month, day).is_some() {
+        Ok((year, month, day))
+    } else {
+        Err(DateTimeParseError::FieldOutOfRange)
+    }
+}
+
+fn parse_year_number(text: &str, allow_two_digits: bool) -> Option<i32> {
+    let year = text.parse::<i32>().ok()?;
+    Some(if allow_two_digits && text.len() <= 2 {
+        expand_two_digit_year(year)
+    } else {
+        year
+    })
+}
+
+fn parse_numeric_triplet(
+    first: &str,
+    second: &str,
+    third: &str,
+    config: &DateTimeConfig,
+) -> Result<(i32, u32, u32), DateTimeParseError> {
+    let a = first
+        .parse::<i32>()
+        .map_err(|_| DateTimeParseError::Invalid)?;
+    let b = second
+        .parse::<u32>()
+        .map_err(|_| DateTimeParseError::Invalid)?;
+    let c = third
+        .parse::<i32>()
+        .map_err(|_| DateTimeParseError::Invalid)?;
+
+    if first.len() >= 4 || a > 31 || matches!(config.date_order, DateOrder::Ymd) {
+        return validate_date(
+            parse_year_number(first, true).unwrap_or(a),
+            b,
+            third
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?,
+        );
+    }
+    if third.len() >= 4 || c > 31 {
+        let year = parse_year_number(third, true).ok_or(DateTimeParseError::Invalid)?;
+        return match config.date_order {
+            DateOrder::Mdy => validate_date(
+                year,
+                first
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?,
+                second
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?,
+            ),
+            DateOrder::Dmy => validate_date(
+                year,
+                second
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?,
+                first
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?,
+            ),
+            DateOrder::Ymd => validate_date(
+                parse_year_number(first, true).unwrap_or(a),
+                b,
+                third
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?,
+            ),
+        };
+    }
+
+    match config.date_order {
+        DateOrder::Mdy => validate_date(
+            parse_year_number(third, true).ok_or(DateTimeParseError::Invalid)?,
+            first
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?,
+            second
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?,
+        ),
+        DateOrder::Dmy => validate_date(
+            parse_year_number(third, true).ok_or(DateTimeParseError::Invalid)?,
+            second
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?,
+            first
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?,
+        ),
+        DateOrder::Ymd => validate_date(
+            parse_year_number(first, true).ok_or(DateTimeParseError::Invalid)?,
+            second
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?,
+            third
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?,
+        ),
+    }
+}
+
+pub fn parse_ordinal_date(year: i32, ordinal_day: u32) -> Option<(i32, u32, u32)> {
+    if ordinal_day == 0 || ordinal_day > if is_leap_year(year) { 366 } else { 365 } {
+        return None;
+    }
+    let mut remaining = ordinal_day;
+    for month in 1..=12 {
+        let days = days_in_month(year, month);
+        if remaining <= days {
+            return Some((year, month, remaining));
+        }
+        remaining -= days;
+    }
+    None
+}
+
+pub fn parse_date_token_with_config(
+    text: &str,
+    config: &DateTimeConfig,
+) -> Result<Option<(i32, u32, u32)>, DateTimeParseError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Some(parts) = parse_date_parts(trimmed) {
+        return Ok(Some(parts));
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return match trimmed.len() {
+            8 => {
+                let year = trimmed[0..4]
+                    .parse::<i32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let month = trimmed[4..6]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let day = trimmed[6..8]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                Ok(Some(validate_date(year, month, day)?))
+            }
+            6 => {
+                let year = expand_two_digit_year(
+                    trimmed[0..2]
+                        .parse::<i32>()
+                        .map_err(|_| DateTimeParseError::Invalid)?,
+                );
+                let month = trimmed[2..4]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let day = trimmed[4..6]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                Ok(Some(validate_date(year, month, day)?))
+            }
+            _ => Ok(None),
+        };
+    }
+
+    for delim in ['-', '/', '.'] {
+        if trimmed.contains(delim) {
+            let parts = trimmed.split(delim).collect::<Vec<_>>();
+            if delim == '.' && parts.len() == 2 && parts[0].chars().all(|ch| ch.is_ascii_digit()) {
+                let year = parse_year_number(parts[0], true).ok_or(DateTimeParseError::Invalid)?;
+                let ordinal = parts[1]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                return parse_ordinal_date(year, ordinal)
+                    .map(Some)
+                    .ok_or(DateTimeParseError::FieldOutOfRange);
+            }
+            if parts.len() != 3 {
+                return Ok(None);
+            }
+            if let Some(month) = month_number(parts[0]) {
+                let day = parts[1]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let year = parse_year_number(parts[2], true).ok_or(DateTimeParseError::Invalid)?;
+                return Ok(Some(validate_date(year, month, day)?));
+            }
+            if let Some(month) = month_number(parts[1]) {
+                let day = parts[0]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let year = parse_year_number(parts[2], true).ok_or(DateTimeParseError::Invalid)?;
+                return Ok(Some(validate_date(year, month, day)?));
+            }
+            if parts
+                .iter()
+                .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+            {
+                return Ok(Some(parse_numeric_triplet(
+                    parts[0], parts[1], parts[2], config,
+                )?));
+            }
+            return Ok(None);
+        }
+    }
+
+    let mut alpha_start = None;
+    let mut alpha_end = None;
+    for (idx, ch) in trimmed.char_indices() {
+        if ch.is_ascii_alphabetic() {
+            alpha_start.get_or_insert(idx);
+            alpha_end = Some(idx + ch.len_utf8());
+        } else if alpha_start.is_some() && alpha_end.is_some() {
+            break;
+        }
+    }
+    if let (Some(start), Some(end)) = (alpha_start, alpha_end) {
+        let month = month_number(&trimmed[start..end]).ok_or(DateTimeParseError::Invalid)?;
+        let prefix = &trimmed[..start];
+        let suffix = &trimmed[end..];
+        if !prefix.is_empty()
+            && !suffix.is_empty()
+            && prefix.chars().all(|ch| ch.is_ascii_digit())
+            && suffix.chars().all(|ch| ch.is_ascii_digit())
+        {
+            let year = parse_year_number(prefix, true).ok_or(DateTimeParseError::Invalid)?;
+            let day = suffix
+                .parse::<u32>()
+                .map_err(|_| DateTimeParseError::Invalid)?;
+            return Ok(Some(validate_date(year, month, day)?));
+        }
+    }
+
+    Ok(None)
+}
+
 pub fn parse_fraction_to_usecs(text: &str) -> Option<i64> {
     if text.is_empty() || !text.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
@@ -132,30 +438,51 @@ pub fn parse_fraction_to_usecs(text: &str) -> Option<i64> {
     Some(micros)
 }
 
-pub fn parse_offset_seconds(text: &str) -> Option<i32> {
+fn parse_numeric_offset_seconds(text: &str) -> Option<i32> {
     let trimmed = text.trim();
-    if trimmed.eq_ignore_ascii_case("z")
-        || trimmed.eq_ignore_ascii_case("utc")
-        || trimmed.eq_ignore_ascii_case("gmt")
-    {
-        return Some(0);
-    }
     let sign = match trimmed.as_bytes().first().copied() {
         Some(b'+') => 1,
         Some(b'-') => -1,
-        _ => return named_timezone_offset_seconds(trimmed),
+        _ => return None,
     };
     let rest = &trimmed[1..];
-    let parts = rest.split(':').collect::<Vec<_>>();
-    let hour = parts.first()?.parse::<i32>().ok()?;
-    let minute = parts.get(1).map_or(Some(0), |part| part.parse::<i32>().ok())?;
-    let second = parts.get(2).map_or(Some(0), |part| part.parse::<i32>().ok())?;
+    let (hour, minute, second) = if rest.contains(':') {
+        let parts = rest.split(':').collect::<Vec<_>>();
+        let hour = parts.first()?.parse::<i32>().ok()?;
+        let minute = parts
+            .get(1)
+            .map_or(Some(0), |part| part.parse::<i32>().ok())?;
+        let second = parts
+            .get(2)
+            .map_or(Some(0), |part| part.parse::<i32>().ok())?;
+        (hour, minute, second)
+    } else if rest.chars().all(|ch| ch.is_ascii_digit()) {
+        match rest.len() {
+            1 | 2 => (rest.parse::<i32>().ok()?, 0, 0),
+            3 | 4 => (
+                rest[..rest.len() - 2].parse::<i32>().ok()?,
+                rest[rest.len() - 2..].parse::<i32>().ok()?,
+                0,
+            ),
+            5 | 6 => (
+                rest[..rest.len() - 4].parse::<i32>().ok()?,
+                rest[rest.len() - 4..rest.len() - 2].parse::<i32>().ok()?,
+                rest[rest.len() - 2..].parse::<i32>().ok()?,
+            ),
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+    if minute > 59 || second > 59 {
+        return None;
+    }
     Some(sign * (hour * 3600 + minute * 60 + second))
 }
 
 pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
     match name.trim().to_ascii_lowercase().as_str() {
-        "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" => Some(0),
+        "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some(0),
         "est" | "america/new_york" => Some(-5 * 3600),
         "edt" => Some(-4 * 3600),
         "cst" => Some(-6 * 3600),
@@ -164,6 +491,70 @@ pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
         "mdt" => Some(-6 * 3600),
         "pst" | "america/los_angeles" => Some(-8 * 3600),
         "pdt" => Some(-7 * 3600),
+        _ => None,
+    }
+}
+
+fn timezone_name_exists(name: &str) -> bool {
+    [
+        "/usr/share/zoneinfo",
+        "/var/db/timezone/zoneinfo",
+        "/usr/share/lib/zoneinfo",
+    ]
+    .into_iter()
+    .any(|base| Path::new(base).join(name).exists())
+}
+
+fn is_timezone_name_candidate(token: &str) -> bool {
+    let trimmed = token.trim();
+    !trimmed.is_empty()
+        && (trimmed.contains('/')
+            || trimmed.eq_ignore_ascii_case("zulu")
+            || trimmed
+                .chars()
+                .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '_' | '/' | '+' | '-' | ':')))
+}
+
+pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeParseError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if let Some(offset) = parse_numeric_offset_seconds(trimmed) {
+        return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
+    }
+    if let Some(offset) = named_timezone_offset_seconds(trimmed) {
+        return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
+    }
+    if let Some(sign_idx) = trimmed
+        .char_indices()
+        .skip(1)
+        .find_map(|(idx, ch)| matches!(ch, '+' | '-').then_some(idx))
+    {
+        let prefix = &trimmed[..sign_idx];
+        let suffix = &trimmed[sign_idx..];
+        if named_timezone_offset_seconds(prefix).is_some()
+            && parse_numeric_offset_seconds(suffix).is_some()
+        {
+            return Ok(Some(TimeZoneSpec::FixedOffset(
+                parse_numeric_offset_seconds(suffix).expect("checked above"),
+            )));
+        }
+    }
+    if timezone_name_exists(trimmed) {
+        return Ok(Some(TimeZoneSpec::Named(normalize_timezone_name(trimmed))));
+    }
+    if is_timezone_name_candidate(trimmed) {
+        return Err(DateTimeParseError::UnknownTimeZone(
+            trimmed.to_ascii_lowercase(),
+        ));
+    }
+    Ok(None)
+}
+
+pub fn parse_offset_seconds(text: &str) -> Option<i32> {
+    match parse_timezone_spec(text).ok()? {
+        Some(TimeZoneSpec::FixedOffset(offset)) => Some(offset),
         _ => None,
     }
 }
@@ -183,7 +574,9 @@ pub fn parse_time_components(text: &str) -> Option<(u32, u32, u32, i64)> {
     }
     let hour = parts[0].parse::<u32>().ok()?;
     let minute = parts[1].parse::<u32>().ok()?;
-    let second = parts.get(2).map_or(Some(0), |part| part.parse::<u32>().ok())?;
+    let second = parts
+        .get(2)
+        .map_or(Some(0), |part| part.parse::<u32>().ok())?;
     if hour > 24 || minute > 59 || second > 59 {
         return None;
     }
