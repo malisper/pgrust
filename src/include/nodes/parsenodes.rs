@@ -63,7 +63,13 @@ impl fmt::Display for ParseError {
             ParseError::InvalidInteger(value) => write!(f, "invalid integer: {value}"),
             ParseError::InvalidNumeric(value) => write!(f, "invalid numeric: {value}"),
             ParseError::UnknownTable(name) => write!(f, "unknown table: {name}"),
-            ParseError::UnknownColumn(name) => write!(f, "unknown column: {name}"),
+            ParseError::UnknownColumn(name) => {
+                if name.contains('.') {
+                    write!(f, "column {name} does not exist")
+                } else {
+                    write!(f, "column \"{name}\" does not exist")
+                }
+            }
             ParseError::AmbiguousColumn(name) => {
                 write!(f, "column reference \"{name}\" is ambiguous")
             }
@@ -140,6 +146,23 @@ impl fmt::Display for ParseError {
                 write!(f, "no schema has been selected to create in")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ParseError;
+
+    #[test]
+    fn unknown_column_display_matches_postgres_shape() {
+        assert_eq!(
+            ParseError::UnknownColumn("x.t".into()).to_string(),
+            "column x.t does not exist"
+        );
+        assert_eq!(
+            ParseError::UnknownColumn("missing".into()).to_string(),
+            "column \"missing\" does not exist"
+        );
     }
 }
 
