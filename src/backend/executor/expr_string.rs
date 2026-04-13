@@ -313,6 +313,7 @@ pub(super) fn eval_format_function(values: &[Value]) -> Result<Value, ExecError>
                 }
                 width_arg = parsed;
                 idx += 1;
+                next_arg = next_arg.max(width_arg + 1);
             } else if !width_digits.is_empty() {
                 return Err(ExecError::RaiseException(
                     "unterminated format() type specifier".into(),
@@ -1223,6 +1224,11 @@ pub(super) fn eval_reverse_function(values: &[Value]) -> Result<Value, ExecError
     };
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
+    }
+    if let Some(text) = value.as_text() {
+        return Ok(Value::Text(CompactString::from_owned(
+            text.chars().rev().collect(),
+        )));
     }
     let mut bytes = expect_bytea_arg("reverse", value, &Value::Null)?.to_vec();
     bytes.reverse();

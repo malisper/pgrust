@@ -6526,6 +6526,50 @@ fn format_supports_common_postgres_specifiers() {
 }
 
 #[test]
+fn reverse_supports_text_and_bytea() {
+    let base = temp_dir("reverse_text_and_bytea");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select reverse('abcde'), encode(reverse(E'\\\\001\\\\002\\\\003'::bytea), 'hex')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("edcba".into()),
+                    Value::Text("030201".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn format_star_with_explicit_width_uses_next_value_argument() {
+    let base = temp_dir("format_star_explicit_width");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select format('>>%*1$s<<', 10, 'Hello')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text(">>     Hello<<".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn lower_supports_grouped_queries() {
     let base = temp_dir("lower_supports_grouped_queries");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
