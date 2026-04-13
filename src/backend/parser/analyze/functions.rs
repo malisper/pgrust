@@ -89,6 +89,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Random => args.is_empty(),
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
+            BuiltinScalarFunction::Concat => true,
+            BuiltinScalarFunction::ConcatWs => !args.is_empty(),
+            BuiltinScalarFunction::Format => !args.is_empty(),
             BuiltinScalarFunction::Abs
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
@@ -127,6 +130,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Gamma
             | BuiltinScalarFunction::Lgamma
             | BuiltinScalarFunction::Md5
+            | BuiltinScalarFunction::QuoteLiteral
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
             | BuiltinScalarFunction::BpcharToText
@@ -162,6 +166,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Strpos
             | BuiltinScalarFunction::ConvertFrom
             | BuiltinScalarFunction::Left
+            | BuiltinScalarFunction::Right
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Encode
             | BuiltinScalarFunction::Decode
@@ -574,7 +579,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::JsonbPathQueryFirst,
         ),
         ("initcap", BuiltinScalarFunction::Initcap),
+        ("concat", BuiltinScalarFunction::Concat),
+        ("concat_ws", BuiltinScalarFunction::ConcatWs),
+        ("format", BuiltinScalarFunction::Format),
         ("left", BuiltinScalarFunction::Left),
+        ("right", BuiltinScalarFunction::Right),
         ("lpad", BuiltinScalarFunction::LPad),
         ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
@@ -582,6 +591,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("lower", BuiltinScalarFunction::Lower),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
+        ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
@@ -889,7 +899,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
 fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
     !matches!(
         func,
-        BuiltinScalarFunction::Log
+        BuiltinScalarFunction::Concat
+            | BuiltinScalarFunction::ConcatWs
+            | BuiltinScalarFunction::Format
+            | BuiltinScalarFunction::Log
             | BuiltinScalarFunction::Trunc
             | BuiltinScalarFunction::Round
             | BuiltinScalarFunction::Substring
