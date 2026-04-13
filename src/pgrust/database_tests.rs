@@ -909,8 +909,8 @@ fn insert_and_copy_from_maintain_btree_index() {
 }
 
 #[test]
-fn indexed_tables_reject_update_delete_and_truncate() {
-    let base = temp_dir("indexed_table_dml_rejections");
+fn indexed_update_maintains_indexes() {
+    let base = temp_dir("indexed_update_maintains_indexes");
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table items (id int4 not null, name text)")
@@ -920,21 +920,110 @@ fn indexed_tables_reject_update_delete_and_truncate() {
     db.execute(1, "create index items_id_idx on items (id)")
         .unwrap();
 
-    for sql in [
-        "update items set name = 'beta' where id = 1",
-        "delete from items where id = 1",
-        "truncate items",
-    ] {
-        match db.execute(1, sql) {
-            Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. })) => {
-                assert!(
-                    actual.contains("indexed table"),
-                    "expected indexed-table rejection for {sql}, got {actual}"
-                );
-            }
-            other => panic!("expected indexed-table rejection for {sql}, got {:?}", other),
-        }
-    }
+    db.execute(1, "update items set id = 2, name = 'beta' where id = 1")
+        .unwrap();
+
+    assert_explain_uses_index(&db, 1, "select name from items where id = 2", "items_id_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select name from items where id = 1"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select name from items where id = 2"),
+        vec![vec![Value::Text("beta".into())]]
+    );
+}
+
+#[test]
+fn indexed_delete_keeps_index_scans_correct() {
+    let base = temp_dir("indexed_delete_keeps_index_scans_correct");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values (1, 'alpha'), (2, 'beta'), (3, 'gamma')",
+    )
+    .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    db.execute(1, "delete from items where id = 2").unwrap();
+
+    assert_explain_uses_index(&db, 1, "select name from items where id = 2", "items_id_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select name from items where id = 2"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from items order by id"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn indexed_update_and_delete_apply_residual_predicates() {
+    let base = temp_dir("indexed_dml_residual_predicates");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, tag text, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values (1, 'keep', 'alpha'), (1, 'skip', 'beta'), (2, 'keep', 'gamma')",
+    )
+    .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    db.execute(1, "update items set name = 'updated' where id = 1 and tag = 'keep'")
+        .unwrap();
+    db.execute(1, "delete from items where id = 1 and tag = 'skip'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, tag, name from items order by id, tag"),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("keep".into()),
+                Value::Text("updated".into())
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("keep".into()),
+                Value::Text("gamma".into())
+            ],
+        ]
+    );
+}
+
+#[test]
+fn indexed_truncate_reinitializes_indexes() {
+    let base = temp_dir("indexed_truncate_reinitializes_indexes");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha'), (2, 'beta')")
+        .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    db.execute(1, "truncate items").unwrap();
+
+    assert_explain_uses_index(&db, 1, "select name from items where id = 1", "items_id_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    db.execute(1, "insert into items values (3, 'gamma')").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select name from items where id = 3"),
+        vec![vec![Value::Text("gamma".into())]]
+    );
 }
 
 #[test]

@@ -1,17 +1,19 @@
 use std::rc::Rc;
+use std::collections::HashSet;
 
 use parking_lot::RwLock;
 
 use crate::backend::access::heap::heapam::{
-    HeapError, heap_delete_with_waiter, heap_fetch, heap_insert_mvcc_with_cid,
+    HeapError, heap_delete_with_waiter, heap_fetch, heap_fetch_visible, heap_insert_mvcc_with_cid,
     heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
     heap_update_with_waiter,
 };
+use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
     AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement,
-    BoundIndexRelation, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
+    BoundIndexRelation, BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
     MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement,
     bind_create_table, build_plan,
 };
@@ -24,7 +26,7 @@ use crate::backend::executor::exec_expr::{
     compile_predicate_with_decoder, eval_expr, tuple_from_values,
 };
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
-use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start};
+use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start, Expr};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::execnodes::*;
 
@@ -106,13 +108,6 @@ fn validate_maintenance_targets(
     Ok(())
 }
 
-fn indexed_table_unsupported(op: &'static str) -> ExecError {
-    ExecError::Parse(ParseError::UnexpectedToken {
-        expected: "table without usable indexes",
-        actual: format!("{op} on indexed table"),
-    })
-}
-
 fn maintain_indexes_for_row(
     heap_rel: crate::backend::storage::smgr::RelFileLocator,
     heap_desc: &RelationDesc,
@@ -145,6 +140,169 @@ fn maintain_indexes_for_row(
         }))?;
     }
     Ok(())
+}
+
+fn reinitialize_index_relation(
+    index: &BoundIndexRelation,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let _ = ctx.pool.invalidate_relation(index.rel);
+    ctx.pool
+        .with_storage_mut(|s| s.smgr.truncate(index.rel, ForkNumber::Main, 0))
+        .map_err(HeapError::Storage)?;
+    crate::backend::access::index::indexam::index_build_empty_stub(
+        &crate::include::access::amapi::IndexBuildEmptyContext {
+            pool: ctx.pool.clone(),
+            index_relation: index.rel,
+        },
+        index.index_meta.am_oid,
+    )
+    .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
+        expected: "index reinitialization",
+        actual: format!("{err:?}"),
+    }))?;
+    Ok(())
+}
+
+fn collect_matching_rows_heap(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    desc: &RelationDesc,
+    predicate: Option<&Expr>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, rel, ctx.snapshot.clone())?;
+
+    let desc = Rc::new(desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+    let qual = predicate.map(|p| compile_predicate_with_decoder(p, &decoder));
+
+    let mut slot = TupleSlot::empty(decoder.ncols());
+    slot.decoder = Some(Rc::clone(&decoder));
+    let mut rows = Vec::new();
+
+    loop {
+        let next: Result<Option<usize>, ExecError> =
+            heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
+        let Some(buffer_id) = next? else {
+            break;
+        };
+
+        let page =
+            unsafe { ctx.pool.page_unlocked(buffer_id) }.expect("pinned buffer must be valid");
+
+        let pin = scan
+            .pinned_buffer_rc()
+            .expect("buffer must be pinned after prepare_next_page");
+
+        let mut page_rows = Vec::new();
+        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
+            slot.kind = SlotKind::BufferHeapTuple {
+                tuple_ptr: tuple_bytes.as_ptr(),
+                tuple_len: tuple_bytes.len(),
+                pin: Rc::clone(&pin),
+            };
+            slot.tts_nvalid = 0;
+            slot.tts_values.clear();
+            slot.decode_offset = 0;
+            slot.values()?;
+            Value::materialize_all(&mut slot.tts_values);
+            page_rows.push((tid, slot.tts_values.clone()));
+        }
+        drop(pin);
+
+        for (tid, values) in page_rows {
+            let mut slot = TupleSlot::virtual_row(values.clone());
+            if let Some(q) = &qual {
+                if !q(&mut slot, ctx)? {
+                    continue;
+                }
+            }
+            rows.push((tid, values));
+        }
+    }
+
+    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
+    Ok(rows)
+}
+
+fn collect_matching_rows_index(
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    desc: &RelationDesc,
+    index: &BoundIndexRelation,
+    keys: &[crate::include::access::scankey::ScanKeyData],
+    predicate: Option<&Expr>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
+    let desc = Rc::new(desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+    let qual = predicate.map(|p| compile_predicate_with_decoder(p, &decoder));
+
+    let begin = crate::include::access::amapi::IndexBeginScanContext {
+        pool: ctx.pool.clone(),
+        client_id: ctx.client_id,
+        snapshot: ctx.snapshot.clone(),
+        heap_relation: rel,
+        index_relation: index.rel,
+        index_desc: index.desc.clone(),
+        index_meta: index.index_meta.clone(),
+        key_data: keys.to_vec(),
+        direction: crate::include::access::relscan::ScanDirection::Forward,
+    };
+    let mut scan = indexam::index_beginscan(&begin, index.index_meta.am_oid).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index access method begin scan",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+
+    loop {
+        let has_tuple = indexam::index_getnext(&mut scan, index.index_meta.am_oid).map_err(|err| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index access method tuple",
+                actual: format!("{err:?}"),
+            })
+        })?;
+        if !has_tuple {
+            break;
+        }
+        let tid = scan
+            .xs_heaptid
+            .expect("index scan tuple must set heap tid");
+        if !seen.insert(tid) {
+            continue;
+        }
+        let visible = {
+            let txns = ctx.txns.read();
+            heap_fetch_visible(&ctx.pool, ctx.client_id, rel, tid, &txns, &ctx.snapshot)?
+        };
+        let Some(tuple) = visible else {
+            continue;
+        };
+        let mut slot = TupleSlot::from_heap_tuple(
+            Rc::clone(&desc),
+            Rc::clone(&attr_descs),
+            tid,
+            tuple,
+        );
+        if let Some(q) = &qual {
+            if !q(&mut slot, ctx)? {
+                continue;
+            }
+        }
+        rows.push((tid, slot.into_values()?));
+    }
+
+    indexam::index_endscan(scan, index.index_meta.am_oid).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index access method end scan",
+            actual: format!("{err:?}"),
+        })
+    })?;
+    Ok(rows)
 }
 
 pub fn execute_analyze(
@@ -245,17 +403,17 @@ pub fn execute_truncate_table(
         let entry = catalog
             .lookup_relation(&table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
-        if catalog
-            .index_relations_for_heap(entry.relation_oid)
-            .iter()
-            .any(|index| index.index_meta.indisvalid && index.index_meta.indisready)
-        {
-            return Err(indexed_table_unsupported("TRUNCATE"));
-        }
+        let indexes = catalog.index_relations_for_heap(entry.relation_oid);
         let _ = ctx.pool.invalidate_relation(entry.rel);
         ctx.pool
             .with_storage_mut(|s| s.smgr.truncate(entry.rel, ForkNumber::Main, 0))
             .map_err(HeapError::Storage)?;
+        for index in indexes
+            .iter()
+            .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+        {
+            reinitialize_index_relation(index, ctx)?;
+        }
     }
     Ok(StatementResult::AffectedRows(0))
 }
@@ -395,134 +553,98 @@ pub fn execute_update_with_waiter(
     cid: CommandId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
-    if stmt.has_valid_index {
-        return Err(indexed_table_unsupported("UPDATE"));
-    }
-    let mut scan =
-        heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
 
-    // Hoist descriptor allocation, decoder compilation, and predicate
-    // compilation out of the per-tuple loop.
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
-    // Compiled predicate: uses the fixed-offset fast path for BufferHeapTuple
-    // and falls back for HeapTuple.
     let qual = stmt
         .predicate
         .as_ref()
         .map(|p| compile_predicate_with_decoder(p, &decoder));
-
-    // Reusable slot — allocated once, reset per tuple (like PG's ss_ScanTupleSlot).
-    let mut slot = TupleSlot::empty(decoder.ncols());
-    slot.decoder = Some(Rc::clone(&decoder));
-
-    // Page-mode scan: batch visibility checks per page under a single lock,
-    // matching the SELECT path (heap_scan_prepare_next_page). This replaces
-    // the old per-tuple txns.read() which caused 19% lock contention.
-    loop {
-        let next: Result<Option<usize>, ExecError> =
-            heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
-        let Some(buffer_id) = next? else {
-            break;
-        };
-
-        // SAFETY: buffer is pinned, visibility offsets were collected under
-        // lock in prepare_next_page, and tuple user data is immutable.
-        let page =
-            unsafe { ctx.pool.page_unlocked(buffer_id) }.expect("pinned buffer must be valid");
-
-        let pin = scan
-            .pinned_buffer_rc()
-            .expect("buffer must be pinned after prepare_next_page");
-
-        let mut page_rows = Vec::new();
-        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
-            // Materialize page rows before expression evaluation so the page
-            // borrow can end; correlated subqueries need mutable access to ctx.
-            slot.kind = SlotKind::BufferHeapTuple {
-                tuple_ptr: tuple_bytes.as_ptr(),
-                tuple_len: tuple_bytes.len(),
-                pin: Rc::clone(&pin),
-            };
-            slot.tts_nvalid = 0;
-            slot.tts_values.clear();
-            slot.decode_offset = 0;
-            slot.values()?;
-            Value::materialize_all(&mut slot.tts_values);
-            page_rows.push((tid, slot.tts_values.clone()));
+    let target_rows = match &stmt.row_source {
+        BoundModifyRowSource::Heap => {
+            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.predicate.as_ref(), ctx)?
         }
-        drop(pin);
+        BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
+            stmt.rel,
+            &stmt.desc,
+            index,
+            keys,
+            stmt.predicate.as_ref(),
+            ctx,
+        )?,
+    };
 
-        for (tid, original_values) in page_rows {
-            let mut slot = TupleSlot::virtual_row(original_values.clone());
-            if let Some(q) = &qual {
-                if !q(&mut slot, ctx)? {
-                    continue;
+    for (tid, original_values) in target_rows {
+        let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
+        let mut values = original_values;
+        for assignment in &stmt.assignments {
+            values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+        }
+
+        let replacement = tuple_from_values(&stmt.desc, &values)?;
+        let mut current_tid = tid;
+        let mut current_replacement = replacement;
+        let mut current_values = values;
+        loop {
+            match heap_update_with_waiter(
+                &*ctx.pool,
+                ctx.client_id,
+                stmt.rel,
+                &ctx.txns,
+                xid,
+                cid,
+                current_tid,
+                &current_replacement,
+                waiter,
+            ) {
+                Ok(new_tid) => {
+                    maintain_indexes_for_row(
+                        stmt.rel,
+                        &stmt.desc,
+                        &stmt.indexes,
+                        &current_values,
+                        new_tid,
+                        ctx,
+                    )?;
+                    affected_rows += 1;
+                    break;
                 }
-            }
-            let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
-            let mut values = original_values;
-            for assignment in &stmt.assignments {
-                values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
-            }
-
-            let replacement = tuple_from_values(&stmt.desc, &values)?;
-            let mut current_tid = tid;
-            let mut current_replacement = replacement;
-            loop {
-                match heap_update_with_waiter(
-                    &*ctx.pool,
-                    ctx.client_id,
-                    stmt.rel,
-                    &ctx.txns,
-                    xid,
-                    cid,
-                    current_tid,
-                    &current_replacement,
-                    waiter,
-                ) {
-                    Ok(new_tid) => {
-                        let _ = new_tid;
-                        affected_rows += 1;
+                Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                    let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                    let mut new_slot = TupleSlot::from_heap_tuple(
+                        Rc::clone(&desc),
+                        Rc::clone(&attr_descs),
+                        new_ctid,
+                        new_tuple,
+                    );
+                    let passes = match &qual {
+                        Some(q) => q(&mut new_slot, ctx)?,
+                        None => true,
+                    };
+                    if !passes {
                         break;
                     }
-                    Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
-                        let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
-                        let mut new_slot = TupleSlot::from_heap_tuple(
-                            Rc::clone(&desc),
-                            Rc::clone(&attr_descs),
-                            new_ctid,
-                            new_tuple,
-                        );
-                        let passes = match &qual {
-                            Some(q) => q(&mut new_slot, ctx)?,
-                            None => true,
-                        };
-                        if !passes {
-                            break;
-                        }
-                        let new_values_base = new_slot.into_values()?;
-                        let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
-                        let mut new_values = new_values_base;
-                        for assignment in &stmt.assignments {
-                            new_values[assignment.column_index] =
-                                eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
-                        }
-                        current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
-                        current_tid = new_ctid;
+                    let new_values_base = new_slot.into_values()?;
+                    let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
+                    let mut new_values = new_values_base;
+                    for assignment in &stmt.assignments {
+                        new_values[assignment.column_index] =
+                            eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
                     }
-                    Err(HeapError::TupleAlreadyModified(_)) => {
-                        break;
-                    }
-                    Err(e) => return Err(e.into()),
+                    current_values = new_values.clone();
+                    current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
+                    current_tid = new_ctid;
                 }
+                Err(HeapError::TupleAlreadyModified(_)) => {
+                    break;
+                }
+                Err(e) => return Err(e.into()),
             }
         }
     }
 
-    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
     Ok(StatementResult::AffectedRows(affected_rows))
 }
 
@@ -540,15 +662,6 @@ pub fn execute_delete_with_waiter(
     xid: TransactionId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
-    if stmt.has_valid_index {
-        return Err(indexed_table_unsupported("DELETE"));
-    }
-    let mut scan =
-        heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
-    let mut targets = Vec::new();
-
-    // Hoist descriptor allocation, decoder compilation, and predicate
-    // compilation out of the per-tuple loop.
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
@@ -556,58 +669,26 @@ pub fn execute_delete_with_waiter(
         .predicate
         .as_ref()
         .map(|p| compile_predicate_with_decoder(p, &decoder));
-
-    // Reusable slot — allocated once, reset per tuple.
-    let mut slot = TupleSlot::empty(decoder.ncols());
-    slot.decoder = Some(Rc::clone(&decoder));
-
-    // Page-mode scan: batch visibility checks per page under a single lock.
-    loop {
-        let next: Result<Option<usize>, ExecError> =
-            heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
-        let Some(buffer_id) = next? else {
-            break;
-        };
-
-        let page =
-            unsafe { ctx.pool.page_unlocked(buffer_id) }.expect("pinned buffer must be valid");
-
-        let pin = scan
-            .pinned_buffer_rc()
-            .expect("buffer must be pinned after prepare_next_page");
-
-        let mut page_rows = Vec::new();
-        while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
-            slot.kind = SlotKind::BufferHeapTuple {
-                tuple_ptr: tuple_bytes.as_ptr(),
-                tuple_len: tuple_bytes.len(),
-                pin: Rc::clone(&pin),
-            };
-            slot.tts_nvalid = 0;
-            slot.tts_values.clear();
-            slot.decode_offset = 0;
-            slot.values()?;
-            Value::materialize_all(&mut slot.tts_values);
-            page_rows.push((tid, slot.tts_values.clone()));
+    let targets = match &stmt.row_source {
+        BoundModifyRowSource::Heap => {
+            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.predicate.as_ref(), ctx)?
+                .into_iter()
+                .map(|(tid, _)| tid)
+                .collect::<Vec<_>>()
         }
-        drop(pin);
-
-        for (tid, values) in page_rows {
-            let mut slot = TupleSlot::virtual_row(values);
-            if let Some(q) = &qual {
-                if !q(&mut slot, ctx)? {
-                    continue;
-                }
-            }
-            targets.push(tid);
-        }
-    }
-
-    // Use the scan snapshot for visibility checks in the delete phase so that
-    // rows committed by other transactions after the scan still appear visible
-    // (enabling the correct TupleAlreadyModified path rather than TupleNotVisible).
-    let snapshot = scan.snapshot.clone();
-    heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
+        BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
+            stmt.rel,
+            &stmt.desc,
+            index,
+            keys,
+            stmt.predicate.as_ref(),
+            ctx,
+        )?
+        .into_iter()
+        .map(|(tid, _)| tid)
+        .collect::<Vec<_>>(),
+    };
+    let snapshot = ctx.snapshot.clone();
 
     let mut affected_rows = 0;
     for tid in &targets {
