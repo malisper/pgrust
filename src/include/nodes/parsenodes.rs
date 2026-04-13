@@ -407,6 +407,7 @@ pub enum SqlTypeKind {
     Int2Vector,
     Int4,
     Int8,
+    Name,
     Oid,
     OidVector,
     Bit,

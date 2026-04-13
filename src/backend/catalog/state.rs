@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
 use crate::backend::catalog::catalog::allocate_relation_object_oids;
+use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
@@ -55,6 +56,7 @@ pub enum CatalogError {
     UnknownTable(String),
     UnknownColumn(String),
     UnknownType(String),
+    UniqueViolation(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +88,7 @@ impl Catalog {
             let entry = bootstrap_catalog_entry(kind);
             self.insert(kind.relation_name(), entry);
         }
+        insert_bootstrap_system_indexes(self);
     }
 
     pub fn insert(&mut self, name: impl Into<String>, entry: CatalogEntry) {
@@ -363,10 +366,46 @@ impl Catalog {
             .tables
             .remove(&name.to_ascii_lowercase())
             .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
-        self.constraints.retain(|row| row.conrelid != entry.relation_oid);
+        self.constraints
+            .retain(|row| row.conrelid != entry.relation_oid);
         self.depends
             .retain(|row| row.objid != entry.relation_oid && row.refobjid != entry.relation_oid);
         Ok(entry)
+    }
+
+    pub fn set_index_ready_valid(
+        &mut self,
+        relation_oid: u32,
+        indisready: bool,
+        indisvalid: bool,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'i' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let index_meta = entry
+            .index_meta
+            .as_mut()
+            .ok_or(CatalogError::Corrupt("index relation missing index metadata"))?;
+        index_meta.indisready = indisready;
+        index_meta.indisvalid = indisvalid;
+        let new_entry = entry.clone();
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
     }
 
     pub fn remove_by_oid(&mut self, relation_oid: u32) -> Option<(String, CatalogEntry)> {
@@ -382,7 +421,8 @@ impl Catalog {
     }
 
     fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {
-        self.constraints.retain(|row| row.conrelid != entry.relation_oid);
+        self.constraints
+            .retain(|row| row.conrelid != entry.relation_oid);
         if entry.relkind != 'r' {
             return;
         }

@@ -38,11 +38,13 @@ pub const PG_INDEX_ROWTYPE_OID: u32 = 0;
 pub const BOOL_TYPE_OID: u32 = 16;
 pub const BYTEA_TYPE_OID: u32 = 17;
 pub const INTERNAL_CHAR_TYPE_OID: u32 = 18;
+pub const NAME_TYPE_OID: u32 = 19;
 pub const BIT_TYPE_OID: u32 = 1560;
 pub const VARBIT_TYPE_OID: u32 = 1562;
 pub const BOOL_ARRAY_TYPE_OID: u32 = 1000;
 pub const BYTEA_ARRAY_TYPE_OID: u32 = 1001;
 pub const INTERNAL_CHAR_ARRAY_TYPE_OID: u32 = 1002;
+pub const NAME_ARRAY_TYPE_OID: u32 = 1003;
 pub const BIT_ARRAY_TYPE_OID: u32 = 1561;
 pub const VARBIT_ARRAY_TYPE_OID: u32 = 1563;
 pub const INT8_TYPE_OID: u32 = 20;
@@ -425,10 +427,10 @@ mod tests {
     }
 }
 use super::{
-    pg_am_desc, pg_attrdef_desc, pg_attribute_desc, pg_auth_members_desc, pg_authid_desc,
-    pg_amop_desc, pg_amproc_desc, pg_cast_desc, pg_class_desc, pg_collation_desc,
+    pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc, pg_attribute_desc,
+    pg_auth_members_desc, pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc,
     pg_constraint_desc, pg_database_desc, pg_depend_desc, pg_index_desc, pg_language_desc,
-    pg_namespace_desc, pg_opclass_desc, pg_opfamily_desc, pg_operator_desc, pg_proc_desc,
+    pg_namespace_desc, pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc,
     pg_tablespace_desc, pg_type_desc,
 };
 use crate::backend::executor::RelationDesc;

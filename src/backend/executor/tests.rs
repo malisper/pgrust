@@ -352,6 +352,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
     ExecutorContext {
         pool: test_pool(base),
         txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
+        txn_waiter: None,
         snapshot,
         client_id: 1,
         next_command_id: 0,
@@ -371,6 +372,7 @@ fn run_plan(
     let mut ctx = ExecutorContext {
         pool,
         txns: txns_arc,
+        txn_waiter: None,
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 42,
         next_command_id: 0,
@@ -421,6 +423,7 @@ fn run_sql_with_catalog(
         let mut ctx = ExecutorContext {
             pool,
             txns: txns_arc,
+            txn_waiter: None,
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
             next_command_id: 0,
@@ -1998,6 +2001,7 @@ fn pg_attribute_exposes_bootstrap_columns() {
             vec![Value::Text("reltype".into())],
             vec![Value::Text("relowner".into())],
             vec![Value::Text("relam".into())],
+            vec![Value::Text("reltablespace".into())],
             vec![Value::Text("relfilenode".into())],
             vec![Value::Text("relpersistence".into())],
             vec![Value::Text("relkind".into())],
@@ -3675,6 +3679,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
     let mut ctx = ExecutorContext {
         pool,
         txns: txns_arc,
+        txn_waiter: None,
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 77,
         next_command_id: 0,

@@ -256,7 +256,10 @@ pub fn render_internal_char_text(byte: u8) -> String {
     }
 }
 
-pub(crate) fn parse_text_array_literal(raw: &str, element_type: SqlType) -> Result<Value, ExecError> {
+pub(crate) fn parse_text_array_literal(
+    raw: &str,
+    element_type: SqlType,
+) -> Result<Value, ExecError> {
     parse_text_array_literal_with_op(raw, element_type, "::array")
 }
 
@@ -474,8 +477,11 @@ pub(crate) fn soft_input_error_info(
         // constrained text inputs.
         SqlTypeKind::Bit
         | SqlTypeKind::VarBit
+        | SqlTypeKind::Name
         | SqlTypeKind::Char
-        | SqlTypeKind::Varchar => cast_text_value(text, ty, false),
+        | SqlTypeKind::Varchar => {
+            cast_text_value(text, ty, false)
+        }
         _ => cast_value(Value::Text(text.into()), ty),
     };
     match parsed {
@@ -548,6 +554,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
@@ -611,6 +618,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
@@ -646,6 +654,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
@@ -780,6 +789,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
@@ -826,6 +836,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlType {
                 kind:
                     SqlTypeKind::Text
+                    | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
                     | SqlTypeKind::Timestamp
@@ -878,7 +889,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlTypeKind::Bit | SqlTypeKind::VarBit => {
                 Ok(Value::Bit(coerce_bit_string(bits, ty, true)?))
             }
-            SqlTypeKind::Text | SqlTypeKind::Timestamp => Ok(Value::Text(
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Timestamp => Ok(Value::Text(
                 CompactString::from_owned(render_bit_text(&bits)),
             )),
             _ => Err(ExecError::TypeMismatch {
@@ -897,9 +908,7 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Timestamp
-        | SqlTypeKind::PgNodeTree => {
-            Ok(Value::Text(CompactString::new(text)))
-        }
+        | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(
             parse_bit_text(text)?,
@@ -913,7 +922,7 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
         SqlTypeKind::JsonPath => Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?)),
-        SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
             coerce_character_string(text, ty, explicit)?,
         ))),
         SqlTypeKind::Int2 => cast_text_to_int2(text),
@@ -947,9 +956,7 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Timestamp
-        | SqlTypeKind::PgNodeTree => {
-            Ok(Value::Text(CompactString::from_owned(value.render())))
-        }
+        | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
         SqlTypeKind::Json => {
             let rendered = value.render();
             validate_json_text(&rendered)?;
@@ -965,7 +972,9 @@ pub(super) fn cast_numeric_value(
         }
         SqlTypeKind::InternalChar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => cast_text_value(&value.render(), ty, explicit),
-        SqlTypeKind::Char | SqlTypeKind::Varchar => cast_text_value(&value.render(), ty, explicit),
+        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+            cast_text_value(&value.render(), ty, explicit)
+        }
         SqlTypeKind::Float4 => {
             let rendered = value.render();
             let v = parse_pg_float(&rendered, SqlTypeKind::Float4)?;
@@ -1011,6 +1020,7 @@ pub(super) fn cast_numeric_value(
 
 fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<String, ExecError> {
     let max_chars = match ty.kind {
+        SqlTypeKind::Name => return Ok(text.to_string()),
         SqlTypeKind::Char => ty.char_len().unwrap_or(1),
         SqlTypeKind::Varchar => match ty.char_len() {
             Some(max_chars) => max_chars,
@@ -1423,20 +1433,22 @@ mod tests {
 
     #[test]
     fn soft_input_error_info_supports_catalog_backed_input_types() {
-        assert!(soft_input_error_info("{\"a\":1}", "jsonb")
-            .unwrap()
-            .is_none());
-        assert!(soft_input_error_info("{\"a\":", "jsonb")
-            .unwrap()
-            .is_some());
-        assert!(soft_input_error_info("$.a", "jsonpath")
-            .unwrap()
-            .is_none());
-        assert!(soft_input_error_info("{1,2,3}", "int4[]")
-            .unwrap()
-            .is_none());
-        assert!(soft_input_error_info("{1,nope}", "int4[]")
-            .unwrap()
-            .is_some());
+        assert!(
+            soft_input_error_info("{\"a\":1}", "jsonb")
+                .unwrap()
+                .is_none()
+        );
+        assert!(soft_input_error_info("{\"a\":", "jsonb").unwrap().is_some());
+        assert!(soft_input_error_info("$.a", "jsonpath").unwrap().is_none());
+        assert!(
+            soft_input_error_info("{1,2,3}", "int4[]")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            soft_input_error_info("{1,nope}", "int4[]")
+                .unwrap()
+                .is_some()
+        );
     }
 }

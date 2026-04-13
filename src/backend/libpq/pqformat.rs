@@ -29,6 +29,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
         ExecError::RaiseException(message) => message.clone(),
+        ExecError::UniqueViolation { constraint } => {
+            format!("duplicate key value violates unique constraint \"{constraint}\"")
+        }
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
         ExecError::InvalidIntegerInput { ty, value } => {
             format!("invalid input syntax for type {ty}: \"{value}\"")
@@ -205,6 +208,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::JsonPath => 4073,
             SqlTypeKind::InternalChar => 1002,
+            SqlTypeKind::Name => 1003,
             SqlTypeKind::Text
             | SqlTypeKind::Int2Vector
             | SqlTypeKind::OidVector
@@ -231,6 +235,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
         SqlTypeKind::InternalChar => (18, 1, -1),
+        SqlTypeKind::Name => (19, 64, -1),
         SqlTypeKind::Bool => (16, 1, -1),
         SqlTypeKind::Varchar => (1043, -1, col.sql_type.typmod),
         SqlTypeKind::Text
@@ -238,9 +243,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         | SqlTypeKind::OidVector
         | SqlTypeKind::Timestamp
         | SqlTypeKind::Char
-        | SqlTypeKind::PgNodeTree => {
-            (25, -1, col.sql_type.typmod)
-        }
+        | SqlTypeKind::PgNodeTree => (25, -1, col.sql_type.typmod),
     }
 }
 

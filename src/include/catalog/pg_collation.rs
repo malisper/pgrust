@@ -22,7 +22,7 @@ pub fn pg_collation_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("collname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("collname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("collnamespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("collowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc(

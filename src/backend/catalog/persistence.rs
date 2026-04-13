@@ -7,16 +7,21 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::transam::xact::Snapshot;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError};
+use crate::backend::catalog::indexing::{
+    maintain_catalog_indexes_for_insert, rebuild_system_catalog_indexes,
+};
 use crate::backend::catalog::rowcodec::{catalog_row_values_for_kind, decode_catalog_tuple_values};
 use crate::backend::catalog::rows::{PhysicalCatalogRows, physical_catalog_rows_for_catalog_entry};
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
-use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::storage::smgr::ForkNumber;
+use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::access::itemptr::ItemPointerData;
-use crate::include::catalog::{BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc};
+use crate::include::catalog::{
+    BootstrapCatalogKind, bootstrap_catalog_kinds, bootstrap_relation_desc,
+};
 use crate::include::nodes::datum::Value;
 
 pub(crate) fn sync_catalog_rows(
@@ -60,6 +65,7 @@ pub(crate) fn sync_catalog_rows_subset(
             catalog_row_values_for_kind(rows, kind),
         )?;
     }
+    rebuild_system_catalog_indexes(base_dir)?;
     Ok(())
 }
 
@@ -75,7 +81,7 @@ pub(crate) fn append_catalog_entry_rows(
 }
 
 pub(crate) fn insert_catalog_rows_subset_mvcc(
-    ctx: &CatalogWriteContext<'_>,
+    ctx: &CatalogWriteContext,
     rows: &PhysicalCatalogRows,
     db_oid: u32,
     kinds: &[BootstrapCatalogKind],
@@ -83,7 +89,7 @@ pub(crate) fn insert_catalog_rows_subset_mvcc(
     for &kind in kinds {
         let desc = bootstrap_relation_desc(kind);
         for values in catalog_row_values_for_kind(rows, kind) {
-            catalog_tuple_insert(
+            let tid = catalog_tuple_insert(
                 ctx,
                 RelFileLocator {
                     spc_oid: 0,
@@ -93,13 +99,14 @@ pub(crate) fn insert_catalog_rows_subset_mvcc(
                 &desc,
                 &values,
             )?;
+            maintain_catalog_indexes_for_insert(ctx, kind, tid, &values)?;
         }
     }
     Ok(())
 }
 
 pub(crate) fn delete_catalog_rows_subset_mvcc(
-    ctx: &CatalogWriteContext<'_>,
+    ctx: &CatalogWriteContext,
     rows: &PhysicalCatalogRows,
     db_oid: u32,
     kinds: &[BootstrapCatalogKind],
@@ -117,15 +124,9 @@ pub(crate) fn delete_catalog_rows_subset_mvcc(
             rel_number: kind.relation_oid(),
         };
         for values in catalog_row_values_for_kind(rows, kind) {
-            catalog_tuple_delete_matching(
-                ctx,
-                kind,
-                rel,
-                &desc,
-                &values,
-                &snapshot,
-            )
-            .map_err(|err| CatalogError::Io(format!("catalog delete for {kind:?} failed: {err:?}")))?;
+            catalog_tuple_delete_matching(ctx, kind, rel, &desc, &values, &snapshot).map_err(
+                |err| CatalogError::Io(format!("catalog delete for {kind:?} failed: {err:?}")),
+            )?;
         }
     }
     Ok(())
@@ -163,6 +164,7 @@ fn append_catalog_rows_subset(
             catalog_row_values_for_kind(rows, kind),
         )?;
     }
+    rebuild_system_catalog_indexes(base_dir)?;
     Ok(())
 }
 
@@ -189,21 +191,20 @@ fn insert_catalog_rows(
 }
 
 fn catalog_tuple_insert(
-    ctx: &CatalogWriteContext<'_>,
+    ctx: &CatalogWriteContext,
     rel: RelFileLocator,
     desc: &RelationDesc,
     values: &[Value],
-) -> Result<(), CatalogError> {
+) -> Result<ItemPointerData, CatalogError> {
     let tuple = tuple_from_values(desc, values)
         .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
-    heap_insert_mvcc_with_cid(ctx.pool, ctx.client_id, rel, ctx.xid, ctx.cid, &tuple)
-        .map_err(|e| CatalogError::Io(format!("catalog tuple insert failed: {e:?}")))?;
-    Ok(())
+    heap_insert_mvcc_with_cid(&ctx.pool, ctx.client_id, rel, ctx.xid, ctx.cid, &tuple)
+        .map_err(|e| CatalogError::Io(format!("catalog tuple insert failed: {e:?}")))
 }
 
 #[allow(dead_code)]
 fn catalog_tuple_update_matching(
-    ctx: &CatalogWriteContext<'_>,
+    ctx: &CatalogWriteContext,
     kind: BootstrapCatalogKind,
     rel: RelFileLocator,
     desc: &RelationDesc,
@@ -215,12 +216,15 @@ fn catalog_tuple_update_matching(
         .ok_or(CatalogError::Corrupt("missing catalog tuple for update"))?;
     let replacement = tuple_from_values(desc, new_values)
         .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
-    let waiter = ctx.waiter.map(|waiter| (ctx.txns, waiter));
+    let waiter = ctx
+        .waiter
+        .as_deref()
+        .map(|waiter| (&*ctx.txns, waiter));
     heap_update_with_waiter(
-        ctx.pool,
+        &ctx.pool,
         ctx.client_id,
         rel,
-        ctx.txns,
+        &ctx.txns,
         ctx.xid,
         ctx.cid,
         tid,
@@ -232,7 +236,7 @@ fn catalog_tuple_update_matching(
 }
 
 fn catalog_tuple_delete_matching(
-    ctx: &CatalogWriteContext<'_>,
+    ctx: &CatalogWriteContext,
     kind: BootstrapCatalogKind,
     rel: RelFileLocator,
     desc: &RelationDesc,
@@ -241,14 +245,26 @@ fn catalog_tuple_delete_matching(
 ) -> Result<(), CatalogError> {
     let tid = find_catalog_tuple_tid(ctx, kind, rel, desc, values, snapshot)?
         .ok_or(CatalogError::Corrupt("missing catalog tuple for delete"))?;
-    let waiter = ctx.waiter.map(|waiter| (ctx.txns, waiter));
-    heap_delete_with_waiter(ctx.pool, ctx.client_id, rel, ctx.txns, ctx.xid, tid, snapshot, waiter)
-        .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
+    let waiter = ctx
+        .waiter
+        .as_deref()
+        .map(|waiter| (&*ctx.txns, waiter));
+    heap_delete_with_waiter(
+        &ctx.pool,
+        ctx.client_id,
+        rel,
+        &ctx.txns,
+        ctx.xid,
+        tid,
+        snapshot,
+        waiter,
+    )
+    .map_err(|e| CatalogError::Io(format!("catalog tuple delete failed: {e:?}")))?;
     Ok(())
 }
 
 fn find_catalog_tuple_tid(
-    ctx: &CatalogWriteContext<'_>,
+    ctx: &CatalogWriteContext,
     kind: BootstrapCatalogKind,
     rel: RelFileLocator,
     desc: &RelationDesc,
@@ -256,9 +272,9 @@ fn find_catalog_tuple_tid(
     snapshot: &Snapshot,
 ) -> Result<Option<ItemPointerData>, CatalogError> {
     let txns = ctx.txns.read();
-    let mut scan = heap_scan_begin(ctx.pool, rel)
+    let mut scan = heap_scan_begin(&ctx.pool, rel)
         .map_err(|e| CatalogError::Io(format!("catalog scan begin failed: {e:?}")))?;
-    while let Some((tid, tuple)) = heap_scan_next(ctx.pool, ctx.client_id, &mut scan)
+    while let Some((tid, tuple)) = heap_scan_next(&ctx.pool, ctx.client_id, &mut scan)
         .map_err(|e| CatalogError::Io(format!("catalog scan failed: {e:?}")))?
     {
         if !snapshot.tuple_visible(&txns, &tuple) {
@@ -278,9 +294,9 @@ fn catalog_row_identity_matches(
     right: &[Value],
 ) -> bool {
     match kind {
-        BootstrapCatalogKind::PgClass | BootstrapCatalogKind::PgType | BootstrapCatalogKind::PgAttrdef => {
-            catalog_value_eq(left.first(), right.first())
-        }
+        BootstrapCatalogKind::PgClass
+        | BootstrapCatalogKind::PgType
+        | BootstrapCatalogKind::PgAttrdef => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgAttribute => {
             catalog_value_eq(left.first(), right.first())
                 && catalog_value_eq(left.get(3), right.get(3))
@@ -312,8 +328,12 @@ fn catalog_value_eq(left: Option<&Value>, right: Option<&Value>) -> bool {
         (Some(Value::Int64(a)), Some(Value::Int32(b))) => *a == i64::from(*b),
         (Some(Value::Int64(a)), Some(Value::Int64(b))) => a == b,
         (Some(Value::Text(a)), Some(Value::Text(b))) => a == b,
-        (Some(Value::Text(a)), Some(Value::InternalChar(b))) => a.chars().next() == Some(char::from(*b)),
-        (Some(Value::InternalChar(a)), Some(Value::Text(b))) => Some(char::from(*a)) == b.chars().next(),
+        (Some(Value::Text(a)), Some(Value::InternalChar(b))) => {
+            a.chars().next() == Some(char::from(*b))
+        }
+        (Some(Value::InternalChar(a)), Some(Value::Text(b))) => {
+            Some(char::from(*a)) == b.chars().next()
+        }
         (Some(Value::InternalChar(a)), Some(Value::InternalChar(b))) => a == b,
         (Some(Value::Bool(a)), Some(Value::Bool(b))) => a == b,
         (Some(a), Some(b)) => a == b,

@@ -1,14 +1,14 @@
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
-use crate::backend::utils::cache::catcache::format_indkey;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::utils::cache::catcache::format_indkey;
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
@@ -24,15 +24,24 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(namespace_row_values)
             .collect(),
-        BootstrapCatalogKind::PgClass => rows.classes.iter().cloned().map(pg_class_row_values).collect(),
+        BootstrapCatalogKind::PgClass => rows
+            .classes
+            .iter()
+            .cloned()
+            .map(pg_class_row_values)
+            .collect(),
         BootstrapCatalogKind::PgAttribute => rows
             .attributes
             .iter()
             .cloned()
             .map(pg_attribute_row_values)
             .collect(),
-        BootstrapCatalogKind::PgType => rows.types.iter().cloned().map(pg_type_row_values).collect(),
-        BootstrapCatalogKind::PgProc => rows.procs.iter().cloned().map(pg_proc_row_values).collect(),
+        BootstrapCatalogKind::PgType => {
+            rows.types.iter().cloned().map(pg_type_row_values).collect()
+        }
+        BootstrapCatalogKind::PgProc => {
+            rows.procs.iter().cloned().map(pg_proc_row_values).collect()
+        }
         BootstrapCatalogKind::PgLanguage => rows
             .languages
             .iter()
@@ -51,7 +60,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_database_row_values)
             .collect(),
-        BootstrapCatalogKind::PgAuthId => rows.authids.iter().cloned().map(pg_authid_row_values).collect(),
+        BootstrapCatalogKind::PgAuthId => rows
+            .authids
+            .iter()
+            .cloned()
+            .map(pg_authid_row_values)
+            .collect(),
         BootstrapCatalogKind::PgAuthMembers => rows
             .auth_members
             .iter()
@@ -71,7 +85,9 @@ pub(crate) fn catalog_row_values_for_kind(
             .map(pg_tablespace_row_values)
             .collect(),
         BootstrapCatalogKind::PgAm => rows.ams.iter().cloned().map(pg_am_row_values).collect(),
-        BootstrapCatalogKind::PgAmop => rows.amops.iter().cloned().map(pg_amop_row_values).collect(),
+        BootstrapCatalogKind::PgAmop => {
+            rows.amops.iter().cloned().map(pg_amop_row_values).collect()
+        }
         BootstrapCatalogKind::PgAmproc => rows
             .amprocs
             .iter()
@@ -84,15 +100,27 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_attrdef_row_values)
             .collect(),
-        BootstrapCatalogKind::PgCast => rows.casts.iter().cloned().map(pg_cast_row_values).collect(),
+        BootstrapCatalogKind::PgCast => {
+            rows.casts.iter().cloned().map(pg_cast_row_values).collect()
+        }
         BootstrapCatalogKind::PgConstraint => rows
             .constraints
             .iter()
             .cloned()
             .map(pg_constraint_row_values)
             .collect(),
-        BootstrapCatalogKind::PgDepend => rows.depends.iter().cloned().map(pg_depend_row_values).collect(),
-        BootstrapCatalogKind::PgIndex => rows.indexes.iter().cloned().map(pg_index_row_values).collect(),
+        BootstrapCatalogKind::PgDepend => rows
+            .depends
+            .iter()
+            .cloned()
+            .map(pg_depend_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgIndex => rows
+            .indexes
+            .iter()
+            .cloned()
+            .map(pg_index_row_values)
+            .collect(),
         BootstrapCatalogKind::PgOpclass => rows
             .opclasses
             .iter()
@@ -131,7 +159,9 @@ pub(crate) fn parse_indkey(indkey: &str) -> Vec<i16> {
         .collect()
 }
 
-pub(crate) fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespaceRow, CatalogError> {
+pub(crate) fn namespace_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgNamespaceRow, CatalogError> {
     Ok(PgNamespaceRow {
         oid: expect_oid(&values[0])?,
         nspname: expect_text(&values[1])?,
@@ -140,8 +170,8 @@ pub(crate) fn namespace_row_from_values(values: Vec<Value>) -> Result<PgNamespac
 }
 
 pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
-    let relpersistence = expect_char(&values[7], "relpersistence")?;
-    let relkind = expect_char(&values[8], "relkind")?;
+    let relpersistence = expect_char(&values[8], "relpersistence")?;
+    let relkind = expect_char(&values[9], "relkind")?;
     Ok(PgClassRow {
         oid: expect_oid(&values[0])?,
         relname: expect_text(&values[1])?,
@@ -149,7 +179,8 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         reltype: expect_oid(&values[3])?,
         relowner: expect_oid(&values[4])?,
         relam: expect_oid(&values[5])?,
-        relfilenode: expect_oid(&values[6])?,
+        reltablespace: expect_oid(&values[6])?,
+        relfilenode: expect_oid(&values[7])?,
         relpersistence,
         relkind,
     })
@@ -218,7 +249,9 @@ pub(crate) fn pg_auth_members_row_from_values(
     })
 }
 
-pub(crate) fn pg_language_row_from_values(values: Vec<Value>) -> Result<PgLanguageRow, CatalogError> {
+pub(crate) fn pg_language_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgLanguageRow, CatalogError> {
     Ok(PgLanguageRow {
         oid: expect_oid(&values[0])?,
         lanname: expect_text(&values[1])?,
@@ -231,7 +264,9 @@ pub(crate) fn pg_language_row_from_values(values: Vec<Value>) -> Result<PgLangua
     })
 }
 
-pub(crate) fn pg_operator_row_from_values(values: Vec<Value>) -> Result<PgOperatorRow, CatalogError> {
+pub(crate) fn pg_operator_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgOperatorRow, CatalogError> {
     Ok(PgOperatorRow {
         oid: expect_oid(&values[0])?,
         oprname: expect_text(&values[1])?,
@@ -329,7 +364,9 @@ pub(crate) fn pg_constraint_row_from_values(
     })
 }
 
-pub(crate) fn pg_database_row_from_values(values: Vec<Value>) -> Result<PgDatabaseRow, CatalogError> {
+pub(crate) fn pg_database_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgDatabaseRow, CatalogError> {
     Ok(PgDatabaseRow {
         oid: expect_oid(&values[0])?,
         datname: expect_text(&values[1])?,
@@ -399,7 +436,9 @@ pub(crate) fn pg_opclass_row_from_values(values: Vec<Value>) -> Result<PgOpclass
     })
 }
 
-pub(crate) fn pg_opfamily_row_from_values(values: Vec<Value>) -> Result<PgOpfamilyRow, CatalogError> {
+pub(crate) fn pg_opfamily_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgOpfamilyRow, CatalogError> {
     Ok(PgOpfamilyRow {
         oid: expect_oid(&values[0])?,
         opfmethod: expect_oid(&values[1])?,
@@ -469,6 +508,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.reltype as i32),
         Value::Int32(row.relowner as i32),
         Value::Int32(row.relam as i32),
+        Value::Int32(row.reltablespace as i32),
         Value::Int32(row.relfilenode as i32),
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
@@ -782,8 +822,12 @@ fn decode_builtin_sql_type(oid: u32) -> Option<SqlType> {
 
 fn expect_oid(value: &Value) -> Result<u32, CatalogError> {
     match value {
-        Value::Int64(v) => u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value")),
-        Value::Int32(v) => u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value")),
+        Value::Int64(v) => {
+            u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value"))
+        }
+        Value::Int32(v) => {
+            u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value"))
+        }
         _ => Err(CatalogError::Corrupt("expected oid value")),
     }
 }

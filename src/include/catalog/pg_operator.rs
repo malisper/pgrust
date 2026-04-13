@@ -40,7 +40,7 @@ pub fn pg_operator_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("oprname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("oprname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("oprnamespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("oprowner", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("oprkind", SqlType::new(SqlTypeKind::InternalChar), false),

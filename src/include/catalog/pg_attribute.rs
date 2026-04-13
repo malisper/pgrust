@@ -2,7 +2,7 @@ use super::{
     pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc, pg_auth_members_desc,
     pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc, pg_constraint_desc,
     pg_database_desc, pg_depend_desc, pg_index_desc, pg_language_desc, pg_namespace_desc,
-    pg_opclass_desc, pg_opfamily_desc, pg_operator_desc, pg_proc_desc, pg_tablespace_desc,
+    pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc, pg_tablespace_desc,
     pg_type_desc,
 };
 use crate::backend::catalog::catalog::column_desc;
@@ -16,17 +16,18 @@ use crate::include::catalog::{
     INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID,
-    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    OIDVECTOR_TYPE_OID,
-    PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_AM_RELATION_OID, PG_ATTRDEF_RELATION_OID,
+    NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
+    OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PG_AM_RELATION_OID,
+    PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID,
     PG_ATTRIBUTE_RELATION_OID, PG_AUTH_MEMBERS_RELATION_OID, PG_AUTHID_RELATION_OID,
     PG_CAST_RELATION_OID, PG_CLASS_RELATION_OID, PG_COLLATION_RELATION_OID,
     PG_CONSTRAINT_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPEND_RELATION_OID,
-    PG_INDEX_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID,
-    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TABLESPACE_RELATION_OID, PG_TYPE_RELATION_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    PG_INDEX_RELATION_OID, PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID,
+    PG_NODE_TREE_TYPE_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_TABLESPACE_RELATION_OID,
+    PG_TYPE_RELATION_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
+    VARCHAR_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +45,7 @@ pub fn pg_attribute_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("attrelid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc("attname", SqlType::new(SqlTypeKind::Text), false),
+            column_desc("attname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("atttypid", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("attnum", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("attnotnull", SqlType::new(SqlTypeKind::Bool), false),
@@ -104,7 +105,10 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
         &pg_tablespace_desc(),
     ));
     rows.extend(attribute_rows_for_desc(PG_AM_RELATION_OID, &pg_am_desc()));
-    rows.extend(attribute_rows_for_desc(PG_AMOP_RELATION_OID, &pg_amop_desc()));
+    rows.extend(attribute_rows_for_desc(
+        PG_AMOP_RELATION_OID,
+        &pg_amop_desc(),
+    ));
     rows.extend(attribute_rows_for_desc(
         PG_AMPROC_RELATION_OID,
         &pg_amproc_desc(),
@@ -170,6 +174,8 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::InternalChar, true) => INTERNAL_CHAR_ARRAY_TYPE_OID,
         (SqlTypeKind::Int8, false) => INT8_TYPE_OID,
         (SqlTypeKind::Int8, true) => INT8_ARRAY_TYPE_OID,
+        (SqlTypeKind::Name, false) => NAME_TYPE_OID,
+        (SqlTypeKind::Name, true) => NAME_ARRAY_TYPE_OID,
         (SqlTypeKind::Int2, false) => INT2_TYPE_OID,
         (SqlTypeKind::Int2, true) => INT2_ARRAY_TYPE_OID,
         (SqlTypeKind::Int2Vector, false) => INT2VECTOR_TYPE_OID,
@@ -213,7 +219,7 @@ mod tests {
     #[test]
     fn bootstrap_pg_attribute_rows_cover_core_catalog_columns() {
         let rows = bootstrap_pg_attribute_rows();
-        assert_eq!(rows.len(), 191);
+        assert_eq!(rows.len(), 192);
         assert!(rows.iter().any(|row| {
             row.attrelid == PG_CLASS_RELATION_OID
                 && row.attname == "relkind"

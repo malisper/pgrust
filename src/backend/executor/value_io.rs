@@ -531,6 +531,7 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             Ok(Value::Bool(bytes[0] != 0))
         }
         SqlTypeKind::Text
+        | SqlTypeKind::Name
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Timestamp

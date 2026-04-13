@@ -43,6 +43,7 @@ pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
     match lowered.as_str() {
         "int2vector" => return Ok(SqlType::new(SqlTypeKind::Int2Vector)),
         "oidvector" => return Ok(SqlType::new(SqlTypeKind::OidVector)),
+        "name" => return Ok(SqlType::new(SqlTypeKind::Name)),
         "pg_node_tree" => return Ok(SqlType::new(SqlTypeKind::PgNodeTree)),
         _ => {}
     }
@@ -809,7 +810,10 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
                 predicate = Some(build_expr(expr)?);
             }
             Rule::create_index_with_clause => {
-                for option in part.into_inner().filter(|inner| inner.as_rule() == Rule::reloption) {
+                for option in part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::reloption)
+                {
                     options.push(build_reloption(option)?);
                 }
             }
@@ -1180,6 +1184,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "int4",
         SqlTypeKind::Int8 => "int8",
+        SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
         SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",
