@@ -1,15 +1,15 @@
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible;
+use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::rowcodec::{
     namespace_row_from_values, pg_am_row_from_values, pg_amop_row_from_values,
     pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
     pg_class_row_from_values, pg_collation_row_from_values, pg_index_row_from_values,
     pg_opclass_row_from_values, pg_opfamily_row_from_values, pg_type_row_from_values,
 };
-use crate::backend::catalog::catalog::column_desc;
-use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
@@ -412,9 +412,9 @@ pub fn index_relation_oids_for_heap(
         vec![eq_key(1, oid_value(relation_oid))],
         pg_index_row_from_values,
     )
-        .into_iter()
-        .map(|row| row.indexrelid)
-        .collect()
+    .into_iter()
+    .map(|row| row.indexrelid)
+    .collect()
 }
 
 pub fn relation_entry_by_oid(
@@ -465,15 +465,21 @@ pub fn relation_entry_by_oid(
                 },
                 !attr.attnotnull,
             );
+            desc.storage.attlen = attr.attlen;
+            desc.storage.attalign = attr.attalign;
+            desc.storage.attstorage = attr.attstorage;
+            desc.storage.attcompression = attr.attcompression;
             if let Some(attrdef) = attrdefs
                 .iter()
                 .find(|attrdef| attrdef.adrelid == relation_oid && attrdef.adnum == attr.attnum)
             {
                 desc.attrdef_oid = Some(attrdef.oid);
                 desc.default_expr = Some(attrdef.adbin.clone());
-                desc.missing_default_value =
-                    crate::backend::parser::derive_literal_default_value(&attrdef.adbin, desc.sql_type)
-                        .ok();
+                desc.missing_default_value = crate::backend::parser::derive_literal_default_value(
+                    &attrdef.adbin,
+                    desc.sql_type,
+                )
+                .ok();
             }
             Some(desc)
         })
@@ -527,6 +533,7 @@ pub fn relation_entry_by_oid(
         relation_oid: class.oid,
         namespace_oid: class.relnamespace,
         row_type_oid: class.reltype,
+        reltoastrelid: class.reltoastrelid,
         relpersistence: class.relpersistence,
         relkind: class.relkind,
         desc: crate::backend::executor::RelationDesc { columns },
@@ -648,12 +655,16 @@ pub fn relation_display_name(
         return Some(format!("{namespace}.{}", class.relname));
     }
     let search_path = db.effective_search_path(client_id, configured_search_path);
-    let first_match = search_path.iter().find_map(|schema| {
-        let namespace_oid = namespace_oid_for_name(db, client_id, txn_ctx, schema)?;
-        let row = class_row_by_name_namespace(db, client_id, txn_ctx, &class.relname, namespace_oid)?;
-        let visible_entry = relation_entry_by_oid(db, client_id, txn_ctx, row.oid)?;
-        Some((row, visible_entry))
-    }).and_then(|(row, visible_entry)| {
+    let first_match = search_path
+        .iter()
+        .find_map(|schema| {
+            let namespace_oid = namespace_oid_for_name(db, client_id, txn_ctx, schema)?;
+            let row =
+                class_row_by_name_namespace(db, client_id, txn_ctx, &class.relname, namespace_oid)?;
+            let visible_entry = relation_entry_by_oid(db, client_id, txn_ctx, row.oid)?;
+            Some((row, visible_entry))
+        })
+        .and_then(|(row, visible_entry)| {
             visible_entry
                 .relkind
                 .eq(&entry.relkind)
@@ -732,13 +743,18 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         ensure_type_rows(self.db, self.client_id, self.txn_ctx)
     }
 
-    fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<crate::backend::parser::BoundIndexRelation> {
+    fn index_relations_for_heap(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<crate::backend::parser::BoundIndexRelation> {
         index_relation_oids_for_heap(self.db, self.client_id, self.txn_ctx, relation_oid)
             .into_iter()
             .filter_map(|index_oid| {
-                let entry = relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
+                let entry =
+                    relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
                 let index_meta = entry.index.as_ref()?.clone();
-                let class = class_row_by_oid(self.db, self.client_id, self.txn_ctx, entry.relation_oid)?;
+                let class =
+                    class_row_by_oid(self.db, self.client_id, self.txn_ctx, entry.relation_oid)?;
                 Some(crate::backend::parser::BoundIndexRelation {
                     name: class.relname,
                     rel: entry.rel,

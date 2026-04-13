@@ -3,7 +3,7 @@ pub use crate::backend::catalog::state::{
 };
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::access::htup::AttributeAlign;
+use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();
@@ -28,6 +28,8 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
             name,
             attlen,
             attalign,
+            attstorage: default_attribute_storage(sql_type, attlen),
+            attcompression: default_attribute_compression(sql_type, attlen),
             nullable,
         },
         ty,
@@ -37,6 +39,46 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         default_expr: None,
         missing_default_value: None,
     }
+}
+
+fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage {
+    if attlen > 0 {
+        return AttributeStorage::Plain;
+    }
+
+    if sql_type.is_array {
+        return AttributeStorage::Extended;
+    }
+
+    match sql_type.kind {
+        SqlTypeKind::Name
+        | SqlTypeKind::Int2Vector
+        | SqlTypeKind::OidVector
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::InternalChar
+        | SqlTypeKind::PgNodeTree => AttributeStorage::Plain,
+        SqlTypeKind::Bit
+        | SqlTypeKind::VarBit
+        | SqlTypeKind::Bytea
+        | SqlTypeKind::Varchar
+        | SqlTypeKind::Char
+        | SqlTypeKind::Numeric
+        | SqlTypeKind::Json
+        | SqlTypeKind::Jsonb
+        | SqlTypeKind::JsonPath
+        | SqlTypeKind::Text => AttributeStorage::Extended,
+        SqlTypeKind::Bool
+        | SqlTypeKind::Int2
+        | SqlTypeKind::Int4
+        | SqlTypeKind::Int8
+        | SqlTypeKind::Oid
+        | SqlTypeKind::Float4
+        | SqlTypeKind::Float8 => AttributeStorage::Plain,
+    }
+}
+
+fn default_attribute_compression(_sql_type: SqlType, _attlen: i16) -> AttributeCompression {
+    AttributeCompression::Default
 }
 
 pub fn allocate_relation_object_oids(desc: &mut RelationDesc, next_oid: &mut u32) {

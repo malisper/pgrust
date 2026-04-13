@@ -10,7 +10,9 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         relam: relam_for_relkind('r'),
         reltablespace: 0,
         relfilenode: 0,
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relnatts: 0,
     }
 }
