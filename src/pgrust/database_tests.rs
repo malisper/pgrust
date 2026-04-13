@@ -120,6 +120,92 @@ fn temp_dir(label: &str) -> PathBuf {
     p
 }
 
+fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
+    match db.execute(client_id, sql).unwrap() {
+        StatementResult::Query { rows, .. } => rows,
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
+    match db.execute(client_id, &format!("explain {sql}")).unwrap() {
+        StatementResult::Query { rows, .. } => rows
+            .into_iter()
+            .map(|row| match row.first() {
+                Some(Value::Text(text)) => text.to_string(),
+                other => panic!("expected explain text row, got {:?}", other),
+            })
+            .collect(),
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn relfilenode_for(db: &Database, client_id: u32, relname: &str) -> i64 {
+    let rows = query_rows(
+        db,
+        client_id,
+        &format!("select relfilenode from pg_class where relname = '{relname}'"),
+    );
+    match rows.as_slice() {
+        [row] => match row.first() {
+            Some(Value::Int32(value)) => i64::from(*value),
+            Some(Value::Int64(value)) => *value,
+            other => panic!("expected relfilenode integer, got {:?}", other),
+        },
+        other => panic!("expected one relfilenode row, got {:?}", other),
+    }
+}
+
+fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
+    let relfilenode = relfilenode_for(db, client_id, index_name);
+    let lines = explain_lines(db, client_id, sql);
+    assert!(
+        lines.iter().any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
+        "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
+    );
+}
+
+fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_name: &str) {
+    let relfilenode = relfilenode_for(db, client_id, heap_name);
+    let lines = explain_lines(db, client_id, sql);
+    assert!(
+        lines.iter().any(|line| line.contains(&format!("Seq Scan on rel {relfilenode}"))),
+        "expected EXPLAIN to use seq scan on {heap_name} (relfilenode {relfilenode}), got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("Index Scan")),
+        "expected no index scan, got {lines:?}"
+    );
+}
+
+fn setup_index_matrix_db(label: &str) -> Database {
+    let base = temp_dir(label);
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table items (a int4 not null, b int4 not null, c int4 not null, note text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into items values \
+         (1, 10, 100, 'a1'), \
+         (1, 20, 200, 'a2'), \
+         (2, 15, 100, 'b1'), \
+         (2, 25, 200, 'b2'), \
+         (2, 35, 300, 'b3'), \
+         (3, 30, 100, 'c1')",
+    )
+    .unwrap();
+    db.execute(1, "create index items_a_idx on items (a)").unwrap();
+    db.execute(1, "create index items_ab_idx on items (a, b)")
+        .unwrap();
+    db.execute(1, "create index items_b_idx on items (b)").unwrap();
+    db.execute(1, "create index items_ba_idx on items (b, a)")
+        .unwrap();
+    db
+}
+
 #[test]
 fn single_thread_create_insert_select() {
     let base = temp_dir("single_thread");
@@ -884,6 +970,323 @@ fn create_index_respects_maintenance_work_mem_budget() {
         }
         other => panic!("expected maintenance_work_mem build failure, got {:?}", other),
     }
+}
+
+#[test]
+fn index_matrix_equality_search_uses_single_column_index() {
+    let db = setup_index_matrix_db("index_matrix_eq_search");
+    assert_explain_uses_index(&db, 1, "select note from items where a = 2", "items_a_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where a = 2 order by note"),
+        vec![
+            vec![Value::Text("b1".into())],
+            vec![Value::Text("b2".into())],
+            vec![Value::Text("b3".into())],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_equality_plus_range_uses_multicol_index() {
+    let db = setup_index_matrix_db("index_matrix_eq_range");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where a = 2 and b >= 25",
+        "items_ab_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where a = 2 and b >= 25 order by b"),
+        vec![
+            vec![Value::Text("b2".into())],
+            vec![Value::Text("b3".into())],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_order_only_uses_forward_index_scan() {
+    let db = setup_index_matrix_db("index_matrix_order_forward");
+    assert_explain_uses_index(&db, 1, "select a, b from items order by a", "items_a_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from items order by a"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(20)],
+            vec![Value::Int32(2), Value::Int32(15)],
+            vec![Value::Int32(2), Value::Int32(25)],
+            vec![Value::Int32(2), Value::Int32(35)],
+            vec![Value::Int32(3), Value::Int32(30)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_order_only_uses_backward_index_scan() {
+    let db = setup_index_matrix_db("index_matrix_order_backward");
+    assert_explain_uses_index(&db, 1, "select a from items order by a desc", "items_a_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select a from items order by a desc"),
+        vec![
+            vec![Value::Int32(3)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(1)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_non_indexed_predicate_falls_back_to_seqscan() {
+    let db = setup_index_matrix_db("index_matrix_non_indexed");
+    assert_explain_uses_seqscan(&db, 1, "select note from items where c = 100", "items");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where c = 100 order by note"),
+        vec![
+            vec![Value::Text("a1".into())],
+            vec![Value::Text("b1".into())],
+            vec![Value::Text("c1".into())],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_or_predicate_falls_back_to_seqscan() {
+    let db = setup_index_matrix_db("index_matrix_or");
+    assert_explain_uses_seqscan(
+        &db,
+        1,
+        "select note from items where a = 1 or a = 2",
+        "items",
+    );
+}
+
+#[test]
+fn index_matrix_mixed_direction_order_falls_back_to_seqscan() {
+    let db = setup_index_matrix_db("index_matrix_mixed_order");
+    assert_explain_uses_seqscan(&db, 1, "select a, b from items order by a, b desc", "items");
+}
+
+#[test]
+fn index_matrix_picks_longest_qual_prefix_index() {
+    let db = setup_index_matrix_db("index_matrix_longest_prefix");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where a = 2 and b = 25",
+        "items_ab_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where a = 2 and b = 25"),
+        vec![vec![Value::Text("b2".into())]]
+    );
+}
+
+#[test]
+fn index_matrix_prefers_qual_index_over_order_only_index() {
+    let db = setup_index_matrix_db("index_matrix_qual_over_order");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select a, b from items where b = 30 order by a",
+        "items_ba_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from items where b = 30 order by a"),
+        vec![vec![Value::Int32(3), Value::Int32(30)]]
+    );
+}
+
+#[test]
+fn index_matrix_prefers_order_removing_index_when_prefix_ties() {
+    let db = setup_index_matrix_db("index_matrix_order_tiebreak");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select a, b from items where a = 2 order by b",
+        "items_ab_idx",
+    );
+    let lines = explain_lines(&db, 1, "select a, b from items where a = 2 order by b");
+    assert!(
+        !lines.iter().any(|line| line.contains("Sort")),
+        "expected order by removal after choosing items_ab_idx, got {lines:?}"
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from items where a = 2 order by b"),
+        vec![
+            vec![Value::Int32(2), Value::Int32(15)],
+            vec![Value::Int32(2), Value::Int32(25)],
+            vec![Value::Int32(2), Value::Int32(35)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_residual_filter_still_returns_correct_rows() {
+    let db = setup_index_matrix_db("index_matrix_residual");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where a = 2 and c = 200",
+        "items_a_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where a = 2 and c = 200"),
+        vec![vec![Value::Text("b2".into())]]
+    );
+}
+
+#[test]
+fn index_matrix_equality_search_on_second_column_uses_single_column_index() {
+    let db = setup_index_matrix_db("index_matrix_eq_search_b");
+    assert_explain_uses_index(&db, 1, "select note from items where b = 25", "items_b_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where b = 25"),
+        vec![vec![Value::Text("b2".into())]]
+    );
+}
+
+#[test]
+fn index_matrix_second_column_equality_plus_range_uses_ba_index() {
+    let db = setup_index_matrix_db("index_matrix_eq_range_ba");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where b = 25 and a >= 2",
+        "items_ba_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where b = 25 and a >= 2"),
+        vec![vec![Value::Text("b2".into())]]
+    );
+}
+
+#[test]
+fn index_matrix_range_only_on_first_column_uses_index() {
+    let db = setup_index_matrix_db("index_matrix_range_only_first");
+    assert_explain_uses_index(&db, 1, "select a, b from items where a >= 2 order by a", "items_a_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from items where a >= 2 order by a, b"),
+        vec![
+            vec![Value::Int32(2), Value::Int32(15)],
+            vec![Value::Int32(2), Value::Int32(25)],
+            vec![Value::Int32(2), Value::Int32(35)],
+            vec![Value::Int32(3), Value::Int32(30)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_order_by_two_columns_uses_matching_multicolumn_index() {
+    let db = setup_index_matrix_db("index_matrix_order_two_cols");
+    assert_explain_uses_index(&db, 1, "select a, b from items order by a, b", "items_ab_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from items order by a, b"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(20)],
+            vec![Value::Int32(2), Value::Int32(15)],
+            vec![Value::Int32(2), Value::Int32(25)],
+            vec![Value::Int32(2), Value::Int32(35)],
+            vec![Value::Int32(3), Value::Int32(30)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_order_by_two_columns_uses_matching_ba_index() {
+    let db = setup_index_matrix_db("index_matrix_order_two_cols_ba");
+    assert_explain_uses_index(&db, 1, "select a, b from items order by b, a", "items_ba_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from items order by b, a"),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Int32(15)],
+            vec![Value::Int32(1), Value::Int32(20)],
+            vec![Value::Int32(2), Value::Int32(25)],
+            vec![Value::Int32(3), Value::Int32(30)],
+            vec![Value::Int32(2), Value::Int32(35)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_order_by_second_column_desc_uses_backward_scan() {
+    let db = setup_index_matrix_db("index_matrix_order_b_desc");
+    assert_explain_uses_index(&db, 1, "select b from items order by b desc", "items_b_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select b from items order by b desc"),
+        vec![
+            vec![Value::Int32(35)],
+            vec![Value::Int32(30)],
+            vec![Value::Int32(25)],
+            vec![Value::Int32(20)],
+            vec![Value::Int32(15)],
+            vec![Value::Int32(10)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_order_by_non_indexed_column_falls_back_to_seqscan() {
+    let db = setup_index_matrix_db("index_matrix_order_c");
+    assert_explain_uses_seqscan(&db, 1, "select c from items order by c", "items");
+}
+
+#[test]
+fn index_matrix_expression_predicate_falls_back_to_seqscan() {
+    let db = setup_index_matrix_db("index_matrix_expression_predicate");
+    assert_explain_uses_seqscan(&db, 1, "select note from items where a + 1 = 3", "items");
+}
+
+#[test]
+fn index_matrix_equalities_on_multiple_indexes_tie_break_by_catalog_order() {
+    let db = setup_index_matrix_db("index_matrix_catalog_tiebreak");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where a = 2 and b = 25",
+        "items_ab_idx",
+    );
+}
+
+#[test]
+fn index_matrix_order_only_prefix_tie_breaks_by_catalog_order() {
+    let db = setup_index_matrix_db("index_matrix_order_prefix_tiebreak");
+    assert_explain_uses_index(&db, 1, "select b from items order by b", "items_b_idx");
+}
+
+#[test]
+fn index_matrix_equality_then_desc_order_uses_matching_multicolumn_index() {
+    let db = setup_index_matrix_db("index_matrix_eq_then_desc_order");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select b from items where a = 2 order by b desc",
+        "items_ab_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select b from items where a = 2 order by b desc"),
+        vec![
+            vec![Value::Int32(35)],
+            vec![Value::Int32(25)],
+            vec![Value::Int32(15)],
+        ]
+    );
+}
+
+#[test]
+fn index_matrix_insert_after_build_remains_queryable_via_index() {
+    let db = setup_index_matrix_db("index_matrix_insert_after_build");
+    db.execute(1, "insert into items values (4, 40, 400, 'd1')")
+        .unwrap();
+    assert_explain_uses_index(&db, 1, "select note from items where a = 4", "items_a_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where a = 4"),
+        vec![vec![Value::Text("d1".into())]]
+    );
 }
 
 #[test]
