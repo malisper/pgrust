@@ -1,10 +1,31 @@
+use crate::backend::catalog::catalog::{
+    Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions, column_desc,
+};
 use crate::backend::executor::RelationDesc;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::page::bufpage::MAXALIGN;
+use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::access::heaptoast::TOAST_TUPLE_THRESHOLD;
-use crate::include::access::htup::{AttributeStorage, SIZEOF_HEAP_TUPLE_HEADER};
+use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 pub use crate::include::catalog::toasting::{
     PG_TOAST_NAMESPACE, toast_index_name, toast_relation_name,
 };
+use crate::include::catalog::{
+    BTREE_AM_OID, DEPENDENCY_INTERNAL, INT4_BTREE_OPCLASS_OID, OID_BTREE_OPCLASS_OID,
+    PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, PgDependRow,
+};
+use crate::include::nodes::parsenodes::IndexColumnDef;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToastCatalogChanges {
+    pub parent_name: String,
+    pub old_parent: CatalogEntry,
+    pub new_parent: CatalogEntry,
+    pub toast_name: String,
+    pub toast_entry: CatalogEntry,
+    pub index_name: String,
+    pub index_entry: CatalogEntry,
+}
 
 fn bitmap_len(natts: usize) -> usize {
     natts.div_ceil(8)
@@ -84,12 +105,100 @@ pub fn relation_needs_toast_table(desc: &RelationDesc) -> bool {
     tuple_length > TOAST_TUPLE_THRESHOLD
 }
 
+fn toast_relation_desc() -> RelationDesc {
+    let mut chunk_id = column_desc("chunk_id", SqlType::new(SqlTypeKind::Oid), false);
+    chunk_id.storage.attstorage = AttributeStorage::Plain;
+    chunk_id.storage.attcompression = AttributeCompression::Default;
+
+    let mut chunk_seq = column_desc("chunk_seq", SqlType::new(SqlTypeKind::Int4), false);
+    chunk_seq.storage.attstorage = AttributeStorage::Plain;
+    chunk_seq.storage.attcompression = AttributeCompression::Default;
+
+    let mut chunk_data = column_desc("chunk_data", SqlType::new(SqlTypeKind::Bytea), false);
+    chunk_data.storage.attstorage = AttributeStorage::Plain;
+    chunk_data.storage.attcompression = AttributeCompression::Default;
+
+    RelationDesc {
+        columns: vec![chunk_id, chunk_seq, chunk_data],
+    }
+}
+
+pub fn new_relation_create_toast_table(
+    catalog: &mut Catalog,
+    relation_oid: u32,
+) -> Result<Option<ToastCatalogChanges>, CatalogError> {
+    let Some((parent_name, parent)) = catalog
+        .entries()
+        .find(|(_, entry)| entry.relation_oid == relation_oid)
+        .map(|(name, entry)| (name.to_string(), entry.clone()))
+    else {
+        return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+    };
+
+    if parent.relkind != 'r'
+        || parent.relpersistence == 't'
+        || parent.reltoastrelid != 0
+        || !relation_needs_toast_table(&parent.desc)
+    {
+        return Ok(None);
+    }
+
+    let toast_name = format!("{PG_TOAST_NAMESPACE}.{}", toast_relation_name(relation_oid));
+    let toast_entry = catalog.create_table_with_relkind(
+        toast_name.clone(),
+        toast_relation_desc(),
+        PG_TOAST_NAMESPACE_OID,
+        parent.rel.db_oid,
+        parent.relpersistence,
+        't',
+    )?;
+    catalog.add_depend_row(PgDependRow {
+        classid: PG_CLASS_RELATION_OID,
+        objid: toast_entry.relation_oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: relation_oid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_INTERNAL,
+    });
+
+    let index_name = format!("{PG_TOAST_NAMESPACE}.{}", toast_index_name(relation_oid));
+    let toast_index = catalog.create_index_for_relation_with_options(
+        index_name.clone(),
+        toast_entry.relation_oid,
+        true,
+        &[IndexColumnDef::from("chunk_id"), IndexColumnDef::from("chunk_seq")],
+        &CatalogIndexBuildOptions {
+            am_oid: BTREE_AM_OID,
+            indclass: vec![OID_BTREE_OPCLASS_OID, INT4_BTREE_OPCLASS_OID],
+            indcollation: vec![0, 0],
+            indoption: vec![0, 0],
+        },
+    )?;
+    let (_index_name, _old_index, index_entry) =
+        catalog.set_index_ready_valid(toast_index.relation_oid, true, true)?;
+    let (_updated_name, old_parent, new_parent) =
+        catalog.set_relation_toast_relid(relation_oid, toast_entry.relation_oid)?;
+
+    Ok(Some(ToastCatalogChanges {
+        parent_name,
+        old_parent,
+        new_parent,
+        toast_name,
+        toast_entry,
+        index_name,
+        index_entry,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::catalog::catalog::column_desc;
+    use crate::backend::catalog::Catalog;
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::catalog::{DEPENDENCY_INTERNAL, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID};
 
     #[test]
     fn unlimited_text_column_needs_toast() {
@@ -113,5 +222,44 @@ mod tests {
             )],
         };
         assert!(!relation_needs_toast_table(&desc));
+    }
+
+    #[test]
+    fn new_relation_create_toast_table_creates_heap_and_index() {
+        let mut catalog = Catalog::default();
+        let table = catalog
+            .create_table(
+                "docs",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("payload", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+
+        let changes = new_relation_create_toast_table(&mut catalog, table.relation_oid)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(changes.new_parent.reltoastrelid, changes.toast_entry.relation_oid);
+        assert_eq!(changes.toast_entry.relkind, 't');
+        assert_eq!(changes.toast_entry.namespace_oid, PG_TOAST_NAMESPACE_OID);
+        assert_eq!(
+            changes
+                .index_entry
+                .index_meta
+                .as_ref()
+                .map(|meta| (meta.indkey.clone(), meta.indisunique, meta.indisready, meta.indisvalid)),
+            Some((vec![1, 2], true, true, true))
+        );
+        assert!(catalog.depend_rows().iter().any(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objid == changes.toast_entry.relation_oid
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == table.relation_oid
+                && row.deptype == DEPENDENCY_INTERNAL
+        }));
     }
 }

@@ -167,10 +167,22 @@ impl Catalog {
     pub fn create_table_with_options(
         &mut self,
         name: impl Into<String>,
+        desc: RelationDesc,
+        namespace_oid: u32,
+        db_oid: u32,
+        relpersistence: char,
+    ) -> Result<CatalogEntry, CatalogError> {
+        self.create_table_with_relkind(name, desc, namespace_oid, db_oid, relpersistence, 'r')
+    }
+
+    pub(crate) fn create_table_with_relkind(
+        &mut self,
+        name: impl Into<String>,
         mut desc: RelationDesc,
         namespace_oid: u32,
         db_oid: u32,
         relpersistence: char,
+        relkind: char,
     ) -> Result<CatalogEntry, CatalogError> {
         let name = name.into().to_ascii_lowercase();
         if self.tables.contains_key(&name) {
@@ -180,7 +192,9 @@ impl Catalog {
         let relation_oid = self.next_oid;
         let row_type_oid = relation_oid.saturating_add(1);
         let mut next_oid = row_type_oid.saturating_add(1);
-        allocate_relation_object_oids(&mut desc, &mut next_oid);
+        if relkind == 'r' {
+            allocate_relation_object_oids(&mut desc, &mut next_oid);
+        }
 
         let entry = CatalogEntry {
             rel: RelFileLocator {
@@ -193,7 +207,7 @@ impl Catalog {
             row_type_oid,
             reltoastrelid: 0,
             relpersistence,
-            relkind: 'r',
+            relkind,
             desc,
             index_meta: None,
         };
@@ -252,7 +266,7 @@ impl Catalog {
             .get_by_oid(relation_oid)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if table.relkind != 'r' {
+        if table.relkind != 'r' && table.relkind != 't' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let mut indkey = Vec::with_capacity(columns.len());
@@ -451,6 +465,34 @@ impl Catalog {
         Ok((name, old_entry, new_entry))
     }
 
+    pub fn set_relation_toast_relid(
+        &mut self,
+        relation_oid: u32,
+        reltoastrelid: u32,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        entry.reltoastrelid = reltoastrelid;
+        let new_entry = entry.clone();
+        Ok((name, old_entry, new_entry))
+    }
+
     pub fn remove_by_oid(&mut self, relation_oid: u32) -> Option<(String, CatalogEntry)> {
         let name = self
             .tables
@@ -461,6 +503,14 @@ impl Catalog {
         self.depends
             .retain(|row| row.objid != relation_oid && row.refobjid != relation_oid);
         Some((name, entry))
+    }
+
+    pub fn add_depend_row(&mut self, row: PgDependRow) {
+        if self.depends.iter().any(|existing| existing == &row) {
+            return;
+        }
+        self.depends.push(row);
+        sort_pg_depend_rows(&mut self.depends);
     }
 
     fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {
