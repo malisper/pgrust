@@ -36,7 +36,8 @@ pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_string::{
     eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
     eval_length_function, eval_like, eval_lower_function, eval_md5_function,
-    eval_position_function, eval_regexp_like, eval_regexp_replace, eval_repeat_function,
+    eval_position_function, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
+    eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr, eval_repeat_function,
     eval_text_substring, eval_to_char_function, eval_to_number_function, eval_trim_function,
 };
 use super::node_types::*;
@@ -524,6 +525,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
+        BuiltinScalarFunction::RegexpCount => eval_regexp_count(&values),
+        BuiltinScalarFunction::RegexpInstr => eval_regexp_instr(&values),
+        BuiltinScalarFunction::RegexpSubstr => eval_regexp_substr(&values),
+        BuiltinScalarFunction::RegexpSplitToArray => eval_regexp_split_to_array(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
@@ -778,6 +783,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
         BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
+        BuiltinScalarFunction::RegexpCount => eval_regexp_count(&values),
+        BuiltinScalarFunction::RegexpInstr => eval_regexp_instr(&values),
+        BuiltinScalarFunction::RegexpSubstr => eval_regexp_substr(&values),
+        BuiltinScalarFunction::RegexpSplitToArray => eval_regexp_split_to_array(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),

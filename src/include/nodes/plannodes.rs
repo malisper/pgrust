@@ -147,6 +147,10 @@ pub enum BuiltinScalarFunction {
     RTrim,
     RegexpLike,
     RegexpReplace,
+    RegexpCount,
+    RegexpInstr,
+    RegexpSubstr,
+    RegexpSplitToArray,
     Left,
     Repeat,
     Length,
@@ -233,6 +237,12 @@ pub enum JsonTableFunction {
     JsonbArrayElementsText,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegexTableFunction {
+    Matches,
+    SplitToTable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetReturningCall {
     GenerateSeries {
@@ -250,6 +260,11 @@ pub enum SetReturningCall {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    RegexTableFunction {
+        kind: RegexTableFunction,
+        args: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
 }
 
 impl SetReturningCall {
@@ -257,7 +272,8 @@ impl SetReturningCall {
         match self {
             SetReturningCall::GenerateSeries { output, .. } => std::slice::from_ref(output),
             SetReturningCall::Unnest { output_columns, .. }
-            | SetReturningCall::JsonTableFunction { output_columns, .. } => output_columns,
+            | SetReturningCall::JsonTableFunction { output_columns, .. }
+            | SetReturningCall::RegexTableFunction { output_columns, .. } => output_columns,
         }
     }
 }

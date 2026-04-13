@@ -202,14 +202,20 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Repeat)
                 | Some(BuiltinScalarFunction::Md5)
                 | Some(BuiltinScalarFunction::ConvertFrom)
+                | Some(BuiltinScalarFunction::RegexpSubstr)
                 | Some(BuiltinScalarFunction::RegexpReplace)
                 | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::Length)
+                | Some(BuiltinScalarFunction::RegexpCount)
+                | Some(BuiltinScalarFunction::RegexpInstr)
                 | Some(BuiltinScalarFunction::JsonArrayLength)
                 | Some(BuiltinScalarFunction::JsonbArrayLength)
                 | Some(BuiltinScalarFunction::Scale)
                 | Some(BuiltinScalarFunction::MinScale)
                 | Some(BuiltinScalarFunction::WidthBucket) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::RegexpSplitToArray) => {
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+                }
                 Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => {
                     function_arg_values(args).next().map_or(SqlType::new(SqlTypeKind::Text), |arg| {

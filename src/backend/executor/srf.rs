@@ -1,4 +1,5 @@
 use super::expr_json::eval_json_table_function;
+use super::expr_string::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
 use crate::backend::parser::SqlTypeKind;
 use crate::include::nodes::datum::NumericValue;
@@ -18,6 +19,9 @@ pub(crate) fn eval_set_returning_call(
         SetReturningCall::Unnest { args, .. } => eval_unnest(args, slot, ctx),
         SetReturningCall::JsonTableFunction { kind, args, .. } => {
             eval_json_table_function(*kind, args, slot, ctx)
+        }
+        SetReturningCall::RegexTableFunction { kind, args, .. } => {
+            eval_regex_table_function(*kind, args, slot, ctx)
         }
     }
 }
@@ -70,7 +74,37 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
                 "jsonb_array_elements_text"
             }
         },
+        SetReturningCall::RegexTableFunction { kind, .. } => match kind {
+            crate::include::nodes::plannodes::RegexTableFunction::Matches => "regexp_matches",
+            crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+                "regexp_split_to_table"
+            }
+        },
     }
+}
+
+fn eval_regex_table_function(
+    kind: crate::include::nodes::plannodes::RegexTableFunction,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rows = match kind {
+        crate::include::nodes::plannodes::RegexTableFunction::Matches => {
+            eval_regexp_matches_rows(&values)?
+        }
+        crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+            eval_regexp_split_to_table_rows(&values)?
+        }
+    };
+    Ok(rows
+        .into_iter()
+        .map(|value| TupleSlot::virtual_row(vec![value]))
+        .collect())
 }
 
 fn eval_generate_series(

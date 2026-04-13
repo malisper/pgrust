@@ -1442,23 +1442,65 @@ fn bind_scalar_function_call(
                 })
                 .collect(),
         }),
+        BuiltinScalarFunction::RegexpCount => Ok(Expr::FuncCall {
+            func,
+            args: bind_regex_count_args(
+                &bound_args,
+                args,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
+        }),
+        BuiltinScalarFunction::RegexpInstr => Ok(Expr::FuncCall {
+            func,
+            args: bind_regex_instr_args(
+                &bound_args,
+                args,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
+        }),
+        BuiltinScalarFunction::RegexpSubstr => Ok(Expr::FuncCall {
+            func,
+            args: bind_regex_substr_args(
+                &bound_args,
+                args,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
+        }),
         BuiltinScalarFunction::RegexpReplace => Ok(Expr::FuncCall {
             func,
-            args: args
-                .iter()
-                .enumerate()
-                .map(|(idx, arg)| {
-                    let ty = infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                    coerce_bound_expr(bound_args[idx].clone(), ty, SqlType::new(SqlTypeKind::Text))
-                })
-                .collect(),
+            args: bind_regex_replace_args(
+                &bound_args,
+                args,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
+        }),
+        BuiltinScalarFunction::RegexpSplitToArray => Ok(Expr::FuncCall {
+            func,
+            args: bind_regex_split_to_array_args(
+                &bound_args,
+                args,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
         }),
         BuiltinScalarFunction::Md5 => {
             let arg_type = infer_sql_expr_type_with_ctes(
@@ -2169,4 +2211,172 @@ fn bind_scalar_function_call(
             args: bound_args,
         }),
     }
+}
+
+fn bind_regex_count_args(
+    bound_args: &[Expr],
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Vec<Expr> {
+    let mut out = Vec::with_capacity(args.len());
+    for (idx, arg) in args.iter().enumerate() {
+        let ty = infer_sql_expr_type_with_ctes(
+            arg,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        out.push(coerce_bound_expr(
+            bound_args[idx].clone(),
+            ty,
+            if idx == 2 {
+                SqlType::new(SqlTypeKind::Int4)
+            } else {
+                SqlType::new(SqlTypeKind::Text)
+            },
+        ));
+    }
+    out
+}
+
+fn bind_regex_instr_args(
+    bound_args: &[Expr],
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Vec<Expr> {
+    let mut out = Vec::with_capacity(args.len());
+    for (idx, arg) in args.iter().enumerate() {
+        let ty = infer_sql_expr_type_with_ctes(
+            arg,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        out.push(coerce_bound_expr(
+            bound_args[idx].clone(),
+            ty,
+            match idx {
+                2..=4 | 6 => SqlType::new(SqlTypeKind::Int4),
+                _ => SqlType::new(SqlTypeKind::Text),
+            },
+        ));
+    }
+    out
+}
+
+fn bind_regex_substr_args(
+    bound_args: &[Expr],
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Vec<Expr> {
+    let mut out = Vec::with_capacity(args.len());
+    for (idx, arg) in args.iter().enumerate() {
+        let ty = infer_sql_expr_type_with_ctes(
+            arg,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        out.push(coerce_bound_expr(
+            bound_args[idx].clone(),
+            ty,
+            match idx {
+                2 | 3 | 5 => SqlType::new(SqlTypeKind::Int4),
+                _ => SqlType::new(SqlTypeKind::Text),
+            },
+        ));
+    }
+    out
+}
+
+fn bind_regex_replace_args(
+    bound_args: &[Expr],
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Vec<Expr> {
+    let mut out = Vec::with_capacity(args.len());
+    let fourth_is_text = if args.len() == 4 {
+        let arg_type = infer_sql_expr_type_with_ctes(
+            &args[3],
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        !is_integer_family(arg_type)
+    } else {
+        false
+    };
+    for (idx, arg) in args.iter().enumerate() {
+        let ty = infer_sql_expr_type_with_ctes(
+            arg,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        out.push(coerce_bound_expr(
+            bound_args[idx].clone(),
+            ty,
+            match idx {
+                0..=2 => SqlType::new(SqlTypeKind::Text),
+                3 if fourth_is_text => SqlType::new(SqlTypeKind::Text),
+                3 | 4 => SqlType::new(SqlTypeKind::Int4),
+                _ => SqlType::new(SqlTypeKind::Text),
+            },
+        ));
+    }
+    out
+}
+
+fn bind_regex_split_to_array_args(
+    bound_args: &[Expr],
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Vec<Expr> {
+    let mut out = Vec::with_capacity(args.len());
+    for (idx, arg) in args.iter().enumerate() {
+        let ty = infer_sql_expr_type_with_ctes(
+            arg,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+        out.push(coerce_bound_expr(
+            bound_args[idx].clone(),
+            ty,
+            SqlType::new(SqlTypeKind::Text),
+        ));
+    }
+    out
 }
