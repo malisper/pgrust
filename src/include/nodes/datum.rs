@@ -1,5 +1,8 @@
 use crate::include::nodes::tsearch::{TsQuery, TsVector};
 use crate::pgrust::compact_string::CompactString;
+use crate::include::nodes::datetime::{
+    DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
+};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
@@ -277,6 +280,11 @@ pub enum Value {
     Int16(i16),
     Int32(i32),
     Int64(i64),
+    Date(DateADT),
+    Time(TimeADT),
+    TimeTz(TimeTzADT),
+    Timestamp(TimestampADT),
+    TimestampTz(TimestampTzADT),
     Bit(BitString),
     Bytea(Vec<u8>),
     Point(GeoPoint),
@@ -559,6 +567,11 @@ impl Value {
             Value::Int16(v) => Value::Int16(*v),
             Value::Int32(v) => Value::Int32(*v),
             Value::Int64(v) => Value::Int64(*v),
+            Value::Date(v) => Value::Date(*v),
+            Value::Time(v) => Value::Time(*v),
+            Value::TimeTz(v) => Value::TimeTz(*v),
+            Value::Timestamp(v) => Value::Timestamp(*v),
+            Value::TimestampTz(v) => Value::TimestampTz(*v),
             Value::Bit(v) => Value::Bit(v.clone()),
             Value::Bytea(v) => Value::Bytea(v.clone()),
             Value::Point(v) => Value::Point(v.clone()),
@@ -625,6 +638,11 @@ impl PartialEq for Value {
             (Value::Int16(a), Value::Int16(b)) => a == b,
             (Value::Int32(a), Value::Int32(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
+            (Value::Date(a), Value::Date(b)) => a == b,
+            (Value::Time(a), Value::Time(b)) => a == b,
+            (Value::TimeTz(a), Value::TimeTz(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
+            (Value::TimestampTz(a), Value::TimestampTz(b)) => a == b,
             (Value::Bit(a), Value::Bit(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::Point(a), Value::Point(b)) => {
@@ -709,6 +727,26 @@ impl std::hash::Hash for Value {
             }
             Value::Int64(v) => {
                 2u8.hash(state);
+                v.hash(state);
+            }
+            Value::Date(v) => {
+                15u8.hash(state);
+                v.hash(state);
+            }
+            Value::Time(v) => {
+                16u8.hash(state);
+                v.hash(state);
+            }
+            Value::TimeTz(v) => {
+                17u8.hash(state);
+                v.hash(state);
+            }
+            Value::Timestamp(v) => {
+                18u8.hash(state);
+                v.hash(state);
+            }
+            Value::TimestampTz(v) => {
+                19u8.hash(state);
                 v.hash(state);
             }
             Value::Bit(v) => {

@@ -1461,35 +1461,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 actual: format!("field selection .{field} is not bound yet"),
             });
         }
-        SqlExpr::Subscript { expr, index } => bind_geometry_subscript(
-            expr,
-            *index,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::GeometryUnaryOp { op, expr } => {
-            bind_geometry_unary_expr(*op, expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
-        }
-        SqlExpr::GeometryBinaryOp { op, left, right } => bind_geometry_binary_expr(
-            *op,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::FieldSelect { field, .. } => {
-            return Err(ParseError::UnexpectedToken {
-                expected: "scalar expression",
-                actual: format!("field selection .{field} is not bound yet"),
-            });
-        }
-        SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
+        SqlExpr::CurrentDate => Expr::CurrentDate,
+        SqlExpr::CurrentTime { precision } => Expr::CurrentTime {
+            precision: *precision,
+        },
+        SqlExpr::CurrentTimestamp { precision } => Expr::CurrentTimestamp {
+            precision: *precision,
+        },
+        SqlExpr::LocalTime { precision } => Expr::LocalTime {
+            precision: *precision,
+        },
+        SqlExpr::LocalTimestamp { precision } => Expr::LocalTimestamp {
+            precision: *precision,
+        },
     })
 }
 

@@ -365,6 +365,11 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TsQueryOr
             | BuiltinScalarFunction::TsVectorConcat => args.len() == 2,
             BuiltinScalarFunction::Random => args.is_empty(),
+            BuiltinScalarFunction::Now
+            | BuiltinScalarFunction::TransactionTimestamp
+            | BuiltinScalarFunction::StatementTimestamp
+            | BuiltinScalarFunction::ClockTimestamp
+            | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
@@ -896,6 +901,17 @@ fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarF
 fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFunction)] {
     &[
         ("random", BuiltinScalarFunction::Random),
+        ("now", BuiltinScalarFunction::Now),
+        (
+            "transaction_timestamp",
+            BuiltinScalarFunction::TransactionTimestamp,
+        ),
+        (
+            "statement_timestamp",
+            BuiltinScalarFunction::StatementTimestamp,
+        ),
+        ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
+        ("timeofday", BuiltinScalarFunction::TimeOfDay),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
@@ -1251,6 +1267,22 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         {
             by_func.push((BuiltinScalarFunction::ArrayLower, SqlType::new(SqlTypeKind::Int4)));
         }
+        for func in [
+            BuiltinScalarFunction::Now,
+            BuiltinScalarFunction::TransactionTimestamp,
+            BuiltinScalarFunction::StatementTimestamp,
+            BuiltinScalarFunction::ClockTimestamp,
+        ] {
+            if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                by_func.push((func, SqlType::new(SqlTypeKind::TimestampTz)));
+            }
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::TimeOfDay)
+        {
+            by_func.push((BuiltinScalarFunction::TimeOfDay, SqlType::new(SqlTypeKind::Text)));
+        }
         by_func
     })
 }
@@ -1264,6 +1296,11 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::TsQueryNot
             | BuiltinScalarFunction::TsVectorConcat
             | BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::Now
+            | BuiltinScalarFunction::TransactionTimestamp
+            | BuiltinScalarFunction::StatementTimestamp
+            | BuiltinScalarFunction::ClockTimestamp
+            | BuiltinScalarFunction::TimeOfDay
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb

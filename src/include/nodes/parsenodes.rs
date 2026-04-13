@@ -170,6 +170,7 @@ mod tests {
 pub enum Statement {
     Do(DoStatement),
     Explain(ExplainStatement),
+    Show(ShowStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
     CopyFrom(CopyFromStatement),
@@ -222,6 +223,11 @@ pub struct SetStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResetStatement {
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowStatement {
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -548,6 +554,9 @@ pub enum SqlTypeKind {
     Json,
     Jsonb,
     JsonPath,
+    Date,
+    Time,
+    TimeTz,
     TsVector,
     TsQuery,
     RegConfig,
@@ -562,6 +571,7 @@ pub enum SqlTypeKind {
     Line,
     Circle,
     Timestamp,
+    TimestampTz,
     PgNodeTree,
     InternalChar,
     Char,
@@ -638,6 +648,14 @@ impl SqlType {
         }
     }
 
+    pub const fn with_time_precision(kind: SqlTypeKind, precision: i32) -> Self {
+        Self {
+            kind,
+            typmod: precision,
+            is_array: false,
+        }
+    }
+
     pub const fn array_of(mut elem: SqlType) -> Self {
         elem.is_array = true;
         elem
@@ -675,6 +693,16 @@ impl SqlType {
             let precision = (packed >> 16) & 0xffff;
             let scale = ((packed & 0xffff) as i16) as i32;
             Some((precision, scale))
+        }
+    }
+
+    pub const fn time_precision(self) -> Option<i32> {
+        match self.kind {
+            SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz if self.typmod >= 0 => Some(self.typmod),
+            _ => None,
         }
     }
 }
@@ -847,5 +875,17 @@ pub enum SqlExpr {
         expr: Box<SqlExpr>,
         field: String,
     },
-    CurrentTimestamp,
+    CurrentDate,
+    CurrentTime {
+        precision: Option<i32>,
+    },
+    CurrentTimestamp {
+        precision: Option<i32>,
+    },
+    LocalTime {
+        precision: Option<i32>,
+    },
+    LocalTimestamp {
+        precision: Option<i32>,
+    },
 }

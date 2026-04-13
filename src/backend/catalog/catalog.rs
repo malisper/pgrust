@@ -12,6 +12,11 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Int16 => (2, AttributeAlign::Short),
         ScalarType::Int32 => (4, AttributeAlign::Int),
         ScalarType::Int64 => (8, AttributeAlign::Double),
+        ScalarType::Date => (4, AttributeAlign::Int),
+        ScalarType::Time => (8, AttributeAlign::Double),
+        ScalarType::TimeTz => (12, AttributeAlign::Double),
+        ScalarType::Timestamp => (8, AttributeAlign::Double),
+        ScalarType::TimestampTz => (8, AttributeAlign::Double),
         ScalarType::BitString => (-1, AttributeAlign::Int),
         ScalarType::Bytea => (-1, AttributeAlign::Int),
         ScalarType::Point => (16, AttributeAlign::Double),
@@ -62,7 +67,11 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         SqlTypeKind::Name
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
+        | SqlTypeKind::Date
+        | SqlTypeKind::Time
+        | SqlTypeKind::TimeTz
         | SqlTypeKind::Timestamp
+        | SqlTypeKind::TimestampTz
         | SqlTypeKind::InternalChar
         | SqlTypeKind::PgNodeTree => AttributeStorage::Plain,
         SqlTypeKind::Bit
@@ -140,15 +149,19 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::JsonPath => ScalarType::JsonPath,
+        SqlTypeKind::Date => ScalarType::Date,
+        SqlTypeKind::Time => ScalarType::Time,
+        SqlTypeKind::TimeTz => ScalarType::TimeTz,
         SqlTypeKind::TsVector => ScalarType::TsVector,
         SqlTypeKind::TsQuery => ScalarType::TsQuery,
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
         SqlTypeKind::Text
-        | SqlTypeKind::Timestamp
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::InternalChar
         | SqlTypeKind::Char
         | SqlTypeKind::Varchar => ScalarType::Text,
+        SqlTypeKind::Timestamp => ScalarType::Timestamp,
+        SqlTypeKind::TimestampTz => ScalarType::TimestampTz,
         SqlTypeKind::Bool => ScalarType::Bool,
     }
 }

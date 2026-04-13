@@ -45,6 +45,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
+        SqlExpr::Const(Value::Date(_)) => SqlType::new(SqlTypeKind::Date),
+        SqlExpr::Const(Value::Time(_)) => SqlType::new(SqlTypeKind::Time),
+        SqlExpr::Const(Value::TimeTz(_)) => SqlType::new(SqlTypeKind::TimeTz),
+        SqlExpr::Const(Value::Timestamp(_)) => SqlType::new(SqlTypeKind::Timestamp),
+        SqlExpr::Const(Value::TimestampTz(_)) => SqlType::new(SqlTypeKind::TimestampTz),
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
@@ -294,6 +299,13 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::ArrayNdims)
                 | Some(BuiltinScalarFunction::ArrayLower) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::ArrayDims) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::Now)
+                | Some(BuiltinScalarFunction::TransactionTimestamp)
+                | Some(BuiltinScalarFunction::StatementTimestamp)
+                | Some(BuiltinScalarFunction::ClockTimestamp) => {
+                    SqlType::new(SqlTypeKind::TimestampTz)
+                }
+                Some(BuiltinScalarFunction::TimeOfDay) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)
@@ -651,7 +663,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Subscript { .. }
         | SqlExpr::GeometryUnaryOp { .. }
         | SqlExpr::GeometryBinaryOp { .. } => unreachable!("handled before match"),
-        SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
+        SqlExpr::CurrentDate => SqlType::new(SqlTypeKind::Date),
+        SqlExpr::CurrentTime { precision } => precision
+            .map(|precision| SqlType::with_time_precision(SqlTypeKind::TimeTz, precision))
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::TimeTz)),
+        SqlExpr::CurrentTimestamp { precision } => precision
+            .map(|precision| SqlType::with_time_precision(SqlTypeKind::TimestampTz, precision))
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::TimestampTz)),
+        SqlExpr::LocalTime { precision } => precision
+            .map(|precision| SqlType::with_time_precision(SqlTypeKind::Time, precision))
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::Time)),
+        SqlExpr::LocalTimestamp { precision } => precision
+            .map(|precision| SqlType::with_time_precision(SqlTypeKind::Timestamp, precision))
+            .unwrap_or_else(|| SqlType::new(SqlTypeKind::Timestamp)),
     }
 }
 

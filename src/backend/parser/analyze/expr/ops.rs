@@ -121,6 +121,9 @@ fn supports_comparison_operator(
     {
         return true;
     }
+    if supports_builtin_datetime_comparison(op, left, right) {
+        return true;
+    }
     supports_array_comparison_operator(op, left, right)
 }
 
@@ -131,6 +134,21 @@ fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -
     left.is_array
         && right.is_array
         && left == right
+        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+}
+
+fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
+    !left.is_array
+        && !right.is_array
+        && left.kind == right.kind
+        && matches!(
+            left.kind,
+            SqlTypeKind::Date
+                | SqlTypeKind::Time
+                | SqlTypeKind::TimeTz
+                | SqlTypeKind::Timestamp
+                | SqlTypeKind::TimestampTz
+        )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
 }
 

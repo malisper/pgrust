@@ -39,8 +39,12 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
     match sql_type.kind {
         crate::backend::parser::SqlTypeKind::Name => Some(64 + crate::include::varatt::VARHDRSZ),
         crate::backend::parser::SqlTypeKind::InternalChar => Some(2),
-        crate::backend::parser::SqlTypeKind::Timestamp => {
-            Some(64 + crate::include::varatt::VARHDRSZ)
+        crate::backend::parser::SqlTypeKind::Date
+        | crate::backend::parser::SqlTypeKind::Time
+        | crate::backend::parser::SqlTypeKind::TimeTz
+        | crate::backend::parser::SqlTypeKind::Timestamp
+        | crate::backend::parser::SqlTypeKind::TimestampTz => {
+            Some(column.storage.attlen as usize)
         }
         crate::backend::parser::SqlTypeKind::Varchar
         | crate::backend::parser::SqlTypeKind::Char => sql_type

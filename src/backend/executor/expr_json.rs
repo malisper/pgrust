@@ -11,6 +11,7 @@ use crate::backend::executor::jsonpath::{
     parse_jsonpath, validate_jsonpath,
 };
 use crate::backend::executor::render_bit_text;
+use crate::backend::executor::render_datetime_value_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::include::nodes::plannodes::BuiltinScalarFunction;
 use crate::pgrust::compact_string::CompactString;
@@ -696,6 +697,13 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::JsonPath(v) => Ok(v.to_string()),
         Value::Json(v) => Ok(v.to_string()),
         Value::Jsonb(v) => render_jsonb_bytes(v),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            Ok(render_datetime_value_text(value).expect("datetime values render"))
+        }
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -1507,6 +1515,13 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         Value::InternalChar(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => SerdeJsonValue::String(
+            render_datetime_value_text(value).expect("datetime values render"),
+        ),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

@@ -280,6 +280,42 @@ impl CompiledTupleDecoder {
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
                             ])),
+                            ScalarType::Date => Value::Date(
+                                crate::include::nodes::datetime::DateADT(i32::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3],
+                                ])),
+                            ),
+                            ScalarType::Time => Value::Time(
+                                crate::include::nodes::datetime::TimeADT(i64::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                    bytes[6], bytes[7],
+                                ])),
+                            ),
+                            ScalarType::TimeTz => Value::TimeTz(
+                                crate::include::nodes::datetime::TimeTzADT {
+                                    time: crate::include::nodes::datetime::TimeADT(
+                                        i64::from_le_bytes([
+                                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+                                            bytes[5], bytes[6], bytes[7],
+                                        ]),
+                                    ),
+                                    offset_seconds: i32::from_le_bytes([
+                                        bytes[8], bytes[9], bytes[10], bytes[11],
+                                    ]),
+                                },
+                            ),
+                            ScalarType::Timestamp => Value::Timestamp(
+                                crate::include::nodes::datetime::TimestampADT(i64::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                    bytes[6], bytes[7],
+                                ])),
+                            ),
+                            ScalarType::TimestampTz => Value::TimestampTz(
+                                crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                    bytes[6], bytes[7],
+                                ])),
+                            ),
                             ScalarType::BitString => {
                                 values.push(Value::Null);
                                 continue;
@@ -674,6 +710,64 @@ fn decode_scalar_array_element(
             }
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
         }
+        ScalarType::Date => {
+            if bytes.len() != 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "date array element must be 4 bytes".into(),
+                });
+            }
+            Ok(Value::Date(crate::include::nodes::datetime::DateADT(
+                i32::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        ScalarType::Time => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "time array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Time(crate::include::nodes::datetime::TimeADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        ScalarType::TimeTz => {
+            if bytes.len() != 12 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "timetz array element must be 12 bytes".into(),
+                });
+            }
+            Ok(Value::TimeTz(crate::include::nodes::datetime::TimeTzADT {
+                time: crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(
+                    bytes[0..8].try_into().unwrap(),
+                )),
+                offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            }))
+        }
+        ScalarType::Timestamp => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "timestamp array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Timestamp(crate::include::nodes::datetime::TimestampADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        ScalarType::TimestampTz => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "timestamptz array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
         ScalarType::Float32 => {
             if bytes.len() != 4 {
                 return Err(ExecError::InvalidStorageValue {
@@ -861,6 +955,11 @@ fn scalar_type_for_sql_type(sql_type: crate::backend::parser::SqlType) -> Scalar
         SqlTypeKind::TsVector => ScalarType::TsVector,
         SqlTypeKind::TsQuery => ScalarType::TsQuery,
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
-        SqlTypeKind::Timestamp | SqlTypeKind::PgNodeTree => ScalarType::Text,
+        SqlTypeKind::Date => ScalarType::Date,
+        SqlTypeKind::Time => ScalarType::Time,
+        SqlTypeKind::TimeTz => ScalarType::TimeTz,
+        SqlTypeKind::Timestamp => ScalarType::Timestamp,
+        SqlTypeKind::TimestampTz => ScalarType::TimestampTz,
+        SqlTypeKind::PgNodeTree => ScalarType::Text,
     }
 }

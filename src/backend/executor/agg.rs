@@ -1,5 +1,5 @@
 use super::render_bit_text;
-use super::{compare_order_values, parse_numeric_text};
+use super::{compare_order_values, parse_numeric_text, render_datetime_value_text};
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
@@ -444,6 +444,11 @@ fn json_object_agg_key(key: &Value) -> String {
             }
         }
         Value::JsonPath(v) => v.to_string(),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => render_datetime_value_text(key).expect("datetime values render"),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -488,6 +493,14 @@ fn value_to_json_text(value: &Value) -> String {
         Value::InternalChar(v) => {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => serde_json::to_string(
+            &render_datetime_value_text(value).expect("datetime values render"),
+        )
+        .unwrap(),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

@@ -9,6 +9,7 @@ use super::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
+use super::expr_datetime::render_datetime_value_text;
 use super::node_types::*;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
@@ -60,6 +61,20 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(oid.to_le_bytes().to_vec()))
         }
         (ScalarType::Int64, Value::Int64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Date, Value::Date(v)) => Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec())),
+        (ScalarType::Time, Value::Time(v)) => Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec())),
+        (ScalarType::TimeTz, Value::TimeTz(v)) => {
+            let mut bytes = Vec::with_capacity(12);
+            bytes.extend_from_slice(&v.time.0.to_le_bytes());
+            bytes.extend_from_slice(&v.offset_seconds.to_le_bytes());
+            Ok(TupleValue::Bytes(bytes))
+        }
+        (ScalarType::Timestamp, Value::Timestamp(v)) => {
+            Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec()))
+        }
+        (ScalarType::TimestampTz, Value::TimestampTz(v)) => {
+            Ok(TupleValue::Bytes(v.0.to_le_bytes().to_vec()))
+        }
         (ScalarType::BitString, Value::Bit(v)) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
             bytes.extend_from_slice(&(v.bit_len as u32).to_le_bytes());
@@ -192,6 +207,11 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Date(v) => cast_value(Value::Date(*v), target),
+        Value::Time(v) => cast_value(Value::Time(*v), target),
+        Value::TimeTz(v) => cast_value(Value::TimeTz(*v), target),
+        Value::Timestamp(v) => cast_value(Value::Timestamp(*v), target),
+        Value::TimestampTz(v) => cast_value(Value::TimestampTz(*v), target),
         Value::Bit(bits) => match target.kind {
             SqlTypeKind::Bit | SqlTypeKind::VarBit => {
                 Ok(Value::Bit(coerce_bit_string(bits.clone(), target, false)?))
@@ -316,6 +336,69 @@ pub(crate) fn decode_value_with_toast(
                     details: "int8 must be exactly 8 bytes".into(),
                 },
             )?)))
+        }
+        ScalarType::Date => {
+            if column.storage.attlen != 4 || bytes.len() != 4 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Date(crate::include::nodes::datetime::DateADT(
+                i32::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        ScalarType::Time => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Time(crate::include::nodes::datetime::TimeADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        ScalarType::TimeTz => {
+            if column.storage.attlen != 12 || bytes.len() != 12 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::TimeTz(crate::include::nodes::datetime::TimeTzADT {
+                time: crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(
+                    bytes[0..8].try_into().unwrap(),
+                )),
+                offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            }))
+        }
+        ScalarType::Timestamp => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Timestamp(crate::include::nodes::datetime::TimestampADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        ScalarType::TimestampTz => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
         }
         ScalarType::BitString => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -650,6 +733,16 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
             Ok(oid.to_le_bytes().to_vec())
         }
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Date(v) => Ok(v.0.to_le_bytes().to_vec()),
+        Value::Time(v) => Ok(v.0.to_le_bytes().to_vec()),
+        Value::TimeTz(v) => {
+            let mut bytes = Vec::with_capacity(12);
+            bytes.extend_from_slice(&v.time.0.to_le_bytes());
+            bytes.extend_from_slice(&v.offset_seconds.to_le_bytes());
+            Ok(bytes)
+        }
+        Value::Timestamp(v) => Ok(v.0.to_le_bytes().to_vec()),
+        Value::TimestampTz(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::Bit(v) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
             bytes.extend_from_slice(&(v.bit_len as u32).to_le_bytes());
@@ -818,6 +911,64 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             }
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
         }
+        SqlTypeKind::Date => {
+            if bytes.len() != 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "date array element must be 4 bytes".into(),
+                });
+            }
+            Ok(Value::Date(crate::include::nodes::datetime::DateADT(
+                i32::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        SqlTypeKind::Time => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "time array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Time(crate::include::nodes::datetime::TimeADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        SqlTypeKind::TimeTz => {
+            if bytes.len() != 12 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "timetz array element must be 12 bytes".into(),
+                });
+            }
+            Ok(Value::TimeTz(crate::include::nodes::datetime::TimeTzADT {
+                time: crate::include::nodes::datetime::TimeADT(i64::from_le_bytes(
+                    bytes[0..8].try_into().unwrap(),
+                )),
+                offset_seconds: i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            }))
+        }
+        SqlTypeKind::Timestamp => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "timestamp array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Timestamp(crate::include::nodes::datetime::TimestampADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
+        SqlTypeKind::TimestampTz => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "timestamptz array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
+                i64::from_le_bytes(bytes.try_into().unwrap()),
+            )))
+        }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
             let width = if matches!(element_type.kind, SqlTypeKind::Float4) {
                 4
@@ -974,7 +1125,6 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
         | SqlTypeKind::Name
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
-        | SqlTypeKind::Timestamp
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::InternalChar
         | SqlTypeKind::Char
@@ -1031,6 +1181,14 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
+            Value::Date(_)
+            | Value::Time(_)
+            | Value::TimeTz(_)
+            | Value::Timestamp(_)
+            | Value::TimestampTz(_) => push_array_text_element(
+                &mut out,
+                &render_datetime_value_text(item).expect("datetime values render"),
+            ),
             Value::Bit(v) => out.push_str(&render_bit_text(v)),
             Value::Bytea(v) => {
                 let rendered = crate::backend::libpq::pqformat::format_bytea_text(

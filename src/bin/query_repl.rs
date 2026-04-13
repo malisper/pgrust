@@ -141,6 +141,13 @@ fn render_value(value: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            pgrust::backend::executor::render_datetime_value_text(value).unwrap()
+        }
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Json(v) => v.to_string(),
@@ -448,6 +455,7 @@ fn run_statement(
     clear_notices();
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
+        Statement::Show(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Set(_)
         | Statement::Reset(_)
         | Statement::CopyFrom(_)

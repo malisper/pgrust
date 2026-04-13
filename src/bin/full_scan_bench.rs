@@ -269,6 +269,15 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Int16(v) => *v as i64,
         Value::Int32(v) => *v as i64,
         Value::Int64(v) => *v,
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => pgrust::backend::executor::render_datetime_value_text(value)
+            .unwrap()
+            .bytes()
+            .map(i64::from)
+            .sum(),
         Value::Float64(v) => *v as i64,
         Value::Numeric(v) => v.render().bytes().map(i64::from).sum(),
         Value::Json(v) => v.bytes().map(i64::from).sum(),

@@ -14,7 +14,11 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::FuncCall { .. }
-        | SqlExpr::CurrentTimestamp => false,
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => false,
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_contains_agg),
         SqlExpr::BinaryOperator { left, right, .. } => {
             expr_contains_agg(left) || expr_contains_agg(right)
@@ -113,16 +117,20 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::IntegerLiteral(_)
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
-        | SqlExpr::CurrentTimestamp => false,
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => false,
         SqlExpr::BinaryOperator { left, right, .. } => {
             expr_references_input_scope(left) || expr_references_input_scope(right)
+        }
+        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
+            args.iter().any(|arg| expr_references_input_scope(&arg.value))
         }
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
             expr_references_input_scope(expr)
         }
-        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
-            .iter()
-            .any(|arg| expr_references_input_scope(&arg.value)),
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_references_input_scope),
         SqlExpr::ArraySubscript { array, subscripts } => {
             expr_references_input_scope(array)
@@ -239,7 +247,11 @@ pub(super) fn collect_aggs(
         | SqlExpr::InSubquery { .. }
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
-        | SqlExpr::CurrentTimestamp => {}
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => {}
         SqlExpr::BinaryOperator { left, right, .. } => {
             collect_aggs(left, aggs);
             collect_aggs(right, aggs);

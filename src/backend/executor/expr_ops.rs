@@ -67,6 +67,14 @@ pub(crate) fn compare_order_values(
             }
         }
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Date(a), Value::Date(b)) => a.cmp(b),
+        (Value::Time(a), Value::Time(b)) => a.cmp(b),
+        (Value::TimeTz(a), Value::TimeTz(b)) => a
+            .time
+            .cmp(&b.time)
+            .then_with(|| a.offset_seconds.cmp(&b.offset_seconds)),
+        (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
+        (Value::TimestampTz(a), Value::TimestampTz(b)) => a.cmp(b),
         (Value::Bit(a), Value::Bit(b)) => compare_bit_strings(a, b),
         (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
@@ -145,6 +153,11 @@ pub(crate) fn compare_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
+        (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),
+        (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),
+        (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(l == r)),
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(l == r)),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
@@ -200,6 +213,11 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int32(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int64(r)) => l != r,
+        (Value::Date(l), Value::Date(r)) => l != r,
+        (Value::Time(l), Value::Time(r)) => l != r,
+        (Value::TimeTz(l), Value::TimeTz(r)) => l != r,
+        (Value::Timestamp(l), Value::Timestamp(r)) => l != r,
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => l != r,
         (Value::Bytea(l), Value::Bytea(r)) => l != r,
         (Value::Bit(l), Value::Bit(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),

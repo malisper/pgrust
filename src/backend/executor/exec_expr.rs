@@ -7,6 +7,7 @@ use super::expr_bit::{
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::expr_casts::{cast_value, soft_input_error_info};
+use super::expr_datetime::{current_date_value, current_time_value, current_timestamp_value};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
@@ -64,7 +65,6 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
-use crate::pgrust::compact_string::CompactString;
 
 extern crate rand;
 
@@ -292,9 +292,11 @@ pub fn eval_expr(
             func_variadic,
             ..
         } => eval_builtin_function(*func, args, *func_variadic, slot, ctx),
-        Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(
-            render_current_timestamp(),
-        ))),
+        Expr::CurrentDate => Ok(current_date_value()),
+        Expr::CurrentTime { precision } => Ok(current_time_value(*precision, true)),
+        Expr::CurrentTimestamp { precision } => Ok(current_timestamp_value(*precision, true)),
+        Expr::LocalTime { precision } => Ok(current_time_value(*precision, false)),
+        Expr::LocalTimestamp { precision } => Ok(current_timestamp_value(*precision, false)),
     }
 }
 
@@ -477,9 +479,11 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             let value = eval_plpgsql_expr(array, slot)?;
             eval_array_subscript_plpgsql(value, subscripts, slot)
         }
-        Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(
-            render_current_timestamp(),
-        ))),
+        Expr::CurrentDate => Ok(current_date_value()),
+        Expr::CurrentTime { precision } => Ok(current_time_value(*precision, true)),
+        Expr::CurrentTimestamp { precision } => Ok(current_timestamp_value(*precision, true)),
+        Expr::LocalTime { precision } => Ok(current_time_value(*precision, false)),
+        Expr::LocalTimestamp { precision } => Ok(current_timestamp_value(*precision, false)),
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "plpgsql expression without subqueries or SQL statements",
             actual: format!("{expr:?}"),
@@ -947,6 +951,18 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::WebSearchToTsQuery
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
         BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
+        BuiltinScalarFunction::Now
+        | BuiltinScalarFunction::TransactionTimestamp
+        | BuiltinScalarFunction::StatementTimestamp
+        | BuiltinScalarFunction::ClockTimestamp => Ok(current_timestamp_value(None, true)),
+        BuiltinScalarFunction::TimeOfDay => {
+            let value = current_timestamp_value(None, true);
+            Ok(Value::Text(
+                super::render_datetime_value_text(&value)
+                    .unwrap_or_else(render_current_timestamp)
+                    .into(),
+            ))
+        }
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgInputIsValid => {
             let input = values[0].as_text().ok_or_else(|| ExecError::TypeMismatch {
