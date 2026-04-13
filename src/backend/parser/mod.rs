@@ -7,7 +7,7 @@ pub mod gram;
 
 pub use crate::include::nodes::parsenodes::*;
 pub use analyze::*;
-pub use gram::{parse_expr, parse_statement, parse_type_name};
+pub use gram::{ParseOptions, parse_expr, parse_statement, parse_statement_with_options, parse_type_name};
 
 pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
     let stmt = parse_statement(sql)?;

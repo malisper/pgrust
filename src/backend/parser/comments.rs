@@ -269,6 +269,84 @@ pub(crate) fn normalize_position_syntax_preserving_layout(sql: &str) -> String {
     String::from_utf8(out).expect("position normalization preserves UTF-8")
 }
 
+pub(crate) fn contains_unicode_string_literals(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    let mut dollar_tag: Option<Vec<u8>> = None;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Normal,
+        SingleQuote,
+        QuotedIdentifier,
+        DollarString,
+    }
+
+    let mut state = State::Normal;
+
+    while i < bytes.len() {
+        match state {
+            State::Normal => {
+                if starts_unicode_string(bytes, i) {
+                    return true;
+                }
+                if bytes[i] == b'\'' {
+                    i += 1;
+                    state = State::SingleQuote;
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    state = State::QuotedIdentifier;
+                } else if let Some((tag, len)) = parse_dollar_tag(bytes, i) {
+                    i += len;
+                    dollar_tag = Some(tag);
+                    state = State::DollarString;
+                } else {
+                    i += sql[i..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1);
+                }
+            }
+            State::SingleQuote => {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                        state = State::Normal;
+                    }
+                } else {
+                    i += sql[i..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1);
+                }
+            }
+            State::QuotedIdentifier => {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                        i += 2;
+                    } else {
+                        i += 1;
+                        state = State::Normal;
+                    }
+                } else {
+                    i += sql[i..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1);
+                }
+            }
+            State::DollarString => {
+                if let Some(tag) = dollar_tag.as_ref() {
+                    if matches_dollar_end(bytes, i, tag) {
+                        i += tag.len() + 2;
+                        dollar_tag = None;
+                        state = State::Normal;
+                    } else {
+                        i += sql[i..].chars().next().map(|ch| ch.len_utf8()).unwrap_or(1);
+                    }
+                } else {
+                    state = State::Normal;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn parse_plain_string_literal(sql: &str, start: usize) -> (String, usize) {
     let bytes = sql.as_bytes();
     let mut i = start + 1;

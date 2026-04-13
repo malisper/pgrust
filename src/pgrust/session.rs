@@ -15,7 +15,8 @@ use crate::backend::executor::{
     parse_bytea_text,
 };
 use crate::backend::parser::{
-    CatalogLookup, ParseError, PreparedInsert, SelectStatement, Statement, bind_delete,
+    CatalogLookup, ParseError, ParseOptions, PreparedInsert, SelectStatement, Statement,
+    bind_delete,
     bind_insert, bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -109,6 +110,16 @@ impl Session {
             Some(value) if value == "escape" => ByteaOutputFormat::Escape,
             _ => ByteaOutputFormat::Hex,
         }
+    }
+
+    pub fn standard_conforming_strings(&self) -> bool {
+        !matches!(
+            self.gucs
+                .get("standard_conforming_strings")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("off" | "false")
+        )
     }
 
     pub fn maintenance_work_mem_kb(&self) -> Result<usize, ExecError> {
@@ -217,7 +228,16 @@ impl Session {
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
-        let stmt = db.plan_cache.get_statement(sql)?;
+        let stmt = if self.standard_conforming_strings() {
+            db.plan_cache.get_statement(sql)?
+        } else {
+            crate::backend::parser::parse_statement_with_options(
+                sql,
+                ParseOptions {
+                    standard_conforming_strings: false,
+                },
+            )?
+        };
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
