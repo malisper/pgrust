@@ -10,6 +10,7 @@ use super::expr_casts::{cast_value, soft_input_error_info};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
+use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
 };
@@ -496,6 +497,9 @@ fn eval_plpgsql_builtin_function(
         .iter()
         .map(|arg| eval_plpgsql_expr(arg, slot))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(result) = eval_geometry_function(func, &values) {
+        return result;
+    }
     match func {
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
@@ -704,6 +708,9 @@ fn eval_builtin_function(
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(result) = eval_geometry_function(func, &values) {
+        return result;
+    }
     if let Some(result) = eval_json_builtin_function(func, &values, func_variadic) {
         return result;
     }

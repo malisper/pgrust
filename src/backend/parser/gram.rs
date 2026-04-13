@@ -1476,6 +1476,13 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Bool => "bool",
+        SqlTypeKind::Point => "point",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
+        SqlTypeKind::Box => "box",
+        SqlTypeKind::Polygon => "polygon",
+        SqlTypeKind::Line => "line",
+        SqlTypeKind::Circle => "circle",
         SqlTypeKind::Timestamp => "timestamp",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "char",
@@ -1673,6 +1680,13 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_jsonb => SqlType::new(SqlTypeKind::Jsonb),
         Rule::kw_jsonpath => SqlType::new(SqlTypeKind::JsonPath),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
+        Rule::kw_point => SqlType::new(SqlTypeKind::Point),
+        Rule::kw_lseg => SqlType::new(SqlTypeKind::Lseg),
+        Rule::kw_path => SqlType::new(SqlTypeKind::Path),
+        Rule::kw_box => SqlType::new(SqlTypeKind::Box),
+        Rule::kw_polygon => SqlType::new(SqlTypeKind::Polygon),
+        Rule::kw_line => SqlType::new(SqlTypeKind::Line),
+        Rule::kw_circle => SqlType::new(SqlTypeKind::Circle),
         Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
         Rule::internal_char_type => SqlType::new(SqlTypeKind::InternalChar),
         Rule::char_type => {
@@ -1786,7 +1800,32 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::negated_expr => {
             let raw = pair.as_str().trim_start();
             let expr = build_expr(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)?;
-            if raw.starts_with("||/") {
+            if raw.starts_with("@-@") {
+                Ok(SqlExpr::GeometryUnaryOp {
+                    op: GeometryUnaryOp::Length,
+                    expr: Box::new(expr),
+                })
+            } else if raw.starts_with('#') {
+                Ok(SqlExpr::GeometryUnaryOp {
+                    op: GeometryUnaryOp::Npoints,
+                    expr: Box::new(expr),
+                })
+            } else if raw.starts_with("@@") {
+                Ok(SqlExpr::GeometryUnaryOp {
+                    op: GeometryUnaryOp::Center,
+                    expr: Box::new(expr),
+                })
+            } else if raw.starts_with("?|") {
+                Ok(SqlExpr::GeometryUnaryOp {
+                    op: GeometryUnaryOp::IsVertical,
+                    expr: Box::new(expr),
+                })
+            } else if raw.starts_with("?-") {
+                Ok(SqlExpr::GeometryUnaryOp {
+                    op: GeometryUnaryOp::IsHorizontal,
+                    expr: Box::new(expr),
+                })
+            } else if raw.starts_with("||/") {
                 Ok(SqlExpr::FuncCall {
                     name: "cbrt".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
@@ -1830,6 +1869,31 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
             match next.as_rule() {
                 Rule::null_predicate_suffix => build_null_predicate(left, next),
+                Rule::between_suffix => {
+                    let mut negated = false;
+                    let mut bounds = Vec::new();
+                    for part in next.into_inner() {
+                        match part.as_rule() {
+                            Rule::kw_not => negated = true,
+                            Rule::concat_expr => bounds.push(build_expr(part)?),
+                            _ => {}
+                        }
+                    }
+                    let low = bounds
+                        .first()
+                        .cloned()
+                        .ok_or(ParseError::UnexpectedEof)?;
+                    let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
+                    let between = SqlExpr::And(
+                        Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
+                        Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
+                    );
+                    Ok(if negated {
+                        SqlExpr::Not(Box::new(between))
+                    } else {
+                        between
+                    })
+                }
                 Rule::in_expr_list_suffix => {
                     let mut negated = false;
                     let mut values = Vec::new();
@@ -1932,6 +1996,71 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
+                        "<->" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::Distance,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "##" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::ClosestPoint,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "?#" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::Intersects,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "?||" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::Parallel,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "?-|" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::Perpendicular,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "~=" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::Same,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "&<" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::OverLeft,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "&>" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::OverRight,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "<<|" | "<^" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::Below,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "|>>" | ">^" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::Above,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "&<|" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::OverBelow,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "|&>" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::OverAbove,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "?-" => SqlExpr::GeometryBinaryOp {
+                            op: GeometryBinaryOp::IsHorizontal,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
                         "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
                         "@?" => SqlExpr::JsonbPathExists(Box::new(left), Box::new(right)),
@@ -2490,7 +2619,7 @@ fn fold_infix(
                 "-" => SqlExpr::Sub(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
             },
-            Rule::bit_op => match op.as_str() {
+            Rule::bit_op => match op.as_str().trim() {
                 "&" => SqlExpr::BitAnd(Box::new(expr), Box::new(rhs)),
                 "|" => SqlExpr::BitOr(Box::new(expr), Box::new(rhs)),
                 "#" => SqlExpr::BitXor(Box::new(expr), Box::new(rhs)),

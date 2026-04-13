@@ -94,6 +94,16 @@ fn encode_index_value(
         Value::Jsonb(v) => Ok(v.clone()),
         Value::JsonPath(v) => Ok(v.as_bytes().to_vec()),
         Value::InternalChar(v) => Ok(vec![*v]),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => Err(CatalogError::Io(format!(
+            "unsupported index key type {:?}",
+            sql_type.kind
+        ))),
         Value::Array(_) => Err(CatalogError::Io(format!(
             "unsupported index key type {:?}",
             sql_type.kind

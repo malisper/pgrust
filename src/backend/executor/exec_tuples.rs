@@ -4,10 +4,13 @@
 use super::ExecError;
 use super::expr_casts::parse_text_array_literal_with_op;
 use super::exec_expr::parse_numeric_text;
+use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
 use super::value_io::missing_column_value;
 use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
+use crate::include::nodes::datum::{
+    ArrayDimension, ArrayValue, GeoBox, GeoCircle, GeoLine, GeoLseg, GeoPoint,
+};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
 
 /// A precomputed decode step for one column, eliminating per-tuple type
@@ -288,6 +291,44 @@ impl CompiledTupleDecoder {
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
                             ])),
+                            ScalarType::Point => Value::Point(GeoPoint {
+                                x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                                y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                            }),
+                            ScalarType::Line => Value::Line(GeoLine {
+                                a: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                                b: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                                c: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                            }),
+                            ScalarType::Lseg => Value::Lseg(GeoLseg {
+                                p: [
+                                    GeoPoint {
+                                        x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                                        y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                                    },
+                                    GeoPoint {
+                                        x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                                        y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                                    },
+                                ],
+                            }),
+                            ScalarType::Box => Value::Box(GeoBox {
+                                high: GeoPoint {
+                                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                                },
+                                low: GeoPoint {
+                                    x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                                    y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                                },
+                            }),
+                            ScalarType::Circle => Value::Circle(GeoCircle {
+                                center: GeoPoint {
+                                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                                },
+                                radius: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                            }),
                             ScalarType::Bool => Value::Bool(bytes[0] != 0),
                             ScalarType::Numeric => {
                                 values.push(Value::Null);
@@ -310,6 +351,14 @@ impl CompiledTupleDecoder {
                                 continue;
                             }
                             ScalarType::Text => {
+                                values.push(Value::Null);
+                                continue;
+                            }
+                            ScalarType::Path => {
+                                values.push(Value::Null);
+                                continue;
+                            }
+                            ScalarType::Polygon => {
                                 values.push(Value::Null);
                                 continue;
                             }
@@ -392,6 +441,12 @@ impl CompiledTupleDecoder {
                                     bytes_slice.len() as u32,
                                 ));
                             }
+                            ScalarType::Path => {
+                                values.push(Value::Path(decode_path_bytes(bytes_slice)?));
+                            }
+                            ScalarType::Polygon => {
+                                values.push(Value::Polygon(decode_polygon_bytes(bytes_slice)?));
+                            }
                             ScalarType::Array(elem_ty) => {
                                 let _ = elem_ty;
                                 values.push(decode_array_value(sql_type.element_type(), bytes_slice)?);
@@ -458,6 +513,12 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Text => {
                                 values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
+                            }
+                            ScalarType::Path => {
+                                values.push(Value::Path(decode_path_bytes(bytes)?));
+                            }
+                            ScalarType::Polygon => {
+                                values.push(Value::Polygon(decode_polygon_bytes(bytes)?));
                             }
                             ScalarType::Array(elem_ty) => {
                                 let _ = elem_ty;
@@ -611,6 +672,84 @@ fn decode_scalar_array_element(
                 bytes.try_into().unwrap(),
             )))
         }
+        ScalarType::Point => {
+            if bytes.len() != 16 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "point array element must be 16 bytes".into(),
+                });
+            }
+            Ok(Value::Point(GeoPoint {
+                x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            }))
+        }
+        ScalarType::Line => {
+            if bytes.len() != 24 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "line array element must be 24 bytes".into(),
+                });
+            }
+            Ok(Value::Line(GeoLine {
+                a: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                b: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                c: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            }))
+        }
+        ScalarType::Lseg => {
+            if bytes.len() != 32 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "lseg array element must be 32 bytes".into(),
+                });
+            }
+            Ok(Value::Lseg(GeoLseg {
+                p: [
+                    GeoPoint {
+                        x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                        y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                    },
+                    GeoPoint {
+                        x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                        y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                    },
+                ],
+            }))
+        }
+        ScalarType::Box => {
+            if bytes.len() != 32 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "box array element must be 32 bytes".into(),
+                });
+            }
+            Ok(Value::Box(GeoBox {
+                high: GeoPoint {
+                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                },
+                low: GeoPoint {
+                    x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                },
+            }))
+        }
+        ScalarType::Circle => {
+            if bytes.len() != 24 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "circle array element must be 24 bytes".into(),
+                });
+            }
+            Ok(Value::Circle(GeoCircle {
+                center: GeoPoint {
+                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                },
+                radius: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            }))
+        }
         ScalarType::Numeric => Ok(Value::Numeric(
             unsafe { std::str::from_utf8_unchecked(bytes) }.into(),
         )),
@@ -653,6 +792,8 @@ fn decode_scalar_array_element(
                 std::str::from_utf8_unchecked(bytes)
             }),
         )),
+        ScalarType::Path => Ok(Value::Path(decode_path_bytes(bytes)?)),
+        ScalarType::Polygon => Ok(Value::Polygon(decode_polygon_bytes(bytes)?)),
         ScalarType::Array(_) => unreachable!("array elements use the nested array sentinel"),
     }
 }
@@ -660,10 +801,21 @@ fn decode_scalar_array_element(
 fn scalar_type_for_sql_type(sql_type: crate::backend::parser::SqlType) -> ScalarType {
     use crate::backend::parser::SqlTypeKind;
 
+    if sql_type.is_array {
+        return ScalarType::Array(Box::new(scalar_type_for_sql_type(sql_type.element_type())));
+    }
+
     match sql_type.kind {
         SqlTypeKind::Bool => ScalarType::Bool,
         SqlTypeKind::Bit | SqlTypeKind::VarBit => ScalarType::BitString,
         SqlTypeKind::Bytea => ScalarType::Bytea,
+        SqlTypeKind::Point => ScalarType::Point,
+        SqlTypeKind::Lseg => ScalarType::Lseg,
+        SqlTypeKind::Path => ScalarType::Path,
+        SqlTypeKind::Line => ScalarType::Line,
+        SqlTypeKind::Box => ScalarType::Box,
+        SqlTypeKind::Polygon => ScalarType::Polygon,
+        SqlTypeKind::Circle => ScalarType::Circle,
         SqlTypeKind::InternalChar
         | SqlTypeKind::Char
         | SqlTypeKind::Varchar

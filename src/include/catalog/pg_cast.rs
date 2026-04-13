@@ -2,18 +2,20 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BPCHAR_ARRAY_TYPE_OID,
-    BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CAST_PROC_INT2_INT4_OID,
-    CAST_PROC_INT2_INT8_OID, CAST_PROC_INT4_INT2_OID, CAST_PROC_INT4_INT8_OID,
-    CAST_PROC_INT8_INT2_OID, CAST_PROC_INT8_INT4_OID, CAST_PROC_NUMERIC_INT2_OID,
-    CAST_PROC_NUMERIC_INT4_OID, CAST_PROC_NUMERIC_INT8_OID, CAST_PROC_TEXT_BPCHAR_OID,
-    FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
-    INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID,
-    INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID,
-    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
-    JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID,
+    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
+    CAST_PROC_INT2_INT4_OID, CAST_PROC_INT2_INT8_OID, CAST_PROC_INT4_INT2_OID,
+    CAST_PROC_INT4_INT8_OID, CAST_PROC_INT8_INT2_OID, CAST_PROC_INT8_INT4_OID,
+    CAST_PROC_NUMERIC_INT2_OID, CAST_PROC_NUMERIC_INT4_OID, CAST_PROC_NUMERIC_INT8_OID,
+    CAST_PROC_TEXT_BPCHAR_OID, CIRCLE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
+    INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
+    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
+    JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID,
+    LINE_TYPE_OID, LSEG_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID,
+    OID_TYPE_OID, PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,8 +131,14 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
             'f',
         ),
     ];
-    rows.extend(text_input_cast_rows(4113));
-    rows.extend(text_input_array_cast_rows(4131));
+    let text_input_rows = text_input_cast_rows(4113);
+    let geometry_rows = geometry_cast_rows(4113 + text_input_rows.len() as u32);
+    let array_rows = text_input_array_cast_rows(
+        4113 + text_input_rows.len() as u32 + geometry_rows.len() as u32,
+    );
+    rows.extend(text_input_rows);
+    rows.extend(geometry_rows);
+    rows.extend(array_rows);
     rows
 }
 
@@ -172,11 +180,41 @@ fn text_input_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         BPCHAR_TYPE_OID,
         VARCHAR_TYPE_OID,
         TIMESTAMP_TYPE_OID,
+        POINT_TYPE_OID,
+        LSEG_TYPE_OID,
+        PATH_TYPE_OID,
+        BOX_TYPE_OID,
+        POLYGON_TYPE_OID,
+        LINE_TYPE_OID,
+        CIRCLE_TYPE_OID,
     ];
     targets
         .into_iter()
         .enumerate()
         .map(|(idx, target)| cast_row(first_oid + idx as u32, TEXT_TYPE_OID, target, 0, 'e', 'i'))
+        .collect()
+}
+
+fn geometry_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
+    let casts = [
+        (POINT_TYPE_OID, BOX_TYPE_OID, 'a'),
+        (LSEG_TYPE_OID, POINT_TYPE_OID, 'e'),
+        (PATH_TYPE_OID, POLYGON_TYPE_OID, 'a'),
+        (BOX_TYPE_OID, POINT_TYPE_OID, 'e'),
+        (BOX_TYPE_OID, POLYGON_TYPE_OID, 'a'),
+        (POLYGON_TYPE_OID, POINT_TYPE_OID, 'e'),
+        (POLYGON_TYPE_OID, PATH_TYPE_OID, 'a'),
+        (POLYGON_TYPE_OID, BOX_TYPE_OID, 'e'),
+        (CIRCLE_TYPE_OID, POINT_TYPE_OID, 'e'),
+        (CIRCLE_TYPE_OID, BOX_TYPE_OID, 'e'),
+        (CIRCLE_TYPE_OID, POLYGON_TYPE_OID, 'e'),
+    ];
+    casts
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (source, target, context))| {
+            cast_row(first_oid + idx as u32, source, target, 0, context, 'f')
+        })
         .collect()
 }
 

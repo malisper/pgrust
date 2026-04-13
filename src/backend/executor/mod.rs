@@ -7,6 +7,7 @@ mod expr_bool;
 mod expr_casts;
 mod expr_compile;
 mod expr_format;
+mod expr_geometry;
 mod expr_json;
 mod expr_math;
 mod expr_numeric;
@@ -45,6 +46,8 @@ pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
 pub use value_io::format_array_value_text;
+pub(crate) use expr_geometry::geometry_input_error_message;
+pub(crate) use expr_geometry::render_geometry_text;
 pub use startup::executor_start;
 
 use crate::backend::access::heap::heapam::HeapError;
@@ -139,6 +142,10 @@ pub enum ExecError {
     },
     InvalidNumericInput(String),
     InvalidByteaInput {
+        value: String,
+    },
+    InvalidGeometryInput {
+        ty: &'static str,
         value: String,
     },
     InvalidBitInput {

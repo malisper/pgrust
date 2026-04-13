@@ -942,6 +942,15 @@ impl Session {
                                     })?
                                     .into(),
                             ),
+                            ScalarType::Point
+                            | ScalarType::Lseg
+                            | ScalarType::Path
+                            | ScalarType::Line
+                            | ScalarType::Box
+                            | ScalarType::Polygon
+                            | ScalarType::Circle => {
+                                cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                            }
                             ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
                             ScalarType::Text => Value::Text(raw.clone().into()),
                             ScalarType::Bool => match raw.as_str() {

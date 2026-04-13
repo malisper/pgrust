@@ -503,11 +503,45 @@ pub enum SqlTypeKind {
     JsonPath,
     Text,
     Bool,
+    Point,
+    Lseg,
+    Path,
+    Box,
+    Polygon,
+    Line,
+    Circle,
     Timestamp,
     PgNodeTree,
     InternalChar,
     Char,
     Varchar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeometryUnaryOp {
+    Center,
+    Length,
+    Npoints,
+    IsVertical,
+    IsHorizontal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeometryBinaryOp {
+    Same,
+    Distance,
+    ClosestPoint,
+    Intersects,
+    Parallel,
+    Perpendicular,
+    IsVertical,
+    IsHorizontal,
+    OverLeft,
+    OverRight,
+    Below,
+    Above,
+    OverBelow,
+    OverAbove,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -659,6 +693,19 @@ pub enum SqlExpr {
     UnaryPlus(Box<SqlExpr>),
     Negate(Box<SqlExpr>),
     BitNot(Box<SqlExpr>),
+    Subscript {
+        expr: Box<SqlExpr>,
+        index: i32,
+    },
+    GeometryUnaryOp {
+        op: GeometryUnaryOp,
+        expr: Box<SqlExpr>,
+    },
+    GeometryBinaryOp {
+        op: GeometryBinaryOp,
+        left: Box<SqlExpr>,
+        right: Box<SqlExpr>,
+    },
     Cast(Box<SqlExpr>, SqlType),
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     NotEq(Box<SqlExpr>, Box<SqlExpr>),

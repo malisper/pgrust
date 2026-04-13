@@ -274,7 +274,9 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
         | SqlExpr::IsNotNull(inner)
-        | SqlExpr::Cast(inner, _) => visit_nested_srfs(inner, info),
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => visit_nested_srfs(inner, info),
         SqlExpr::ArraySubscript { array, subscripts } => {
             visit_nested_srfs(array, info);
             for subscript in subscripts {
@@ -285,6 +287,10 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
                     visit_nested_srfs(upper, info);
                 }
             }
+        }
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            visit_nested_srfs(left, info);
+            visit_nested_srfs(right, info);
         }
         SqlExpr::ArrayLiteral(items) => {
             for item in items {
