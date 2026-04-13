@@ -431,7 +431,9 @@ fn eval_unary_value(value: JsonbValue, op: UnaryOp) -> Result<JsonbValue, ExecEr
 fn numeric_from_jsonb(value: &JsonbValue) -> Result<NumericValue, ExecError> {
     match value {
         JsonbValue::Numeric(numeric) => Ok(numeric.clone()),
-        _ => Err(exec_jsonpath_error("jsonpath arithmetic requires numeric operands")),
+        _ => Err(exec_jsonpath_error(
+            "jsonpath arithmetic requires numeric operands",
+        )),
     }
 }
 
@@ -489,7 +491,11 @@ fn numeric_remainder(left: &NumericValue, right: &NumericValue) -> Option<Numeri
     }
 }
 
-fn align_numeric_coeff(coeff: num_bigint::BigInt, from_scale: u32, to_scale: u32) -> num_bigint::BigInt {
+fn align_numeric_coeff(
+    coeff: num_bigint::BigInt,
+    from_scale: u32,
+    to_scale: u32,
+) -> num_bigint::BigInt {
     if from_scale >= to_scale {
         coeff
     } else {

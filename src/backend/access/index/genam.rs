@@ -1,12 +1,10 @@
 use crate::backend::catalog::CatalogError;
+use crate::include::access::amapi::IndexBeginScanContext;
 use crate::include::access::relscan::{
     BtIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
 };
-use crate::include::access::amapi::IndexBeginScanContext;
 
-pub fn index_beginscan_stub(
-    ctx: &IndexBeginScanContext,
-) -> Result<IndexScanDesc, CatalogError> {
+pub fn index_beginscan_stub(ctx: &IndexBeginScanContext) -> Result<IndexScanDesc, CatalogError> {
     Ok(IndexScanDesc {
         pool: ctx.pool.clone(),
         client_id: ctx.client_id,

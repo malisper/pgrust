@@ -441,9 +441,7 @@ fn run_statement(
         Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
-        | Statement::AlterTableAddColumn(_) => {
-            Ok(StatementResult::AffectedRows(0))
-        }
+        | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::CommentOnTable(stmt) => {
             let xid = txns.write().begin();
             let result = {
@@ -461,9 +459,13 @@ fn run_statement(
                         actual: format!("{err:?}"),
                     })
                 })?;
-                let relation = relcache.get_by_name(&stmt.table_name).cloned().ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
-                })?;
+                let relation =
+                    relcache
+                        .get_by_name(&stmt.table_name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
+                        })?;
                 if relation.relpersistence == 't' {
                     Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "permanent table for COMMENT ON TABLE",
@@ -471,11 +473,7 @@ fn run_statement(
                     }))
                 } else {
                     catalog_store
-                        .comment_relation_mvcc(
-                            relation.relation_oid,
-                            stmt.comment.as_deref(),
-                            &ctx,
-                        )
+                        .comment_relation_mvcc(relation.relation_oid, stmt.comment.as_deref(), &ctx)
                         .map_err(|other| {
                             ExecError::Parse(ParseError::UnexpectedToken {
                                 expected: "table comment update",

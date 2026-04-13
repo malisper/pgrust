@@ -99,9 +99,7 @@ pub fn execute_readonly_statement(
         Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
-        | Statement::AlterTableAddColumn(_) => {
-            Ok(StatementResult::AffectedRows(0))
-        }
+        | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON TABLE".into(),
