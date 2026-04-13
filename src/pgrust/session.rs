@@ -815,12 +815,17 @@ impl Session {
         };
 
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let (rel, desc, indexes) = {
+        let (rel, toast, toast_index, desc, indexes) = {
             let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
             })?;
+            let toast_index = entry
+                .toast
+                .and_then(|toast| catalog.index_relations_for_heap(toast.relation_oid).into_iter().next());
             (
                 entry.rel,
+                entry.toast,
+                toast_index,
                 entry.desc.clone(),
                 catalog.index_relations_for_heap(entry.relation_oid),
             )
@@ -943,6 +948,8 @@ impl Session {
             };
             crate::backend::commands::tablecmds::execute_insert_values(
                 rel,
+                toast,
+                toast_index.as_ref(),
                 &desc,
                 &indexes,
                 &parsed_rows,

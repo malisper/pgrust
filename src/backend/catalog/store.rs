@@ -65,6 +65,12 @@ pub struct CatalogMutationEffect {
     pub full_reset: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableResult {
+    pub entry: CatalogEntry,
+    pub toast: Option<ToastCatalogChanges>,
+}
+
 pub struct CatalogWriteContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<RwLock<TransactionManager>>,
@@ -211,7 +217,12 @@ impl CatalogStore {
         let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
         let entry = catalog.create_table(name.clone(), desc)?;
-        let toast = new_relation_create_toast_table(&mut catalog, entry.relation_oid)?;
+        let toast = new_relation_create_toast_table(
+            &mut catalog,
+            entry.relation_oid,
+            crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
+            crate::include::catalog::PG_TOAST_NAMESPACE_OID,
+        )?;
         let entry = toast
             .as_ref()
             .map(|changes| changes.new_parent.clone())
@@ -346,13 +357,15 @@ impl CatalogStore {
         name: impl Into<String>,
         desc: RelationDesc,
         ctx: &CatalogWriteContext,
-    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+    ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         self.create_table_mvcc_with_options(
             name,
             desc,
             crate::include::catalog::PUBLIC_NAMESPACE_OID,
             1,
             'p',
+            crate::include::catalog::PG_TOAST_NAMESPACE_OID,
+            crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
             ctx,
         )
     }
@@ -364,8 +377,10 @@ impl CatalogStore {
         namespace_oid: u32,
         db_oid: u32,
         relpersistence: char,
+        toast_namespace_oid: u32,
+        toast_namespace_name: &str,
         ctx: &CatalogWriteContext,
-    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+    ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
         let entry = catalog.create_table_with_options(
@@ -375,11 +390,12 @@ impl CatalogStore {
             db_oid,
             relpersistence,
         )?;
-        let toast = if relpersistence == 't' {
-            None
-        } else {
-            new_relation_create_toast_table(&mut catalog, entry.relation_oid)?
-        };
+        let toast = new_relation_create_toast_table(
+            &mut catalog,
+            entry.relation_oid,
+            toast_namespace_name,
+            toast_namespace_oid,
+        )?;
         let entry = toast
             .as_ref()
             .map(|changes| changes.new_parent.clone())
@@ -401,10 +417,10 @@ impl CatalogStore {
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
         effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
-        if let Some(toast) = toast {
+        if let Some(ref toast) = toast {
             record_toast_effects(&mut effect, &toast);
         }
-        Ok((entry, effect))
+        Ok((CreateTableResult { entry, toast }, effect))
     }
 
     pub fn create_namespace_mvcc(

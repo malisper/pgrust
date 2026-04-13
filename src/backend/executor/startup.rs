@@ -2,7 +2,7 @@ use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState, ProjectSetState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, ValuesState,
 };
 
@@ -15,9 +15,15 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot: TupleSlot::empty(0),
             stats: NodeExecStats::default(),
         }),
-        Plan::SeqScan { rel, desc, .. } => {
+        Plan::SeqScan {
+            rel,
+            toast,
+            desc,
+            ..
+        } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
-            let attr_descs = desc.attribute_descs();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
                 &desc,
                 &attr_descs,
@@ -27,7 +33,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(SeqScanState {
                 rel,
+                toast_relation: toast,
                 column_names,
+                desc,
+                attr_descs,
                 scan: None,
                 slot,
                 qual: None,
@@ -38,6 +47,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             rel,
             index_rel,
             am_oid,
+            toast,
             desc,
             index_meta,
             keys,
@@ -55,6 +65,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(IndexScanState {
                 rel,
+                toast_relation: toast,
                 index_rel,
                 am_oid,
                 column_names,
@@ -88,11 +99,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
             })
         }
         Plan::Filter { input, predicate } if matches!(&*input, Plan::SeqScan { .. }) => {
-            let Plan::SeqScan { rel, desc, .. } = *input else {
+            let Plan::SeqScan {
+                rel,
+                toast,
+                desc,
+                ..
+            } = *input else {
                 unreachable!()
             };
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
-            let attr_descs = desc.attribute_descs();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
                 &desc,
                 &attr_descs,
@@ -103,7 +120,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(SeqScanState {
                 rel,
+                toast_relation: toast,
                 column_names,
+                desc,
+                attr_descs,
                 scan: None,
                 slot,
                 qual: Some(qual),
@@ -176,7 +196,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             })
         }
         Plan::FunctionScan { call } => Box::new(FunctionScanState {
-            output_columns: call.output_columns().iter().map(|c| c.name.clone()).collect(),
+            output_columns: call
+                .output_columns()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
             call,
             rows: None,
             next_index: 0,
