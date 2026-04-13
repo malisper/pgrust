@@ -24,7 +24,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PGRUST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$PGRUST_DIR/.." && pwd)"
-PG_REGRESS="$REPO_ROOT/postgres/src/test/regress"
+PG_REGRESS=""
+for candidate in \
+    "$REPO_ROOT/postgres/src/test/regress" \
+    "$PGRUST_DIR/../../postgres/src/test/regress"
+do
+    if [[ -d "$candidate" ]]; then
+        PG_REGRESS="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$PG_REGRESS" ]]; then
+    echo "ERROR: could not find postgres regression checkout."
+    echo "Looked in:"
+    echo "  $REPO_ROOT/postgres/src/test/regress"
+    echo "  $PGRUST_DIR/../../postgres/src/test/regress"
+    exit 1
+fi
+
 SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
 
