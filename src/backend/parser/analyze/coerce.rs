@@ -17,8 +17,10 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
         && !to.is_array
     {
         return Some(Expr::FuncCall {
+            func_oid: 0,
             func: BuiltinScalarFunction::BpcharToText,
             args: vec![expr.clone()],
+            func_variadic: false,
         });
     }
     None

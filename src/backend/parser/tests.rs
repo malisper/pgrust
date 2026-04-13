@@ -526,9 +526,67 @@ fn parse_position_in_syntax_as_builtin_call() {
     let stmt = parse_select("select position('bc' in 'abcd')").unwrap();
     assert!(matches!(
         stmt.targets[0].expr,
-        SqlExpr::FuncCall { ref name, ref args }
+        SqlExpr::FuncCall { ref name, ref args, .. }
             if name == "position" && args.len() == 2
     ));
+}
+
+#[test]
+fn parse_variadic_function_call_marks_call_level_flag() {
+    std::thread::Builder::new()
+        .name("parse_variadic_function_call_marks_call_level_flag".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let stmt = parse_select("select json_build_array(VARIADIC ARRAY[1, 2, 3])").unwrap();
+            assert!(matches!(
+                stmt.targets[0].expr,
+                SqlExpr::FuncCall {
+                    ref name,
+                    ref args,
+                    func_variadic: true,
+                } if name == "json_build_array" && args.len() == 1
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn parse_variadic_function_call_with_fixed_prefix_and_cast() {
+    std::thread::Builder::new()
+        .name("parse_variadic_function_call_with_fixed_prefix_and_cast".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let stmt = parse_select(
+                "select json_extract_path('{\"a\":{\"b\":2}}'::json, VARIADIC ARRAY['a', 'b']::text[])",
+            )
+            .unwrap();
+            assert!(matches!(
+                stmt.targets[0].expr,
+                SqlExpr::FuncCall {
+                    ref name,
+                    ref args,
+                    func_variadic: true,
+                } if name == "json_extract_path" && args.len() == 2
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn parse_variadic_must_be_final_supplied_argument() {
+    std::thread::Builder::new()
+        .name("parse_variadic_must_be_final_supplied_argument".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            assert!(parse_select("select json_build_array(VARIADIC ARRAY[1, 2], 3)").is_err());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -543,7 +601,7 @@ fn parse_multiline_position_convert_from_expression() {
                 .unwrap();
             assert!(matches!(
                 stmt.targets[0].expr,
-                SqlExpr::FuncCall { ref name, ref args }
+                SqlExpr::FuncCall { ref name, ref args, .. }
                     if name == "position" && args.len() == 2
             ));
         })
@@ -790,14 +848,14 @@ fn parse_bit_substring_and_overlay_syntax() {
     )
     .unwrap();
     match &stmt.targets[0].expr {
-        SqlExpr::FuncCall { name, args } => {
+        SqlExpr::FuncCall { name, args, .. } => {
             assert_eq!(name, "substring");
             assert_eq!(args.len(), 3);
         }
         other => panic!("expected substring call, got {other:?}"),
     }
     match &stmt.targets[1].expr {
-        SqlExpr::FuncCall { name, args } => {
+        SqlExpr::FuncCall { name, args, .. } => {
             assert_eq!(name, "overlay");
             assert_eq!(args.len(), 3);
         }
@@ -917,15 +975,15 @@ fn parse_prefix_float_operator_sugar() {
     let stmt = parse_select("select @x, |/x, ||/x from metrics").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args } if name == "abs" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "abs" && args.len() == 1
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
-        SqlExpr::FuncCall { name, args } if name == "sqrt" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "sqrt" && args.len() == 1
     ));
     assert!(matches!(
         &stmt.targets[2].expr,
-        SqlExpr::FuncCall { name, args } if name == "cbrt" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "cbrt" && args.len() == 1
     ));
 }
 
@@ -934,7 +992,7 @@ fn parse_power_operator_and_in_list() {
     let stmt = parse_select("select x ^ '2.0', x in (0, 1, 2) from metrics").unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args } if name == "power" && args.len() == 2
+        SqlExpr::FuncCall { name, args, .. } if name == "power" && args.len() == 2
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
@@ -1665,11 +1723,21 @@ fn parse_create_table_with_array_types() {
 }
 
 #[test]
+fn parse_multidimensional_array_cast_type() {
+    let stmt = parse_select("select '{{1,2},{3,4}}'::int4[][]").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::Cast(_, ty)
+            if ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+    ));
+}
+
+#[test]
 fn parse_array_and_unnest_expressions() {
     let stmt =
         parse_select("select * from unnest(ARRAY['a', 'b']::varchar[], ARRAY[1, 2])").unwrap();
     assert!(
-        matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "unnest" && args.len() == 2)
+        matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args, .. }) if name == "unnest" && args.len() == 2)
     );
 
     let stmt = parse_select("select 1 = any (ARRAY[1, 2])").unwrap();
@@ -1722,10 +1790,33 @@ fn parse_aggregate_select() {
         SqlExpr::AggCall {
             func: AggFunc::Count,
             args,
-            distinct: false
+            distinct: false,
+            ..
         } if args.is_empty()
     ));
     assert_eq!(stmt.targets[0].output_name, "count");
+}
+
+#[test]
+fn parse_variadic_aggregate_call_marks_call_level_flag() {
+    std::thread::Builder::new()
+        .name("parse_variadic_aggregate_call_marks_call_level_flag".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let stmt = parse_select("select count(VARIADIC ARRAY[1, 2]) from people").unwrap();
+            assert!(matches!(
+                &stmt.targets[0].expr,
+                SqlExpr::AggCall {
+                    func: AggFunc::Count,
+                    args,
+                    func_variadic: true,
+                    ..
+                } if args.len() == 1
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -1780,7 +1871,8 @@ fn parse_column_alias() {
         SqlExpr::AggCall {
             func: AggFunc::Count,
             args,
-            distinct: false
+            distinct: false,
+            ..
         } if args.is_empty()
     ));
 }
@@ -1802,7 +1894,8 @@ fn parse_count_distinct() {
         SqlExpr::AggCall {
             func: AggFunc::Count,
             args,
-            distinct: true
+            distinct: true,
+            ..
         } if args.len() == 1
     ));
 }
@@ -1811,7 +1904,7 @@ fn parse_count_distinct() {
 fn parse_generate_series() {
     let stmt = parse_select("select * from generate_series(1, 10)").unwrap();
     assert!(
-        matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 2)
+        matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args, .. }) if name == "generate_series" && args.len() == 2)
     );
 }
 
@@ -1819,7 +1912,7 @@ fn parse_generate_series() {
 fn parse_generate_series_with_step() {
     let stmt = parse_select("select * from generate_series(1, 10, 2)").unwrap();
     assert!(
-        matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args }) if name == "generate_series" && args.len() == 3)
+        matches!(stmt.from, Some(FromItem::FunctionCall { ref name, ref args, .. }) if name == "generate_series" && args.len() == 3)
     );
 }
 
@@ -1829,7 +1922,7 @@ fn parse_named_function_args_in_select() {
         "select jsonb_path_exists(target => '{}'::jsonb, path := '$', silent => true)",
     )
     .unwrap();
-    let SqlExpr::FuncCall { name, args } = &stmt.targets[0].expr else {
+    let SqlExpr::FuncCall { name, args, .. } = &stmt.targets[0].expr else {
         panic!("expected function call");
     };
     assert_eq!(name, "jsonb_path_exists");
@@ -1842,7 +1935,7 @@ fn parse_named_function_args_in_select() {
 #[test]
 fn parse_named_function_args_in_from() {
     let stmt = parse_select("select * from generate_series(start => 1, stop := 3)").unwrap();
-    let Some(FromItem::FunctionCall { name, args }) = stmt.from else {
+    let Some(FromItem::FunctionCall { name, args, .. }) = stmt.from else {
         panic!("expected function call in from");
     };
     assert_eq!(name, "generate_series");
@@ -1866,10 +1959,7 @@ fn build_plan_for_unnest_uses_array_element_types() {
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::FunctionScan {
-            call: crate::include::nodes::plannodes::SetReturningCall::Unnest {
-                output_columns,
-                ..
-            },
+            call: crate::include::nodes::plannodes::SetReturningCall::Unnest { output_columns, .. },
         } => {
             assert_eq!(output_columns.len(), 2);
             assert_eq!(
@@ -1921,7 +2011,7 @@ fn parse_srf_with_column_alias() {
             column_aliases,
             preserve_source_names,
         }) => {
-            let FromItem::FunctionCall { name, args } = source.as_ref() else {
+            let FromItem::FunctionCall { name, args, .. } = source.as_ref() else {
                 panic!("expected FunctionCall source, got {:?}", source);
             };
             assert_eq!(name, "generate_series");
@@ -2390,7 +2480,8 @@ fn parse_json_builder_and_object_agg_functions() {
         SqlExpr::AggCall {
             func: AggFunc::JsonObjectAgg,
             args,
-            distinct: false
+            distinct: false,
+            ..
         } if args.len() == 2
     ));
 }
@@ -2627,9 +2718,10 @@ fn parse_unicode_string_and_identifier_literals() {
 
 #[test]
 fn parse_unicode_uescape_string_and_identifier_literals() {
-    let stmt =
-        parse_statement("select U&'d!0061t\\+000061' UESCAPE '!' as U&\"d*0061t\\+000061\" UESCAPE '*'")
-            .unwrap();
+    let stmt = parse_statement(
+        "select U&'d!0061t\\+000061' UESCAPE '!' as U&\"d*0061t\\+000061\" UESCAPE '*'",
+    )
+    .unwrap();
     match stmt {
         Statement::Select(stmt) => {
             assert_eq!(
@@ -2647,7 +2739,10 @@ fn parse_unicode_uescape_allows_non_escape_backslashes() {
     let stmt = parse_statement(r#"select U&' \' UESCAPE '!' as tricky"#).unwrap();
     match stmt {
         Statement::Select(stmt) => {
-            assert_eq!(stmt.targets[0].expr, SqlExpr::Const(Value::Text(" \\".into())));
+            assert_eq!(
+                stmt.targets[0].expr,
+                SqlExpr::Const(Value::Text(" \\".into()))
+            );
         }
         other => panic!("expected select statement, got {other:?}"),
     }
@@ -2680,7 +2775,10 @@ fn parse_unicode_string_rejects_when_standard_conforming_strings_is_off() {
         },
     )
     .unwrap_err();
-    assert_eq!(err.to_string(), "unsafe use of string constant with Unicode escapes");
+    assert_eq!(
+        err.to_string(),
+        "unsafe use of string constant with Unicode escapes"
+    );
 }
 
 #[test]
@@ -2688,7 +2786,10 @@ fn parse_unicode_string_validates_surrogate_pairs() {
     let stmt = parse_statement(r"select U&'\D83D\DE00'").unwrap();
     match stmt {
         Statement::Select(stmt) => {
-            assert_eq!(stmt.targets[0].expr, SqlExpr::Const(Value::Text("😀".into())));
+            assert_eq!(
+                stmt.targets[0].expr,
+                SqlExpr::Const(Value::Text("😀".into()))
+            );
         }
         other => panic!("expected select statement, got {other:?}"),
     }
@@ -2702,7 +2803,10 @@ fn parse_escape_string_validates_unicode_escapes() {
     let stmt = parse_statement(r"select E'\uD83D\uDE00'").unwrap();
     match stmt {
         Statement::Select(stmt) => {
-            assert_eq!(stmt.targets[0].expr, SqlExpr::Const(Value::Text("😀".into())));
+            assert_eq!(
+                stmt.targets[0].expr,
+                SqlExpr::Const(Value::Text("😀".into()))
+            );
         }
         other => panic!("expected select statement, got {other:?}"),
     }
@@ -2746,22 +2850,21 @@ fn parse_trim_without_explicit_trim_chars() {
     .unwrap();
     assert!(matches!(
         &stmt.targets[0].expr,
-        SqlExpr::FuncCall { name, args } if name == "btrim" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "btrim" && args.len() == 1
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
-        SqlExpr::FuncCall { name, args } if name == "ltrim" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "ltrim" && args.len() == 1
     ));
     assert!(matches!(
         &stmt.targets[2].expr,
-        SqlExpr::FuncCall { name, args } if name == "rtrim" && args.len() == 1
+        SqlExpr::FuncCall { name, args, .. } if name == "rtrim" && args.len() == 1
     ));
 }
 
 #[test]
 fn parse_similar_to_syntax() {
-    let stmt =
-        parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
+    let stmt = parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
     match stmt {
         Statement::Select(stmt) => {
             assert!(matches!(

@@ -57,6 +57,9 @@ pub const INT4_ARRAY_TYPE_OID: u32 = 1007;
 pub const TEXT_TYPE_OID: u32 = 25;
 pub const OID_TYPE_OID: u32 = 26;
 pub const OIDVECTOR_TYPE_OID: u32 = 30;
+pub const ANYOID: u32 = 2276;
+pub const ANYARRAYOID: u32 = 2277;
+pub const RECORD_TYPE_OID: u32 = 2249;
 pub const TEXT_ARRAY_TYPE_OID: u32 = 1009;
 pub const BPCHAR_ARRAY_TYPE_OID: u32 = 1014;
 pub const VARCHAR_ARRAY_TYPE_OID: u32 = 1015;
@@ -388,7 +391,10 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[18].oid, PG_CAST_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[19].oid, PG_CONSTRAINT_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_DEPEND_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_DESCRIPTION_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[21].oid,
+            PG_DESCRIPTION_RELATION_OID
+        );
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_INDEX_RELATION_OID);
     }
 

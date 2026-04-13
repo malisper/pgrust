@@ -1,5 +1,7 @@
 use super::*;
-use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows};
+use crate::include::catalog::{
+    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
+};
 use crate::include::nodes::plannodes::RegexTableFunction;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -15,6 +17,109 @@ struct NamedArgSignature {
     params: &'static [&'static str],
     required: usize,
     defaults: &'static [Option<NamedArgDefault>],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResolvedSrfImpl {
+    GenerateSeries,
+    Unnest,
+    JsonTable(JsonTableFunction),
+    RegexTable(RegexTableFunction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResolvedFunctionCall {
+    pub proc_oid: u32,
+    pub prokind: char,
+    pub proretset: bool,
+    pub result_type: SqlType,
+    pub declared_arg_types: Vec<SqlType>,
+    pub nvargs: usize,
+    pub vatype_oid: u32,
+    pub func_variadic: bool,
+    pub scalar_impl: Option<BuiltinScalarFunction>,
+    pub srf_impl: Option<ResolvedSrfImpl>,
+    pub agg_impl: Option<AggFunc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CandidateMatch {
+    declared_arg_types: Vec<SqlType>,
+    cost: usize,
+    nvargs: usize,
+    vatype_oid: u32,
+}
+
+pub(super) fn resolve_function_call(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    actual_types: &[SqlType],
+    func_variadic: bool,
+) -> Result<ResolvedFunctionCall, ParseError> {
+    let mut best: Option<(ResolvedFunctionCall, usize, bool, bool)> = None;
+    let mut ambiguous = false;
+
+    for row in catalog.proc_rows_by_name(name) {
+        let scalar_impl = builtin_scalar_function_for_proc_row(&row);
+        let srf_impl = builtin_srf_impl_for_proc_row(&row);
+        let agg_impl = aggregate_func_for_proname(&row.proname);
+        if scalar_impl.is_none() && srf_impl.is_none() && agg_impl.is_none() {
+            continue;
+        }
+
+        let Some(candidate) = match_proc_signature(catalog, &row, actual_types, func_variadic)
+        else {
+            continue;
+        };
+
+        let resolved = ResolvedFunctionCall {
+            proc_oid: row.oid,
+            prokind: row.prokind,
+            proretset: row.proretset,
+            result_type: builtin_sql_type_for_oid(row.prorettype)
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            declared_arg_types: candidate.declared_arg_types,
+            nvargs: candidate.nvargs,
+            vatype_oid: candidate.vatype_oid,
+            func_variadic: row.provariadic != 0
+                && (func_variadic || (row.provariadic != ANYOID && candidate.nvargs > 0)),
+            scalar_impl,
+            srf_impl,
+            agg_impl,
+        };
+
+        let is_variadic = row.provariadic != 0;
+        let expanded = row.provariadic != 0 && !func_variadic && candidate.nvargs > 0;
+        match &best {
+            None => {
+                best = Some((resolved, candidate.cost, is_variadic, expanded));
+                ambiguous = false;
+            }
+            Some((_, best_cost, best_variadic, best_expanded)) => {
+                let current_rank = (candidate.cost, is_variadic, expanded);
+                let best_rank = (*best_cost, *best_variadic, *best_expanded);
+                if current_rank < best_rank {
+                    best = Some((resolved, candidate.cost, is_variadic, expanded));
+                    ambiguous = false;
+                } else if current_rank == best_rank {
+                    ambiguous = true;
+                }
+            }
+        }
+    }
+
+    if ambiguous {
+        return Err(ParseError::UnexpectedToken {
+            expected: "unambiguous builtin function call",
+            actual: format!("{name}({} args)", actual_types.len()),
+        });
+    }
+
+    best.map(|(resolved, _, _, _)| resolved)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "supported builtin function",
+            actual: name.to_string(),
+        })
 }
 
 pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
@@ -73,6 +178,168 @@ pub(super) fn resolve_regex_table_function(name: &str) -> Option<RegexTableFunct
         "regexp_split_to_table" => Some(RegexTableFunction::SplitToTable),
         _ => None,
     }
+}
+
+fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    builtin_scalar_function_for_proc_src(&row.prosrc)
+}
+
+fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
+    match row.proname.to_ascii_lowercase().as_str() {
+        "generate_series" => Some(ResolvedSrfImpl::GenerateSeries),
+        "unnest" => Some(ResolvedSrfImpl::Unnest),
+        other => resolve_json_table_function(other)
+            .map(ResolvedSrfImpl::JsonTable)
+            .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable)),
+    }
+}
+
+fn match_proc_signature(
+    catalog: &dyn CatalogLookup,
+    row: &PgProcRow,
+    actual_types: &[SqlType],
+    func_variadic: bool,
+) -> Option<CandidateMatch> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    if row.provariadic == 0 {
+        if actual_types.len() != declared_oids.len() {
+            return None;
+        }
+        let mut declared_arg_types = Vec::with_capacity(actual_types.len());
+        let mut cost = 0usize;
+        for (actual_type, declared_oid) in actual_types.iter().zip(declared_oids.iter()) {
+            let (arg_cost, target_type) =
+                match_proc_arg_type(catalog, *actual_type, *declared_oid)?;
+            cost += arg_cost;
+            declared_arg_types.push(target_type);
+        }
+        return Some(CandidateMatch {
+            declared_arg_types,
+            cost,
+            nvargs: 0,
+            vatype_oid: 0,
+        });
+    }
+
+    let fixed_prefix_len = declared_oids.len().saturating_sub(1);
+    if actual_types.len() < fixed_prefix_len {
+        return None;
+    }
+
+    let mut declared_arg_types = Vec::with_capacity(actual_types.len());
+    let mut cost = 0usize;
+    for (actual_type, declared_oid) in actual_types
+        .iter()
+        .take(fixed_prefix_len)
+        .zip(declared_oids.iter().take(fixed_prefix_len))
+    {
+        let (arg_cost, target_type) = match_proc_arg_type(catalog, *actual_type, *declared_oid)?;
+        cost += arg_cost;
+        declared_arg_types.push(target_type);
+    }
+
+    if func_variadic {
+        if actual_types.len() != declared_oids.len() {
+            return None;
+        }
+        let (arg_cost, target_type) =
+            match_explicit_variadic_arg(catalog, *actual_types.last()?, row.provariadic)?;
+        cost += arg_cost;
+        declared_arg_types.push(target_type);
+        return Some(CandidateMatch {
+            declared_arg_types,
+            cost,
+            nvargs: 0,
+            vatype_oid: row.provariadic,
+        });
+    }
+
+    let nvargs = actual_types.len().saturating_sub(fixed_prefix_len);
+    for actual_type in actual_types.iter().skip(fixed_prefix_len) {
+        let (arg_cost, target_type) =
+            match_variadic_element_type(catalog, *actual_type, row.provariadic)?;
+        cost += arg_cost;
+        declared_arg_types.push(target_type);
+    }
+
+    Some(CandidateMatch {
+        declared_arg_types,
+        cost,
+        nvargs,
+        vatype_oid: row.provariadic,
+    })
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
+    if argtypes.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn match_proc_arg_type(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    declared_oid: u32,
+) -> Option<(usize, SqlType)> {
+    if declared_oid == ANYOID {
+        return Some((2, actual_type));
+    }
+    if declared_oid == ANYARRAYOID {
+        return actual_type.is_array.then_some((2, actual_type));
+    }
+    let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
+    arg_type_match_cost(actual_type, declared_type).map(|cost| (cost, declared_type))
+}
+
+fn match_variadic_element_type(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    variadic_oid: u32,
+) -> Option<(usize, SqlType)> {
+    if variadic_oid == ANYOID {
+        return Some((2, actual_type));
+    }
+    let declared_type = catalog.type_by_oid(variadic_oid)?.sql_type;
+    arg_type_match_cost(actual_type, declared_type).map(|cost| (cost, declared_type))
+}
+
+fn match_explicit_variadic_arg(
+    catalog: &dyn CatalogLookup,
+    actual_type: SqlType,
+    variadic_oid: u32,
+) -> Option<(usize, SqlType)> {
+    if variadic_oid == ANYOID {
+        return actual_type.is_array.then_some((2, actual_type));
+    }
+    if !actual_type.is_array {
+        return None;
+    }
+    let element_type = catalog.type_by_oid(variadic_oid)?.sql_type;
+    let target_type = SqlType::array_of(element_type);
+    arg_type_match_cost(actual_type, target_type).map(|cost| (cost, target_type))
+}
+
+fn arg_type_match_cost(actual_type: SqlType, target_type: SqlType) -> Option<usize> {
+    if actual_type == target_type {
+        return Some(0);
+    }
+    if actual_type.is_array != target_type.is_array {
+        return None;
+    }
+    if is_numeric_family(actual_type) && is_numeric_family(target_type) {
+        return Some(1);
+    }
+    if is_text_like_type(actual_type) && is_text_like_type(target_type) {
+        return Some(1);
+    }
+    if is_bit_string_type(actual_type) && is_bit_string_type(target_type) {
+        return Some(1);
+    }
+    None
 }
 
 pub(super) fn validate_scalar_function_arity(
@@ -803,7 +1070,10 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::Unistr)
         {
-            by_func.push((BuiltinScalarFunction::Unistr, SqlType::new(SqlTypeKind::Text)));
+            by_func.push((
+                BuiltinScalarFunction::Unistr,
+                SqlType::new(SqlTypeKind::Text),
+            ));
         }
         by_func
     })
@@ -1087,6 +1357,58 @@ mod tests {
             Some(JsonTableFunction::Each)
         );
         assert_eq!(resolve_json_table_function("random"), None);
+    }
+
+    #[test]
+    fn resolve_function_call_expands_ordinary_variadic_candidates() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "json_extract_path",
+            &[
+                SqlType::new(SqlTypeKind::Json),
+                SqlType::new(SqlTypeKind::Text),
+                SqlType::new(SqlTypeKind::Text),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(resolved.proc_oid, 6243);
+        assert_eq!(resolved.vatype_oid, TEXT_TYPE_OID);
+        assert_eq!(resolved.nvargs, 2);
+        assert!(resolved.func_variadic);
+        assert_eq!(
+            resolved.scalar_impl,
+            Some(BuiltinScalarFunction::JsonExtractPath)
+        );
+    }
+
+    #[test]
+    fn resolve_function_call_preserves_explicit_variadic_any_calls() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "json_build_array",
+            &[SqlType::array_of(SqlType::new(SqlTypeKind::Text))],
+            true,
+        )
+        .unwrap();
+        assert_eq!(resolved.proc_oid, 6213);
+        assert_eq!(resolved.vatype_oid, ANYOID);
+        assert_eq!(resolved.nvargs, 0);
+        assert!(resolved.func_variadic);
+    }
+
+    #[test]
+    fn resolve_function_call_clears_variadic_for_non_variadic_target() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "lower",
+            &[SqlType::new(SqlTypeKind::Text)],
+            true,
+        )
+        .unwrap();
+        assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::Lower));
+        assert!(!resolved.func_variadic);
+        assert_eq!(resolved.vatype_oid, 0);
     }
 
     #[test]

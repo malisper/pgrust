@@ -268,64 +268,93 @@ pub(crate) fn parse_text_array_literal_with_op(
     element_type: SqlType,
     op: &'static str,
 ) -> Result<Value, ExecError> {
-    if raw == "{}" {
-        return Ok(Value::Array(Vec::new()));
-    }
-    if !raw.starts_with('{') || !raw.ends_with('}') {
-        return Err(ExecError::TypeMismatch {
+    fn array_parse_error(raw: &str, op: &'static str) -> ExecError {
+        ExecError::TypeMismatch {
             op,
             left: Value::Null,
             right: Value::Text(raw.into()),
-        });
-    }
-
-    let mut chars = raw[1..raw.len() - 1].chars().peekable();
-    let mut items = Vec::new();
-    while chars.peek().is_some() {
-        let mut quoted = false;
-        let value = if chars.peek() == Some(&'"') {
-            quoted = true;
-            chars.next();
-            let mut text = String::new();
-            while let Some(ch) = chars.next() {
-                match ch {
-                    '"' => break,
-                    '\\' => {
-                        let escaped = chars.next().ok_or_else(|| ExecError::TypeMismatch {
-                            op,
-                            left: Value::Null,
-                            right: Value::Text(raw.into()),
-                        })?;
-                        text.push(escaped);
-                    }
-                    other => text.push(other),
-                }
-            }
-            text
-        } else {
-            let mut text = String::new();
-            while let Some(&ch) = chars.peek() {
-                if ch == ',' {
-                    break;
-                }
-                text.push(ch);
-                chars.next();
-            }
-            text
-        };
-
-        let value = if !quoted && value == "NULL" {
-            Value::Null
-        } else {
-            cast_text_value(&value, element_type, true)?
-        };
-        items.push(value);
-
-        if chars.peek() == Some(&',') {
-            chars.next();
         }
     }
 
+    fn parse_array_items(
+        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+        element_type: SqlType,
+        raw: &str,
+        op: &'static str,
+    ) -> Result<Vec<Value>, ExecError> {
+        let mut items = Vec::new();
+        loop {
+            match chars.peek() {
+                Some('}') => break,
+                Some(_) => {}
+                None => return Err(array_parse_error(raw, op)),
+            }
+
+            let value = match chars.peek() {
+                Some('{') => {
+                    chars.next();
+                    let nested = parse_array_items(chars, element_type, raw, op)?;
+                    if chars.next() != Some('}') {
+                        return Err(array_parse_error(raw, op));
+                    }
+                    Value::Array(nested)
+                }
+                Some('"') => {
+                    chars.next();
+                    let mut text = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('"') => break,
+                            Some('\\') => {
+                                let escaped =
+                                    chars.next().ok_or_else(|| array_parse_error(raw, op))?;
+                                text.push(escaped);
+                            }
+                            Some(ch) => text.push(ch),
+                            None => return Err(array_parse_error(raw, op)),
+                        }
+                    }
+                    cast_text_value(&text, element_type, true)?
+                }
+                Some(_) => {
+                    let mut text = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if ch == ',' || ch == '}' {
+                            break;
+                        }
+                        text.push(ch);
+                        chars.next();
+                    }
+                    if text == "NULL" {
+                        Value::Null
+                    } else {
+                        cast_text_value(&text, element_type, true)?
+                    }
+                }
+                None => return Err(array_parse_error(raw, op)),
+            };
+            items.push(value);
+
+            match chars.peek() {
+                Some(',') => {
+                    chars.next();
+                }
+                Some('}') => break,
+                None => return Err(array_parse_error(raw, op)),
+                _ => return Err(array_parse_error(raw, op)),
+            }
+        }
+        Ok(items)
+    }
+
+    let mut chars = raw.chars().peekable();
+    if chars.next() != Some('{') {
+        return Err(array_parse_error(raw, op));
+    }
+    let items = parse_array_items(&mut chars, element_type, raw, op)?;
+    if chars.next() != Some('}') || chars.peek().is_some() {
+        return Err(array_parse_error(raw, op));
+    }
     Ok(Value::Array(items))
 }
 
@@ -479,9 +508,7 @@ pub(crate) fn soft_input_error_info(
         | SqlTypeKind::VarBit
         | SqlTypeKind::Name
         | SqlTypeKind::Char
-        | SqlTypeKind::Varchar => {
-            cast_text_value(text, ty, false)
-        }
+        | SqlTypeKind::Varchar => cast_text_value(text, ty, false),
         _ => cast_value(Value::Text(text.into()), ty),
     };
     match parsed {
@@ -922,9 +949,9 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
         SqlTypeKind::JsonPath => Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?)),
-        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
-            coerce_character_string(text, ty, explicit)?,
-        ))),
+        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(
+            CompactString::from_owned(coerce_character_string(text, ty, explicit)?),
+        )),
         SqlTypeKind::Int2 => cast_text_to_int2(text),
         SqlTypeKind::Int4 => cast_text_to_int4(text),
         SqlTypeKind::Int8 => cast_text_to_int8(text),
@@ -1393,6 +1420,10 @@ mod tests {
                 4
             )))
         );
+        assert_eq!(
+            parse_input_type_name("int4[][]").unwrap(),
+            Some(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+        );
     }
 
     #[test]
@@ -1408,6 +1439,15 @@ mod tests {
         assert_eq!(
             parse_text_array_literal("{true,false}", SqlType::new(SqlTypeKind::Bool)).unwrap(),
             Value::Array(vec![Value::Bool(true), Value::Bool(false)])
+        );
+        assert_eq!(
+            parse_text_array_literal("{{1,4},{2,5},{3,6}}", SqlType::new(SqlTypeKind::Int4))
+                .unwrap(),
+            Value::Array(vec![
+                Value::Array(vec![Value::Int32(1), Value::Int32(4)]),
+                Value::Array(vec![Value::Int32(2), Value::Int32(5)]),
+                Value::Array(vec![Value::Int32(3), Value::Int32(6)]),
+            ])
         );
     }
 

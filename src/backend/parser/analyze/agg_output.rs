@@ -8,7 +8,7 @@ pub(super) fn bind_agg_output_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     bind_agg_output_expr_in_clause(
@@ -32,7 +32,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
@@ -50,8 +50,9 @@ pub(super) fn bind_agg_output_expr_in_clause(
             func,
             args,
             distinct,
+            func_variadic,
         } => {
-            let entry = (*func, args.clone(), *distinct);
+            let entry = (*func, args.clone(), *distinct, *func_variadic);
             for (i, agg) in agg_list.iter().enumerate() {
                 if *agg == entry {
                     return Ok(Expr::Column(n_keys + i));
@@ -1074,7 +1075,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             n_keys,
         ),
         SqlExpr::Random => Ok(Expr::Random),
-        SqlExpr::FuncCall { name, args } => bind_grouped_func_call(
+        SqlExpr::FuncCall { name, args, .. } => bind_grouped_func_call(
             name,
             args,
             group_by_exprs,

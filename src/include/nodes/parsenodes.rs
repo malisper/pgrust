@@ -292,6 +292,7 @@ pub enum FromItem {
     FunctionCall {
         name: String,
         args: Vec<SqlFunctionArg>,
+        func_variadic: bool,
     },
     DerivedTable(Box<SelectStatement>),
     Join {
@@ -686,6 +687,7 @@ pub enum SqlExpr {
         func: AggFunc,
         args: Vec<SqlFunctionArg>,
         distinct: bool,
+        func_variadic: bool,
     },
     ScalarSubquery(Box<SelectStatement>),
     Exists(Box<SelectStatement>),
@@ -714,6 +716,7 @@ pub enum SqlExpr {
     FuncCall {
         name: String,
         args: Vec<SqlFunctionArg>,
+        func_variadic: bool,
     },
     CurrentTimestamp,
 }

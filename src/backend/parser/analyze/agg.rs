@@ -96,9 +96,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => false,
-        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
-            args.iter().any(|arg| expr_references_input_scope(&arg.value))
-        }
+        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_input_scope(&arg.value)),
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_references_input_scope),
         SqlExpr::ScalarSubquery(_)
         | SqlExpr::Exists(_)
@@ -151,7 +151,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         } => {
             expr_references_input_scope(expr)
                 || expr_references_input_scope(pattern)
-                || escape.as_ref().is_some_and(|e| expr_references_input_scope(e))
+                || escape
+                    .as_ref()
+                    .is_some_and(|e| expr_references_input_scope(e))
         }
         SqlExpr::Similar {
             expr,
@@ -161,7 +163,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         } => {
             expr_references_input_scope(expr)
                 || expr_references_input_scope(pattern)
-                || escape.as_ref().is_some_and(|e| expr_references_input_scope(e))
+                || escape
+                    .as_ref()
+                    .is_some_and(|e| expr_references_input_scope(e))
         }
         SqlExpr::Cast(inner, _)
         | SqlExpr::UnaryPlus(inner)
@@ -173,14 +177,18 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
     }
 }
 
-pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlFunctionArg>, bool)>) {
+pub(super) fn collect_aggs(
+    expr: &SqlExpr,
+    aggs: &mut Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool)>,
+) {
     match expr {
         SqlExpr::AggCall {
             func,
             args,
             distinct,
+            func_variadic,
         } => {
-            let entry = (*func, args.clone(), *distinct);
+            let entry = (*func, args.clone(), *distinct, *func_variadic);
             if !aggs.contains(&entry) {
                 aggs.push(entry);
             }

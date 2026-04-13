@@ -158,7 +158,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             SqlType::new(SqlTypeKind::Bool)
         }
         SqlExpr::Random => SqlType::new(SqlTypeKind::Float8),
-        SqlExpr::FuncCall { name, args } => {
+        SqlExpr::FuncCall { name, args, .. } => {
             if name.eq_ignore_ascii_case("coalesce") {
                 let values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
                 return infer_common_scalar_expr_type_with_ctes(
@@ -273,8 +273,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                         },
                     )
                 }
-                Some(BuiltinScalarFunction::Reverse) => {
-                    function_arg_values(args).next().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
+                Some(BuiltinScalarFunction::Reverse) => function_arg_values(args).next().map_or(
+                    SqlType::new(SqlTypeKind::Text),
+                    |arg| {
                         infer_sql_expr_type_with_ctes(
                             arg,
                             scope,
@@ -283,8 +284,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                             grouped_outer,
                             ctes,
                         )
-                    })
-                }
+                    },
+                ),
                 Some(BuiltinScalarFunction::GetBit) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::SetBit | BuiltinScalarFunction::SetByte) => {
                     function_arg_values(args).next().map_or(

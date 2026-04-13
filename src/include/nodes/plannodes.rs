@@ -274,21 +274,29 @@ pub enum RegexTableFunction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetReturningCall {
     GenerateSeries {
+        func_oid: u32,
+        func_variadic: bool,
         start: Expr,
         stop: Expr,
         step: Expr,
         output: QueryColumn,
     },
     Unnest {
+        func_oid: u32,
+        func_variadic: bool,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
     JsonTableFunction {
+        func_oid: u32,
+        func_variadic: bool,
         kind: JsonTableFunction,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
     RegexTableFunction {
+        func_oid: u32,
+        func_variadic: bool,
         kind: RegexTableFunction,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
@@ -318,6 +326,8 @@ pub enum ProjectSetTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggAccum {
+    pub aggfnoid: u32,
+    pub agg_variadic: bool,
     pub func: AggFunc,
     pub args: Vec<Expr>,
     pub distinct: bool,
@@ -424,8 +434,10 @@ pub enum Expr {
     JsonPath(Box<Expr>, Box<Expr>),
     JsonPathText(Box<Expr>, Box<Expr>),
     FuncCall {
+        func_oid: u32,
         func: BuiltinScalarFunction,
         args: Vec<Expr>,
+        func_variadic: bool,
     },
     CurrentTimestamp,
 }
