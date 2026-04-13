@@ -1,9 +1,13 @@
 use super::ExecError;
-use super::expr_casts::parse_bytea_text;
+use super::expr_bit::render_bit_text;
+use super::expr_casts::{cast_value, parse_bytea_text, render_internal_char_text};
 use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::parse_numeric_text;
+use super::value_io::format_array_text;
+use crate::backend::executor::jsonb::render_jsonb_bytes;
 use super::node_types::Value;
 use crate::backend::libpq::pqformat::format_bytea_text;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
@@ -76,6 +80,293 @@ pub(super) fn eval_to_number_function(values: &[Value]) -> Result<Value, ExecErr
     Ok(Value::Numeric(to_number_numeric(text, format)?))
 }
 
+fn value_output_text(value: &Value) -> Result<String, ExecError> {
+    Ok(match value {
+        Value::Null => String::new(),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Bool(v) => {
+            if *v {
+                "t".into()
+            } else {
+                "f".into()
+            }
+        }
+        Value::Text(_) | Value::TextRef(_, _) | Value::JsonPath(_) => value.as_text().unwrap().into(),
+        Value::Json(v) => v.as_str().into(),
+        Value::Jsonb(bytes) => render_jsonb_bytes(bytes)?,
+        Value::Bit(bits) => render_bit_text(bits),
+        Value::Bytea(bytes) => format_bytea_text(bytes, ByteaOutputFormat::Hex),
+        Value::InternalChar(byte) => render_internal_char_text(*byte),
+        Value::Array(values) => format_array_text(values),
+    })
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    if !identifier.is_empty()
+        && identifier
+            .chars()
+            .enumerate()
+            .all(|(idx, ch)| {
+                if idx == 0 {
+                    ch == '_' || ch.is_ascii_lowercase()
+                } else {
+                    ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit()
+                }
+            })
+    {
+        return identifier.into();
+    }
+    let escaped = identifier.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+fn quote_literal_text(text: &str) -> String {
+    let escaped = text.replace('\'', "''");
+    if text.contains('\\') {
+        let escaped = escaped.replace('\\', "\\\\");
+        format!("E'{escaped}'")
+    } else {
+        format!("'{escaped}'")
+    }
+}
+
+fn pad_formatted(mut value: String, width: i32, left_align: bool) -> String {
+    let width = width.unsigned_abs() as usize;
+    let len = value.chars().count();
+    if width <= len {
+        return value;
+    }
+    let padding = " ".repeat(width - len);
+    if left_align || width == 0 {
+        value.push_str(&padding);
+        value
+    } else {
+        format!("{padding}{value}")
+    }
+}
+
+fn format_arg_text(kind: char, value: &Value) -> Result<String, ExecError> {
+    match kind {
+        's' => {
+            if matches!(value, Value::Null) {
+                Ok(String::new())
+            } else {
+                value_output_text(value)
+            }
+        }
+        'I' => {
+            if matches!(value, Value::Null) {
+                Err(ExecError::RaiseException(
+                    "null values cannot be formatted as an SQL identifier".into(),
+                ))
+            } else {
+                Ok(quote_identifier(&value_output_text(value)?))
+            }
+        }
+        'L' => {
+            if matches!(value, Value::Null) {
+                Ok("NULL".into())
+            } else {
+                Ok(quote_literal_text(&value_output_text(value)?))
+            }
+        }
+        other => Err(ExecError::RaiseException(format!(
+            "unrecognized format() type specifier \"{other}\""
+        ))),
+    }
+}
+
+fn format_width_arg(values: &[Value], index: usize) -> Result<i32, ExecError> {
+    let Some(value) = values.get(index) else {
+        return Err(ExecError::RaiseException("too few arguments for format()".into()));
+    };
+    Ok(match value {
+        Value::Null => 0,
+        Value::Int16(v) => *v as i32,
+        Value::Int32(v) => *v,
+        Value::Int64(v) => *v as i32,
+        other => {
+            let casted = cast_value(other.clone(), SqlType::new(SqlTypeKind::Int4))?;
+            match casted {
+                Value::Int32(v) => v,
+                _ => 0,
+            }
+        }
+    })
+}
+
+pub(super) fn eval_concat_function(values: &[Value]) -> Result<Value, ExecError> {
+    let mut out = String::new();
+    for value in values {
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        out.push_str(&value_output_text(value)?);
+    }
+    Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+pub(super) fn eval_concat_ws_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(separator_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(separator_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let separator = separator_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "concat_ws",
+        left: separator_value.clone(),
+        right: Value::Text("".into()),
+    })?;
+    let mut out = String::new();
+    let mut first = true;
+    for value in values.iter().skip(1) {
+        if matches!(value, Value::Null) {
+            continue;
+        }
+        if !first {
+            out.push_str(separator);
+        }
+        first = false;
+        out.push_str(&value_output_text(value)?);
+    }
+    Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+pub(super) fn eval_format_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(format_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(format_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let format = format_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "format",
+        left: format_value.clone(),
+        right: Value::Text("".into()),
+    })?;
+    let mut out = String::new();
+    let chars: Vec<char> = format.chars().collect();
+    let mut idx = 0usize;
+    let mut next_arg = 1usize;
+    while idx < chars.len() {
+        if chars[idx] != '%' {
+            out.push(chars[idx]);
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        if idx >= chars.len() {
+            return Err(ExecError::RaiseException(
+                "unterminated format() type specifier".into(),
+            ));
+        }
+        if chars[idx] == '%' {
+            out.push('%');
+            idx += 1;
+            continue;
+        }
+
+        let mut explicit_arg = None;
+        let mut lookahead = idx;
+        let mut digits = String::new();
+        while lookahead < chars.len() && chars[lookahead].is_ascii_digit() {
+            digits.push(chars[lookahead]);
+            lookahead += 1;
+        }
+        if lookahead < chars.len() && chars[lookahead] == '$' {
+            let parsed = digits.parse::<usize>().unwrap_or(0);
+            if parsed == 0 {
+                return Err(ExecError::RaiseException(
+                    "format specifies argument 0, but arguments are numbered from 1".into(),
+                ));
+            }
+            explicit_arg = Some(parsed);
+            idx = lookahead + 1;
+        }
+
+        let mut left_align = false;
+        if idx < chars.len() && chars[idx] == '-' {
+            left_align = true;
+            idx += 1;
+        }
+
+        let mut width = None;
+        if idx < chars.len() && chars[idx] == '*' {
+            idx += 1;
+            let mut width_arg = next_arg;
+            let mut width_digits = String::new();
+            while idx < chars.len() && chars[idx].is_ascii_digit() {
+                width_digits.push(chars[idx]);
+                idx += 1;
+            }
+            if idx < chars.len() && chars[idx] == '$' {
+                let parsed = width_digits.parse::<usize>().unwrap_or(0);
+                if parsed == 0 {
+                    return Err(ExecError::RaiseException(
+                        "format specifies argument 0, but arguments are numbered from 1".into(),
+                    ));
+                }
+                width_arg = parsed;
+                idx += 1;
+                next_arg = next_arg.max(width_arg + 1);
+            } else if !width_digits.is_empty() {
+                return Err(ExecError::RaiseException(
+                    "unterminated format() type specifier".into(),
+                ));
+            } else {
+                next_arg += 1;
+            }
+            let width_value = format_width_arg(&values[1..], width_arg - 1)?;
+            if width_value < 0 {
+                left_align = true;
+            }
+            width = Some(width_value);
+        } else {
+            let mut width_digits = String::new();
+            while idx < chars.len() && chars[idx].is_ascii_digit() {
+                width_digits.push(chars[idx]);
+                idx += 1;
+            }
+            if !width_digits.is_empty() {
+                width = Some(width_digits.parse::<i32>().unwrap_or(0));
+            }
+        }
+
+        if idx >= chars.len() {
+            return Err(ExecError::RaiseException(
+                "unterminated format() type specifier".into(),
+            ));
+        }
+        let kind = chars[idx];
+        idx += 1;
+        let arg_index = explicit_arg.unwrap_or_else(|| {
+            let current = next_arg;
+            next_arg += 1;
+            current
+        });
+        if arg_index == 0 {
+            return Err(ExecError::RaiseException(
+                "format specifies argument 0, but arguments are numbered from 1".into(),
+            ));
+        }
+        let Some(value) = values.get(arg_index) else {
+            return Err(ExecError::RaiseException("too few arguments for format()".into()));
+        };
+        let rendered = format_arg_text(kind, value)?;
+        out.push_str(&pad_formatted(
+            rendered,
+            width.unwrap_or(0),
+            left_align,
+        ));
+    }
+    Ok(Value::Text(CompactString::from_owned(out)))
+}
+
 pub(super) fn eval_left_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
@@ -111,6 +402,44 @@ pub(super) fn eval_left_function(values: &[Value]) -> Result<Value, ExecError> {
     };
     Ok(Value::Text(CompactString::from_owned(
         chars[..take].iter().collect(),
+    )))
+}
+
+pub(super) fn eval_right_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(count_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(count_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "right",
+            left: text_value.clone(),
+            right: count_value.clone(),
+        })?;
+    let count = match count_value {
+        Value::Int32(v) => *v,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "right",
+                left: text_value.clone(),
+                right: other.clone(),
+            });
+        }
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let start = if count >= 0 {
+        chars.len().saturating_sub(count as usize)
+    } else {
+        usize::min(count.unsigned_abs() as usize, chars.len())
+    };
+    Ok(Value::Text(CompactString::from_owned(
+        chars[start..].iter().collect(),
     )))
 }
 
@@ -896,9 +1225,26 @@ pub(super) fn eval_reverse_function(values: &[Value]) -> Result<Value, ExecError
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
+    if let Some(text) = value.as_text() {
+        return Ok(Value::Text(CompactString::from_owned(
+            text.chars().rev().collect(),
+        )));
+    }
     let mut bytes = expect_bytea_arg("reverse", value, &Value::Null)?.to_vec();
     bytes.reverse();
     Ok(Value::Bytea(bytes))
+}
+
+pub(super) fn eval_quote_literal_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Text(CompactString::from_owned(quote_literal_text(
+        &value_output_text(value)?,
+    ))))
 }
 
 pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError> {

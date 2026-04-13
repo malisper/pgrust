@@ -27,6 +27,13 @@ impl Default for FloatFormatOptions {
 
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "text or bit argument",
+            actual,
+        }) if actual.starts_with("Length(") => {
+            let signature = actual.replace("Length", "length");
+            format!("function {signature} does not exist")
+        }
         ExecError::Parse(p) => p.to_string(),
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
@@ -96,6 +103,27 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
             format!("row is too big: size {size}, maximum size {max_size}")
         }
         other => format!("{other:?}"),
+    }
+}
+
+pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
+    match e {
+        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "text or bit argument",
+            actual,
+        }) if actual.starts_with("Length(") => Some(
+            "No function matches the given name and argument types. You might need to add explicit type casts.".into(),
+        ),
+        ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => Some(
+            "No operator matches the given name and argument types. You might need to add explicit type casts.".into(),
+        ),
+        ExecError::RaiseException(message)
+            if message.starts_with("unrecognized format() type specifier")
+                || message == "unterminated format() type specifier" =>
+        {
+            Some("For a single \"%\" use \"%%\".".into())
+        }
+        _ => None,
     }
 }
 
@@ -457,6 +485,16 @@ pub(crate) fn send_error(
     message: &str,
     position: Option<usize>,
 ) -> io::Result<()> {
+    send_error_with_hint(w, sqlstate, message, None, position)
+}
+
+pub(crate) fn send_error_with_hint(
+    w: &mut impl Write,
+    sqlstate: &str,
+    message: &str,
+    hint: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
     let mut body = Vec::new();
     body.push(b'S');
     body.extend_from_slice(b"ERROR\0");
@@ -468,6 +506,11 @@ pub(crate) fn send_error(
     body.push(b'M');
     body.extend_from_slice(message.as_bytes());
     body.push(0);
+    if let Some(hint) = hint {
+        body.push(b'H');
+        body.extend_from_slice(hint.as_bytes());
+        body.push(0);
+    }
     if let Some(position) = position {
         body.push(b'P');
         body.extend_from_slice(position.to_string().as_bytes());
