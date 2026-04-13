@@ -1,6 +1,6 @@
 /// A string type that stores short strings inline (up to 22 bytes on the stack)
 /// to avoid heap allocation. Falls back to standard String for longer strings.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub enum CompactString {
     Inline { len: u8, buf: [u8; 22] },
     Heap(String),

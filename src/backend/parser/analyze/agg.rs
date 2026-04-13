@@ -16,6 +16,12 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::FuncCall { .. }
         | SqlExpr::CurrentTimestamp => false,
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_contains_agg),
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            expr_contains_agg(left) || expr_contains_agg(right)
+        }
+        SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
+            expr_contains_agg(expr)
+        }
         SqlExpr::ArraySubscript { array, subscripts } => {
             expr_contains_agg(array)
                 || subscripts.iter().any(|subscript| {
@@ -108,6 +114,12 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => false,
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            expr_references_input_scope(left) || expr_references_input_scope(right)
+        }
+        SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
+            expr_references_input_scope(expr)
+        }
         SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
             .iter()
             .any(|arg| expr_references_input_scope(&arg.value)),
@@ -228,6 +240,13 @@ pub(super) fn collect_aggs(
         | SqlExpr::QuantifiedSubquery { .. }
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => {}
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            collect_aggs(left, aggs);
+            collect_aggs(right, aggs);
+        }
+        SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
+            collect_aggs(expr, aggs);
+        }
         SqlExpr::FuncCall { args, .. } => {
             for arg in args {
                 collect_aggs(&arg.value, aggs);

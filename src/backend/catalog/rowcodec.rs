@@ -9,7 +9,8 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTypeRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
@@ -48,6 +49,36 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_language_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgTsParser => rows
+            .ts_parsers
+            .iter()
+            .cloned()
+            .map(pg_ts_parser_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgTsTemplate => rows
+            .ts_templates
+            .iter()
+            .cloned()
+            .map(pg_ts_template_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgTsDict => rows
+            .ts_dicts
+            .iter()
+            .cloned()
+            .map(pg_ts_dict_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgTsConfig => rows
+            .ts_configs
+            .iter()
+            .cloned()
+            .map(pg_ts_config_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgTsConfigMap => rows
+            .ts_config_maps
+            .iter()
+            .cloned()
+            .map(pg_ts_config_map_row_values)
             .collect(),
         BootstrapCatalogKind::PgOperator => rows
             .operators
@@ -274,6 +305,67 @@ pub(crate) fn pg_language_row_from_values(
         lanplcallfoid: expect_oid(&values[5])?,
         laninline: expect_oid(&values[6])?,
         lanvalidator: expect_oid(&values[7])?,
+    })
+}
+
+pub(crate) fn pg_ts_parser_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgTsParserRow, CatalogError> {
+    Ok(PgTsParserRow {
+        oid: expect_oid(&values[0])?,
+        prsname: expect_text(&values[1])?,
+        prsnamespace: expect_oid(&values[2])?,
+        prsstart: expect_oid(&values[3])?,
+        prstoken: expect_oid(&values[4])?,
+        prsend: expect_oid(&values[5])?,
+        prsheadline: expect_nullable_oid(&values[6])?,
+        prslextype: expect_oid(&values[7])?,
+    })
+}
+
+pub(crate) fn pg_ts_template_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgTsTemplateRow, CatalogError> {
+    Ok(PgTsTemplateRow {
+        oid: expect_oid(&values[0])?,
+        tmplname: expect_text(&values[1])?,
+        tmplnamespace: expect_oid(&values[2])?,
+        tmplinit: expect_nullable_oid(&values[3])?,
+        tmpllexize: expect_oid(&values[4])?,
+    })
+}
+
+pub(crate) fn pg_ts_dict_row_from_values(values: Vec<Value>) -> Result<PgTsDictRow, CatalogError> {
+    Ok(PgTsDictRow {
+        oid: expect_oid(&values[0])?,
+        dictname: expect_text(&values[1])?,
+        dictnamespace: expect_oid(&values[2])?,
+        dictowner: expect_oid(&values[3])?,
+        dicttemplate: expect_oid(&values[4])?,
+        dictinitoption: expect_nullable_text(&values[5])?,
+    })
+}
+
+pub(crate) fn pg_ts_config_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgTsConfigRow, CatalogError> {
+    Ok(PgTsConfigRow {
+        oid: expect_oid(&values[0])?,
+        cfgname: expect_text(&values[1])?,
+        cfgnamespace: expect_oid(&values[2])?,
+        cfgowner: expect_oid(&values[3])?,
+        cfgparser: expect_oid(&values[4])?,
+    })
+}
+
+pub(crate) fn pg_ts_config_map_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgTsConfigMapRow, CatalogError> {
+    Ok(PgTsConfigMapRow {
+        mapcfg: expect_oid(&values[0])?,
+        maptokentype: expect_int32(&values[1])?,
+        mapseqno: expect_int32(&values[2])?,
+        mapdict: expect_oid(&values[3])?,
     })
 }
 
@@ -645,6 +737,65 @@ fn pg_language_row_values(row: PgLanguageRow) -> Vec<Value> {
     ]
 }
 
+fn pg_ts_parser_row_values(row: PgTsParserRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.prsname.into()),
+        Value::Int32(row.prsnamespace as i32),
+        Value::Int32(row.prsstart as i32),
+        Value::Int32(row.prstoken as i32),
+        Value::Int32(row.prsend as i32),
+        row.prsheadline
+            .map(|oid| Value::Int32(oid as i32))
+            .unwrap_or(Value::Null),
+        Value::Int32(row.prslextype as i32),
+    ]
+}
+
+fn pg_ts_template_row_values(row: PgTsTemplateRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.tmplname.into()),
+        Value::Int32(row.tmplnamespace as i32),
+        row.tmplinit
+            .map(|oid| Value::Int32(oid as i32))
+            .unwrap_or(Value::Null),
+        Value::Int32(row.tmpllexize as i32),
+    ]
+}
+
+fn pg_ts_dict_row_values(row: PgTsDictRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.dictname.into()),
+        Value::Int32(row.dictnamespace as i32),
+        Value::Int32(row.dictowner as i32),
+        Value::Int32(row.dicttemplate as i32),
+        row.dictinitoption
+            .map(|text| Value::Text(text.into()))
+            .unwrap_or(Value::Null),
+    ]
+}
+
+fn pg_ts_config_row_values(row: PgTsConfigRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.cfgname.into()),
+        Value::Int32(row.cfgnamespace as i32),
+        Value::Int32(row.cfgowner as i32),
+        Value::Int32(row.cfgparser as i32),
+    ]
+}
+
+fn pg_ts_config_map_row_values(row: PgTsConfigMapRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.mapcfg as i32),
+        Value::Int32(row.maptokentype),
+        Value::Int32(row.mapseqno),
+        Value::Int32(row.mapdict as i32),
+    ]
+}
+
 fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -889,6 +1040,13 @@ fn expect_oid(value: &Value) -> Result<u32, CatalogError> {
             u32::try_from(*v).map_err(|_| CatalogError::Corrupt("invalid oid value"))
         }
         _ => Err(CatalogError::Corrupt("expected oid value")),
+    }
+}
+
+fn expect_nullable_oid(value: &Value) -> Result<Option<u32>, CatalogError> {
+    match value {
+        Value::Null => Ok(None),
+        other => expect_oid(other).map(Some),
     }
 }
 

@@ -353,6 +353,17 @@ pub(super) fn validate_scalar_function_arity(
             ScalarFunctionArity::Exact(count) => args.len() == *count,
         })
         .unwrap_or_else(|| match func {
+            BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::ToTsQuery
+            | BuiltinScalarFunction::PlainToTsQuery
+            | BuiltinScalarFunction::PhraseToTsQuery
+            | BuiltinScalarFunction::WebSearchToTsQuery => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::TsLexize => args.len() == 2,
+            BuiltinScalarFunction::TsQueryNot => args.len() == 1,
+            BuiltinScalarFunction::TsMatch
+            | BuiltinScalarFunction::TsQueryAnd
+            | BuiltinScalarFunction::TsQueryOr
+            | BuiltinScalarFunction::TsVectorConcat => args.len() == 2,
             BuiltinScalarFunction::Random => args.is_empty(),
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
@@ -643,6 +654,30 @@ pub(super) fn comparison_operator_exists(
 }
 
 pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<SqlType> {
+    match func {
+        BuiltinScalarFunction::TsMatch => return Some(SqlType::new(SqlTypeKind::Bool)),
+        BuiltinScalarFunction::ToTsVector => {
+            return Some(SqlType::new(SqlTypeKind::TsVector));
+        }
+        BuiltinScalarFunction::ToTsQuery
+        | BuiltinScalarFunction::PlainToTsQuery
+        | BuiltinScalarFunction::PhraseToTsQuery
+        | BuiltinScalarFunction::WebSearchToTsQuery => {
+            return Some(SqlType::new(SqlTypeKind::TsQuery));
+        }
+        BuiltinScalarFunction::TsLexize => {
+            return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
+        }
+        BuiltinScalarFunction::TsQueryAnd
+        | BuiltinScalarFunction::TsQueryOr
+        | BuiltinScalarFunction::TsQueryNot => {
+            return Some(SqlType::new(SqlTypeKind::TsQuery));
+        }
+        BuiltinScalarFunction::TsVectorConcat => {
+            return Some(SqlType::new(SqlTypeKind::TsVector));
+        }
+        _ => {}
+    }
     scalar_fixed_return_types()
         .iter()
         .find_map(|(candidate, sql_type)| (*candidate == func).then_some(*sql_type))
@@ -867,6 +902,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
+        ("to_tsvector", BuiltinScalarFunction::ToTsVector),
+        ("to_tsquery", BuiltinScalarFunction::ToTsQuery),
+        ("plainto_tsquery", BuiltinScalarFunction::PlainToTsQuery),
+        ("phraseto_tsquery", BuiltinScalarFunction::PhraseToTsQuery),
+        (
+            "websearch_to_tsquery",
+            BuiltinScalarFunction::WebSearchToTsQuery,
+        ),
+        ("ts_lexize", BuiltinScalarFunction::TsLexize),
         ("array_to_json", BuiltinScalarFunction::ArrayToJson),
         ("json_build_array", BuiltinScalarFunction::JsonBuildArray),
         ("json_build_object", BuiltinScalarFunction::JsonBuildObject),
@@ -1214,7 +1258,12 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
 fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
     matches!(
         func,
-        BuiltinScalarFunction::Random
+        BuiltinScalarFunction::TsMatch
+            | BuiltinScalarFunction::TsQueryAnd
+            | BuiltinScalarFunction::TsQueryOr
+            | BuiltinScalarFunction::TsQueryNot
+            | BuiltinScalarFunction::TsVectorConcat
+            | BuiltinScalarFunction::Random
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::ToJson
             | BuiltinScalarFunction::ToJsonb

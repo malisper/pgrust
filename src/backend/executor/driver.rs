@@ -54,6 +54,10 @@ pub fn execute_statement(
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::CopyFrom(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COPY handled by session layer",
+            actual: "COPY".into(),
+        })),
         Statement::AlterTableAddColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
             actual: "ALTER TABLE ADD COLUMN".into(),

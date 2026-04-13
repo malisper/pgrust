@@ -113,6 +113,14 @@ fn supports_comparison_operator(
     if comparison_operator_exists(catalog, op, left, right) {
         return true;
     }
+    if !left.is_array
+        && !right.is_array
+        && left == right
+        && matches!(left.kind, SqlTypeKind::TsQuery | SqlTypeKind::TsVector)
+        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+    {
+        return true;
+    }
     supports_array_comparison_operator(op, left, right)
 }
 
@@ -275,6 +283,171 @@ pub(super) fn bind_concat_expr(
     bind_concat_operands(left, left_type, left_bound, right, right_type, right_bound)
 }
 
+pub(super) fn bind_overloaded_binary_expr(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let mut left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let mut right_type = coerce_unknown_string_literal_type(right, raw_right_type, raw_left_type);
+    let right_is_string_literal = matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    let left_is_string_literal = matches!(
+        left,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+
+    if op == "@@" {
+        if matches!(left_type.kind, SqlTypeKind::TsVector) && right_is_string_literal {
+            right_type = SqlType::new(SqlTypeKind::TsQuery);
+        } else if matches!(right_type.kind, SqlTypeKind::TsVector) && left_is_string_literal {
+            left_type = SqlType::new(SqlTypeKind::TsQuery);
+        }
+    } else if op == "&&" {
+        if matches!(left_type.kind, SqlTypeKind::TsQuery) && right_is_string_literal {
+            right_type = SqlType::new(SqlTypeKind::TsQuery);
+        } else if matches!(right_type.kind, SqlTypeKind::TsQuery) && left_is_string_literal {
+            left_type = SqlType::new(SqlTypeKind::TsQuery);
+        }
+    }
+
+    let left_bound =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let right_bound =
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+
+    match op {
+        "@@" => {
+            if left_type.kind == SqlTypeKind::Jsonb && right_type.kind == SqlTypeKind::JsonPath {
+                return Ok(Expr::JsonbPathMatch(
+                    Box::new(left_bound),
+                    Box::new(right_bound),
+                ));
+            }
+            if matches!(left_type.kind, SqlTypeKind::TsVector)
+                && matches!(right_type.kind, SqlTypeKind::TsQuery)
+            {
+                return Ok(Expr::FuncCall {
+                    func_oid: 0,
+                    func: BuiltinScalarFunction::TsMatch,
+                    args: vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::TsVector),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                    ],
+                    func_variadic: false,
+                });
+            }
+            if matches!(left_type.kind, SqlTypeKind::TsQuery)
+                && matches!(right_type.kind, SqlTypeKind::TsVector)
+            {
+                return Ok(Expr::FuncCall {
+                    func_oid: 0,
+                    func: BuiltinScalarFunction::TsMatch,
+                    args: vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::TsVector),
+                        ),
+                    ],
+                    func_variadic: false,
+                });
+            }
+        }
+        "&&" => {
+            if left_type.is_array && right_type.is_array {
+                return Ok(Expr::ArrayOverlap(
+                    Box::new(left_bound),
+                    Box::new(right_bound),
+                ));
+            }
+            if matches!(left_type.kind, SqlTypeKind::TsQuery)
+                && matches!(right_type.kind, SqlTypeKind::TsQuery)
+            {
+                return Ok(Expr::FuncCall {
+                    func_oid: 0,
+                    func: BuiltinScalarFunction::TsQueryAnd,
+                    args: vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::TsQuery),
+                        ),
+                    ],
+                    func_variadic: false,
+                });
+            }
+        }
+        _ => {}
+    }
+
+    Err(ParseError::UndefinedOperator {
+        op,
+        left_type: sql_type_name(left_type),
+        right_type: sql_type_name(right_type),
+    })
+}
+
+pub(super) fn bind_prefix_operator_expr(
+    op: &str,
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_type =
+        infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let bound =
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    match op {
+        "!!" if matches!(raw_type.kind, SqlTypeKind::TsQuery) => Ok(Expr::FuncCall {
+            func_oid: 0,
+            func: BuiltinScalarFunction::TsQueryNot,
+            args: vec![coerce_bound_expr(
+                bound,
+                raw_type,
+                SqlType::new(SqlTypeKind::TsQuery),
+            )],
+            func_variadic: false,
+        }),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "supported prefix operator",
+            actual: op.into(),
+        }),
+    }
+}
+
 pub(crate) fn bind_concat_operands(
     left_sql: &SqlExpr,
     left_type: SqlType,
@@ -312,6 +485,34 @@ pub(crate) fn bind_concat_operands(
         let left_expr = coerce_bound_expr(left_bound, left_type, common);
         let right_expr = coerce_bound_expr(right_bound, right_type, common);
         return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
+    }
+
+    if matches!(left_type.kind, SqlTypeKind::TsVector)
+        && matches!(right_type.kind, SqlTypeKind::TsVector)
+    {
+        return Ok(Expr::FuncCall {
+            func_oid: 0,
+            func: BuiltinScalarFunction::TsVectorConcat,
+            args: vec![
+                coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::TsVector)),
+                coerce_bound_expr(right_bound, right_type, SqlType::new(SqlTypeKind::TsVector)),
+            ],
+            func_variadic: false,
+        });
+    }
+
+    if matches!(left_type.kind, SqlTypeKind::TsQuery)
+        && matches!(right_type.kind, SqlTypeKind::TsQuery)
+    {
+        return Ok(Expr::FuncCall {
+            func_oid: 0,
+            func: BuiltinScalarFunction::TsQueryOr,
+            args: vec![
+                coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::TsQuery)),
+                coerce_bound_expr(right_bound, right_type, SqlType::new(SqlTypeKind::TsQuery)),
+            ],
+            func_variadic: false,
+        });
     }
 
     if should_use_text_concat(left_sql, left_type, right_sql, right_type) {

@@ -51,7 +51,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int64(v))
-            if matches!(column.sql_type.kind, SqlTypeKind::Oid) =>
+            if matches!(
+                column.sql_type.kind,
+                SqlTypeKind::Oid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+            ) =>
         {
             let oid = u32::try_from(v).map_err(|_| ExecError::OidOutOfRange)?;
             Ok(TupleValue::Bytes(oid.to_le_bytes().to_vec()))
@@ -116,6 +119,12 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::JsonPath, Value::JsonPath(text)) => {
             Ok(TupleValue::Bytes(text.as_bytes().to_vec()))
         }
+        (ScalarType::TsVector, Value::TsVector(vector)) => Ok(TupleValue::Bytes(
+            crate::backend::executor::encode_tsvector_bytes(&vector),
+        )),
+        (ScalarType::TsQuery, Value::TsQuery(query)) => Ok(TupleValue::Bytes(
+            crate::backend::executor::encode_tsquery_bytes(&query),
+        )),
         (ScalarType::Text, Value::InternalChar(v)) => {
             Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
         }
@@ -205,6 +214,16 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Json(text) => cast_text_value(text.as_str(), target, false),
         Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
         Value::Bytea(bytes) => cast_value(Value::Bytea(bytes.clone()), target),
+        Value::TsVector(vector) => cast_text_value(
+            &crate::backend::executor::render_tsvector_text(vector),
+            target,
+            false,
+        ),
+        Value::TsQuery(query) => cast_text_value(
+            &crate::backend::executor::render_tsquery_text(query),
+            target,
+            false,
+        ),
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
@@ -274,7 +293,10 @@ pub(crate) fn decode_value_with_toast(
                     details: "int4 must be exactly 4 bytes".into(),
                 }
             })?);
-            if matches!(column.sql_type.kind, SqlTypeKind::Oid) {
+            if matches!(
+                column.sql_type.kind,
+                SqlTypeKind::Oid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+            ) {
                 Ok(Value::Int64(raw as u32 as i64))
             } else {
                 Ok(Value::Int32(raw))
@@ -493,6 +515,30 @@ pub(crate) fn decode_value_with_toast(
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
+        ScalarType::TsVector => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::TsVector(
+                crate::backend::executor::decode_tsvector_bytes(bytes)?,
+            ))
+        }
+        ScalarType::TsQuery => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::TsQuery(
+                crate::backend::executor::decode_tsquery_bytes(bytes)?,
+            ))
+        }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(ExecError::UnsupportedStorageType {
@@ -594,6 +640,15 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Null => Ok(Vec::new()),
         Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Int64(v)
+            if matches!(
+                element_type.kind,
+                SqlTypeKind::Oid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+            ) =>
+        {
+            let oid = u32::try_from(v).map_err(|_| ExecError::OidOutOfRange)?;
+            Ok(oid.to_le_bytes().to_vec())
+        }
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Bit(v) => {
             let mut bytes = Vec::with_capacity(4 + v.bytes.len());
@@ -607,6 +662,8 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::Json(text) => Ok(text.as_bytes().to_vec()),
         Value::Text(text) => Ok(text.as_bytes().to_vec()),
         Value::TextRef(_, _) => Ok(coerced.as_text().unwrap().as_bytes().to_vec()),
+        Value::TsVector(vector) => Ok(crate::backend::executor::encode_tsvector_bytes(&vector)),
+        Value::TsQuery(query) => Ok(crate::backend::executor::encode_tsquery_bytes(&query)),
         Value::InternalChar(v) => Ok(vec![v]),
         Value::Float64(v) => {
             if matches!(element_type.kind, SqlTypeKind::Float4) {
@@ -740,7 +797,10 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             }
             Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().unwrap())))
         }
-        SqlTypeKind::Int4 | SqlTypeKind::Oid => {
+        SqlTypeKind::Int4
+        | SqlTypeKind::Oid
+        | SqlTypeKind::RegConfig
+        | SqlTypeKind::RegDictionary => {
             if bytes.len() != 4 {
                 return Err(ExecError::InvalidStorageValue {
                     column: "<array>".into(),
@@ -895,6 +955,12 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?))
         }
+        SqlTypeKind::TsVector => Ok(Value::TsVector(
+            crate::backend::executor::decode_tsvector_bytes(bytes)?,
+        )),
+        SqlTypeKind::TsQuery => Ok(Value::TsQuery(
+            crate::backend::executor::decode_tsquery_bytes(bytes)?,
+        )),
         SqlTypeKind::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {
@@ -991,6 +1057,34 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             Value::JsonPath(v) => {
                 out.push('"');
                 for ch in v.chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
+            Value::TsVector(v) => {
+                let rendered = crate::backend::executor::render_tsvector_text(v);
+                out.push('"');
+                for ch in rendered.chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
+            Value::TsQuery(v) => {
+                let rendered = crate::backend::executor::render_tsquery_text(v);
+                out.push('"');
+                for ch in rendered.chars() {
                     match ch {
                         '"' | '\\' => {
                             out.push('\\');

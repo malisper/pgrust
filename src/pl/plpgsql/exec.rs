@@ -178,6 +178,8 @@ fn render_raise_value(value: &Value) -> String {
         Value::InternalChar(v) => char::from(*v).to_string(),
         Value::Json(text) | Value::JsonPath(text) => text.to_string(),
         Value::Jsonb(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
+        Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::Bytea(bytes) => {
             let mut rendered = String::from("\\x");
             for byte in bytes {

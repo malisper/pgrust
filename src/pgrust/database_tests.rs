@@ -120,6 +120,110 @@ fn explain_lines(db: &Database, client_id: u32, sql: &str) -> Vec<String> {
     }
 }
 
+#[test]
+fn copy_from_file_loads_tsvector_rows() {
+    let dir = temp_dir("copy_from_file");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table docs (t text, a tsvector)")
+        .unwrap();
+
+    let copy_path = dir.join("docs.tsv");
+    std::fs::write(&copy_path, "hello\tbar:2 foo:1\n").unwrap();
+
+    let sql = format!("copy docs from '{}'", copy_path.display());
+    match session.execute(&db, &sql).unwrap() {
+        StatementResult::AffectedRows(count) => assert_eq!(count, 1),
+        other => panic!("expected affected rows, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select t, a from docs"),
+        vec![vec![
+            Value::Text("hello".into()),
+            Value::TsVector(
+                crate::include::nodes::tsearch::TsVector::parse("bar:2 foo:1").unwrap()
+            ),
+        ]]
+    );
+}
+
+#[test]
+fn text_search_catalogs_are_bootstrapped() {
+    let dir = temp_dir("text_search_catalogs");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select prsname, prsstart, prstoken, prsend, prslextype from pg_ts_parser order by oid",
+        ),
+        vec![vec![
+            Value::Text("default".into()),
+            Value::Int64(3717),
+            Value::Int64(3718),
+            Value::Int64(3719),
+            Value::Int64(3721),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select dictname, dicttemplate, dictinitoption from pg_ts_dict order by oid",
+        ),
+        vec![vec![
+            Value::Text("simple".into()),
+            Value::Int64(3727),
+            Value::Null,
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tmplname, tmplinit, tmpllexize from pg_ts_template order by oid",
+        ),
+        vec![
+            vec![
+                Value::Text("simple".into()),
+                Value::Int64(3725),
+                Value::Int64(3726),
+            ],
+            vec![
+                Value::Text("synonym".into()),
+                Value::Int64(3728),
+                Value::Int64(3729),
+            ],
+            vec![
+                Value::Text("ispell".into()),
+                Value::Int64(3731),
+                Value::Int64(3732),
+            ],
+            vec![
+                Value::Text("thesaurus".into()),
+                Value::Int64(3740),
+                Value::Int64(3741),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select cfgname, cfgparser from pg_ts_config order by oid",
+        ),
+        vec![vec![Value::Text("simple".into()), Value::Int64(3722)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from pg_ts_config_map"),
+        vec![vec![Value::Int64(19)]]
+    );
+}
+
 fn relfilenode_for(db: &Database, client_id: u32, relname: &str) -> i64 {
     let rows = query_rows(
         db,

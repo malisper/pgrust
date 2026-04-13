@@ -59,6 +59,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Box(_)) => SqlType::new(SqlTypeKind::Box),
         SqlExpr::Const(Value::Polygon(_)) => SqlType::new(SqlTypeKind::Polygon),
         SqlExpr::Const(Value::Circle(_)) => SqlType::new(SqlTypeKind::Circle),
+        SqlExpr::Const(Value::TsVector(_)) => SqlType::new(SqlTypeKind::TsVector),
+        SqlExpr::Const(Value::TsQuery(_)) => SqlType::new(SqlTypeKind::TsQuery),
         SqlExpr::Const(Value::InternalChar(_)) => SqlType::new(SqlTypeKind::InternalChar),
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
@@ -102,6 +104,39 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes),
             infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes),
         ),
+        SqlExpr::BinaryOperator { op, left, right } => {
+            let left_type = infer_sql_expr_type_with_ctes(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            match op.as_str() {
+                "@@" => SqlType::new(SqlTypeKind::Bool),
+                "||" if matches!(left_type.element_type().kind, SqlTypeKind::TsVector)
+                    && matches!(right_type.element_type().kind, SqlTypeKind::TsVector) =>
+                {
+                    SqlType::new(SqlTypeKind::TsVector)
+                }
+                "&&" | "||"
+                    if matches!(left_type.element_type().kind, SqlTypeKind::TsQuery)
+                        && matches!(right_type.element_type().kind, SqlTypeKind::TsQuery) =>
+                {
+                    SqlType::new(SqlTypeKind::TsQuery)
+                }
+                _ => SqlType::new(SqlTypeKind::Text),
+            }
+        }
         SqlExpr::UnaryPlus(inner) => {
             infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }
@@ -111,7 +146,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::BitNot(inner) => {
             infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }
+        SqlExpr::PrefixOperator { op, expr } => match op.as_str() {
+            "!!" => SqlType::new(SqlTypeKind::TsQuery),
+            _ => infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ),
+        },
         SqlExpr::Cast(_, ty) => *ty,
+        SqlExpr::FieldSelect { .. } => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Eq(_, _)
         | SqlExpr::NotEq(_, _)
         | SqlExpr::Lt(_, _)
@@ -226,6 +273,23 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 return sql_type;
             }
             match resolved {
+                Some(BuiltinScalarFunction::TsMatch) => SqlType::new(SqlTypeKind::Bool),
+                Some(BuiltinScalarFunction::ToTsVector) => SqlType::new(SqlTypeKind::TsVector),
+                Some(
+                    BuiltinScalarFunction::ToTsQuery
+                    | BuiltinScalarFunction::PlainToTsQuery
+                    | BuiltinScalarFunction::PhraseToTsQuery
+                    | BuiltinScalarFunction::WebSearchToTsQuery,
+                ) => SqlType::new(SqlTypeKind::TsQuery),
+                Some(BuiltinScalarFunction::TsLexize) => {
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+                }
+                Some(
+                    BuiltinScalarFunction::TsQueryAnd
+                    | BuiltinScalarFunction::TsQueryOr
+                    | BuiltinScalarFunction::TsQueryNot,
+                ) => SqlType::new(SqlTypeKind::TsQuery),
+                Some(BuiltinScalarFunction::TsVectorConcat) => SqlType::new(SqlTypeKind::TsVector),
                 Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::ArrayNdims)
                 | Some(BuiltinScalarFunction::ArrayLower) => SqlType::new(SqlTypeKind::Int4),

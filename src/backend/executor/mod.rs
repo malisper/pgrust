@@ -19,6 +19,7 @@ mod nodes;
 mod pg_regex;
 mod srf;
 mod startup;
+mod tsearch;
 pub(crate) mod value_io;
 pub(crate) mod expr {
     pub(crate) use super::exec_expr::*;
@@ -49,6 +50,13 @@ pub use value_io::format_array_value_text;
 pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
 pub use startup::executor_start;
+pub(crate) use tsearch::{
+    compare_tsquery, compare_tsvector, concat_tsvector, decode_tsquery_bytes,
+    decode_tsvector_bytes, encode_tsquery_bytes, encode_tsvector_bytes,
+    eval_tsquery_matches_tsvector, eval_tsvector_matches_tsquery, parse_tsquery_text,
+    parse_tsvector_text, render_tsquery_text, render_tsvector_text, tsquery_and,
+    tsquery_input_error, tsquery_not, tsquery_or, tsvector_input_error,
+};
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{

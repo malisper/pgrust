@@ -89,6 +89,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::Const(v) => Ok(Expr::Const(v.clone())),
         SqlExpr::IntegerLiteral(value) => Ok(Expr::Const(bind_integer_literal(value)?)),
         SqlExpr::NumericLiteral(value) => Ok(Expr::Const(bind_numeric_literal(value)?)),
+        SqlExpr::BinaryOperator { op, .. } => Err(ParseError::UnexpectedToken {
+            expected: "grouped expression",
+            actual: format!("unsupported operator {op}"),
+        }),
         SqlExpr::Add(l, r) => Ok(Expr::Add(
             Box::new(bind_agg_output_expr_in_clause(
                 l,
@@ -1271,6 +1275,14 @@ pub(super) fn bind_agg_output_expr_in_clause(
             func_variadic: false,
         }),
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
+        SqlExpr::PrefixOperator { op, .. } => Err(ParseError::UnexpectedToken {
+            expected: "grouped expression",
+            actual: format!("unsupported operator {op}"),
+        }),
+        SqlExpr::FieldSelect { field, .. } => Err(ParseError::UnexpectedToken {
+            expected: "grouped expression",
+            actual: format!("unsupported field selection .{field}"),
+        }),
     }
 }
 

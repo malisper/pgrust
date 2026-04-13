@@ -501,6 +501,12 @@ fn eval_plpgsql_builtin_function(
         return result;
     }
     match func {
+        BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::ToTsQuery
+        | BuiltinScalarFunction::PlainToTsQuery
+        | BuiltinScalarFunction::PhraseToTsQuery
+        | BuiltinScalarFunction::WebSearchToTsQuery
+        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
@@ -631,6 +637,59 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
+        BuiltinScalarFunction::TsMatch => match values.as_slice() {
+            [Value::TsVector(vector), Value::TsQuery(query)] => Ok(Value::Bool(
+                crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
+            )),
+            [Value::TsQuery(query), Value::TsVector(vector)] => Ok(Value::Bool(
+                crate::backend::executor::eval_tsquery_matches_tsvector(query, vector),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "@@",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryAnd => match values.as_slice() {
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
+                crate::backend::executor::tsquery_and(left.clone(), right.clone()),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "&&",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryOr => match values.as_slice() {
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
+                crate::backend::executor::tsquery_or(left.clone(), right.clone()),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "||",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryNot => match values.as_slice() {
+            [Value::TsQuery(query)] => Ok(Value::TsQuery(crate::backend::executor::tsquery_not(
+                query.clone(),
+            ))),
+            _ => Err(ExecError::TypeMismatch {
+                op: "!!",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Null,
+            }),
+        },
+        BuiltinScalarFunction::TsVectorConcat => match values.as_slice() {
+            [Value::TsVector(left), Value::TsVector(right)] => Ok(Value::TsVector(
+                crate::backend::executor::concat_tsvector(left, right),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "||",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
         BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
@@ -697,6 +756,172 @@ fn eval_plpgsql_builtin_function(
     }
 }
 
+fn eval_text_search_builtin_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+) -> Result<Value, ExecError> {
+    fn arg_text(
+        values: &[Value],
+        index: usize,
+        op: &'static str,
+    ) -> Result<Option<String>, ExecError> {
+        let Some(value) = values.get(index) else {
+            return Ok(None);
+        };
+        if matches!(value, Value::Null) {
+            return Ok(None);
+        }
+        value
+            .as_text()
+            .map(|text| Some(text.to_string()))
+            .ok_or_else(|| ExecError::TypeMismatch {
+                op,
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            })
+    }
+
+    let parse_error = |op: &'static str, message: String| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "valid text search input",
+            actual: format!("{op}: {message}"),
+        })
+    };
+
+    match func {
+        BuiltinScalarFunction::ToTsVector => {
+            let result = match values {
+                [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
+                [_] => crate::backend::tsearch::to_tsvector_with_config_name(
+                    None,
+                    arg_text(values, 0, "to_tsvector")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                [_, _] => crate::backend::tsearch::to_tsvector_with_config_name(
+                    arg_text(values, 0, "to_tsvector")?.as_deref(),
+                    arg_text(values, 1, "to_tsvector")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                _ => unreachable!(),
+            };
+            result
+                .map(Value::TsVector)
+                .map_err(|e| parse_error("to_tsvector", e))
+        }
+        BuiltinScalarFunction::ToTsQuery => {
+            let result = match values {
+                [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
+                [_] => crate::backend::tsearch::to_tsquery_with_config_name(
+                    None,
+                    arg_text(values, 0, "to_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                [_, _] => crate::backend::tsearch::to_tsquery_with_config_name(
+                    arg_text(values, 0, "to_tsquery")?.as_deref(),
+                    arg_text(values, 1, "to_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                _ => unreachable!(),
+            };
+            result
+                .map(Value::TsQuery)
+                .map_err(|e| parse_error("to_tsquery", e))
+        }
+        BuiltinScalarFunction::PlainToTsQuery => {
+            let result = match values {
+                [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
+                [_] => crate::backend::tsearch::plainto_tsquery_with_config_name(
+                    None,
+                    arg_text(values, 0, "plainto_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                [_, _] => crate::backend::tsearch::plainto_tsquery_with_config_name(
+                    arg_text(values, 0, "plainto_tsquery")?.as_deref(),
+                    arg_text(values, 1, "plainto_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                _ => unreachable!(),
+            };
+            result
+                .map(Value::TsQuery)
+                .map_err(|e| parse_error("plainto_tsquery", e))
+        }
+        BuiltinScalarFunction::PhraseToTsQuery => {
+            let result = match values {
+                [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
+                [_] => crate::backend::tsearch::phraseto_tsquery_with_config_name(
+                    None,
+                    arg_text(values, 0, "phraseto_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                [_, _] => crate::backend::tsearch::phraseto_tsquery_with_config_name(
+                    arg_text(values, 0, "phraseto_tsquery")?.as_deref(),
+                    arg_text(values, 1, "phraseto_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                _ => unreachable!(),
+            };
+            result
+                .map(Value::TsQuery)
+                .map_err(|e| parse_error("phraseto_tsquery", e))
+        }
+        BuiltinScalarFunction::WebSearchToTsQuery => {
+            let result = match values {
+                [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
+                [_] => crate::backend::tsearch::websearch_to_tsquery_with_config_name(
+                    None,
+                    arg_text(values, 0, "websearch_to_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                [_, _] => crate::backend::tsearch::websearch_to_tsquery_with_config_name(
+                    arg_text(values, 0, "websearch_to_tsquery")?.as_deref(),
+                    arg_text(values, 1, "websearch_to_tsquery")?
+                        .as_deref()
+                        .unwrap_or_default(),
+                ),
+                _ => unreachable!(),
+            };
+            result
+                .map(Value::TsQuery)
+                .map_err(|e| parse_error("websearch_to_tsquery", e))
+        }
+        BuiltinScalarFunction::TsLexize => match values {
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [_, _] => crate::backend::tsearch::ts_lexize_with_dictionary_name(
+                arg_text(values, 0, "ts_lexize")?
+                    .as_deref()
+                    .unwrap_or_default(),
+                arg_text(values, 1, "ts_lexize")?
+                    .as_deref()
+                    .unwrap_or_default(),
+            )
+            .map(|lexemes| {
+                Value::Array(
+                    lexemes
+                        .into_iter()
+                        .map(|lexeme| Value::Text(lexeme.into()))
+                        .collect(),
+                )
+            })
+            .map_err(|e| parse_error("ts_lexize", e)),
+            _ => unreachable!(),
+        },
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "text search builtin function",
+            actual: format!("{func:?}"),
+        })),
+    }
+}
+
 fn eval_builtin_function(
     func: BuiltinScalarFunction,
     args: &[Expr],
@@ -715,6 +940,12 @@ fn eval_builtin_function(
         return result;
     }
     match func {
+        BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::ToTsQuery
+        | BuiltinScalarFunction::PlainToTsQuery
+        | BuiltinScalarFunction::PhraseToTsQuery
+        | BuiltinScalarFunction::WebSearchToTsQuery
+        | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
         BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgInputIsValid => {
@@ -835,6 +1066,59 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Lgamma => eval_unary_float_function("lgamma", &values, eval_lgamma),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
+        BuiltinScalarFunction::TsMatch => match values.as_slice() {
+            [Value::TsVector(vector), Value::TsQuery(query)] => Ok(Value::Bool(
+                crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
+            )),
+            [Value::TsQuery(query), Value::TsVector(vector)] => Ok(Value::Bool(
+                crate::backend::executor::eval_tsquery_matches_tsvector(query, vector),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "@@",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryAnd => match values.as_slice() {
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
+                crate::backend::executor::tsquery_and(left.clone(), right.clone()),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "&&",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryOr => match values.as_slice() {
+            [Value::TsQuery(left), Value::TsQuery(right)] => Ok(Value::TsQuery(
+                crate::backend::executor::tsquery_or(left.clone(), right.clone()),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "||",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::TsQueryNot => match values.as_slice() {
+            [Value::TsQuery(query)] => Ok(Value::TsQuery(crate::backend::executor::tsquery_not(
+                query.clone(),
+            ))),
+            _ => Err(ExecError::TypeMismatch {
+                op: "!!",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Null,
+            }),
+        },
+        BuiltinScalarFunction::TsVectorConcat => match values.as_slice() {
+            [Value::TsVector(left), Value::TsVector(right)] => Ok(Value::TsVector(
+                crate::backend::executor::concat_tsvector(left, right),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "||",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
         BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
@@ -2021,6 +2305,19 @@ fn compare_subquery_values(
         SubqueryComparisonOp::LtEq => order_values("<=", left, right),
         SubqueryComparisonOp::Gt => order_values(">", left, right),
         SubqueryComparisonOp::GtEq => order_values(">=", left, right),
+        SubqueryComparisonOp::Match => match (&left, &right) {
+            (Value::TsVector(vector), Value::TsQuery(query)) => Ok(Value::Bool(
+                crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
+            )),
+            (Value::TsQuery(query), Value::TsVector(vector)) => Ok(Value::Bool(
+                crate::backend::executor::eval_tsquery_matches_tsvector(query, vector),
+            )),
+            _ => Err(ExecError::TypeMismatch {
+                op: "@@",
+                left,
+                right,
+            }),
+        },
     }
 }
 

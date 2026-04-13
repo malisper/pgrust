@@ -153,6 +153,8 @@ fn render_value(value: &Value) -> String {
         | Value::Box(_)
         | Value::Polygon(_)
         | Value::Circle(_) => format!("{value:?}"),
+        Value::TsVector(v) => v.render(),
+        Value::TsQuery(v) => v.render(),
         Value::Bit(v) => v.render(),
         Value::Bytea(v) => pgrust::backend::libpq::pqformat::format_bytea_text(
             v,
@@ -448,6 +450,7 @@ fn run_statement(
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Set(_)
         | Statement::Reset(_)
+        | Statement::CopyFrom(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::CommentOnTable(stmt) => {

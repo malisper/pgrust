@@ -79,6 +79,10 @@ pub(crate) fn compare_order_values(
             &decode_jsonb(a).unwrap_or(JsonbValue::Null),
             &decode_jsonb(b).unwrap_or(JsonbValue::Null),
         ),
+        (Value::TsVector(a), Value::TsVector(b)) => {
+            crate::backend::executor::compare_tsvector(a, b)
+        }
+        (Value::TsQuery(a), Value::TsQuery(b)) => crate::backend::executor::compare_tsquery(a, b),
         (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
             a.as_text().unwrap().cmp(b.as_text().unwrap())
         }
@@ -155,6 +159,8 @@ pub(crate) fn compare_values(
         (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Bool(
             compare_jsonb(&decode_jsonb(l)?, &decode_jsonb(r)?) == Ordering::Equal,
         )),
+        (Value::TsVector(l), Value::TsVector(r)) => Ok(Value::Bool(l == r)),
+        (Value::TsQuery(l), Value::TsQuery(r)) => Ok(Value::Bool(l == r)),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
             Ok(Value::Bool(l.as_text() == r.as_text()))
         }
@@ -208,6 +214,8 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
             .zip(decode_jsonb(r).ok())
             .map(|(l, r)| compare_jsonb(&l, &r) != Ordering::Equal)
             .unwrap_or(true),
+        (Value::TsVector(l), Value::TsVector(r)) => l != r,
+        (Value::TsQuery(l), Value::TsQuery(r)) => l != r,
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
         (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => {
@@ -506,6 +514,28 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
             &decode_jsonb(l)?,
             &decode_jsonb(r)?,
         )))),
+        (Value::TsVector(l), Value::TsVector(r)) => Ok(Value::TsVector(
+            crate::backend::executor::concat_tsvector(l, r),
+        )),
+        (Value::TsQuery(l), Value::TsQuery(r)) => Ok(Value::TsQuery(
+            crate::backend::executor::tsquery_or(l.clone(), r.clone()),
+        )),
+        (Value::Array(l), Value::Array(r)) => {
+            let mut items = l.clone();
+            items.extend(r.iter().cloned());
+            Ok(Value::Array(items))
+        }
+        (Value::Array(l), _) => {
+            let mut items = l.clone();
+            items.push(right);
+            Ok(Value::Array(items))
+        }
+        (_, Value::Array(r)) => {
+            let mut items = Vec::with_capacity(r.len() + 1);
+            items.push(left);
+            items.extend(r.iter().cloned());
+            Ok(Value::Array(items))
+        }
         _ => {
             let text_type = SqlType::new(SqlTypeKind::Text);
             let left_text = cast_value(left, text_type)?;

@@ -6,6 +6,10 @@ pub const PG_TYPE_RELATION_OID: u32 = 1247;
 pub const PG_DATABASE_ROWTYPE_OID: u32 = 1248;
 pub const PG_ATTRIBUTE_RELATION_OID: u32 = 1249;
 pub const PG_PROC_RELATION_OID: u32 = 1255;
+pub const PG_TS_DICT_RELATION_OID: u32 = 3600;
+pub const PG_TS_PARSER_RELATION_OID: u32 = 3601;
+pub const PG_TS_CONFIG_RELATION_OID: u32 = 3602;
+pub const PG_TS_CONFIG_MAP_RELATION_OID: u32 = 3603;
 pub const PG_PROC_ROWTYPE_OID: u32 = 81;
 pub const PG_CLASS_RELATION_OID: u32 = 1259;
 pub const PG_AUTHID_RELATION_OID: u32 = 1260;
@@ -27,6 +31,7 @@ pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
 pub const PG_OPCLASS_RELATION_OID: u32 = 2616;
 pub const PG_OPERATOR_RELATION_OID: u32 = 2617;
 pub const PG_OPFAMILY_RELATION_OID: u32 = 2753;
+pub const PG_TS_TEMPLATE_RELATION_OID: u32 = 3764;
 
 pub const PG_NAMESPACE_ROWTYPE_OID: u32 = 0;
 pub const PG_TYPE_ROWTYPE_OID: u32 = 71;
@@ -90,6 +95,14 @@ pub const JSONB_TYPE_OID: u32 = 3802;
 pub const JSONB_ARRAY_TYPE_OID: u32 = 3807;
 pub const JSONPATH_TYPE_OID: u32 = 4072;
 pub const JSONPATH_ARRAY_TYPE_OID: u32 = 4073;
+pub const TSVECTOR_TYPE_OID: u32 = 3614;
+pub const TSVECTOR_ARRAY_TYPE_OID: u32 = 3643;
+pub const TSQUERY_TYPE_OID: u32 = 3615;
+pub const TSQUERY_ARRAY_TYPE_OID: u32 = 3645;
+pub const REGCONFIG_TYPE_OID: u32 = 3734;
+pub const REGCONFIG_ARRAY_TYPE_OID: u32 = 3735;
+pub const REGDICTIONARY_TYPE_OID: u32 = 3769;
+pub const REGDICTIONARY_ARRAY_TYPE_OID: u32 = 3770;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootstrapCatalogRelation {
@@ -104,6 +117,11 @@ pub enum BootstrapCatalogKind {
     PgAttribute,
     PgType,
     PgProc,
+    PgTsParser,
+    PgTsTemplate,
+    PgTsDict,
+    PgTsConfig,
+    PgTsConfigMap,
     PgLanguage,
     PgOperator,
     PgDatabase,
@@ -132,6 +150,11 @@ impl BootstrapCatalogKind {
             Self::PgAttribute => PG_ATTRIBUTE_RELATION_OID,
             Self::PgType => PG_TYPE_RELATION_OID,
             Self::PgProc => PG_PROC_RELATION_OID,
+            Self::PgTsParser => PG_TS_PARSER_RELATION_OID,
+            Self::PgTsTemplate => PG_TS_TEMPLATE_RELATION_OID,
+            Self::PgTsDict => PG_TS_DICT_RELATION_OID,
+            Self::PgTsConfig => PG_TS_CONFIG_RELATION_OID,
+            Self::PgTsConfigMap => PG_TS_CONFIG_MAP_RELATION_OID,
             Self::PgLanguage => PG_LANGUAGE_RELATION_OID,
             Self::PgOperator => PG_OPERATOR_RELATION_OID,
             Self::PgDatabase => PG_DATABASE_RELATION_OID,
@@ -160,6 +183,11 @@ impl BootstrapCatalogKind {
             Self::PgAttribute => "pg_attribute",
             Self::PgType => "pg_type",
             Self::PgProc => "pg_proc",
+            Self::PgTsParser => "pg_ts_parser",
+            Self::PgTsTemplate => "pg_ts_template",
+            Self::PgTsDict => "pg_ts_dict",
+            Self::PgTsConfig => "pg_ts_config",
+            Self::PgTsConfigMap => "pg_ts_config_map",
             Self::PgLanguage => "pg_language",
             Self::PgOperator => "pg_operator",
             Self::PgDatabase => "pg_database",
@@ -188,6 +216,11 @@ impl BootstrapCatalogKind {
             Self::PgAttribute => PG_ATTRIBUTE_ROWTYPE_OID,
             Self::PgType => PG_TYPE_ROWTYPE_OID,
             Self::PgProc => PG_PROC_ROWTYPE_OID,
+            Self::PgTsParser => 0,
+            Self::PgTsTemplate => 0,
+            Self::PgTsDict => 0,
+            Self::PgTsConfig => 0,
+            Self::PgTsConfigMap => 0,
             Self::PgLanguage => 0,
             Self::PgOperator => 0,
             Self::PgDatabase => PG_DATABASE_ROWTYPE_OID,
@@ -210,10 +243,15 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 23] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 28] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
+    BootstrapCatalogKind::PgTsParser,
+    BootstrapCatalogKind::PgTsTemplate,
+    BootstrapCatalogKind::PgTsDict,
+    BootstrapCatalogKind::PgTsConfig,
+    BootstrapCatalogKind::PgTsConfigMap,
     BootstrapCatalogKind::PgLanguage,
     BootstrapCatalogKind::PgOperator,
     BootstrapCatalogKind::PgOpfamily,
@@ -236,7 +274,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 23] = [
     BootstrapCatalogKind::PgIndex,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 23] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 28] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -249,6 +287,11 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgAttribute => pg_attribute_desc(),
         BootstrapCatalogKind::PgType => pg_type_desc(),
         BootstrapCatalogKind::PgProc => pg_proc_desc(),
+        BootstrapCatalogKind::PgTsParser => pg_ts_parser_desc(),
+        BootstrapCatalogKind::PgTsTemplate => pg_ts_template_desc(),
+        BootstrapCatalogKind::PgTsDict => pg_ts_dict_desc(),
+        BootstrapCatalogKind::PgTsConfig => pg_ts_config_desc(),
+        BootstrapCatalogKind::PgTsConfigMap => pg_ts_config_map_desc(),
         BootstrapCatalogKind::PgLanguage => pg_language_desc(),
         BootstrapCatalogKind::PgOperator => pg_operator_desc(),
         BootstrapCatalogKind::PgDatabase => pg_database_desc(),
@@ -274,7 +317,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 23] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 28] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -286,6 +329,26 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 23] = [
     BootstrapCatalogRelation {
         oid: PG_PROC_RELATION_OID,
         name: "pg_proc",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_TS_PARSER_RELATION_OID,
+        name: "pg_ts_parser",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_TS_TEMPLATE_RELATION_OID,
+        name: "pg_ts_template",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_TS_DICT_RELATION_OID,
+        name: "pg_ts_dict",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_TS_CONFIG_RELATION_OID,
+        name: "pg_ts_config",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_TS_CONFIG_MAP_RELATION_OID,
+        name: "pg_ts_config_map",
     },
     BootstrapCatalogRelation {
         oid: PG_LANGUAGE_RELATION_OID,
@@ -378,32 +441,40 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[0].oid, PG_NAMESPACE_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[1].oid, PG_TYPE_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[2].oid, PG_PROC_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[3].oid, PG_LANGUAGE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[4].oid, PG_OPERATOR_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[5].oid, PG_OPFAMILY_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[6].oid, PG_OPCLASS_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[7].oid, PG_AMOP_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[8].oid, PG_AMPROC_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[9].oid, PG_ATTRIBUTE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[10].oid, PG_CLASS_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[11].oid, PG_AUTHID_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[3].oid, PG_TS_PARSER_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[4].oid, PG_TS_TEMPLATE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[5].oid, PG_TS_DICT_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[6].oid, PG_TS_CONFIG_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[12].oid,
+            CORE_BOOTSTRAP_RELATIONS[7].oid,
+            PG_TS_CONFIG_MAP_RELATION_OID
+        );
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[8].oid, PG_LANGUAGE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[9].oid, PG_OPERATOR_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[10].oid, PG_OPFAMILY_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[11].oid, PG_OPCLASS_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[12].oid, PG_AMOP_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[13].oid, PG_AMPROC_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[14].oid, PG_ATTRIBUTE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[15].oid, PG_CLASS_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[16].oid, PG_AUTHID_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[17].oid,
             PG_AUTH_MEMBERS_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[13].oid, PG_COLLATION_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[14].oid, PG_DATABASE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[15].oid, PG_TABLESPACE_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[16].oid, PG_AM_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[17].oid, PG_ATTRDEF_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[18].oid, PG_CAST_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[19].oid, PG_CONSTRAINT_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_DEPEND_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[18].oid, PG_COLLATION_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[19].oid, PG_DATABASE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_TABLESPACE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_AM_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_ATTRDEF_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[23].oid, PG_CAST_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[24].oid, PG_CONSTRAINT_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[25].oid, PG_DEPEND_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[21].oid,
+            CORE_BOOTSTRAP_RELATIONS[26].oid,
             PG_DESCRIPTION_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[27].oid, PG_INDEX_RELATION_OID);
     }
 
     #[test]
@@ -418,6 +489,11 @@ mod tests {
                 "pg_namespace",
                 "pg_type",
                 "pg_proc",
+                "pg_ts_parser",
+                "pg_ts_template",
+                "pg_ts_dict",
+                "pg_ts_config",
+                "pg_ts_config_map",
                 "pg_language",
                 "pg_operator",
                 "pg_opfamily",
@@ -460,6 +536,7 @@ use super::{
     pg_auth_members_desc, pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc,
     pg_constraint_desc, pg_database_desc, pg_depend_desc, pg_index_desc, pg_language_desc,
     pg_namespace_desc, pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc,
-    pg_tablespace_desc, pg_type_desc,
+    pg_tablespace_desc, pg_ts_config_desc, pg_ts_config_map_desc, pg_ts_dict_desc,
+    pg_ts_parser_desc, pg_ts_template_desc, pg_type_desc,
 };
 use crate::backend::executor::RelationDesc;

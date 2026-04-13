@@ -78,6 +78,10 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::TsVector => "tsvector",
+        SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::RegConfig => "regconfig",
+        SqlTypeKind::RegDictionary => "regdictionary",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Point => "point",
@@ -168,6 +172,30 @@ pub(super) fn coerce_unknown_string_literal_type(
         }
         if is_bit_string_type(peer_type) {
             return SqlType::new(SqlTypeKind::VarBit);
+        }
+        match peer_type.element_type().kind {
+            SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
+            SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
+            SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
+            SqlTypeKind::RegDictionary => return SqlType::new(SqlTypeKind::RegDictionary),
+            _ => {}
+        }
+        if peer_type.is_array {
+            match peer_type.kind {
+                SqlTypeKind::TsQuery => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery));
+                }
+                SqlTypeKind::TsVector => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::TsVector));
+                }
+                SqlTypeKind::RegConfig => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegConfig));
+                }
+                SqlTypeKind::RegDictionary => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegDictionary));
+                }
+                _ => {}
+            }
         }
         if is_geometry_type(peer_type) {
             return peer_type.element_type();

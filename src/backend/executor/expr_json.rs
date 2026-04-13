@@ -707,6 +707,8 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
             Default::default(),
         )
         .unwrap_or_default()),
+        Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
+        Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
             op,
             left: value.clone(),
@@ -1515,6 +1517,12 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
             crate::backend::executor::render_geometry_text(value, Default::default())
                 .unwrap_or_default(),
         ),
+        Value::TsVector(v) => {
+            SerdeJsonValue::String(crate::backend::executor::render_tsvector_text(v))
+        }
+        Value::TsQuery(v) => {
+            SerdeJsonValue::String(crate::backend::executor::render_tsquery_text(v))
+        }
         Value::Array(items) => {
             SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect())
         }

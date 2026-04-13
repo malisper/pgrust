@@ -102,6 +102,11 @@ fn visible_catalog_without_text_input_cast(
         base.authid_rows(),
         base.auth_members_rows(),
         base.language_rows(),
+        base.ts_parser_rows(),
+        base.ts_template_rows(),
+        base.ts_dict_rows(),
+        base.ts_config_rows(),
+        base.ts_config_map_rows(),
         base.constraint_rows(),
         base.operator_rows(),
         base.proc_rows(),
@@ -140,6 +145,11 @@ fn visible_catalog_without_operator(
         base.authid_rows(),
         base.auth_members_rows(),
         base.language_rows(),
+        base.ts_parser_rows(),
+        base.ts_template_rows(),
+        base.ts_dict_rows(),
+        base.ts_config_rows(),
+        base.ts_config_map_rows(),
         base.constraint_rows(),
         base.operator_rows()
             .into_iter()
@@ -415,6 +425,19 @@ fn parse_statement_ignores_embedded_and_leading_comments() {
             assert_eq!(stmt.targets[0].output_name, "value");
         }
         other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_copy_from_file_statement() {
+    let stmt = parse_statement("copy test_tsvector from '/tmp/tsearch.data'").unwrap();
+    match stmt {
+        Statement::CopyFrom(copy) => {
+            assert_eq!(copy.table_name, "test_tsvector");
+            assert_eq!(copy.columns, None);
+            assert_eq!(copy.source, CopySource::File("/tmp/tsearch.data".into()));
+        }
+        other => panic!("expected copy statement, got {other:?}"),
     }
 }
 

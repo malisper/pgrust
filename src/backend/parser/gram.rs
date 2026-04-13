@@ -242,6 +242,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::table_stmt => Ok(Statement::Select(build_table_select(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
         Rule::values_stmt => Ok(Statement::Values(build_values_statement(inner)?)),
+        Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
@@ -1473,6 +1474,10 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::TsVector => "tsvector",
+        SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::RegConfig => "regconfig",
+        SqlTypeKind::RegDictionary => "regdictionary",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Bool => "bool",
@@ -1679,6 +1684,10 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_json => SqlType::new(SqlTypeKind::Json),
         Rule::kw_jsonb => SqlType::new(SqlTypeKind::Jsonb),
         Rule::kw_jsonpath => SqlType::new(SqlTypeKind::JsonPath),
+        Rule::kw_tsvector => SqlType::new(SqlTypeKind::TsVector),
+        Rule::kw_tsquery => SqlType::new(SqlTypeKind::TsQuery),
+        Rule::kw_regconfig => SqlType::new(SqlTypeKind::RegConfig),
+        Rule::kw_regdictionary => SqlType::new(SqlTypeKind::RegDictionary),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
         Rule::kw_point => SqlType::new(SqlTypeKind::Point),
         Rule::kw_lseg => SqlType::new(SqlTypeKind::Lseg),
@@ -1788,6 +1797,17 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             },
                         };
                     }
+                    Rule::field_select_suffix => {
+                        let field = suffix
+                            .into_inner()
+                            .find(|part| part.as_rule() == Rule::identifier)
+                            .map(build_identifier)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        expr = SqlExpr::FieldSelect {
+                            expr: Box::new(expr),
+                            field,
+                        };
+                    }
                     _ => {}
                 }
             }
@@ -1830,6 +1850,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     name: "cbrt".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
                     func_variadic: false,
+                })
+            } else if raw.starts_with("!!") {
+                Ok(SqlExpr::PrefixOperator {
+                    op: "!!".into(),
+                    expr: Box::new(expr),
                 })
             } else if raw.starts_with("|/") {
                 Ok(SqlExpr::FuncCall {
@@ -1939,6 +1964,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 Rule::quantified_suffix => {
                     let mut parts = next.into_inner();
                     let op = match parts.next().ok_or(ParseError::UnexpectedEof)?.as_str() {
+                        "@@" => SubqueryComparisonOp::Match,
                         "&&" => {
                             return Err(ParseError::UnexpectedToken {
                                 expected: "comparison operator for ANY/ALL",
@@ -2064,11 +2090,19 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
                         "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
                         "@?" => SqlExpr::JsonbPathExists(Box::new(left), Box::new(right)),
-                        "@@" => SqlExpr::JsonbPathMatch(Box::new(left), Box::new(right)),
+                        "@@" => SqlExpr::BinaryOperator {
+                            op: "@@".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
                         "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
                         "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),
-                        "&&" => SqlExpr::ArrayOverlap(Box::new(left), Box::new(right)),
+                        "&&" => SqlExpr::BinaryOperator {
+                            op: "&&".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
                         "->" => SqlExpr::JsonGet(Box::new(left), Box::new(right)),
                         "->>" => SqlExpr::JsonGetText(Box::new(left), Box::new(right)),
                         "#>" => SqlExpr::JsonPath(Box::new(left), Box::new(right)),
@@ -2423,6 +2457,35 @@ fn build_function_arg(pair: Pair<'_, Rule>) -> Result<SqlFunctionArg, ParseError
             actual: inner.as_str().into(),
         }),
     }
+}
+
+fn build_copy_from(pair: Pair<'_, Rule>) -> Result<CopyFromStatement, ParseError> {
+    let mut table_name = None;
+    let mut columns = None;
+    let mut source = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => {
+                table_name = Some(build_identifier(part));
+            }
+            Rule::ident_list => {
+                columns = Some(part.into_inner().map(build_identifier).collect());
+            }
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                source = Some(CopySource::File(decode_string_literal_pair(part)?));
+            }
+            _ => {}
+        }
+    }
+    Ok(CopyFromStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        columns,
+        source: source.ok_or(ParseError::UnexpectedEof)?,
+    })
 }
 
 fn build_null_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {

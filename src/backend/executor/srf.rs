@@ -24,6 +24,12 @@ pub(crate) fn eval_set_returning_call(
         SetReturningCall::RegexTableFunction { kind, args, .. } => {
             eval_regex_table_function(*kind, args, slot, ctx)
         }
+        SetReturningCall::TextSearchTableFunction { .. } => Err(ExecError::Parse(
+            crate::backend::parser::ParseError::UnexpectedToken {
+                expected: "implemented text search table function",
+                actual: "text search table function".into(),
+            },
+        )),
     }
 }
 
@@ -81,6 +87,11 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
             crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
                 "regexp_split_to_table"
             }
+        },
+        SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
+            crate::include::nodes::plannodes::TextSearchTableFunction::TokenType => "ts_token_type",
+            crate::include::nodes::plannodes::TextSearchTableFunction::Parse => "ts_parse",
+            crate::include::nodes::plannodes::TextSearchTableFunction::Debug => "ts_debug",
         },
     }
 }

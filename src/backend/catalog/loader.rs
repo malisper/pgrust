@@ -21,7 +21,9 @@ use crate::backend::catalog::rowcodec::{
     pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
     pg_index_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
     pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
-    pg_tablespace_row_from_values, pg_type_row_from_values,
+    pg_tablespace_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
+    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
+    pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -71,6 +73,11 @@ pub(crate) fn catalog_from_physical_rows(
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
     let _language_rows = rows.languages;
+    let _ts_parser_rows = rows.ts_parsers;
+    let _ts_template_rows = rows.ts_templates;
+    let _ts_dict_rows = rows.ts_dicts;
+    let _ts_config_rows = rows.ts_configs;
+    let _ts_config_map_rows = rows.ts_config_maps;
     let constraint_rows = rows.constraints;
     let _operator_rows = rows.operators;
     let _proc_rows = rows.procs;
@@ -332,6 +339,11 @@ pub(crate) fn load_physical_catalog_rows(
     let mut missing_authid = false;
     let mut missing_auth_members = false;
     let mut missing_language = false;
+    let mut missing_ts_parser = false;
+    let mut missing_ts_template = false;
+    let mut missing_ts_dict = false;
+    let mut missing_ts_config = false;
+    let mut missing_ts_config_map = false;
     let mut missing_constraint = false;
     let mut missing_operator = false;
     let mut missing_proc = false;
@@ -376,6 +388,26 @@ pub(crate) fn load_physical_catalog_rows(
             }
             if kind == BootstrapCatalogKind::PgLanguage {
                 missing_language = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsParser {
+                missing_ts_parser = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsTemplate {
+                missing_ts_template = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsDict {
+                missing_ts_dict = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsConfig {
+                missing_ts_config = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsConfigMap {
+                missing_ts_config_map = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgConstraint {
@@ -492,6 +524,66 @@ pub(crate) fn load_physical_catalog_rows(
         )?
         .into_iter()
         .map(pg_language_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_parser_rows = if missing_ts_parser {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgTsParser],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsParser),
+        )?
+        .into_iter()
+        .map(pg_ts_parser_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_template_rows = if missing_ts_template {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgTsTemplate],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsTemplate),
+        )?
+        .into_iter()
+        .map(pg_ts_template_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_dict_rows = if missing_ts_dict {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgTsDict],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsDict),
+        )?
+        .into_iter()
+        .map(pg_ts_dict_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_config_rows = if missing_ts_config {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgTsConfig],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsConfig),
+        )?
+        .into_iter()
+        .map(pg_ts_config_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_config_map_rows = if missing_ts_config_map {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgTsConfigMap],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsConfigMap),
+        )?
+        .into_iter()
+        .map(pg_ts_config_map_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
     let constraint_rows = if missing_constraint {
@@ -641,6 +733,11 @@ pub(crate) fn load_physical_catalog_rows(
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
+        ts_parsers: ts_parser_rows,
+        ts_templates: ts_template_rows,
+        ts_dicts: ts_dict_rows,
+        ts_configs: ts_config_rows,
+        ts_config_maps: ts_config_map_rows,
         constraints: constraint_rows,
         operators: operator_rows,
         opclasses: Vec::new(),
@@ -678,6 +775,11 @@ pub(crate) fn load_physical_catalog_rows_visible(
     let mut missing_authid = false;
     let mut missing_auth_members = false;
     let mut missing_language = false;
+    let mut missing_ts_parser = false;
+    let mut missing_ts_template = false;
+    let mut missing_ts_dict = false;
+    let mut missing_ts_config = false;
+    let mut missing_ts_config_map = false;
     let mut missing_constraint = false;
     let mut missing_operator = false;
     let mut missing_proc = false;
@@ -722,6 +824,26 @@ pub(crate) fn load_physical_catalog_rows_visible(
             }
             if kind == BootstrapCatalogKind::PgLanguage {
                 missing_language = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsParser {
+                missing_ts_parser = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsTemplate {
+                missing_ts_template = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsDict {
+                missing_ts_dict = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsConfig {
+                missing_ts_config = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgTsConfigMap {
+                missing_ts_config_map = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgConstraint {
@@ -863,6 +985,81 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .map(pg_language_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let ts_parser_rows = if missing_ts_parser {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgTsParser],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsParser),
+        )?
+        .into_iter()
+        .map(pg_ts_parser_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_template_rows = if missing_ts_template {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgTsTemplate],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsTemplate),
+        )?
+        .into_iter()
+        .map(pg_ts_template_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_dict_rows = if missing_ts_dict {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgTsDict],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsDict),
+        )?
+        .into_iter()
+        .map(pg_ts_dict_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_config_rows = if missing_ts_config {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgTsConfig],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsConfig),
+        )?
+        .into_iter()
+        .map(pg_ts_config_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let ts_config_map_rows = if missing_ts_config_map {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgTsConfigMap],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgTsConfigMap),
+        )?
+        .into_iter()
+        .map(pg_ts_config_map_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let constraint_rows = if missing_constraint {
         Vec::new()
     } else {
@@ -1043,6 +1240,11 @@ pub(crate) fn load_physical_catalog_rows_visible(
         authids: authid_rows,
         auth_members: auth_members_rows,
         languages: language_rows,
+        ts_parsers: ts_parser_rows,
+        ts_templates: ts_template_rows,
+        ts_dicts: ts_dict_rows,
+        ts_configs: ts_config_rows,
+        ts_config_maps: ts_config_map_rows,
         constraints: constraint_rows,
         operators: operator_rows,
         opclasses: Vec::new(),

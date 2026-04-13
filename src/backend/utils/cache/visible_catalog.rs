@@ -172,6 +172,11 @@ mod tests {
             base.authid_rows(),
             base.auth_members_rows(),
             base.language_rows(),
+            base.ts_parser_rows(),
+            base.ts_template_rows(),
+            base.ts_dict_rows(),
+            base.ts_config_rows(),
+            base.ts_config_map_rows(),
             base.constraint_rows(),
             base.operator_rows(),
             base.proc_rows()

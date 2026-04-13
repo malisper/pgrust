@@ -25,6 +25,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Numeric => (-1, AttributeAlign::Int),
         ScalarType::Json | ScalarType::Jsonb | ScalarType::JsonPath => (-1, AttributeAlign::Int),
+        ScalarType::TsVector | ScalarType::TsQuery => (-1, AttributeAlign::Int),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Bool => (1, AttributeAlign::Char),
         ScalarType::Array(_) => (-1, AttributeAlign::Int),
@@ -75,12 +76,16 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Json
         | SqlTypeKind::Jsonb
         | SqlTypeKind::JsonPath
+        | SqlTypeKind::TsVector
+        | SqlTypeKind::TsQuery
         | SqlTypeKind::Text => AttributeStorage::Extended,
         SqlTypeKind::Bool
         | SqlTypeKind::Int2
         | SqlTypeKind::Int4
         | SqlTypeKind::Int8
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegConfig
+        | SqlTypeKind::RegDictionary
         | SqlTypeKind::Point
         | SqlTypeKind::Lseg
         | SqlTypeKind::Line
@@ -135,6 +140,9 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::JsonPath => ScalarType::JsonPath,
+        SqlTypeKind::TsVector => ScalarType::TsVector,
+        SqlTypeKind::TsQuery => ScalarType::TsQuery,
+        SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
         SqlTypeKind::Text
         | SqlTypeKind::Timestamp
         | SqlTypeKind::PgNodeTree
