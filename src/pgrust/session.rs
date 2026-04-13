@@ -15,8 +15,8 @@ use crate::backend::executor::{
     parse_bytea_text,
 };
 use crate::backend::parser::{
-    CatalogLookup, ParseError, PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert,
-    bind_insert_prepared, bind_update,
+    CatalogLookup, ParseError, PreparedInsert, SelectStatement, Statement, bind_delete,
+    bind_insert, bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
@@ -67,6 +67,8 @@ pub enum ByteaOutputFormat {
 }
 
 impl Session {
+    const DEFAULT_MAINTENANCE_WORK_MEM_KB: usize = 65_536;
+
     pub fn new(client_id: ClientId) -> Self {
         Self {
             client_id,
@@ -107,6 +109,43 @@ impl Session {
             Some(value) if value == "escape" => ByteaOutputFormat::Escape,
             _ => ByteaOutputFormat::Hex,
         }
+    }
+
+    pub fn maintenance_work_mem_kb(&self) -> Result<usize, ExecError> {
+        let Some(raw) = self.gucs.get("maintenance_work_mem") else {
+            return Ok(Self::DEFAULT_MAINTENANCE_WORK_MEM_KB);
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::DEFAULT_MAINTENANCE_WORK_MEM_KB);
+        }
+        let split_at = trimmed
+            .find(|ch: char| !ch.is_ascii_digit())
+            .unwrap_or(trimmed.len());
+        let (digits, suffix) = trimmed.split_at(split_at);
+        let value = digits
+            .parse::<usize>()
+            .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "valid maintenance_work_mem value",
+                actual: trimmed.to_string(),
+            }))?;
+        let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+            "" | "kb" => 1usize,
+            "mb" => 1024usize,
+            "gb" => 1024usize * 1024usize,
+            _ => {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "maintenance_work_mem with optional kB, MB, or GB suffix",
+                    actual: trimmed.to_string(),
+                }));
+            }
+        };
+        value
+            .checked_mul(multiplier)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "maintenance_work_mem within usize range",
+                actual: trimmed.to_string(),
+            }))
     }
 
     pub(crate) fn catalog_txn_ctx(&self) -> Option<(TransactionId, u32)> {
@@ -153,18 +192,10 @@ impl Session {
         cid: u32,
     ) -> LazyCatalogLookup<'a> {
         let search_path = self.configured_search_path();
-        db.lazy_catalog_lookup(
-            self.client_id,
-            Some((xid, cid)),
-            search_path.as_deref(),
-        )
+        db.lazy_catalog_lookup(self.client_id, Some((xid, cid)), search_path.as_deref())
     }
 
-    fn process_catalog_command_end(
-        &mut self,
-        db: &Database,
-        effect_start: usize,
-    ) {
+    fn process_catalog_command_end(&mut self, db: &Database, effect_start: usize) {
         let client_id = self.client_id;
         let Some(txn) = self.active_txn.as_mut() else {
             return;
@@ -198,6 +229,7 @@ impl Session {
                     self.client_id,
                     create_stmt,
                     search_path.as_deref(),
+                    self.maintenance_work_mem_kb()?,
                 )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
@@ -354,6 +386,7 @@ impl Session {
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
+                let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
                 let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
                 db.execute_create_index_stmt_in_transaction_with_search_path(
                     client_id,
@@ -361,6 +394,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    maintenance_work_mem_kb,
                     catalog_effects,
                 )
             }
@@ -597,10 +631,7 @@ impl Session {
     ) -> Result<PreparedInsert, ExecError> {
         let catalog = self.catalog_lookup(db);
         Ok(bind_insert_prepared(
-            table_name,
-            columns,
-            num_params,
-            &catalog,
+            table_name, columns, num_params, &catalog,
         )?)
     }
 
@@ -684,11 +715,15 @@ impl Session {
         };
 
         let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let (rel, desc) = {
+        let (rel, desc, indexes) = {
             let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
             })?;
-            (entry.rel, entry.desc.clone())
+            (
+                entry.rel,
+                entry.desc.clone(),
+                catalog.index_relations_for_heap(entry.relation_oid),
+            )
         };
         let target_indexes = if let Some(columns) = target_columns {
             let mut indexes = Vec::with_capacity(columns.len());
@@ -808,6 +843,7 @@ impl Session {
             crate::backend::commands::tablecmds::execute_insert_values(
                 rel,
                 &desc,
+                &indexes,
                 &parsed_rows,
                 &mut ctx,
                 xid,

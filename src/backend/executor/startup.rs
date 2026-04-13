@@ -2,7 +2,8 @@ use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, GenerateSeriesState, JsonTableFunctionState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState, ResultState, SeqScanState,
+    IndexScanState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState,
+    ResultState, SeqScanState,
     UnnestState, ValuesState,
 };
 
@@ -15,7 +16,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot: TupleSlot::empty(0),
             stats: NodeExecStats::default(),
         }),
-        Plan::SeqScan { rel, desc } => {
+        Plan::SeqScan { rel, desc, .. } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs = desc.attribute_descs();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
@@ -31,6 +32,40 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 scan: None,
                 slot,
                 qual: None,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::IndexScan {
+            rel,
+            index_rel,
+            am_oid,
+            desc,
+            index_meta,
+            keys,
+            direction,
+        } => {
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
+                &desc,
+                &attr_descs,
+            ));
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder);
+            Box::new(IndexScanState {
+                rel,
+                index_rel,
+                am_oid,
+                column_names,
+                desc,
+                attr_descs,
+                index_meta,
+                keys,
+                direction,
+                scan: None,
+                slot,
                 stats: NodeExecStats::default(),
             })
         }
@@ -54,7 +89,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             })
         }
         Plan::Filter { input, predicate } if matches!(&*input, Plan::SeqScan { .. }) => {
-            let Plan::SeqScan { rel, desc } = *input else {
+            let Plan::SeqScan { rel, desc, .. } = *input else {
                 unreachable!()
             };
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
