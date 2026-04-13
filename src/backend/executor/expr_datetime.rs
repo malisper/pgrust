@@ -1,9 +1,9 @@
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::date::{format_date_text, format_time_text, format_timetz_text};
 use crate::backend::utils::time::datetime::{
-    current_postgres_timestamp_usecs, timezone_offset_seconds, timestamp_parts_from_usecs,
+    current_postgres_timestamp_usecs, timestamp_parts_from_usecs, timezone_offset_seconds,
     today_pg_days,
 };
-use crate::backend::utils::time::date::{format_date_text, format_time_text, format_timetz_text};
 use crate::backend::utils::time::timestamp::{format_timestamp_text, format_timestamptz_text};
 use crate::include::nodes::datetime::{
     TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY,
@@ -34,27 +34,21 @@ fn rounded_usecs(value: i64, precision: Option<i32>) -> i64 {
 
 pub(crate) fn apply_time_precision(value: Value, precision: Option<i32>) -> Value {
     match value {
-        Value::Time(crate::include::nodes::datetime::TimeADT(usecs)) => {
-            Value::Time(crate::include::nodes::datetime::TimeADT(rounded_usecs(
-                usecs, precision,
-            )))
-        }
+        Value::Time(crate::include::nodes::datetime::TimeADT(usecs)) => Value::Time(
+            crate::include::nodes::datetime::TimeADT(rounded_usecs(usecs, precision)),
+        ),
         Value::TimeTz(mut timetz) => {
-            timetz.time = crate::include::nodes::datetime::TimeADT(rounded_usecs(
-                timetz.time.0,
-                precision,
-            ));
+            timetz.time =
+                crate::include::nodes::datetime::TimeADT(rounded_usecs(timetz.time.0, precision));
             Value::TimeTz(timetz)
         }
-        Value::Timestamp(crate::include::nodes::datetime::TimestampADT(usecs)) => {
-            Value::Timestamp(crate::include::nodes::datetime::TimestampADT(rounded_usecs(
-                usecs, precision,
-            )))
-        }
+        Value::Timestamp(crate::include::nodes::datetime::TimestampADT(usecs)) => Value::Timestamp(
+            crate::include::nodes::datetime::TimestampADT(rounded_usecs(usecs, precision)),
+        ),
         Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(usecs)) => {
-            Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(rounded_usecs(
-                usecs, precision,
-            )))
+            Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
+                rounded_usecs(usecs, precision),
+            ))
         }
         other => other,
     }
@@ -69,20 +63,24 @@ pub(crate) fn current_date_value() -> Value {
 pub(crate) fn current_time_value(precision: Option<i32>, with_time_zone: bool) -> Value {
     let config = DateTimeConfig::default();
     let offset_seconds = timezone_offset_seconds(&config);
-    let local_timestamp = current_postgres_timestamp_usecs() + i64::from(offset_seconds) * 1_000_000;
+    let local_timestamp =
+        current_postgres_timestamp_usecs() + i64::from(offset_seconds) * 1_000_000;
     let (_, time_usecs) = timestamp_parts_from_usecs(local_timestamp);
-    let time = TimeADT(rounded_usecs(time_usecs.rem_euclid(USECS_PER_DAY), precision));
+    let time = TimeADT(rounded_usecs(
+        time_usecs.rem_euclid(USECS_PER_DAY),
+        precision,
+    ));
     if with_time_zone {
-        Value::TimeTz(TimeTzADT { time, offset_seconds })
+        Value::TimeTz(TimeTzADT {
+            time,
+            offset_seconds,
+        })
     } else {
         Value::Time(time)
     }
 }
 
-pub(crate) fn current_timestamp_value(
-    precision: Option<i32>,
-    with_time_zone: bool,
-) -> Value {
+pub(crate) fn current_timestamp_value(precision: Option<i32>, with_time_zone: bool) -> Value {
     let config = DateTimeConfig::default();
     let now = current_postgres_timestamp_usecs();
     if with_time_zone {

@@ -7,11 +7,11 @@ use super::expr_bit::{
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::expr_casts::{cast_value, soft_input_error_info};
-use super::expr_datetime::{current_date_value, current_time_value, current_timestamp_value};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
 use super::expr_geometry::eval_geometry_function;
+use super::expr_datetime::{current_date_value, current_time_value, current_timestamp_value};
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
 };

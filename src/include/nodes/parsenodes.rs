@@ -701,7 +701,11 @@ impl SqlType {
             SqlTypeKind::Time
             | SqlTypeKind::TimeTz
             | SqlTypeKind::Timestamp
-            | SqlTypeKind::TimestampTz if self.typmod >= 0 => Some(self.typmod),
+            | SqlTypeKind::TimestampTz
+                if self.typmod >= 0 =>
+            {
+                Some(self.typmod)
+            }
             _ => None,
         }
     }

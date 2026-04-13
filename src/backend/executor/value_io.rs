@@ -384,9 +384,11 @@ pub(crate) fn decode_value_with_toast(
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::Timestamp(crate::include::nodes::datetime::TimestampADT(
-                i64::from_le_bytes(bytes.try_into().unwrap()),
-            )))
+            Ok(Value::Timestamp(
+                crate::include::nodes::datetime::TimestampADT(i64::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )),
+            ))
         }
         ScalarType::TimestampTz => {
             if column.storage.attlen != 8 || bytes.len() != 8 {
@@ -396,9 +398,11 @@ pub(crate) fn decode_value_with_toast(
                     attlen: column.storage.attlen,
                 });
             }
-            Ok(Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
-                i64::from_le_bytes(bytes.try_into().unwrap()),
-            )))
+            Ok(Value::TimestampTz(
+                crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )),
+            ))
         }
         ScalarType::BitString => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
@@ -954,9 +958,11 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
                     details: "timestamp array element must be 8 bytes".into(),
                 });
             }
-            Ok(Value::Timestamp(crate::include::nodes::datetime::TimestampADT(
-                i64::from_le_bytes(bytes.try_into().unwrap()),
-            )))
+            Ok(Value::Timestamp(
+                crate::include::nodes::datetime::TimestampADT(i64::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )),
+            ))
         }
         SqlTypeKind::TimestampTz => {
             if bytes.len() != 8 {
@@ -965,9 +971,11 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
                     details: "timestamptz array element must be 8 bytes".into(),
                 });
             }
-            Ok(Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
-                i64::from_le_bytes(bytes.try_into().unwrap()),
-            )))
+            Ok(Value::TimestampTz(
+                crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes(
+                    bytes.try_into().unwrap(),
+                )),
+            ))
         }
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
             let width = if matches!(element_type.kind, SqlTypeKind::Float4) {

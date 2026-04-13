@@ -1809,15 +1809,11 @@ fn parse_current_datetime_forms() {
     assert!(matches!(stmt.targets[0].expr, SqlExpr::CurrentDate));
     assert!(matches!(
         stmt.targets[1].expr,
-        SqlExpr::CurrentTime {
-            precision: Some(2)
-        }
+        SqlExpr::CurrentTime { precision: Some(2) }
     ));
     assert!(matches!(
         stmt.targets[2].expr,
-        SqlExpr::CurrentTimestamp {
-            precision: Some(3)
-        }
+        SqlExpr::CurrentTimestamp { precision: Some(3) }
     ));
     assert!(matches!(
         stmt.targets[3].expr,
@@ -1825,9 +1821,7 @@ fn parse_current_datetime_forms() {
     ));
     assert!(matches!(
         stmt.targets[4].expr,
-        SqlExpr::LocalTimestamp {
-            precision: Some(4)
-        }
+        SqlExpr::LocalTimestamp { precision: Some(4) }
     ));
 }
 
