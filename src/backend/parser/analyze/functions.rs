@@ -438,7 +438,19 @@ fn table_function_named_arg_signature(name: &str) -> Option<NamedArgSignature> {
             defaults: &[None, None, None],
         });
     }
-    if name.eq_ignore_ascii_case("json_each") {
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "json_each"
+            | "json_each_text"
+            | "json_object_keys"
+            | "json_array_elements"
+            | "json_array_elements_text"
+            | "jsonb_each"
+            | "jsonb_each_text"
+            | "jsonb_object_keys"
+            | "jsonb_array_elements"
+            | "jsonb_array_elements_text"
+    ) {
         return Some(NamedArgSignature {
             params: &["from_json"],
             required: 1,

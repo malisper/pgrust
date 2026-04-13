@@ -5900,6 +5900,73 @@ fn generate_series_accepts_named_sql_args_in_from() {
 }
 
 #[test]
+fn json_jsonb_table_functions_accept_named_sql_args() {
+    let base = temp_dir("json_table_functions_named_args");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_object_keys(from_json => '{\"a\":1,\"b\":2}'::json)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("a".into())],
+                    vec![Value::Text("b".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_array_elements_text(from_json => '[1,true,null]'::jsonb)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("1".into())],
+                    vec![Value::Text("true".into())],
+                    vec![Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from json_each_text(from_json => '{\"a\":1,\"b\":null}'::json) order by key",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("a".into()), Value::Text("1".into())],
+                    vec![Value::Text("b".into()), Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_path_query_works_in_select_list_and_from() {
     let base = temp_dir("jsonb_path_query_srf");
     let txns = TransactionManager::new_durable(&base).unwrap();
