@@ -14,6 +14,16 @@
 
 The current codebase was recently refactored to separate parser, logical plan, and executor-runtime responsibilities more cleanly. Prefer extending those boundaries instead of reintroducing cross-layer dependencies.
 
+## PostgreSQL Reference Tree
+
+There is a full PostgreSQL source checkout alongside this repo at [../postgres](/Users/malisper/workspace/work/postgres-rewrite/postgres). Use it as the first reference when pgrust behavior should match upstream PostgreSQL semantics, output formatting, planner structure, catalog behavior, or regression expectations.
+
+Useful reference paths inside that tree include:
+
+- [../postgres/src/backend](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend) for parser, planner, executor, catalog, and command behavior.
+- [../postgres/src/include](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include) for canonical node/type definitions and shared headers.
+- [../postgres/src/test/regress](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/test/regress) for regression SQL and expected output files.
+
 ## Shared Node Layers
 
 The canonical shared types live under `src/include/nodes`:

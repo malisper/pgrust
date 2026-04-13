@@ -1,0 +1,164 @@
+  # PostgreSQL 18.3 B-tree Port With Rule-Based
+  Planner
+
+  ## Summary
+
+  - Implement PostgreSQL 18.3’s generic index
+    access method framework and nbtree access
+    method in pgrust, using the local ../postgres
+    source tree as the canonical spec.
+  - Match PostgreSQL’s file layout, AM callback
+    surface, index relfile page format, and B-tree
+    algorithms as closely as Rust allows.
+  - Keep one intentional non-PostgreSQL deviation
+    in the planner, per your preference: path
+    selection is deterministic and rule-based, not
+    cost-based. The AM/runtime/storage side still
+    targets PostgreSQL behavior exactly.
+
+  ## Key Changes
+
+  ### 1. Add the full PostgreSQL-shaped index
+  subsystem
+
+  - Add src/include/access counterparts for amapi,
+    genam, relscan, scankey, itup, nbtree, and
+    nbtxlog.
+  - Add src/backend/access/index with PostgreSQL-
+    matching responsibilities: AM routine
+    registration, generic index build/scan
+    dispatch, scan descriptor plumbing, and
+    validation entrypoints.
+  - Add src/backend/access/nbtree with PostgreSQL-
+    matching module split: nbtree, nbtinsert,
+    nbtpage, nbtsearch, nbtdedup, nbtsort,
+    nbtsplitloc, nbtutils, nbtvalidate, and
+    nbtxlog.
+  - Port PostgreSQL 18.3’s B-tree logic directly,
+    preserving control-flow structure and
+    invariants from upstream source and nbtree/
+    README.
+
+  ### 2. Add the missing catalog and relcache
+  surfaces for a real AM
+
+  - Add PostgreSQL catalog families required for a
+    real AM framework: pg_opclass, pg_opfamily,
+    pg_amop, and pg_amproc.
+  - Bootstrap the built-in B-tree AM metadata and
+    operator-class metadata needed for the scalar
+    types/operators pgrust already supports.
+  - Extend relcache/index metadata to carry
+    PostgreSQL-style index state: key attrs,
+    include attrs, opclasses, collations, indoption
+    flags, predicates, expressions, AM OID/routine,
+    and scan/build support state.
+  - Route CREATE INDEX through generic AM build
+    callbacks rather than the current catalog-only
+    relfile creation path.
+
+  ### 3. Match PostgreSQL’s disk format,
+  concurrency rules, and recovery behavior
+
+  - Match PostgreSQL 18.3 B-tree relfile layout
+    exactly: metapage, opaque special area, high
+    keys, sibling links, pivot tuples, suffix
+    truncation, posting-list tuples, half-dead/
+    deleted pages, vacuum cycle IDs, and current
+    metapage version rules.
+  - Implement PostgreSQL’s B-tree concurrency model
+    from nbtree/README: scan pin rules, split
+    behavior, incomplete splits, page deletion,
+    backward scans, VACUUM interlocks, and root-
+    split handling.
+  - Extend pgrust WAL/recovery so B-tree operations
+    use PostgreSQL-equivalent redo semantics and
+    record families from nbtxlog.c.
+  - Treat index relfile cross-compatibility with
+    PostgreSQL 18.3 as a hard requirement. WAL
+    bytes themselves do not need to be PostgreSQL-
+    byte-compatible, but redo behavior and
+    resulting index files do.
+
+  ### 4. Integrate planner and executor with a
+  deterministic index-choice policy
+
+  - Add PostgreSQL-shaped runtime nodes and
+    descriptors for IndexScan, IndexOnlyScan,
+    BitmapIndexScan, and BitmapHeapScan, plus
+    generic IndexScanDesc plumbing.
+  - Keep planner path selection intentionally
+    simple and hardcoded:
+      - choose at most one primary index path per
+        base-relation scan
+      - an index is usable only when a leading
+        prefix of its columns helps the query
+      - equality clauses consume leading columns
+        first
+      - after the equality prefix, at most one next
+        column may be used for range/inequality
+        bounds
+      - ORDER BY can use the index only when it
+        matches the remaining leading index order
+        exactly, including direction/null ordering
+        support
+      - an index may be chosen for ORDER BY alone
+        if the ordering matches from index column 1
+      - when multiple indexes are usable, choose
+        the one with the longest usable prefix,
+        then prefer one that satisfies ORDER BY,
+        then fall back to catalog order
+  - Do not introduce PostgreSQL’s full cost model.
+    This planner rule is the one explicit
+    behavioral simplification.
+
+  ## Test Plan
+
+  - Catalog/metadata tests:
+      - bootstrap AM/opclass catalogs load
+        correctly
+      - CREATE INDEX populates AM/opclass/index
+        catalog rows exactly as expected
+      - relcache exposes the same AM/index metadata
+        needed by generic AM callbacks
+  - Disk/layout compatibility:
+      - build the same B-tree in pgrust and
+        PostgreSQL 18.3 for deterministic cases and
+        compare relfiles page-for-page
+      - verify metapage fields, opaque flags, pivot
+        tuples, posting-list tuples, and deleted-
+        page states against upstream decoders or
+        direct page inspections
+  - Behavioral parity:
+      - exact lookup, ordered scans, backward
+        scans, index-only scans, bitmap scans,
+        unique enforcement, partial/expression/
+        include indexes, page splits, page
+        deletion, VACUUM cleanup, and crash
+        recovery
+      - concurrent insert/scan/split tests matching
+        nbtree/README invariants
+  - Planner tests:
+      - equality-prefix selection
+      - equality-plus-range on next column
+      - ORDER BY-only index choice
+      - tie-breaking by longest usable prefix, then
+        order-by satisfaction, then catalog order
+      - fallback to seqscan when no leading-prefix
+        rule is satisfied
+
+  ## Assumptions
+
+  - PostgreSQL 18.3 in ../postgres is the canonical
+    baseline.
+  - The generic AM framework is built now; B-tree
+    is the first AM implemented on top of it.
+  - “Exactly the same” applies to the AM/runtime/
+    storage side and index relfile format. The
+    planner is intentionally simpler by your choice
+    and will use deterministic prefix rules instead
+    of PostgreSQL costing.
+  - Multi-index combinations and general cost-based
+    path enumeration are out of scope unless later
+    requested; the first planner implementation
+    picks one usable index path per base relation.
