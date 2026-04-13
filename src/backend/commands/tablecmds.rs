@@ -527,6 +527,7 @@ fn apply_assignment_target(
         .iter()
         .map(|subscript| {
             Ok(ResolvedAssignmentSubscript {
+                is_slice: subscript.is_slice,
                 lower: subscript
                     .lower
                     .as_ref()
@@ -550,7 +551,7 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
     if target.subscripts.is_empty() {
         return column_type;
     }
-    if target.subscripts.iter().any(|subscript| subscript.upper.is_some()) {
+    if target.subscripts.iter().any(|subscript| subscript.is_slice) {
         return SqlType::array_of(column_type.element_type());
     }
     column_type.element_type()
@@ -558,6 +559,7 @@ fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarge
 
 #[derive(Clone)]
 struct ResolvedAssignmentSubscript {
+    is_slice: bool,
     lower: Option<Value>,
     upper: Option<Value>,
 }
@@ -572,7 +574,7 @@ fn assign_array_value(
     }
     let subscript = &subscripts[0];
     let (mut lower_bound, mut items) = assignment_top_level(current)?;
-    if subscript.upper.is_some() {
+    if subscript.is_slice {
         let Some(start) = assignment_subscript_index(subscript.lower.as_ref())? else {
             return Err(ExecError::InvalidStorageValue {
                 column: "<array>".into(),

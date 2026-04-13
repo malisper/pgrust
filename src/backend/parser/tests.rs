@@ -1254,6 +1254,46 @@ fn build_plan_accepts_same_type_array_comparisons() {
 }
 
 #[test]
+fn build_plan_coerces_unknown_string_literals_for_array_ops() {
+    let plan = build_plan(
+        &parse_select(
+            "select ARRAY[1, 2] = '{1,2}', ARRAY[1, 2] && '{2,3}', 2 = any ('{1,2,3}')"
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::Eq(left, right)
+            if matches!(left.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+                && matches!(right.as_ref(), Expr::Cast(inner, ty)
+                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+    assert!(matches!(
+        &targets[1].expr,
+        Expr::ArrayOverlap(left, right)
+            if matches!(left.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+                && matches!(right.as_ref(), Expr::Cast(inner, ty)
+                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+    assert!(matches!(
+        &targets[2].expr,
+        Expr::AnyArray { right, .. }
+            if matches!(right.as_ref(), Expr::Cast(inner, ty)
+                if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                    && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+}
+
+#[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
     assert!(
         build_plan(

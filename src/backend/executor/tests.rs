@@ -2,6 +2,7 @@ use super::*;
 use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+use crate::backend::libpq::pqformat::format_exec_error;
 use crate::backend::parser::{Catalog, CatalogEntry};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
@@ -3474,6 +3475,28 @@ fn pg_input_error_info_reports_bool_invalid_input() {
 }
 
 #[test]
+fn pg_input_error_info_reports_array_element_input_error() {
+    let base = temp_dir("pg_input_error_info_array");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('{1,zed}', 'integer[]')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("invalid input syntax for type integer: \"zed\"".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22P02".into()),
+        ]],
+    );
+}
+
+#[test]
 fn boolean_text_cast_accepts_whitespace_and_aliases() {
     let base = temp_dir("boolean_text_casts");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -4727,6 +4750,44 @@ fn array_equality_and_inequality_work_for_same_type_arrays() {
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY[1, 2] = ARRAY[1, 2], ARRAY[1, 2] <> ARRAY[2, 1], ARRAY['a']::varchar[] = ARRAY['a']::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(true)]]); } other => panic!("expected query result, got {:?}", other), }
 }
+
+#[test]
+fn unknown_string_literals_coerce_to_array_types_in_comparisons() {
+    let base = temp_dir("array_unknown_literal_compare");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ARRAY[1,2] = '{}', ARRAY[NULL]::int[] = '{NULL}', 2 = any ('{1,2,3}')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn malformed_array_literals_report_array_input_errors() {
+    let base = temp_dir("array_malformed_input");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '{1,}'::text[]").unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "malformed array literal: \"{1,}\""
+    );
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '[2]={1}'::int[]").unwrap_err();
+    assert_eq!(format_exec_error(&err), "malformed array literal: \"[2]={1}\"");
+}
+
 #[test]
 fn typed_empty_array_selects_as_empty_value() {
     let base = temp_dir("typed_empty_array");

@@ -108,6 +108,12 @@ pub enum ExecError {
         column: String,
         details: String,
     },
+    ArrayInput {
+        message: String,
+        value: String,
+        detail: Option<String>,
+        sqlstate: &'static str,
+    },
     StringDataRightTruncation {
         ty: String,
     },

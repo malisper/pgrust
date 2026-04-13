@@ -277,26 +277,24 @@ pub(crate) fn parse_text_array_literal_with_options(
     op: &'static str,
     explicit: bool,
 ) -> Result<Value, ExecError> {
-    let (lower_bounds, input) = parse_array_bounds_prefix(raw);
+    let (bounds, input) = parse_array_bounds_prefix(raw)?;
     if input == "{}" {
         return Ok(Value::PgArray(ArrayValue::empty()));
     }
     if !input.starts_with('{') || !input.ends_with('}') {
-        return Err(ExecError::TypeMismatch {
-            op,
-            left: Value::Null,
-            right: Value::Text(raw.into()),
-        });
+        return Err(invalid_array_literal(
+            raw,
+            Some("Array value must start with \"{\" or dimension information.".into()),
+        ));
     }
-    let mut parser = ArrayTextParser::new(input, element_type, op, explicit);
+    let mut parser = ArrayTextParser::new(input, element_type, explicit);
     let value = parser.parse_array()?;
     parser.skip_ws();
     if !parser.is_eof() {
-        return Err(ExecError::TypeMismatch {
-            op,
-            left: Value::Null,
-            right: Value::Text(raw.into()),
-        });
+        return Err(invalid_array_literal(
+            raw,
+            Some("Junk after closing right brace.".into()),
+        ));
     }
     let nested = match value {
         Value::Array(values) => values,
@@ -308,57 +306,129 @@ pub(crate) fn parse_text_array_literal_with_options(
             });
         }
     };
-    ArrayValue::from_nested_values(nested, lower_bounds)
-        .map(Value::PgArray)
-        .map_err(|_| ExecError::TypeMismatch {
-            op,
-            left: Value::Null,
-            right: Value::Text(raw.into()),
-        })
+    let array = ArrayValue::from_nested_values(nested, bounds.lower_bounds.clone()).map_err(|_| {
+        invalid_array_literal(
+            raw,
+            Some("Multidimensional arrays must have sub-arrays with matching dimensions.".into()),
+        )
+    })?;
+    if let Some(expected_lengths) = &bounds.lengths
+        && (expected_lengths.len() != array.dimensions.len()
+            || expected_lengths
+                .iter()
+                .zip(array.dimensions.iter())
+                .any(|(expected, actual)| *expected != actual.length))
+    {
+        return Err(invalid_array_literal(
+            raw,
+            Some("Specified array dimensions do not match array contents.".into()),
+        ));
+    }
+    Ok(Value::PgArray(array))
 }
 
-fn parse_array_bounds_prefix(raw: &str) -> (Vec<i32>, &str) {
+#[derive(Default)]
+struct ParsedArrayBounds {
+    lower_bounds: Vec<i32>,
+    lengths: Option<Vec<usize>>,
+}
+
+fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), ExecError> {
     if !raw.starts_with('[') {
-        return (Vec::new(), raw);
+        return Ok((ParsedArrayBounds::default(), raw));
     }
     let Some(equals) = raw.find('=') else {
-        return (Vec::new(), raw);
+        return Ok((ParsedArrayBounds::default(), raw));
     };
     let bounds = &raw[..equals];
     let mut lower_bounds = Vec::new();
+    let mut lengths = Vec::new();
     let mut remaining = bounds;
     while let Some(rest) = remaining.strip_prefix('[') {
         let Some(end) = rest.find(']') else {
-            return (Vec::new(), raw);
+            return Err(invalid_array_literal(raw, None));
         };
         let part = &rest[..end];
-        let Some((lower, _upper)) = part.split_once(':') else {
-            return (Vec::new(), raw);
+        let Some((lower, upper)) = part.split_once(':') else {
+            return Err(invalid_array_literal(
+                raw,
+                Some("Specified array dimensions do not match array contents.".into()),
+            ));
         };
-        let Ok(lower) = lower.trim().parse::<i32>() else {
-            return (Vec::new(), raw);
+        if lower.trim().is_empty() {
+            return Err(invalid_array_literal(
+                raw,
+                Some("\"[\" must introduce explicitly-specified array dimensions.".into()),
+            ));
         };
-        lower_bounds.push(lower);
+        if upper.trim().is_empty() {
+            return Err(invalid_array_literal(
+                raw,
+                Some("Missing array dimension value.".into()),
+            ));
+        }
+        let lower = parse_array_bound(lower.trim(), raw)?;
+        let upper = parse_array_bound(upper.trim(), raw)?;
+        if upper < lower {
+            return Err(ExecError::ArrayInput {
+                message: "upper bound cannot be less than lower bound".into(),
+                value: raw.into(),
+                detail: None,
+                sqlstate: "2202E",
+            });
+        }
+        if upper >= i32::MAX as i64 {
+            return Err(ExecError::ArrayInput {
+                message: format!("array upper bound is too large: {upper}"),
+                value: raw.into(),
+                detail: None,
+                sqlstate: "54000",
+            });
+        }
+        lower_bounds.push(lower as i32);
+        lengths.push((upper - lower + 1) as usize);
         remaining = &rest[end + 1..];
     }
-    (lower_bounds, &raw[equals + 1..])
+    Ok((
+        ParsedArrayBounds {
+            lower_bounds,
+            lengths: Some(lengths),
+        },
+        &raw[equals + 1..],
+    ))
+}
+
+fn parse_array_bound(text: &str, raw: &str) -> Result<i64, ExecError> {
+    text.parse::<i64>().map_err(|_| ExecError::ArrayInput {
+        message: "array bound is out of integer range".into(),
+        value: raw.into(),
+        detail: None,
+        sqlstate: "22003",
+    })
+}
+
+fn invalid_array_literal(raw: &str, detail: Option<String>) -> ExecError {
+    ExecError::ArrayInput {
+        message: format!("malformed array literal: \"{raw}\""),
+        value: raw.into(),
+        detail,
+        sqlstate: "22P02",
+    }
 }
 
 struct ArrayTextParser<'a> {
     input: &'a str,
     offset: usize,
     element_type: SqlType,
-    op: &'static str,
     explicit: bool,
 }
 
 impl<'a> ArrayTextParser<'a> {
-    fn new(input: &'a str, element_type: SqlType, op: &'static str, explicit: bool) -> Self {
+    fn new(input: &'a str, element_type: SqlType, explicit: bool) -> Self {
         Self {
             input,
             offset: 0,
             element_type,
-            op,
             explicit,
         }
     }
@@ -378,6 +448,13 @@ impl<'a> ArrayTextParser<'a> {
             match self.peek_char() {
                 Some(',') => {
                     self.bump_char();
+                    self.skip_ws();
+                    if self.peek_char() == Some('}') {
+                        return Err(invalid_array_literal(
+                            self.input,
+                            Some("Unexpected \"}\" character.".into()),
+                        ));
+                    }
                 }
                 Some('}') => {
                     self.bump_char();
@@ -395,10 +472,31 @@ impl<'a> ArrayTextParser<'a> {
             Some('{') => self.parse_array(),
             Some('"') => {
                 let text = self.parse_quoted_string()?;
+                self.skip_ws();
+                if matches!(self.peek_char(), Some(ch) if !matches!(ch, ',' | '}')) {
+                    return Err(invalid_array_literal(
+                        self.input,
+                        Some("Incorrectly quoted array element.".into()),
+                    ));
+                }
                 cast_text_value(&text, self.element_type, self.explicit)
             }
             Some(_) => {
                 let text = self.parse_unquoted_token();
+                if text.is_empty() {
+                    let detail = match self.peek_char() {
+                        Some(',') => "Unexpected \",\" character.",
+                        Some('}') => "Unexpected \"}\" character.",
+                        _ => "Unexpected array element.",
+                    };
+                    return Err(invalid_array_literal(self.input, Some(detail.into())));
+                }
+                if text.contains('{') {
+                    return Err(invalid_array_literal(
+                        self.input,
+                        Some("Unexpected \"{\" character.".into()),
+                    ));
+                }
                 if text.eq_ignore_ascii_case("NULL") {
                     Ok(Value::Null)
                 } else {
@@ -416,11 +514,9 @@ impl<'a> ArrayTextParser<'a> {
             match ch {
                 '"' => return Ok(text),
                 '\\' => {
-                    let escaped = self.bump_char().ok_or_else(|| ExecError::TypeMismatch {
-                        op: self.op,
-                        left: Value::Null,
-                        right: Value::Text(self.input.into()),
-                    })?;
+                    let escaped = self
+                        .bump_char()
+                        .ok_or_else(|| invalid_array_literal(self.input, None))?;
                     text.push(escaped);
                 }
                 other => text.push(other),
@@ -469,11 +565,10 @@ impl<'a> ArrayTextParser<'a> {
     }
 
     fn type_mismatch<T>(&self) -> Result<T, ExecError> {
-        Err(ExecError::TypeMismatch {
-            op: self.op,
-            left: Value::Null,
-            right: Value::Text(self.input.into()),
-        })
+        Err(invalid_array_literal(
+            self.input,
+            Some("Unexpected array element.".into()),
+        ))
     }
 }
 
@@ -515,11 +610,12 @@ fn explicit_text_input_target_oids() -> &'static BTreeSet<u32> {
 
 fn input_error_message(err: &ExecError, text: &str) -> String {
     match err {
-        ExecError::InvalidIntegerInput { ty, .. } => {
-            format!("invalid input syntax for type {ty}: \"{text}\"")
+        ExecError::InvalidIntegerInput { ty, value } => {
+            format!("invalid input syntax for type {ty}: \"{value}\"")
         }
-        ExecError::IntegerOutOfRange { ty, .. } => {
-            format!("value \"{text}\" is out of range for type {ty}")
+        ExecError::ArrayInput { message, .. } => message.clone(),
+        ExecError::IntegerOutOfRange { ty, value } => {
+            format!("value \"{value}\" is out of range for type {ty}")
         }
         ExecError::Int2OutOfRange => {
             format!("value \"{text}\" is out of range for type smallint")
@@ -571,6 +667,7 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
 fn input_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
         ExecError::InvalidIntegerInput { .. }
+        | ExecError::ArrayInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
         | ExecError::InvalidBitInput { .. }
