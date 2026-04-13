@@ -6,22 +6,24 @@ use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
     BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
-    CIRCLE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
-    FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID,
-    INT4_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID,
-    JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID,
-    NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
-    OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID, PG_ATTRIBUTE_RELATION_OID,
-    PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
-    PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID,
-    PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
-    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
+    INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT8_ARRAY_TYPE_OID,
+    INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID,
+    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
+    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID,
+    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
+    OIDVECTOR_TYPE_OID, PATH_TYPE_OID, PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID,
+    PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID, PG_NAMESPACE_RELATION_OID,
+    PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID, PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID,
+    PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_ARRAY_TYPE_OID,
+    TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID,
+    TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +175,24 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             BPCHAR_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Char)),
         ),
+        builtin_type_row("date", DATE_TYPE_OID, SqlType::new(SqlTypeKind::Date)),
+        builtin_type_row(
+            "_date",
+            DATE_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Date)),
+        ),
+        builtin_type_row("time", TIME_TYPE_OID, SqlType::new(SqlTypeKind::Time)),
+        builtin_type_row(
+            "_time",
+            TIME_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Time)),
+        ),
+        builtin_type_row("timetz", TIMETZ_TYPE_OID, SqlType::new(SqlTypeKind::TimeTz)),
+        builtin_type_row(
+            "_timetz",
+            TIMETZ_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::TimeTz)),
+        ),
         builtin_type_row(
             "timestamp",
             TIMESTAMP_TYPE_OID,
@@ -182,6 +202,16 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_timestamp",
             TIMESTAMP_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Timestamp)),
+        ),
+        builtin_type_row(
+            "timestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+            SqlType::new(SqlTypeKind::TimestampTz),
+        ),
+        builtin_type_row(
+            "_timestamptz",
+            TIMESTAMPTZ_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::TimestampTz)),
         ),
         builtin_type_row(
             "numeric",
@@ -348,6 +378,55 @@ mod tests {
                 && row.typname == "pg_node_tree"
                 && row.sql_type == SqlType::new(SqlTypeKind::PgNodeTree)
         }));
+    }
+
+    #[test]
+    fn builtin_types_include_datetime_rows() {
+        let rows = builtin_type_rows();
+        for (oid, name, sql_type) in [
+            (DATE_TYPE_OID, "date", SqlType::new(SqlTypeKind::Date)),
+            (
+                DATE_ARRAY_TYPE_OID,
+                "_date",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Date)),
+            ),
+            (TIME_TYPE_OID, "time", SqlType::new(SqlTypeKind::Time)),
+            (
+                TIME_ARRAY_TYPE_OID,
+                "_time",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Time)),
+            ),
+            (TIMETZ_TYPE_OID, "timetz", SqlType::new(SqlTypeKind::TimeTz)),
+            (
+                TIMETZ_ARRAY_TYPE_OID,
+                "_timetz",
+                SqlType::array_of(SqlType::new(SqlTypeKind::TimeTz)),
+            ),
+            (
+                TIMESTAMP_TYPE_OID,
+                "timestamp",
+                SqlType::new(SqlTypeKind::Timestamp),
+            ),
+            (
+                TIMESTAMP_ARRAY_TYPE_OID,
+                "_timestamp",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Timestamp)),
+            ),
+            (
+                TIMESTAMPTZ_TYPE_OID,
+                "timestamptz",
+                SqlType::new(SqlTypeKind::TimestampTz),
+            ),
+            (
+                TIMESTAMPTZ_ARRAY_TYPE_OID,
+                "_timestamptz",
+                SqlType::array_of(SqlType::new(SqlTypeKind::TimestampTz)),
+            ),
+        ] {
+            assert!(rows.iter().any(|row| {
+                row.oid == oid && row.typname == name && row.sql_type == sql_type
+            }));
+        }
     }
 
     #[test]
