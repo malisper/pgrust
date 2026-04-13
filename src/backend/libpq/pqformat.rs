@@ -29,6 +29,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
         ExecError::RaiseException(message) => message.clone(),
+        ExecError::InvalidRegex(message) => message.clone(),
         ExecError::UniqueViolation { constraint } => {
             format!("duplicate key value violates unique constraint \"{constraint}\"")
         }
