@@ -2543,6 +2543,12 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::WidthBucket => {
+            if args.len() == 2 {
+                return Ok(Expr::FuncCall {
+                    func,
+                    args: bound_args,
+                });
+            }
             let raw_operand_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,

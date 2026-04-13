@@ -89,14 +89,17 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Random => args.is_empty(),
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
+            BuiltinScalarFunction::ArrayLength
+            | BuiltinScalarFunction::ArrayLower
+            | BuiltinScalarFunction::Cardinality
+            | BuiltinScalarFunction::ArrayNdims
+            | BuiltinScalarFunction::ArrayDims => args.len() == if matches!(func, BuiltinScalarFunction::ArrayLength | BuiltinScalarFunction::ArrayLower) { 2 } else { 1 },
             BuiltinScalarFunction::Concat => true,
             BuiltinScalarFunction::ConcatWs => !args.is_empty(),
             BuiltinScalarFunction::Format => !args.is_empty(),
             BuiltinScalarFunction::Abs
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
-            | BuiltinScalarFunction::ArrayNdims
-            | BuiltinScalarFunction::ArrayDims
             | BuiltinScalarFunction::Lower
             | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Scale
@@ -148,9 +151,17 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::BoolNe
             | BuiltinScalarFunction::Div
             | BuiltinScalarFunction::Mod => args.len() == 2,
-            BuiltinScalarFunction::WidthBucket => args.len() == 4,
-            BuiltinScalarFunction::GetBit | BuiltinScalarFunction::ArrayLower => args.len() == 2,
+            BuiltinScalarFunction::WidthBucket => matches!(args.len(), 2 | 4),
+            BuiltinScalarFunction::GetBit => args.len() == 2,
             BuiltinScalarFunction::SetBit => args.len() == 3,
+            BuiltinScalarFunction::ArrayFill => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::StringToArray
+            | BuiltinScalarFunction::ArrayToString
+            | BuiltinScalarFunction::ArrayPosition
+            | BuiltinScalarFunction::ArraySort => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::ArrayPositions
+            | BuiltinScalarFunction::ArrayRemove => args.len() == 2,
+            BuiltinScalarFunction::ArrayReplace => args.len() == 3,
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
             BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
@@ -277,6 +288,7 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::Stddev
             | AggFunc::Min
             | AggFunc::Max
+            | AggFunc::ArrayAgg
             | AggFunc::JsonAgg
             | AggFunc::JsonbAgg => args.len() == 1,
             AggFunc::JsonObjectAgg | AggFunc::JsonbObjectAgg => args.len() == 2,
@@ -594,6 +606,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_ndims", BuiltinScalarFunction::ArrayNdims),
         ("array_dims", BuiltinScalarFunction::ArrayDims),
         ("array_lower", BuiltinScalarFunction::ArrayLower),
+        ("array_fill", BuiltinScalarFunction::ArrayFill),
+        ("string_to_array", BuiltinScalarFunction::StringToArray),
+        ("array_to_string", BuiltinScalarFunction::ArrayToString),
+        ("array_length", BuiltinScalarFunction::ArrayLength),
+        ("cardinality", BuiltinScalarFunction::Cardinality),
+        ("array_position", BuiltinScalarFunction::ArrayPosition),
+        ("array_positions", BuiltinScalarFunction::ArrayPositions),
+        ("array_remove", BuiltinScalarFunction::ArrayRemove),
+        ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("array_sort", BuiltinScalarFunction::ArraySort),
         ("lower", BuiltinScalarFunction::Lower),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
@@ -1062,6 +1084,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "stddev" => Some(AggFunc::Stddev),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
+        "array_agg" => Some(AggFunc::ArrayAgg),
         "json_agg" => Some(AggFunc::JsonAgg),
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),

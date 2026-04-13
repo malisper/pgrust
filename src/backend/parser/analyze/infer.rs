@@ -246,6 +246,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Sha384)
                 | Some(BuiltinScalarFunction::Sha512) => SqlType::new(SqlTypeKind::Bytea),
                 Some(BuiltinScalarFunction::Length)
+                | Some(BuiltinScalarFunction::ArrayLength)
+                | Some(BuiltinScalarFunction::Cardinality)
+                | Some(BuiltinScalarFunction::ArrayPosition)
                 | Some(BuiltinScalarFunction::Ascii)
                 | Some(BuiltinScalarFunction::RegexpCount)
                 | Some(BuiltinScalarFunction::RegexpInstr)
@@ -261,9 +264,42 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(
                     BuiltinScalarFunction::RegexpMatch | BuiltinScalarFunction::RegexpSplitToArray,
                 ) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                Some(BuiltinScalarFunction::StringToArray) => {
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+                }
+                Some(BuiltinScalarFunction::ArrayPositions) => {
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                }
                 Some(BuiltinScalarFunction::Position | BuiltinScalarFunction::Strpos) => {
                     SqlType::new(SqlTypeKind::Int4)
                 }
+                Some(BuiltinScalarFunction::ArrayToString) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::ArrayFill) => function_arg_values(args).next().map_or(
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                    |arg| SqlType::array_of(infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    ).element_type()),
+                ),
+                Some(
+                    BuiltinScalarFunction::ArrayRemove
+                    | BuiltinScalarFunction::ArrayReplace
+                    | BuiltinScalarFunction::ArraySort,
+                ) => function_arg_values(args).next().map_or(
+                    SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                    |arg| infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    ),
+                ),
                 Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => {
                     function_arg_values(args).next().map_or(
                         SqlType::new(SqlTypeKind::Text),
