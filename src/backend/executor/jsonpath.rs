@@ -1,7 +1,11 @@
 use std::cmp::Ordering;
 
+use num_traits::Zero;
+
 use crate::backend::executor::ExecError;
+use crate::backend::executor::expr_ops::parse_numeric_text;
 use crate::backend::executor::jsonb::{JsonbValue, compare_jsonb};
+use crate::include::nodes::datum::NumericValue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathMode {
@@ -27,9 +31,19 @@ enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Arithmetic {
+        op: ArithmeticOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        inner: Box<Expr>,
+    },
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Not(Box<Expr>),
+    IsUnknown(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -43,10 +57,42 @@ enum Base {
 enum Step {
     Member(String),
     MemberWildcard,
-    Index(i32),
+    Recursive {
+        min_depth: RecursiveBound,
+        max_depth: RecursiveBound,
+    },
+    Index(SubscriptExpr),
     IndexWildcard,
-    Range(i32, i32),
+    Range(SubscriptExpr, SubscriptExpr),
     Filter(Box<Expr>),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ArithmeticOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UnaryOp {
+    Plus,
+    Minus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecursiveBound {
+    Int(i32),
+    Last,
+}
+
+#[derive(Debug, Clone)]
+enum SubscriptExpr {
+    Int(i32),
+    Fractional(NumericValue),
+    Last,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +166,18 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
                 *op,
             ))])
         }
+        Expr::Arithmetic { op, left, right } => {
+            let left_values = eval_expr(left, ctx)?;
+            let right_values = eval_expr(right, ctx)?;
+            eval_arithmetic_any_pair(&left_values, &right_values, *op)
+        }
+        Expr::Unary { op, inner } => {
+            let values = eval_expr(inner, ctx)?;
+            values
+                .into_iter()
+                .map(|value| eval_unary_value(value, *op))
+                .collect()
+        }
         Expr::And(left, right) => Ok(vec![JsonbValue::Bool(
             predicate_bool(left, ctx)? && predicate_bool(right, ctx)?,
         )]),
@@ -127,6 +185,7 @@ fn eval_expr(expr: &Expr, ctx: &RuntimeContext<'_>) -> Result<Vec<JsonbValue>, E
             predicate_bool(left, ctx)? || predicate_bool(right, ctx)?,
         )]),
         Expr::Not(inner) => Ok(vec![JsonbValue::Bool(!predicate_bool(inner, ctx)?)]),
+        Expr::IsUnknown(inner) => Ok(vec![JsonbValue::Bool(eval_expr(inner, ctx).is_err())]),
     }
 }
 
@@ -215,9 +274,18 @@ fn apply_step_single(
             }
             _ => {}
         },
+        Step::Recursive {
+            min_depth,
+            max_depth,
+        } => {
+            let min_depth = resolve_recursive_bound(value, *min_depth);
+            let max_depth = resolve_recursive_bound(value, *max_depth);
+            collect_recursive_values(value, min_depth, max_depth, 1, out);
+        }
         Step::Index(index) => match value {
             JsonbValue::Array(items) => {
-                if let Some(found) = array_index(items, *index) {
+                let index = resolve_subscript_expr(index.clone(), items.len())?;
+                if let Some(found) = array_index(items, index) {
                     out.push(found.clone());
                 } else if matches!(ctx.mode, PathMode::Strict) {
                     return Err(exec_jsonpath_error("jsonpath array index out of range"));
@@ -241,7 +309,9 @@ fn apply_step_single(
         },
         Step::Range(start, end) => match value {
             JsonbValue::Array(items) => {
-                for index in *start..=*end {
+                let start = resolve_subscript_expr(start.clone(), items.len())?;
+                let end = resolve_subscript_expr(end.clone(), items.len())?;
+                for index in start..=end {
                     if let Some(found) = array_index(items, index) {
                         out.push(found.clone());
                     }
@@ -316,6 +386,162 @@ fn compare_values(left: &JsonbValue, right: &JsonbValue, op: CompareOp) -> bool 
     }
 }
 
+fn eval_arithmetic_any_pair(
+    left: &[JsonbValue],
+    right: &[JsonbValue],
+    op: ArithmeticOp,
+) -> Result<Vec<JsonbValue>, ExecError> {
+    let mut out = Vec::new();
+    for left_value in left {
+        for right_value in right {
+            out.push(eval_arithmetic_pair(left_value, right_value, op)?);
+        }
+    }
+    Ok(out)
+}
+
+fn eval_arithmetic_pair(
+    left: &JsonbValue,
+    right: &JsonbValue,
+    op: ArithmeticOp,
+) -> Result<JsonbValue, ExecError> {
+    let left = numeric_from_jsonb(left)?;
+    let right = numeric_from_jsonb(right)?;
+    let value = match op {
+        ArithmeticOp::Add => left.add(&right),
+        ArithmeticOp::Sub => left.sub(&right),
+        ArithmeticOp::Mul => left.mul(&right),
+        ArithmeticOp::Div => left
+            .div(&right, 16)
+            .ok_or_else(|| exec_jsonpath_error("jsonpath division by zero"))?,
+        ArithmeticOp::Mod => numeric_remainder(&left, &right)
+            .ok_or_else(|| exec_jsonpath_error("jsonpath division by zero"))?,
+    };
+    Ok(JsonbValue::Numeric(value))
+}
+
+fn eval_unary_value(value: JsonbValue, op: UnaryOp) -> Result<JsonbValue, ExecError> {
+    let numeric = numeric_from_jsonb(&value)?;
+    Ok(JsonbValue::Numeric(match op {
+        UnaryOp::Plus => numeric,
+        UnaryOp::Minus => numeric.negate(),
+    }))
+}
+
+fn numeric_from_jsonb(value: &JsonbValue) -> Result<NumericValue, ExecError> {
+    match value {
+        JsonbValue::Numeric(numeric) => Ok(numeric.clone()),
+        _ => Err(exec_jsonpath_error("jsonpath arithmetic requires numeric operands")),
+    }
+}
+
+fn resolve_subscript_expr(expr: SubscriptExpr, array_len: usize) -> Result<i32, ExecError> {
+    match expr {
+        SubscriptExpr::Int(value) => Ok(value),
+        SubscriptExpr::Fractional(value) => truncate_numeric_to_i32(&value),
+        SubscriptExpr::Last => Ok((array_len as i32) - 1),
+    }
+}
+
+fn truncate_numeric_to_i32(value: &NumericValue) -> Result<i32, ExecError> {
+    match value {
+        NumericValue::Finite { coeff, scale } => {
+            let truncated = if *scale == 0 {
+                coeff.clone()
+            } else {
+                coeff / num_bigint::BigInt::from(10u8).pow(*scale)
+            };
+            truncated
+                .try_into()
+                .map_err(|_| exec_jsonpath_error("jsonpath subscript is out of range"))
+        }
+        _ => Err(exec_jsonpath_error("jsonpath subscript is out of range")),
+    }
+}
+
+fn numeric_remainder(left: &NumericValue, right: &NumericValue) -> Option<NumericValue> {
+    match (left, right) {
+        (NumericValue::NaN, _) | (_, NumericValue::NaN) => Some(NumericValue::NaN),
+        (NumericValue::PosInf | NumericValue::NegInf, _) => Some(NumericValue::NaN),
+        (_, NumericValue::PosInf | NumericValue::NegInf) => Some(left.clone()),
+        (_, NumericValue::Finite { coeff, .. }) if coeff.is_zero() => None,
+        (
+            NumericValue::Finite {
+                coeff: lcoeff,
+                scale: lscale,
+            },
+            NumericValue::Finite {
+                coeff: rcoeff,
+                scale: rscale,
+            },
+        ) => {
+            let scale = (*lscale).max(*rscale);
+            let left = align_numeric_coeff(lcoeff.clone(), *lscale, scale);
+            let right = align_numeric_coeff(rcoeff.clone(), *rscale, scale);
+            Some(
+                NumericValue::Finite {
+                    coeff: left % right,
+                    scale,
+                }
+                .normalize(),
+            )
+        }
+    }
+}
+
+fn align_numeric_coeff(coeff: num_bigint::BigInt, from_scale: u32, to_scale: u32) -> num_bigint::BigInt {
+    if from_scale >= to_scale {
+        coeff
+    } else {
+        coeff * num_bigint::BigInt::from(10u8).pow(to_scale - from_scale)
+    }
+}
+
+fn resolve_recursive_bound(value: &JsonbValue, bound: RecursiveBound) -> i32 {
+    match bound {
+        RecursiveBound::Int(value) => value,
+        RecursiveBound::Last => recursive_depth(value),
+    }
+}
+
+fn recursive_depth(value: &JsonbValue) -> i32 {
+    match value {
+        JsonbValue::Array(items) => items
+            .iter()
+            .map(|item| 1 + recursive_depth(item))
+            .max()
+            .unwrap_or(0),
+        JsonbValue::Object(items) => items
+            .iter()
+            .map(|(_, item)| 1 + recursive_depth(item))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn collect_recursive_values(
+    value: &JsonbValue,
+    min_depth: i32,
+    max_depth: i32,
+    current_depth: i32,
+    out: &mut Vec<JsonbValue>,
+) {
+    let children: Vec<&JsonbValue> = match value {
+        JsonbValue::Array(items) => items.iter().collect(),
+        JsonbValue::Object(items) => items.iter().map(|(_, item)| item).collect(),
+        _ => Vec::new(),
+    };
+    for child in children {
+        if current_depth >= min_depth && current_depth <= max_depth {
+            out.push(child.clone());
+        }
+        if current_depth < max_depth {
+            collect_recursive_values(child, min_depth, max_depth, current_depth + 1, out);
+        }
+    }
+}
+
 fn exec_jsonpath_error(message: &str) -> ExecError {
     ExecError::InvalidStorageValue {
         column: "jsonpath".into(),
@@ -353,6 +579,24 @@ fn render_expr(expr: &Expr, out: &mut String) {
             });
             render_operand(right, out);
         }
+        Expr::Arithmetic { op, left, right } => {
+            render_operand(left, out);
+            out.push_str(match op {
+                ArithmeticOp::Add => " + ",
+                ArithmeticOp::Sub => " - ",
+                ArithmeticOp::Mul => " * ",
+                ArithmeticOp::Div => " / ",
+                ArithmeticOp::Mod => " % ",
+            });
+            render_operand(right, out);
+        }
+        Expr::Unary { op, inner } => {
+            out.push(match op {
+                UnaryOp::Plus => '+',
+                UnaryOp::Minus => '-',
+            });
+            render_operand(inner, out);
+        }
         Expr::And(left, right) => {
             render_operand(left, out);
             out.push_str(" && ");
@@ -367,12 +611,16 @@ fn render_expr(expr: &Expr, out: &mut String) {
             out.push('!');
             render_operand(inner, out);
         }
+        Expr::IsUnknown(inner) => {
+            render_operand(inner, out);
+            out.push_str(" is unknown");
+        }
     }
 }
 
 fn render_operand(expr: &Expr, out: &mut String) {
     match expr {
-        Expr::Compare { .. } | Expr::And(..) | Expr::Or(..) => {
+        Expr::Compare { .. } | Expr::Arithmetic { .. } | Expr::And(..) | Expr::Or(..) => {
             out.push('(');
             render_expr(expr, out);
             out.push(')');
@@ -399,17 +647,35 @@ fn render_step(step: &Step, out: &mut String) {
             render_quoted_string(name, out);
         }
         Step::MemberWildcard => out.push_str(".*"),
+        Step::Recursive {
+            min_depth,
+            max_depth,
+        } => {
+            out.push_str(".**");
+            if !matches!(
+                (min_depth, max_depth),
+                (RecursiveBound::Int(1), RecursiveBound::Last)
+            ) {
+                out.push('{');
+                render_recursive_bound(*min_depth, out);
+                if min_depth != max_depth {
+                    out.push_str(" to ");
+                    render_recursive_bound(*max_depth, out);
+                }
+                out.push('}');
+            }
+        }
         Step::Index(index) => {
             out.push('[');
-            out.push_str(&index.to_string());
+            render_subscript_expr(index.clone(), out);
             out.push(']');
         }
         Step::IndexWildcard => out.push_str("[*]"),
         Step::Range(start, end) => {
             out.push('[');
-            out.push_str(&start.to_string());
+            render_subscript_expr(start.clone(), out);
             out.push_str(" to ");
-            out.push_str(&end.to_string());
+            render_subscript_expr(end.clone(), out);
             out.push(']');
         }
         Step::Filter(expr) => {
@@ -417,6 +683,21 @@ fn render_step(step: &Step, out: &mut String) {
             render_expr(expr, out);
             out.push(')');
         }
+    }
+}
+
+fn render_recursive_bound(bound: RecursiveBound, out: &mut String) {
+    match bound {
+        RecursiveBound::Int(value) => out.push_str(&value.to_string()),
+        RecursiveBound::Last => out.push_str("last"),
+    }
+}
+
+fn render_subscript_expr(expr: SubscriptExpr, out: &mut String) {
+    match expr {
+        SubscriptExpr::Int(value) => out.push_str(&value.to_string()),
+        SubscriptExpr::Fractional(value) => out.push_str(&value.render()),
+        SubscriptExpr::Last => out.push_str("last"),
     }
 }
 
@@ -512,11 +793,24 @@ impl<'a> Parser<'a> {
         if self.consume("!") {
             return Ok(Expr::Not(Box::new(self.parse_not_expr()?)));
         }
-        self.parse_compare_expr()
+        self.parse_is_unknown_expr()
+    }
+
+    fn parse_is_unknown_expr(&mut self) -> Result<Expr, ExecError> {
+        let expr = self.parse_compare_expr()?;
+        self.skip_ws();
+        if self.consume_keyword("is") {
+            self.skip_ws();
+            if self.consume_keyword("unknown") {
+                return Ok(Expr::IsUnknown(Box::new(expr)));
+            }
+            return Err(exec_jsonpath_error("expected UNKNOWN after IS"));
+        }
+        Ok(expr)
     }
 
     fn parse_compare_expr(&mut self) -> Result<Expr, ExecError> {
-        let left = self.parse_primary()?;
+        let left = self.parse_additive_expr()?;
         self.skip_ws();
         let op = if self.consume("==") {
             Some(CompareOp::Eq)
@@ -534,7 +828,7 @@ impl<'a> Parser<'a> {
             None
         };
         if let Some(op) = op {
-            let right = self.parse_primary()?;
+            let right = self.parse_additive_expr()?;
             Ok(Expr::Compare {
                 op,
                 left: Box::new(left),
@@ -543,6 +837,71 @@ impl<'a> Parser<'a> {
         } else {
             Ok(left)
         }
+    }
+
+    fn parse_additive_expr(&mut self) -> Result<Expr, ExecError> {
+        let mut expr = self.parse_multiplicative_expr()?;
+        loop {
+            self.skip_ws();
+            let op = if self.consume("+") {
+                Some(ArithmeticOp::Add)
+            } else if self.consume("-") {
+                Some(ArithmeticOp::Sub)
+            } else {
+                None
+            };
+            let Some(op) = op else {
+                return Ok(expr);
+            };
+            let right = self.parse_multiplicative_expr()?;
+            expr = Expr::Arithmetic {
+                op,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+    }
+
+    fn parse_multiplicative_expr(&mut self) -> Result<Expr, ExecError> {
+        let mut expr = self.parse_unary_expr()?;
+        loop {
+            self.skip_ws();
+            let op = if self.consume("*") {
+                Some(ArithmeticOp::Mul)
+            } else if self.consume("/") {
+                Some(ArithmeticOp::Div)
+            } else if self.consume("%") {
+                Some(ArithmeticOp::Mod)
+            } else {
+                None
+            };
+            let Some(op) = op else {
+                return Ok(expr);
+            };
+            let right = self.parse_unary_expr()?;
+            expr = Expr::Arithmetic {
+                op,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+    }
+
+    fn parse_unary_expr(&mut self) -> Result<Expr, ExecError> {
+        self.skip_ws();
+        if self.consume("+") {
+            return Ok(Expr::Unary {
+                op: UnaryOp::Plus,
+                inner: Box::new(self.parse_unary_expr()?),
+            });
+        }
+        if self.consume("-") {
+            return Ok(Expr::Unary {
+                op: UnaryOp::Minus,
+                inner: Box::new(self.parse_unary_expr()?),
+            });
+        }
+        self.parse_primary()
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ExecError> {
@@ -590,7 +949,15 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             if self.consume(".") {
                 if self.consume("*") {
-                    steps.push(Step::MemberWildcard);
+                    if self.consume("*") {
+                        let (min_depth, max_depth) = self.parse_recursive_quantifier()?;
+                        steps.push(Step::Recursive {
+                            min_depth,
+                            max_depth,
+                        });
+                    } else {
+                        steps.push(Step::MemberWildcard);
+                    }
                 } else {
                     let key = self
                         .parse_ident()
@@ -605,11 +972,11 @@ impl<'a> Parser<'a> {
                     self.expect("]")?;
                     steps.push(Step::IndexWildcard);
                 } else {
-                    let start = self.parse_signed_int()?;
+                    let start = self.parse_subscript_expr()?;
                     self.skip_ws();
                     if self.consume_keyword("to") {
                         self.skip_ws();
-                        let end = self.parse_signed_int()?;
+                        let end = self.parse_subscript_expr()?;
                         self.skip_ws();
                         self.expect("]")?;
                         steps.push(Step::Range(start, end));
@@ -631,6 +998,55 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(Expr::Path { base, steps })
+    }
+
+    fn parse_recursive_quantifier(
+        &mut self,
+    ) -> Result<(RecursiveBound, RecursiveBound), ExecError> {
+        self.skip_ws();
+        if !self.consume("{") {
+            return Ok((RecursiveBound::Int(1), RecursiveBound::Last));
+        }
+        self.skip_ws();
+        let start = self.parse_recursive_bound()?;
+        self.skip_ws();
+        let end = if self.consume_keyword("to") {
+            self.skip_ws();
+            self.parse_recursive_bound()?
+        } else {
+            start
+        };
+        self.skip_ws();
+        self.expect("}")?;
+        Ok((start, end))
+    }
+
+    fn parse_recursive_bound(&mut self) -> Result<RecursiveBound, ExecError> {
+        if self.consume_keyword("last") {
+            return Ok(RecursiveBound::Last);
+        }
+        Ok(RecursiveBound::Int(self.parse_signed_int()?))
+    }
+
+    fn parse_subscript_expr(&mut self) -> Result<SubscriptExpr, ExecError> {
+        self.skip_ws();
+        if self.consume_keyword("last") {
+            return Ok(SubscriptExpr::Last);
+        }
+        let saved = self.offset;
+        if let Some(number) = self.parse_number()? {
+            let JsonbValue::Numeric(numeric) = number else {
+                unreachable!();
+            };
+            return match &numeric {
+                NumericValue::Finite { scale: 0, .. } => {
+                    Ok(SubscriptExpr::Int(truncate_numeric_to_i32(&numeric)?))
+                }
+                _ => Ok(SubscriptExpr::Fractional(numeric)),
+            };
+        }
+        self.offset = saved;
+        Ok(SubscriptExpr::Int(self.parse_signed_int()?))
     }
 
     fn parse_signed_int(&mut self) -> Result<i32, ExecError> {
@@ -667,7 +1083,7 @@ impl<'a> Parser<'a> {
                 .ok_or_else(|| exec_jsonpath_error("invalid jsonpath numeric literal"))?;
             text.push_str(frac);
         }
-        let numeric = crate::backend::executor::exec_expr::parse_numeric_text(&text)
+        let numeric = parse_numeric_text(&text)
             .ok_or_else(|| exec_jsonpath_error("invalid jsonpath numeric literal"))?;
         Ok(Some(JsonbValue::Numeric(numeric)))
     }
