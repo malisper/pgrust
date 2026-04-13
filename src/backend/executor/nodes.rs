@@ -5,20 +5,33 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines;
-use crate::backend::executor::exec_expr::{compare_order_by_keys, decode_value, eval_expr};
+use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::srf::{
     eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
-use crate::backend::executor::value_io::missing_column_value;
+use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
     NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState, ProjectionState,
-    ResultState, SeqScanState, SlotKind, TupleSlot, ValuesState,
+    ResultState, SeqScanState, SlotKind, ToastRelationRef, TupleSlot, ValuesState,
 };
 use crate::include::nodes::plannodes::{Expr, JoinType};
 
 use std::time::Instant;
+
+fn slot_toast_context(
+    relation: Option<ToastRelationRef>,
+    ctx: &ExecutorContext,
+) -> Option<crate::include::nodes::execnodes::ToastFetchContext> {
+    relation.map(|relation| crate::include::nodes::execnodes::ToastFetchContext {
+        relation,
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        snapshot: ctx.snapshot.clone(),
+        client_id: ctx.client_id,
+    })
+}
 
 impl PlanNode for ResultState {
     fn exec_proc_node<'a>(
@@ -86,10 +99,13 @@ impl PlanNode for SeqScanState {
                     let pin = scan.pinned_buffer_rc().expect("buffer must be pinned");
 
                     self.slot.kind = SlotKind::BufferHeapTuple {
+                        desc: self.desc.clone(),
+                        attr_descs: self.attr_descs.clone(),
                         tuple_ptr: raw_ptr,
                         tuple_len: raw_len,
                         pin,
                     };
+                    self.slot.toast = slot_toast_context(self.toast_relation, ctx);
                     self.slot.tts_nvalid = 0;
                     self.slot.tts_values.clear();
                     self.slot.decode_offset = 0;
@@ -231,6 +247,7 @@ impl PlanNode for IndexScanState {
                 tid,
                 tuple,
             };
+            self.slot.toast = slot_toast_context(self.toast_relation, ctx);
             self.slot.tts_nvalid = 0;
             self.slot.tts_values.clear();
             self.slot.decode_offset = 0;
@@ -1022,24 +1039,43 @@ impl TupleSlot {
         match &self.kind {
             SlotKind::Virtual => Ok(&self.tts_values[..natts]),
             SlotKind::BufferHeapTuple {
+                desc,
+                attr_descs,
                 tuple_ptr,
                 tuple_len,
                 ..
             } => {
                 let (ptr, len) = (*tuple_ptr, *tuple_len);
                 let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-                let decoder = self
-                    .decoder
-                    .as_ref()
-                    .expect("BufferHeapTuple requires decoder");
-                decoder.decode_range(
-                    bytes,
-                    &mut self.tts_values,
-                    self.tts_nvalid,
-                    natts,
-                    &mut self.decode_offset,
-                )?;
-                self.tts_nvalid = natts;
+                if self.toast.is_some() {
+                    let raw = crate::include::access::htup::deform_raw(bytes, attr_descs)?;
+                    self.tts_values.clear();
+                    for (index, column) in desc.columns.iter().enumerate() {
+                        if let Some(datum) = raw.get(index) {
+                            self.tts_values.push(decode_value_with_toast(
+                                column,
+                                *datum,
+                                self.toast.as_ref(),
+                            )?);
+                        } else {
+                            self.tts_values.push(missing_column_value(column));
+                        }
+                    }
+                    self.tts_nvalid = self.tts_values.len();
+                } else {
+                    let decoder = self
+                        .decoder
+                        .as_ref()
+                        .expect("BufferHeapTuple requires decoder");
+                    decoder.decode_range(
+                        bytes,
+                        &mut self.tts_values,
+                        self.tts_nvalid,
+                        natts,
+                        &mut self.decode_offset,
+                    )?;
+                    self.tts_nvalid = natts;
+                }
                 Ok(&self.tts_values[..natts])
             }
             SlotKind::HeapTuple {
@@ -1052,7 +1088,11 @@ impl TupleSlot {
                 self.tts_values.clear();
                 for (index, column) in desc.columns.iter().enumerate() {
                     if let Some(datum) = raw.get(index) {
-                        self.tts_values.push(decode_value(column, *datum)?);
+                        self.tts_values.push(decode_value_with_toast(
+                            column,
+                            *datum,
+                            self.toast.as_ref(),
+                        )?);
                     } else {
                         self.tts_values.push(missing_column_value(column));
                     }

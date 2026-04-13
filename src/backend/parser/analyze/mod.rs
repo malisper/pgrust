@@ -11,7 +11,8 @@ use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, Plan,
-    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, Value, cast_value,
+    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
+    Value, cast_value,
 };
 use crate::include::catalog::{
     PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
@@ -121,6 +122,7 @@ impl CatalogLookup for Catalog {
         relcache.get_by_name(name).map(|entry| BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
+            toast: toast_relation_from_cache(&relcache, entry),
             namespace_oid: entry.namespace_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
@@ -151,6 +153,7 @@ impl CatalogLookup for RelCache {
         self.get_by_name(name).map(|entry| BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
+            toast: toast_relation_from_cache(self, entry),
             namespace_oid: entry.namespace_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
@@ -176,6 +179,31 @@ impl CatalogLookup for RelCache {
 
 fn normalize_catalog_lookup_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+fn toast_relation_from_cache(
+    relcache: &RelCache,
+    entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
+) -> Option<ToastRelationRef> {
+    let toast_oid = entry.reltoastrelid;
+    (toast_oid != 0)
+        .then(|| relcache.get_by_oid(toast_oid))
+        .flatten()
+        .map(|toast| ToastRelationRef {
+            rel: toast.rel,
+            relation_oid: toast.relation_oid,
+        })
+}
+
+fn first_toast_index(
+    catalog: &dyn CatalogLookup,
+    toast: Option<ToastRelationRef>,
+) -> Option<BoundIndexRelation> {
+    let toast = toast?;
+    catalog
+        .index_relations_for_heap(toast.relation_oid)
+        .into_iter()
+        .next()
 }
 
 pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
@@ -985,18 +1013,20 @@ struct ChosenIndexPath {
 }
 
 fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
-    let (rel, relation_oid, desc, filter, order_items) = match plan {
+    let (rel, relation_oid, toast, desc, filter, order_items) = match plan {
         Plan::SeqScan {
             rel,
             relation_oid,
+            toast,
             desc,
-        } => (rel, relation_oid, desc, None, None),
+        } => (rel, relation_oid, toast, desc, None, None),
         Plan::Filter { input, predicate } => match *input {
             Plan::SeqScan {
                 rel,
                 relation_oid,
+                toast,
                 desc,
-            } => (rel, relation_oid, desc, Some(predicate), None),
+            } => (rel, relation_oid, toast, desc, Some(predicate), None),
             other => {
                 return Plan::Filter {
                     input: Box::new(other),
@@ -1008,14 +1038,16 @@ fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
             Plan::SeqScan {
                 rel,
                 relation_oid,
+                toast,
                 desc,
-            } => (rel, relation_oid, desc, None, Some(items)),
+            } => (rel, relation_oid, toast, desc, None, Some(items)),
             Plan::Filter { input, predicate } => match *input {
                 Plan::SeqScan {
                     rel,
                     relation_oid,
+                    toast,
                     desc,
-                } => (rel, relation_oid, desc, Some(predicate), Some(items)),
+                } => (rel, relation_oid, toast, desc, Some(predicate), Some(items)),
                 other => {
                     return Plan::OrderBy {
                         input: Box::new(Plan::Filter {
@@ -1037,12 +1069,13 @@ fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
     };
 
     let indexes = catalog.index_relations_for_heap(relation_oid);
-    choose_index_scan(rel, relation_oid, desc, filter, order_items, indexes)
+    choose_index_scan(rel, relation_oid, toast, desc, filter, order_items, indexes)
 }
 
 fn rebuild_scan_plan(
     rel: RelFileLocator,
     relation_oid: u32,
+    toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     filter: Option<Expr>,
     order_items: Option<Vec<OrderByEntry>>,
@@ -1050,6 +1083,7 @@ fn rebuild_scan_plan(
     let mut plan = Plan::SeqScan {
         rel,
         relation_oid,
+        toast,
         desc,
     };
     if let Some(predicate) = filter {
@@ -1070,19 +1104,21 @@ fn rebuild_scan_plan(
 fn choose_index_scan(
     rel: RelFileLocator,
     relation_oid: u32,
+    toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     filter: Option<Expr>,
     order_items: Option<Vec<OrderByEntry>>,
     indexes: Vec<BoundIndexRelation>,
 ) -> Plan {
     let Some(chosen) = choose_index_path(filter.as_ref(), order_items.as_deref(), &indexes) else {
-        return rebuild_scan_plan(rel, relation_oid, desc, filter, order_items);
+        return rebuild_scan_plan(rel, relation_oid, toast, desc, filter, order_items);
     };
 
     let mut plan = Plan::IndexScan {
         rel,
         index_rel: chosen.index.rel,
         am_oid: chosen.index.index_meta.am_oid,
+        toast,
         desc: desc.clone(),
         index_meta: chosen.index.index_meta.clone(),
         keys: chosen.keys,
@@ -1376,6 +1412,8 @@ fn bind_order_by_items(
 pub struct BoundInsertStatement {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub toast: Option<ToastRelationRef>,
+    pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
     pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
@@ -1396,6 +1434,8 @@ pub enum BoundInsertSource {
 pub struct PreparedInsert {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub toast: Option<ToastRelationRef>,
+    pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
     pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
@@ -1466,6 +1506,8 @@ pub fn bind_insert_prepared(
     Ok(PreparedInsert {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
+        toast: entry.toast,
+        toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
         indexes: catalog.index_relations_for_heap(entry.relation_oid),
         column_defaults,
@@ -1478,6 +1520,8 @@ pub fn bind_insert_prepared(
 pub struct BoundUpdateStatement {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub toast: Option<ToastRelationRef>,
+    pub toast_index: Option<BoundIndexRelation>,
     pub desc: RelationDesc,
     pub row_source: BoundModifyRowSource,
     pub indexes: Vec<BoundIndexRelation>,
@@ -1489,6 +1533,7 @@ pub struct BoundUpdateStatement {
 pub struct BoundDeleteStatement {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub toast: Option<ToastRelationRef>,
     pub desc: RelationDesc,
     pub row_source: BoundModifyRowSource,
     pub predicate: Option<Expr>,
@@ -1590,6 +1635,8 @@ pub fn bind_insert(
     Ok(BoundInsertStatement {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
+        toast: entry.toast,
+        toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
         indexes: catalog.index_relations_for_heap(entry.relation_oid),
         column_defaults,
@@ -1615,6 +1662,8 @@ pub fn bind_update(
     Ok(BoundUpdateStatement {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
+        toast: entry.toast,
+        toast_index: first_toast_index(catalog, entry.toast),
         desc: entry.desc.clone(),
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         indexes,
@@ -1656,6 +1705,7 @@ pub fn bind_delete(
     Ok(BoundDeleteStatement {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
+        toast: entry.toast,
         desc: entry.desc.clone(),
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         predicate,

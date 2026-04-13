@@ -608,6 +608,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
             input: Box::new(Plan::SeqScan {
                 rel: rel(),
                 relation_oid: 0,
+                toast: None,
                 desc: relation_desc(),
             }),
             predicate: Expr::Gt(
@@ -683,6 +684,7 @@ fn seqscan_skips_superseded_versions() {
     let plan = Plan::SeqScan {
         rel: rel(),
         relation_oid: 0,
+        toast: None,
         desc: relation_desc(),
     };
     let rows = run_plan(&base, &txns, plan).unwrap();

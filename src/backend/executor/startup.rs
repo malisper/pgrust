@@ -19,10 +19,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
         Plan::SeqScan {
             rel,
             relation_oid,
+            toast,
             desc,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
-            let attr_descs = desc.attribute_descs();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
                 &desc,
                 &attr_descs,
@@ -33,7 +35,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(SeqScanState {
                 rel,
                 relation_name: explain_relation_name(relation_oid, rel.rel_number),
+                toast_relation: toast,
                 column_names,
+                desc,
+                attr_descs,
                 scan: None,
                 slot,
                 qual: None,
@@ -45,6 +50,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             rel,
             index_rel,
             am_oid,
+            toast,
             desc,
             index_meta,
             keys,
@@ -62,6 +68,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(IndexScanState {
                 rel,
+                toast_relation: toast,
                 index_rel,
                 am_oid,
                 column_names,
@@ -124,13 +131,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let Plan::SeqScan {
                 rel,
                 relation_oid,
+                toast,
                 desc,
-            } = *input
-            else {
+            } = *input else {
                 unreachable!()
             };
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
-            let attr_descs = desc.attribute_descs();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
                 &desc,
                 &attr_descs,
@@ -142,7 +150,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(SeqScanState {
                 rel,
                 relation_name: explain_relation_name(relation_oid, rel.rel_number),
+                toast_relation: toast,
                 column_names,
+                desc,
+                attr_descs,
                 scan: None,
                 slot,
                 qual: Some(qual),

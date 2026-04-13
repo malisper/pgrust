@@ -33,6 +33,7 @@ pub(crate) struct BoundCte {
 pub struct BoundRelation {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
+    pub toast: Option<ToastRelationRef>,
     pub namespace_oid: u32,
     pub relpersistence: char,
     pub relkind: char,
@@ -332,6 +333,7 @@ pub(super) fn bind_from_item_with_ctes(
                 Plan::SeqScan {
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
+                    toast: entry.toast,
                     desc: desc.clone(),
                 },
                 scope_for_relation(Some(name), &desc),
