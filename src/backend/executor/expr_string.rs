@@ -1285,9 +1285,9 @@ fn regex_count_args(values: &[Value]) -> Result<(&str, &str, i32, &str), ExecErr
     let start = optional_regex_i32_arg("regexp_count", values.get(2), 1)?;
     let flags = optional_regex_text_arg("regexp_count", values.get(3), "")?;
     if start <= 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_count start position must be greater than zero".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"start\": {start}"
+        )));
     }
     Ok((text, pattern, start, flags))
 }
@@ -1300,24 +1300,24 @@ fn regex_instr_args(values: &[Value]) -> Result<(&str, &str, i32, i32, i32, &str
     let flags = optional_regex_text_arg("regexp_instr", values.get(5), "")?;
     let subexpr = optional_regex_i32_arg("regexp_instr", values.get(6), 0)?;
     if start <= 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_instr start position must be greater than zero".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"start\": {start}"
+        )));
     }
     if nth <= 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_instr occurrence must be greater than zero".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"n\": {nth}"
+        )));
     }
     if !matches!(return_end, 0 | 1) {
-        return Err(ExecError::RaiseException(
-            "regexp_instr return option must be 0 or 1".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"endoption\": {return_end}"
+        )));
     }
     if subexpr < 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_instr subexpression must not be negative".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"subexpr\": {subexpr}"
+        )));
     }
     Ok((text, pattern, start, nth, return_end, flags, subexpr as usize))
 }
@@ -1329,19 +1329,19 @@ fn regex_substr_args(values: &[Value]) -> Result<(&str, &str, i32, i32, &str, us
     let flags = optional_regex_text_arg("regexp_substr", values.get(4), "")?;
     let subexpr = optional_regex_i32_arg("regexp_substr", values.get(5), 0)?;
     if start <= 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_substr start position must be greater than zero".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"start\": {start}"
+        )));
     }
     if nth <= 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_substr occurrence must be greater than zero".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"n\": {nth}"
+        )));
     }
     if subexpr < 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_substr subexpression must not be negative".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"subexpr\": {subexpr}"
+        )));
     }
     Ok((text, pattern, start, nth, flags, subexpr as usize))
 }
@@ -1372,14 +1372,14 @@ fn regexp_replace_options(values: &[Value]) -> Result<(i32, i32, &str), ExecErro
         _ => {}
     }
     if start <= 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_replace start position must be greater than zero".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"start\": {start}"
+        )));
     }
     if nth < 0 {
-        return Err(ExecError::RaiseException(
-            "regexp_replace occurrence must not be negative".into(),
-        ));
+        return Err(ExecError::RaiseException(format!(
+            "invalid value for parameter \"n\": {nth}"
+        )));
     }
     Ok((start, nth, flags))
 }
