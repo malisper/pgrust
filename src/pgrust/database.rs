@@ -1828,6 +1828,7 @@ fn collect_rels_from_expr(
         | Expr::IsNull(inner)
         | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
         Expr::Add(left, right)
+        | Expr::Coalesce(left, right)
         | Expr::Sub(left, right)
         | Expr::BitAnd(left, right)
         | Expr::BitOr(left, right)
@@ -1929,7 +1930,7 @@ fn collect_rels_from_plan(
         Plan::IndexScan { rel, .. } => {
             rels.insert(*rel);
         }
-        Plan::NestedLoopJoin { left, right, on } => {
+        Plan::NestedLoopJoin { left, right, on, .. } => {
             collect_rels_from_plan(left, rels);
             collect_rels_from_plan(right, rels);
             collect_rels_from_expr(on, rels);

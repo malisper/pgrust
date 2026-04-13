@@ -259,7 +259,7 @@ pub enum FromItem {
         left: Box<FromItem>,
         right: Box<FromItem>,
         kind: JoinKind,
-        on: Option<SqlExpr>,
+        constraint: JoinConstraint,
     },
     Alias {
         source: Box<FromItem>,
@@ -284,10 +284,21 @@ pub fn function_arg_values(args: &[SqlFunctionArg]) -> impl Iterator<Item = &Sql
     args.iter().map(|arg| &arg.value)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
     Inner,
     Cross,
+    Left,
+    Right,
+    Full,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinConstraint {
+    None,
+    On(SqlExpr),
+    Using(Vec<String>),
+    Natural,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

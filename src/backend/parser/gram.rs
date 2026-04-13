@@ -692,10 +692,37 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::from_item | Rule::from_primary | Rule::parenthesized_from_item => {
             build_from_item(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
+        Rule::from_list_item => {
+            let mut source = None;
+            let mut alias = None;
+            let mut column_aliases = Vec::new();
+            for part in pair.into_inner() {
+                match part.as_rule() {
+                    Rule::joined_from_item => source = Some(build_from_item(part)?),
+                    Rule::relation_alias => {
+                        let mut identifiers = Vec::new();
+                        collect_identifiers(part, &mut identifiers);
+                        alias = identifiers.first().cloned();
+                        column_aliases = identifiers.into_iter().skip(1).collect();
+                    }
+                    _ => {}
+                }
+            }
+            let item = source.ok_or(ParseError::UnexpectedEof)?;
+            if let Some(alias) = alias {
+                Ok(FromItem::Alias {
+                    source: Box::new(item),
+                    alias,
+                    column_aliases,
+                })
+            } else {
+                Ok(item)
+            }
+        }
         Rule::from_list => {
             let mut items = pair
                 .into_inner()
-                .filter(|part| part.as_rule() == Rule::joined_from_item)
+                .filter(|part| part.as_rule() == Rule::from_list_item)
                 .map(build_from_item);
             let mut item = items.next().ok_or(ParseError::UnexpectedEof)??;
             for next in items {
@@ -703,7 +730,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     left: Box::new(item),
                     right: Box::new(next?),
                     kind: JoinKind::Cross,
-                    on: None,
+                    constraint: JoinConstraint::None,
                 };
             }
             Ok(item)
@@ -712,20 +739,12 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let mut parts = pair.into_inner();
             let mut item = build_from_item(parts.next().ok_or(ParseError::UnexpectedEof)?)?;
             for join_clause in parts {
-                let mut right = None;
-                let mut on = None;
-                for part in join_clause.into_inner() {
-                    match part.as_rule() {
-                        Rule::aliased_from_item => right = Some(build_from_item(part)?),
-                        Rule::expr => on = Some(build_expr(part)?),
-                        _ => {}
-                    }
-                }
+                let (kind, right, constraint) = build_join_clause(join_clause)?;
                 item = FromItem::Join {
                     left: Box::new(item),
-                    right: Box::new(right.ok_or(ParseError::UnexpectedEof)?),
-                    kind: JoinKind::Inner,
-                    on: Some(on.ok_or(ParseError::UnexpectedEof)?),
+                    right: Box::new(right),
+                    kind,
+                    constraint,
                 };
             }
             Ok(item)
@@ -806,6 +825,86 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_join_clause(
+    pair: Pair<'_, Rule>,
+) -> Result<(JoinKind, FromItem, JoinConstraint), ParseError> {
+    let raw = pair.as_str().to_string();
+    let mut kind = JoinKind::Inner;
+    let mut right = None;
+    let mut constraint = JoinConstraint::None;
+    let mut natural = false;
+
+    for part in pair.into_inner() {
+        consume_join_part(
+            part,
+            &mut kind,
+            &mut right,
+            &mut constraint,
+            &mut natural,
+        )?;
+    }
+
+    if natural {
+        constraint = JoinConstraint::Natural;
+        if matches!(kind, JoinKind::Cross) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "NATURAL join without CROSS",
+                actual: raw,
+            });
+        }
+    }
+
+    match kind {
+        JoinKind::Cross => {
+            if !matches!(constraint, JoinConstraint::None) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "CROSS JOIN without ON or USING",
+                    actual: raw,
+                });
+            }
+        }
+        JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
+            if matches!(constraint, JoinConstraint::None) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "join qualifier",
+                    actual: raw,
+                });
+            }
+        }
+    }
+
+    Ok((kind, right.ok_or(ParseError::UnexpectedEof)?, constraint))
+}
+
+fn consume_join_part(
+    part: Pair<'_, Rule>,
+    kind: &mut JoinKind,
+    right: &mut Option<FromItem>,
+    constraint: &mut JoinConstraint,
+    natural: &mut bool,
+) -> Result<(), ParseError> {
+    match part.as_rule() {
+        Rule::aliased_from_item => *right = Some(build_from_item(part)?),
+        Rule::expr => *constraint = JoinConstraint::On(build_expr(part)?),
+        Rule::join_using_clause => {
+            let mut columns = Vec::new();
+            collect_identifiers(part, &mut columns);
+            *constraint = JoinConstraint::Using(columns);
+        }
+        Rule::cross_join_type => *kind = JoinKind::Cross,
+        Rule::kw_left | Rule::left_join_type => *kind = JoinKind::Left,
+        Rule::kw_right | Rule::right_join_type => *kind = JoinKind::Right,
+        Rule::kw_full | Rule::full_join_type => *kind = JoinKind::Full,
+        Rule::natural_marker => *natural = true,
+        _ => {
+            for inner in part.into_inner() {
+                consume_join_part(inner, kind, right, constraint, natural)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {

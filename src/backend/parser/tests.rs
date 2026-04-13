@@ -597,7 +597,7 @@ fn parse_join_select() {
                 name: "pets".into(),
             }),
             kind: JoinKind::Inner,
-            on: Some(SqlExpr::Eq(
+            constraint: JoinConstraint::On(SqlExpr::Eq(
                 Box::new(SqlExpr::Column("people.id".into())),
                 Box::new(SqlExpr::Column("pets.owner_id".into()))
             )),
@@ -618,7 +618,7 @@ fn parse_cross_join_select() {
                 name: "pets".into(),
             }),
             kind: JoinKind::Cross,
-            on: None,
+            constraint: JoinConstraint::None,
         })
     );
 }
@@ -1060,7 +1060,7 @@ fn parse_cross_join_with_aliases() {
                 column_aliases: vec![],
             }),
             kind: JoinKind::Cross,
-            on: None,
+            constraint: JoinConstraint::None,
         })
     );
 }
@@ -2009,10 +2009,10 @@ fn parse_join_with_derived_table() {
             left,
             right,
             kind,
-            on,
+            constraint,
         }) => {
             assert_eq!(kind, JoinKind::Inner);
-            assert!(on.is_some());
+            assert!(matches!(constraint, JoinConstraint::On(_)));
             assert!(matches!(*left, FromItem::Alias { .. }));
             assert!(matches!(*right, FromItem::Alias { .. }));
         }
@@ -2028,10 +2028,10 @@ fn parse_cross_join_with_derived_table() {
             left,
             right,
             kind,
-            on,
+            constraint,
         }) => {
             assert_eq!(kind, JoinKind::Cross);
-            assert!(on.is_none());
+            assert!(matches!(constraint, JoinConstraint::None));
             assert!(matches!(*left, FromItem::Alias { .. }));
             assert!(matches!(*right, FromItem::Alias { .. }));
         }
@@ -2047,7 +2047,7 @@ fn parse_join_precedence_binds_tighter_than_comma() {
             left,
             right,
             kind: JoinKind::Cross,
-            on: None,
+            constraint: JoinConstraint::None,
         }) => {
             assert!(matches!(*left, FromItem::Table { name } if name == "a"));
             match *right {
@@ -2055,7 +2055,7 @@ fn parse_join_precedence_binds_tighter_than_comma() {
                     left,
                     right,
                     kind: JoinKind::Inner,
-                    on: Some(_),
+                    constraint: JoinConstraint::On(_),
                 } => {
                     assert!(matches!(*left, FromItem::Table { name } if name == "b"));
                     assert!(matches!(*right, FromItem::Table { name } if name == "c"));
@@ -2077,6 +2077,59 @@ fn parse_parenthesized_join_alias() {
         }
         other => panic!("expected aliased parenthesized join, got {:?}", other),
     }
+}
+
+#[test]
+fn parse_cross_join_keyword() {
+    let stmt = parse_select("select * from people cross join pets").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Join {
+            kind: JoinKind::Cross,
+            constraint: JoinConstraint::None,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn parse_join_using_clause() {
+    let stmt = parse_select("select * from people join pets using (id)").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Join {
+            kind: JoinKind::Inner,
+            constraint: JoinConstraint::Using(columns),
+            ..
+        }) if columns == vec!["id".to_string()]
+    ));
+}
+
+#[test]
+fn parse_natural_left_join_clause() {
+    let stmt = parse_select("select * from people natural left join pets").unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Join {
+            kind: JoinKind::Left,
+            constraint: JoinConstraint::Natural,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn parse_join_alias_without_parentheses() {
+    let stmt = parse_select("select * from people join pets on people.id = pets.owner_id as j")
+        .unwrap();
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Alias {
+            source,
+            alias,
+            ..
+        }) if alias == "j" && matches!(*source, FromItem::Join { .. })
+    ));
 }
 
 #[test]

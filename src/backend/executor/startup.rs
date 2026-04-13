@@ -75,7 +75,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::NestedLoopJoin { left, right, on } => {
+        Plan::NestedLoopJoin {
+            left,
+            right,
+            kind,
+            on,
+        } => {
+            let left_width = left.column_names().len();
+            let right_width = right.column_names().len();
             let combined_names: Vec<String> = left
                 .column_names()
                 .into_iter()
@@ -85,11 +92,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
             Box::new(NestedLoopJoinState {
                 left: executor_start(*left),
                 right: executor_start(*right),
+                kind,
                 on,
                 combined_names,
                 right_rows: None,
+                right_matched: None,
                 current_left: None,
+                current_left_matched: false,
                 right_index: 0,
+                left_width,
+                right_width,
+                unmatched_right_index: 0,
                 slot: TupleSlot::empty(ncols),
                 stats: NodeExecStats::default(),
             })

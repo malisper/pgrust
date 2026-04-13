@@ -16,7 +16,7 @@ use crate::include::nodes::execnodes::{
     NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, SlotKind, TupleSlot, ValuesState,
 };
-use crate::include::nodes::plannodes::Expr;
+use crate::include::nodes::plannodes::{Expr, JoinType};
 
 use std::time::Instant;
 
@@ -280,6 +280,11 @@ fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
             render_explain_expr_inner(left, column_names),
             render_explain_expr_inner(right, column_names)
         ),
+        Expr::Coalesce(left, right) => format!(
+            "COALESCE({}, {})",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
         Expr::Eq(left, right) => format!(
             "{} = {}",
             render_explain_expr_inner(left, column_names),
@@ -410,6 +415,7 @@ impl PlanNode for NestedLoopJoinState {
                 let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                 rows.push(TupleSlot::virtual_row(values));
             }
+            self.right_matched = Some(vec![false; rows.len()]);
             self.right_rows = Some(rows);
         }
 
@@ -419,13 +425,36 @@ impl PlanNode for NestedLoopJoinState {
                     Some(slot) => {
                         let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                         self.current_left = Some(TupleSlot::virtual_row(values));
+                        self.current_left_matched = false;
                         self.right_index = 0;
                     }
-                    None => return Ok(None),
+                    None => {
+                        if matches!(self.kind, JoinType::Right | JoinType::Full) {
+                            let right_rows = self.right_rows.as_ref().unwrap();
+                            let right_matched = self.right_matched.as_mut().unwrap();
+                            while self.unmatched_right_index < right_rows.len() {
+                                let ri = self.unmatched_right_index;
+                                self.unmatched_right_index += 1;
+                                if right_matched[ri] {
+                                    continue;
+                                }
+                                let mut combined_values = vec![Value::Null; self.left_width];
+                                combined_values
+                                    .extend(right_rows[ri].tts_values.iter().cloned());
+                                self.slot.tts_values = combined_values;
+                                self.slot.tts_nvalid = self.left_width + self.right_width;
+                                self.slot.kind = SlotKind::Virtual;
+                                self.slot.decode_offset = 0;
+                                return Ok(Some(&mut self.slot));
+                            }
+                        }
+                        return Ok(None);
+                    }
                 }
             }
 
             let right_rows = self.right_rows.as_ref().unwrap();
+            let right_matched = self.right_matched.as_mut().unwrap();
 
             while self.right_index < right_rows.len() {
                 let ri = self.right_index;
@@ -442,10 +471,26 @@ impl PlanNode for NestedLoopJoinState {
                 self.slot.decode_offset = 0;
 
                 match eval_expr(&self.on, &mut self.slot, ctx)? {
-                    Value::Bool(true) => return Ok(Some(&mut self.slot)),
+                    Value::Bool(true) => {
+                        self.current_left_matched = true;
+                        right_matched[ri] = true;
+                        return Ok(Some(&mut self.slot));
+                    }
                     Value::Bool(false) | Value::Null => {}
                     other => return Err(ExecError::NonBoolQual(other)),
                 }
+            }
+
+            if !self.current_left_matched && matches!(self.kind, JoinType::Left | JoinType::Full) {
+                let left = self.current_left.as_ref().unwrap();
+                let mut combined_values: Vec<Value> = left.tts_values.clone();
+                combined_values.extend(std::iter::repeat_n(Value::Null, self.right_width));
+                self.slot.tts_values = combined_values;
+                self.slot.tts_nvalid = self.left_width + self.right_width;
+                self.slot.kind = SlotKind::Virtual;
+                self.slot.decode_offset = 0;
+                self.current_left = None;
+                return Ok(Some(&mut self.slot));
             }
 
             self.current_left = None;
