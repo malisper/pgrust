@@ -21,9 +21,9 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    CatalogLookup, CreateIndexStatement, CreateTableAsStatement, CreateTableStatement,
-    OnCommitAction, ParseError, TablePersistence, bind_delete, bind_insert, bind_update,
-    build_plan, create_relation_desc,
+    CatalogLookup, CommentOnTableStatement, CreateIndexStatement, CreateTableAsStatement,
+    CreateTableStatement, OnCommitAction, ParseError, TablePersistence, bind_delete,
+    bind_insert, bind_update, build_plan, create_relation_desc,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
@@ -658,6 +658,74 @@ impl Database {
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
         guard.disarm();
         result
+    }
+
+    pub(crate) fn execute_comment_on_table_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnTableStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let relation = self
+            .lazy_catalog_lookup(client_id, None, configured_search_path)
+            .lookup_relation(&comment_stmt.table_name)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(comment_stmt.table_name.clone()))
+            })?;
+        self.table_locks
+            .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_table_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_comment_on_table_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnTableStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = catalog.lookup_relation(&comment_stmt.table_name).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(comment_stmt.table_name.clone()))
+        })?;
+        if relation.relpersistence == 't' {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "permanent table for COMMENT ON TABLE",
+                actual: "temporary table".into(),
+            }));
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_create_table_stmt_in_transaction_with_search_path(
@@ -1348,6 +1416,12 @@ impl Database {
             // :HACK: numeric.sql also sets parallel_workers reloptions. Accept and ignore that
             // narrow ALTER TABLE form until table reloptions are represented properly.
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::CommentOnTable(ref comment_stmt) => self
+                .execute_comment_on_table_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let (plan_or_stmt, rels) = {

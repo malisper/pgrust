@@ -7,8 +7,8 @@ use crate::backend::utils::cache::catcache::format_indkey;
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTypeRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
@@ -114,6 +114,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_depend_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgDescription => rows
+            .descriptions
+            .iter()
+            .cloned()
+            .map(pg_description_row_values)
             .collect(),
         BootstrapCatalogKind::PgIndex => rows
             .indexes
@@ -419,6 +425,17 @@ pub(crate) fn pg_depend_row_from_values(values: Vec<Value>) -> Result<PgDependRo
         refobjid: expect_oid(&values[4])?,
         refobjsubid: expect_int32(&values[5])?,
         deptype: expect_char(&values[6], "deptype")?,
+    })
+}
+
+pub(crate) fn pg_description_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgDescriptionRow, CatalogError> {
+    Ok(PgDescriptionRow {
+        objoid: expect_oid(&values[0])?,
+        classoid: expect_oid(&values[1])?,
+        objsubid: expect_int32(&values[2])?,
+        description: expect_text(&values[3])?,
     })
 }
 
@@ -741,6 +758,15 @@ fn pg_depend_row_values(row: PgDependRow) -> Vec<Value> {
         Value::Int32(row.refobjid as i32),
         Value::Int32(row.refobjsubid),
         Value::Text(row.deptype.to_string().into()),
+    ]
+}
+
+fn pg_description_row_values(row: PgDescriptionRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.objoid as i32),
+        Value::Int32(row.classoid as i32),
+        Value::Int32(row.objsubid),
+        Value::Text(row.description.into()),
     ]
 }
 

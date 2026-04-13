@@ -5,14 +5,15 @@ use std::path::{Path, PathBuf};
 use parking_lot::RwLock;
 
 use crate::BufferPool;
+use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::access::transam::xact::{
     CommandId, Snapshot, TransactionId, TransactionManager,
 };
-use crate::backend::catalog::catalog::{
-    Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions,
-};
+use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
+use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions};
 use crate::backend::catalog::indexing::{
-    insert_bootstrap_system_indexes, rebuild_system_catalog_indexes,
+    insert_bootstrap_system_indexes, probe_system_catalog_rows_visible,
+    rebuild_system_catalog_indexes,
 };
 use crate::backend::catalog::loader::{
     load_catalog_from_physical, load_catalog_from_visible_physical,
@@ -20,24 +21,25 @@ use crate::backend::catalog::loader::{
 };
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
-    sync_catalog_rows, sync_catalog_rows_subset,
+    sync_catalog_rows_subset,
 };
+use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::catalog::rows::{
     PhysicalCatalogRows, create_index_sync_kinds, create_table_sync_kinds,
     drop_relation_delete_kinds, drop_relation_sync_kinds, extend_physical_catalog_rows,
     physical_catalog_rows_for_catalog_entry, physical_catalog_rows_from_catcache,
 };
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
-use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgDependRow, PgNamespaceRow,
-    bootstrap_catalog_kinds,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgDependRow,
+    PgDescriptionRow, PgNamespaceRow, bootstrap_catalog_kinds,
 };
+use crate::include::nodes::datum::Value;
 
 const CONTROL_FILE_MAGIC: u32 = 0x5052_4743;
 pub(crate) const DEFAULT_FIRST_REL_NUMBER: u32 = 16000;
@@ -69,6 +71,8 @@ pub struct CatalogWriteContext {
     pub waiter: Option<std::sync::Arc<TransactionWaiter>>,
 }
 
+const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CatalogControl {
     next_oid: u32,
@@ -88,6 +92,7 @@ impl CatalogStore {
         let (mut catalog, control) = if control_path.exists() {
             let control = load_control_file(&control_path)?;
             let mut catalog = load_catalog_from_physical(&base_dir)?;
+            insert_missing_bootstrap_relations(&mut catalog);
             insert_bootstrap_system_indexes(&mut catalog);
             catalog.next_oid = catalog.next_oid.max(control.next_oid);
             catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
@@ -498,6 +503,8 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         for entry in &dropped {
+            let comment_effect = self.comment_relation_mvcc(entry.relation_oid, None, ctx)?;
+            effect_record_catalog_kinds(&mut effect, &comment_effect.touched_catalogs);
             effect_record_rel(&mut effect.dropped_rels, entry.rel);
             effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
             effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
@@ -533,6 +540,95 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn comment_relation_mvcc(
+        &mut self,
+        relation_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let existing = probe_system_catalog_rows_visible(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            PG_DESCRIPTION_O_C_O_INDEX_OID,
+            vec![
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 1,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(relation_oid)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 2,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(PG_CLASS_RELATION_OID)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 3,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int32(0),
+                },
+            ],
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let normalized = comment.and_then(|text| (!text.is_empty()).then_some(text));
+        if let Some(existing_row) = existing.first() {
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    descriptions: vec![existing_row.clone()],
+                    ..PhysicalCatalogRows::default()
+                },
+                1,
+                &[BootstrapCatalogKind::PgDescription],
+            )?;
+            if let Some(text) = normalized {
+                insert_catalog_rows_subset_mvcc(
+                    ctx,
+                    &PhysicalCatalogRows {
+                        descriptions: vec![PgDescriptionRow {
+                            objoid: relation_oid,
+                            classoid: PG_CLASS_RELATION_OID,
+                            objsubid: 0,
+                            description: text.to_string(),
+                        }],
+                        ..PhysicalCatalogRows::default()
+                    },
+                    1,
+                    &[BootstrapCatalogKind::PgDescription],
+                )?;
+            }
+        } else if let Some(text) = normalized {
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    descriptions: vec![PgDescriptionRow {
+                        objoid: relation_oid,
+                        classoid: PG_CLASS_RELATION_OID,
+                        objsubid: 0,
+                        description: text.to_string(),
+                    }],
+                    ..PhysicalCatalogRows::default()
+                },
+                1,
+                &[BootstrapCatalogKind::PgDescription],
+            )?;
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgDescription]);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     fn persist_catalog_kinds(
         &self,
         catalog: &Catalog,
@@ -551,6 +647,14 @@ impl CatalogStore {
                 bootstrap_complete: true,
             },
         )
+    }
+}
+
+fn insert_missing_bootstrap_relations(catalog: &mut Catalog) {
+    for kind in bootstrap_catalog_kinds() {
+        if catalog.get_by_oid(kind.relation_oid()).is_none() {
+            catalog.insert(kind.relation_name(), bootstrap_catalog_entry(kind));
+        }
     }
 }
 
@@ -650,7 +754,7 @@ pub(crate) fn sync_catalog_heaps_for_tests(
 ) -> Result<(), CatalogError> {
     let catcache = CatCache::from_catalog(catalog);
     let rows = physical_catalog_rows_from_catcache(&catcache);
-    sync_catalog_rows(base_dir, &rows, 1)
+    crate::backend::catalog::persistence::sync_catalog_rows(base_dir, &rows, 1)
 }
 
 impl CatalogStore {
@@ -669,7 +773,21 @@ fn sync_physical_catalogs_kinds(
     kinds: &[BootstrapCatalogKind],
 ) -> Result<(), CatalogError> {
     let catcache = CatCache::from_catalog(catalog);
-    let rows = physical_catalog_rows_from_catcache(&catcache);
+    let mut rows = physical_catalog_rows_from_catcache(&catcache);
+    if kinds.contains(&BootstrapCatalogKind::PgDescription) {
+        let pool = std::sync::Arc::new(BufferPool::new(
+            SmgrStorageBackend::new(MdStorageManager::new(base_dir)),
+            64,
+        ));
+        let txns = TransactionManager::new_durable(base_dir.to_path_buf()).unwrap_or_default();
+        if let Ok(snapshot) = txns.snapshot(INVALID_TRANSACTION_ID) {
+            if let Ok(existing_rows) =
+                load_physical_catalog_rows_visible(base_dir, &pool, &txns, &snapshot, 0)
+            {
+                rows.descriptions = existing_rows.descriptions;
+            }
+        }
+    }
     sync_catalog_rows_subset(base_dir, &rows, 1, kinds)?;
     rebuild_system_catalog_indexes(base_dir)
 }
@@ -732,6 +850,7 @@ mod tests {
     use super::*;
     use crate::backend::catalog::column_desc;
     use crate::backend::catalog::loader::load_physical_catalog_rows;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::storage::smgr::ForkNumber;
     use crate::backend::storage::smgr::segment_path;
     use crate::include::catalog::{

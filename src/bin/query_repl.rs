@@ -438,8 +438,62 @@ fn run_statement(
     clear_notices();
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
-        Statement::Set(_) | Statement::Reset(_) | Statement::AlterTableSet(_) => {
+        Statement::Set(_)
+        | Statement::Reset(_)
+        | Statement::AlterTableSet(_) => {
             Ok(StatementResult::AffectedRows(0))
+        }
+        Statement::CommentOnTable(stmt) => {
+            let xid = txns.write().begin();
+            let result = {
+                let ctx = pgrust::backend::catalog::store::CatalogWriteContext {
+                    pool: std::sync::Arc::clone(pool),
+                    txns: txns.clone(),
+                    xid,
+                    cid: 0,
+                    client_id: 21,
+                    waiter: None,
+                };
+                let relcache = catalog_store.relcache().map_err(|err| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "physical relcache",
+                        actual: format!("{err:?}"),
+                    })
+                })?;
+                let relation = relcache.get_by_name(&stmt.table_name).cloned().ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
+                })?;
+                if relation.relpersistence == 't' {
+                    Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "permanent table for COMMENT ON TABLE",
+                        actual: "temporary table".into(),
+                    }))
+                } else {
+                    catalog_store
+                        .comment_relation_mvcc(
+                            relation.relation_oid,
+                            stmt.comment.as_deref(),
+                            &ctx,
+                        )
+                        .map_err(|other| {
+                            ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "table comment update",
+                                actual: format!("{other:?}"),
+                            })
+                        })?;
+                    Ok(StatementResult::AffectedRows(0))
+                }
+            };
+            match result {
+                Ok(ok) => {
+                    txns.write().commit(xid)?;
+                    Ok(ok)
+                }
+                Err(err) => {
+                    let _ = txns.write().abort(xid);
+                    Err(err)
+                }
+            }
         }
         Statement::CreateIndex(stmt) => Ok(catalog_store
             .create_index(

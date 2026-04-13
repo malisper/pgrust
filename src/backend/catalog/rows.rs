@@ -6,8 +6,9 @@ use crate::backend::utils::cache::catcache::{CatCache, format_indkey, sql_type_o
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTypeRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow,
+    PgTypeRow,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -17,6 +18,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub attributes: Vec<PgAttributeRow>,
     pub attrdefs: Vec<PgAttrdefRow>,
     pub depends: Vec<PgDependRow>,
+    pub descriptions: Vec<PgDescriptionRow>,
     pub indexes: Vec<PgIndexRow>,
     pub ams: Vec<PgAmRow>,
     pub amops: Vec<PgAmopRow>,
@@ -79,6 +81,7 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgAttrdef,
         BootstrapCatalogKind::PgConstraint,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgIndex,
     ]
 }
@@ -92,6 +95,7 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgAttribute,
         BootstrapCatalogKind::PgClass,
         BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgDescription,
     ]
 }
 
@@ -104,6 +108,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.attributes.extend(source.attributes);
     target.attrdefs.extend(source.attrdefs);
     target.depends.extend(source.depends);
+    target.descriptions.extend(source.descriptions);
     target.indexes.extend(source.indexes);
     target.ams.extend(source.ams);
     target.amops.extend(source.amops);
@@ -130,6 +135,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         attributes: catcache.attribute_rows(),
         attrdefs: catcache.attrdef_rows(),
         depends: catcache.depend_rows(),
+        descriptions: Vec::new(),
         indexes: catcache.index_rows(),
         ams: catcache.am_rows(),
         amops: catcache.amop_rows(),

@@ -238,6 +238,30 @@ fn parse_create_unique_index_statement() {
 }
 
 #[test]
+fn parse_comment_on_table_statement() {
+    let stmt = parse_statement("comment on table items is 'hello world'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnTable(CommentOnTableStatement {
+            table_name: "items".into(),
+            comment: Some("hello world".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_table_null_statement() {
+    let stmt = parse_statement("comment on table public.items is null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnTable(CommentOnTableStatement {
+            table_name: "public.items".into(),
+            comment: None,
+        })
+    );
+}
+
+#[test]
 fn parse_create_index_with_method_and_ordering() {
     let stmt = parse_statement(
         "create index num_exp_add_idx on num_exp_add using btree (id1 desc nulls first, id2 asc)",

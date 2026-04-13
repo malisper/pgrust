@@ -858,6 +858,118 @@ fn create_index_and_alter_table_set_are_noops() {
 }
 
 #[test]
+fn comment_on_table_upserts_and_clears_pg_description() {
+    let base = temp_dir("comment_on_table");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "comment on table items is 'hello world'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'items' and d.classoid = 1259 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("hello world".into())]]
+    );
+
+    db.execute(1, "comment on table items is 'second comment'")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'items' and d.classoid = 1259 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("second comment".into())]]
+    );
+
+    db.execute(1, "comment on table items is null").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'items' and d.classoid = 1259 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn comment_on_table_respects_txn_commit_and_rollback() {
+    let base = temp_dir("comment_on_table_txn");
+    {
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+
+        session
+            .execute(&db, "create table items (id int4 not null)")
+            .unwrap();
+        session.execute(&db, "begin").unwrap();
+        session
+            .execute(&db, "comment on table items is 'rolled back'")
+            .unwrap();
+        session.execute(&db, "rollback").unwrap();
+
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                "select count(*) \
+                 from pg_description d \
+                 join pg_class c on c.oid = d.objoid \
+                 where c.relname = 'items' and d.classoid = 1259 and d.objsubid = 0"
+            ),
+            vec![vec![Value::Int64(0)]]
+        );
+
+        session.execute(&db, "begin").unwrap();
+        session
+            .execute(&db, "comment on table items is 'committed'")
+            .unwrap();
+        session.execute(&db, "commit").unwrap();
+    }
+
+    let reopened = Database::open(&base, 16).unwrap();
+    assert_eq!(
+        query_rows(
+            &reopened,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'items' and d.classoid = 1259 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("committed".into())]]
+    );
+}
+
+#[test]
+fn comment_on_temp_table_is_unsupported() {
+    let base = temp_dir("comment_on_temp_table");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create temp table items (id int4 not null)")
+        .unwrap();
+    match db.execute(1, "comment on table items is 'nope'") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "permanent table for COMMENT ON TABLE" && actual == "temporary table" => {}
+        other => panic!("expected temp-table comment rejection, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
     let base = temp_dir("btree_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();

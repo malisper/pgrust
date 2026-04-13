@@ -14,6 +14,7 @@ enum DecodeStep {
     /// Only possible when all preceding columns are also fixed-width and NOT NULL.
     FixedInt32 {
         data_offset: usize,
+        is_oid: bool,
     },
     FixedBool {
         data_offset: usize,
@@ -48,17 +49,15 @@ impl CompiledTupleDecoder {
         for (column, attr) in desc.columns.iter().zip(attr_descs.iter()) {
             if let Some(off) = fixed_offset {
                 let aligned = attr.attalign.align_offset(off);
-                if attr.attlen > 0
-                    && !attr.nullable
-                    && !matches!(
-                        column.sql_type.kind,
-                        crate::backend::parser::SqlTypeKind::Oid
-                    )
-                {
+                if attr.attlen > 0 && !attr.nullable {
                     // Fixed-width NOT NULL — we know the exact byte offset.
                     let step = match (&column.ty, attr.attlen) {
                         (ScalarType::Int32, 4) => DecodeStep::FixedInt32 {
                             data_offset: aligned,
+                            is_oid: matches!(
+                                column.sql_type.kind,
+                                crate::backend::parser::SqlTypeKind::Oid
+                            ),
                         },
                         (ScalarType::Bool, 1) => DecodeStep::FixedBool {
                             data_offset: aligned,
@@ -130,7 +129,7 @@ impl CompiledTupleDecoder {
             return None;
         }
         match &self.steps[col] {
-            DecodeStep::FixedInt32 { data_offset } => Some(*data_offset),
+            DecodeStep::FixedInt32 { data_offset, .. } => Some(*data_offset),
             _ => None,
         }
     }
@@ -181,14 +180,17 @@ impl CompiledTupleDecoder {
             }
 
             match step {
-                DecodeStep::FixedInt32 { data_offset } => {
+                DecodeStep::FixedInt32 {
+                    data_offset,
+                    is_oid,
+                } => {
                     let o = *data_offset;
-                    values.push(Value::Int32(i32::from_le_bytes([
-                        data[o],
-                        data[o + 1],
-                        data[o + 2],
-                        data[o + 3],
-                    ])));
+                    let raw = i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+                    if *is_oid {
+                        values.push(Value::Int64(raw as u32 as i64));
+                    } else {
+                        values.push(Value::Int32(raw));
+                    }
                     off = o + 4;
                 }
                 DecodeStep::FixedBool { data_offset } => {

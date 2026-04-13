@@ -99,6 +99,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::comment_on_table_stmt => {
+            Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
+        }
         Rule::create_table_stmt => build_create_table(inner),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
@@ -872,6 +875,26 @@ fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement,
     Ok(AlterTableSetStatement {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         options,
+    })
+}
+
+fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatement, ParseError> {
+    let mut table_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => table_name = Some(build_identifier(part)),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => comment = Some(Some(decode_string_literal(part.as_str())?)),
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnTableStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_set_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_set_stmt | comment_on_table_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -44,6 +44,7 @@ create_index_include_clause = { kw_include ~ "(" ~ ident_list ~ ")" }
 create_index_where_clause = { kw_where ~ expr }
 create_index_with_clause = { kw_with ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
 alter_table_set_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
+comment_on_table_stmt = { kw_comment ~ kw_on ~ kw_table ~ identifier ~ kw_is ~ (quoted_string_literal | kw_null) }
 reloption = { identifier ~ "=" ~ set_value_atom }
 temp_clause = { kw_temp | kw_temporary }
 create_table_tail = { create_table_column_form | create_table_as_form }
@@ -255,6 +256,7 @@ kw_unique = _{ kw_unique_atom }
 kw_index = _{ kw_index_atom }
 kw_include = _{ kw_include_atom }
 kw_alter = _{ kw_alter_atom }
+kw_comment = _{ kw_comment_atom }
 kw_table = _{ kw_table_atom }
 kw_drop = _{ kw_drop_atom }
 kw_truncate = _{ kw_truncate_atom }
@@ -383,6 +385,7 @@ kw_unique_atom = @{ ^"unique" ~ keyword_end }
 kw_index_atom = @{ ^"index" ~ keyword_end }
 kw_include_atom = @{ ^"include" ~ keyword_end }
 kw_alter_atom = @{ ^"alter" ~ keyword_end }
+kw_comment_atom = @{ ^"comment" ~ keyword_end }
 kw_table_atom = @{ ^"table" ~ keyword_end }
 kw_drop_atom = @{ ^"drop" ~ keyword_end }
 kw_truncate_atom = @{ ^"truncate" ~ keyword_end }

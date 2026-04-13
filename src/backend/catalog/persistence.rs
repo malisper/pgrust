@@ -312,6 +312,11 @@ fn catalog_row_identity_matches(
                 && catalog_value_eq(left.get(6), right.get(6))
         }
         BootstrapCatalogKind::PgIndex => catalog_value_eq(left.first(), right.first()),
+        BootstrapCatalogKind::PgDescription => {
+            catalog_value_eq(left.first(), right.first())
+                && catalog_value_eq(left.get(1), right.get(1))
+                && catalog_value_eq(left.get(2), right.get(2))
+        }
         _ => left == right,
     }
 }
