@@ -41,7 +41,11 @@ pub fn default_timezone() -> &'static str {
 pub fn parse_datestyle(value: &str) -> Option<(DateStyleFormat, DateOrder)> {
     let mut format = None;
     let mut order = None;
-    for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
         match part.to_ascii_lowercase().as_str() {
             "iso" => format = Some(DateStyleFormat::Iso),
             "sql" => format = Some(DateStyleFormat::Sql),

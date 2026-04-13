@@ -1,8 +1,6 @@
 use crate::include::nodes::tsearch::{TsQuery, TsVector};
+use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::pgrust::compact_string::CompactString;
-use crate::include::nodes::datetime::{
-    DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
-};
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
