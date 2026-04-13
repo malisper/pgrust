@@ -445,6 +445,18 @@ fn table_function_named_arg_signature(name: &str) -> Option<NamedArgSignature> {
             defaults: &[None],
         });
     }
+    if name.eq_ignore_ascii_case("jsonb_path_query") {
+        return Some(NamedArgSignature {
+            params: &["target", "path", "vars", "silent"],
+            required: 2,
+            defaults: &[
+                None,
+                None,
+                Some(NamedArgDefault::JsonbEmptyObject),
+                Some(NamedArgDefault::Bool(false)),
+            ],
+        });
+    }
     None
 }
 
@@ -616,6 +628,7 @@ fn legacy_json_table_function_entries() -> &'static [(&'static str, JsonTableFun
             "json_array_elements_text",
             JsonTableFunction::ArrayElementsText,
         ),
+        ("jsonb_path_query", JsonTableFunction::JsonbPathQuery),
         ("jsonb_object_keys", JsonTableFunction::JsonbObjectKeys),
         ("jsonb_each", JsonTableFunction::JsonbEach),
         ("jsonb_each_text", JsonTableFunction::JsonbEachText),

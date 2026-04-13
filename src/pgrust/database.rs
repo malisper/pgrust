@@ -1955,8 +1955,10 @@ fn collect_rels_from_plan(
                     collect_rels_from_expr(arg, rels);
                 }
             }
-            crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction { arg, .. } => {
-                collect_rels_from_expr(arg, rels)
+            crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction { args, .. } => {
+                for arg in args {
+                    collect_rels_from_expr(arg, rels);
+                }
             }
         },
         Plan::Values { rows, .. } => {
@@ -1994,9 +1996,13 @@ fn collect_rels_from_plan(
                                 }
                             }
                             crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction {
-                                arg,
+                                args,
                                 ..
-                            } => collect_rels_from_expr(arg, rels),
+                            } => {
+                                for arg in args {
+                                    collect_rels_from_expr(arg, rels);
+                                }
+                            }
                         }
                     }
                 }

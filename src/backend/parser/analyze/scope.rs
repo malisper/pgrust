@@ -555,20 +555,19 @@ pub(super) fn bind_from_item_with_ctes(
             }
             other => {
                 if let Some(kind) = resolve_json_table_function(other) {
-                    if args.len() != 1 {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "single json argument",
-                            actual: format!("{other} with {} arguments", args.len()),
-                        });
-                    }
                     let empty_scope = empty_scope();
-                    let arg = bind_expr_with_outer(
-                        &args[0],
-                        &empty_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                    )?;
+                    let bound_args = args
+                        .iter()
+                        .map(|arg| {
+                            bind_expr_with_outer(
+                                arg,
+                                &empty_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     let output_columns = match kind {
                         JsonTableFunction::ObjectKeys => {
                             vec![QueryColumn::text("json_object_keys")]
@@ -590,6 +589,10 @@ pub(super) fn bind_from_item_with_ctes(
                         JsonTableFunction::ArrayElementsText => {
                             vec![QueryColumn::text("json_array_elements_text")]
                         }
+                        JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
+                            name: "jsonb_path_query".into(),
+                            sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                        }],
                         JsonTableFunction::JsonbObjectKeys => {
                             vec![QueryColumn::text("jsonb_object_keys")]
                         }
@@ -622,7 +625,7 @@ pub(super) fn bind_from_item_with_ctes(
                         Plan::FunctionScan {
                             call: SetReturningCall::JsonTableFunction {
                                 kind,
-                                arg,
+                                args: bound_args,
                                 output_columns,
                             },
                         },

@@ -220,6 +220,7 @@ pub enum JsonTableFunction {
     EachText,
     ArrayElements,
     ArrayElementsText,
+    JsonbPathQuery,
     JsonbObjectKeys,
     JsonbEach,
     JsonbEachText,
@@ -241,7 +242,7 @@ pub enum SetReturningCall {
     },
     JsonTableFunction {
         kind: JsonTableFunction,
-        arg: Expr,
+        args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
 }
