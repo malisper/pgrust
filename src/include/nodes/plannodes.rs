@@ -408,6 +408,10 @@ pub enum Expr {
         op: SubqueryComparisonOp,
         right: Box<Expr>,
     },
+    ArraySubscript {
+        array: Box<Expr>,
+        subscripts: Vec<ExprArraySubscript>,
+    },
     Random,
     JsonGet(Box<Expr>, Box<Expr>),
     JsonGetText(Box<Expr>, Box<Expr>),
@@ -418,6 +422,12 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     CurrentTimestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExprArraySubscript {
+    pub lower: Option<Expr>,
+    pub upper: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

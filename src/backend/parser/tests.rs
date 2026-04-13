@@ -1113,6 +1113,39 @@ fn parse_unary_minus_in_expression() {
 }
 
 #[test]
+fn parse_array_subscript_expressions_and_targets() {
+    let stmt = parse_select("select a[1], b[1:2], c[:], d[2:] from widgets").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::ArraySubscript { ref subscripts, .. } if subscripts.len() == 1 && subscripts[0].upper.is_none()
+    ));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::ArraySubscript { ref subscripts, .. } if subscripts[0].upper.is_some()
+    ));
+
+    match parse_statement("update widgets set a[1] = 1, b[1:2] = array[1,2]").unwrap() {
+        Statement::Update(UpdateStatement { assignments, .. }) => {
+            assert_eq!(assignments[0].target.column, "a");
+            assert_eq!(assignments[0].target.subscripts.len(), 1);
+            assert_eq!(assignments[1].target.column, "b");
+            assert_eq!(assignments[1].target.subscripts.len(), 1);
+        }
+        other => panic!("expected update, got {:?}", other),
+    }
+
+    match parse_statement("insert into widgets (a[1], b[1:2]) values (1, array[1,2])").unwrap() {
+        Statement::Insert(InsertStatement { columns: Some(columns), .. }) => {
+            assert_eq!(columns[0].column, "a");
+            assert_eq!(columns[0].subscripts.len(), 1);
+            assert_eq!(columns[1].column, "b");
+            assert_eq!(columns[1].subscripts.len(), 1);
+        }
+        other => panic!("expected insert, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_unary_plus_numeric_literal_and_new_operators() {
     let stmt =
         parse_select("select +1.5, 5 - 2, 3 * 4, 8 / 2, 9 % 4, 1 <= 2, 3 >= 2, 4 != 5").unwrap();

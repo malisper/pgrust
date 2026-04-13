@@ -531,6 +531,67 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 actual: "ARRAY[]".into(),
             })?,
         },
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            let array_type = infer_sql_expr_type_with_ctes(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if !array_type.is_array {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "array expression",
+                    actual: sql_type_name(array_type).into(),
+                });
+            }
+            Expr::ArraySubscript {
+                array: Box::new(bind_expr_with_outer_and_ctes(
+                    array,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?),
+                subscripts: subscripts
+                    .iter()
+                    .map(|subscript| {
+                        Ok(crate::include::nodes::plannodes::ExprArraySubscript {
+                            lower: subscript
+                                .lower
+                                .as_deref()
+                                .map(|expr| {
+                                    bind_expr_with_outer_and_ctes(
+                                        expr,
+                                        scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer,
+                                        ctes,
+                                    )
+                                })
+                                .transpose()?,
+                            upper: subscript
+                                .upper
+                                .as_deref()
+                                .map(|expr| {
+                                    bind_expr_with_outer_and_ctes(
+                                        expr,
+                                        scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer,
+                                        ctes,
+                                    )
+                                })
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<_, ParseError>>()?,
+            }
+        }
         SqlExpr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
             Box::new(bind_expr_with_outer_and_ctes(
                 left,

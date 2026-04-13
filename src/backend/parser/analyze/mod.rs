@@ -1357,7 +1357,7 @@ pub struct BoundInsertStatement {
     pub desc: RelationDesc,
     pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
-    pub target_columns: Vec<usize>,
+    pub target_columns: Vec<BoundAssignmentTarget>,
     pub source: BoundInsertSource,
 }
 
@@ -1475,7 +1475,20 @@ pub struct BoundDeleteStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundAssignment {
     pub column_index: usize,
+    pub subscripts: Vec<BoundArraySubscript>,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundAssignmentTarget {
+    pub column_index: usize,
+    pub subscripts: Vec<BoundArraySubscript>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundArraySubscript {
+    pub lower: Option<Expr>,
+    pub upper: Option<Expr>,
 }
 
 pub fn bind_insert(
@@ -1492,7 +1505,7 @@ pub fn bind_insert(
             let target_columns = if let Some(columns) = &stmt.columns {
                 columns
                     .iter()
-                    .map(|column| resolve_column(&scope, column))
+                    .map(|column| bind_assignment_target(column, &scope, catalog, &local_ctes))
                     .collect::<Result<Vec<_>, _>>()?
             } else {
                 let width = rows.first().map(Vec::len).unwrap_or(0);
@@ -1502,7 +1515,12 @@ pub fn bind_insert(
                         actual: width,
                     });
                 }
-                (0..width).collect()
+                (0..width)
+                    .map(|column_index| BoundAssignmentTarget {
+                        column_index,
+                        subscripts: Vec::new(),
+                    })
+                    .collect()
             };
             for row in rows {
                 if target_columns.len() != row.len() {
@@ -1517,8 +1535,8 @@ pub fn bind_insert(
                 .map(|row| {
                     row.iter()
                         .zip(target_columns.iter())
-                        .map(|(expr, column_index)| match expr {
-                            SqlExpr::Default => Ok(column_defaults[*column_index].clone()),
+                        .map(|(expr, target)| match expr {
+                            SqlExpr::Default => Ok(column_defaults[target.column_index].clone()),
                             _ => bind_expr_with_outer_and_ctes(
                                 expr,
                                 &scope,
@@ -1534,7 +1552,12 @@ pub fn bind_insert(
             (target_columns, BoundInsertSource::Values(bound_rows))
         }
         InsertSource::DefaultValues => (
-            (0..entry.desc.columns.len()).collect(),
+            (0..entry.desc.columns.len())
+                .map(|column_index| BoundAssignmentTarget {
+                    column_index,
+                    subscripts: Vec::new(),
+                })
+                .collect(),
             BoundInsertSource::DefaultValues(column_defaults.clone()),
         ),
         InsertSource::Select(select) => {
@@ -1543,7 +1566,7 @@ pub fn bind_insert(
             let target_columns = if let Some(columns) = &stmt.columns {
                 columns
                     .iter()
-                    .map(|column| resolve_column(&scope, column))
+                    .map(|column| bind_assignment_target(column, &scope, catalog, &local_ctes))
                     .collect::<Result<Vec<_>, _>>()?
             } else {
                 if actual > entry.desc.columns.len() {
@@ -1552,7 +1575,12 @@ pub fn bind_insert(
                         actual,
                     });
                 }
-                (0..actual).collect()
+                (0..actual)
+                    .map(|column_index| BoundAssignmentTarget {
+                        column_index,
+                        subscripts: Vec::new(),
+                    })
+                    .collect()
             };
             if target_columns.len() != actual {
                 return Err(ParseError::InvalidInsertTargetCount {
@@ -1603,7 +1631,13 @@ pub fn bind_update(
             .iter()
             .map(|assignment| {
                 Ok(BoundAssignment {
-                    column_index: resolve_column(&scope, &assignment.column)?,
+                    column_index: resolve_column(&scope, &assignment.target.column)?,
+                    subscripts: bind_assignment_subscripts(
+                        &assignment.target.subscripts,
+                        &scope,
+                        catalog,
+                        &local_ctes,
+                    )?,
                     expr: bind_expr_with_outer_and_ctes(
                         &assignment.expr,
                         &scope,
@@ -1617,6 +1651,43 @@ pub fn bind_update(
             .collect::<Result<Vec<_>, ParseError>>()?,
         predicate,
     })
+}
+
+fn bind_assignment_target(
+    target: &crate::include::nodes::parsenodes::AssignmentTarget,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+) -> Result<BoundAssignmentTarget, ParseError> {
+    Ok(BoundAssignmentTarget {
+        column_index: resolve_column(scope, &target.column)?,
+        subscripts: bind_assignment_subscripts(&target.subscripts, scope, catalog, local_ctes)?,
+    })
+}
+
+fn bind_assignment_subscripts(
+    subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    local_ctes: &[BoundCte],
+) -> Result<Vec<BoundArraySubscript>, ParseError> {
+    subscripts
+        .iter()
+        .map(|subscript| {
+            Ok(BoundArraySubscript {
+                lower: subscript
+                    .lower
+                    .as_deref()
+                    .map(|expr| bind_expr_with_outer_and_ctes(expr, scope, catalog, &[], None, local_ctes))
+                    .transpose()?,
+                upper: subscript
+                    .upper
+                    .as_deref()
+                    .map(|expr| bind_expr_with_outer_and_ctes(expr, scope, catalog, &[], None, local_ctes))
+                    .transpose()?,
+            })
+        })
+        .collect()
 }
 
 pub fn bind_delete(

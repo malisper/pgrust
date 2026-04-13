@@ -828,9 +828,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         match part.as_rule() {
             Rule::cte_clause => with = build_cte_clause(part)?,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
-            Rule::ident_list => {
-                columns = Some(part.into_inner().map(build_identifier).collect::<Vec<_>>())
-            }
+            Rule::assignment_target_list => columns = Some(build_assignment_target_list(part)?),
             Rule::insert_values_source => {
                 source = Some(InsertSource::Values(
                     part.into_inner()
@@ -1392,9 +1390,47 @@ fn build_values_row(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
 fn build_assignment(pair: Pair<'_, Rule>) -> Result<Assignment, ParseError> {
     let mut inner = pair.into_inner();
     Ok(Assignment {
-        column: build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?),
+        target: build_assignment_target(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
         expr: build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
     })
+}
+
+fn build_assignment_target_list(pair: Pair<'_, Rule>) -> Result<Vec<AssignmentTarget>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::assignment_target)
+        .map(build_assignment_target)
+        .collect()
+}
+
+fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, ParseError> {
+    let mut inner = pair.into_inner();
+    let column = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let mut subscripts = Vec::new();
+    for part in inner {
+        if part.as_rule() == Rule::subscript_suffix {
+            subscripts.push(build_array_subscript(part)?);
+        }
+    }
+    Ok(AssignmentTarget { column, subscripts })
+}
+
+fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseError> {
+    let raw = pair.as_str().to_string();
+    let mut bounds = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::subscript_bound)
+        .map(|bound| {
+            let expr = bound.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_expr(expr).map(Box::new)
+        });
+    let has_slice = raw.contains(':');
+    let lower = bounds.next().transpose()?;
+    let upper = if has_slice {
+        bounds.next().transpose()?
+    } else {
+        None
+    };
+    Ok(ArraySubscript { lower, upper })
 }
 
 fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
@@ -1457,6 +1493,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_int2 | Rule::kw_smallint => SqlType::new(SqlTypeKind::Int2),
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
         Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
+        Rule::kw_name => SqlType::new(SqlTypeKind::Name),
         Rule::kw_oid => SqlType::new(SqlTypeKind::Oid),
         Rule::bit_type => {
             let len = pair
@@ -1582,14 +1619,30 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             let mut inner = pair.into_inner();
             let mut expr = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             for suffix in inner {
-                if suffix.as_rule() == Rule::cast_suffix {
-                    let ty = build_type(
-                        suffix
-                            .into_inner()
-                            .find(|part| part.as_rule() == Rule::type_name)
-                            .ok_or(ParseError::UnexpectedEof)?,
-                    );
-                    expr = SqlExpr::Cast(Box::new(expr), ty);
+                match suffix.as_rule() {
+                    Rule::cast_suffix => {
+                        let ty = build_type(
+                            suffix
+                                .into_inner()
+                                .find(|part| part.as_rule() == Rule::type_name)
+                                .ok_or(ParseError::UnexpectedEof)?,
+                        );
+                        expr = SqlExpr::Cast(Box::new(expr), ty);
+                    }
+                    Rule::subscript_suffix => {
+                        let subscript = build_array_subscript(suffix)?;
+                        expr = match expr {
+                            SqlExpr::ArraySubscript { array, mut subscripts } => {
+                                subscripts.push(subscript);
+                                SqlExpr::ArraySubscript { array, subscripts }
+                            }
+                            other => SqlExpr::ArraySubscript {
+                                array: Box::new(other),
+                                subscripts: vec![subscript],
+                            },
+                        };
+                    }
+                    _ => {}
                 }
             }
             Ok(expr)

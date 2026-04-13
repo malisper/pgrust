@@ -268,6 +268,17 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
         | SqlExpr::IsNull(inner)
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::Cast(inner, _) => visit_nested_srfs(inner, info),
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            visit_nested_srfs(array, info);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    visit_nested_srfs(lower, info);
+                }
+                if let Some(upper) = &subscript.upper {
+                    visit_nested_srfs(upper, info);
+                }
+            }
+        }
         SqlExpr::ArrayLiteral(items) => {
             for item in items {
                 visit_nested_srfs(item, info);

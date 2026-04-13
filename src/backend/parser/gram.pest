@@ -33,7 +33,7 @@ set_value_list = { set_value_atom ~ ("," ~ set_value_atom)* }
 set_value_atom = { signed_set_value | kw_default | kw_true | kw_false | kw_on_value | kw_off | quoted_string_literal | identifier | numeric_literal | integer }
 signed_set_value = { ("+" | "-") ~ (numeric_literal | integer | identifier) }
 
-insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ ident_list ~ ")")? ~ (insert_values_source | insert_default_values_source | select_stmt) }
+insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ assignment_target_list ~ ")")? ~ (insert_values_source | insert_default_values_source | select_stmt) }
 insert_values_source = { kw_values ~ values_row ~ ("," ~ values_row)* }
 insert_default_values_source = { kw_default ~ kw_values }
 create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ if_not_exists_clause? ~ identifier ~ create_table_tail ~ table_storage_clause? }
@@ -111,7 +111,7 @@ nullability = { not_null | nullable }
 not_null = { kw_not ~ kw_null }
 nullable = { kw_null }
 type_name = { base_type_name ~ array_suffix* }
-base_type_name = { internal_char_type | kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_oid | varbit_type | bit_type | kw_bytea | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | kw_json | kw_jsonb | kw_jsonpath | char_type | varchar_type | character_varying_type }
+base_type_name = { internal_char_type | kw_int2 | kw_smallint | kw_int4 | kw_int | kw_integer | kw_int8 | kw_bigint | kw_oid | kw_name | varbit_type | bit_type | kw_bytea | kw_float4 | kw_real | kw_float8 | double_precision_type | numeric_type | kw_text | kw_bool | kw_boolean | kw_timestamp | kw_json | kw_jsonb | kw_jsonpath | char_type | varchar_type | character_varying_type }
 internal_char_type = @{ ^"\"char\"" }
 array_suffix = { "[" ~ "]" }
 double_precision_type = { kw_double ~ kw_precision }
@@ -122,7 +122,9 @@ char_type = { kw_char ~ ("(" ~ integer ~ ")")? }
 varchar_type = { kw_varchar ~ ("(" ~ integer ~ ")")? }
 character_varying_type = { kw_character ~ kw_varying ~ ("(" ~ integer ~ ")")? }
 
-assignment = { identifier ~ "=" ~ expr }
+assignment = { assignment_target ~ "=" ~ expr }
+assignment_target_list = { assignment_target ~ ("," ~ assignment_target)* }
+assignment_target = { identifier ~ subscript_suffix* }
 
 expr = { or_expr }
 or_expr = { and_expr ~ (kw_or ~ and_expr)* }
@@ -161,8 +163,10 @@ similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
 comp_op = { "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "#>>" | "#>" | "->>" | "->" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
-postfix_expr = { unary_expr ~ cast_suffix* }
+postfix_expr = { unary_expr ~ (cast_suffix | subscript_suffix)* }
 cast_suffix = { "::" ~ type_name }
+subscript_suffix = { "[" ~ subscript_bound? ~ (":" ~ subscript_bound?)? ~ "]" }
+subscript_bound = { expr }
 positive_expr = { "+" ~ unary_expr }
 negated_expr = { ("||/" | "|/" | "-" | "~" | "@") ~ unary_expr }
 primary_expr = { kw_default | kw_null | kw_true | kw_false | kw_current_timestamp | exists_expr | scalar_subquery_expr | array_expr | cast_expr | agg_call | typed_string_literal | position_expr | substring_expr | overlay_expr | trim_expr | func_call | bit_string_literal | quoted_string_literal | identifier | numeric_literal | integer | "(" ~ expr ~ ")" }
@@ -353,6 +357,7 @@ kw_text = { kw_text_atom }
 kw_bool = { kw_bool_atom }
 kw_boolean = { kw_boolean_atom }
 kw_timestamp = { kw_timestamp_atom }
+kw_name = { kw_name_atom }
 kw_char = { kw_char_atom }
 kw_character = { kw_character_atom }
 kw_varchar = { kw_varchar_atom }
@@ -496,6 +501,7 @@ kw_text_atom = @{ ^"text" ~ keyword_end }
 kw_bool_atom = @{ ^"bool" ~ keyword_end }
 kw_boolean_atom = @{ ^"boolean" ~ keyword_end }
 kw_timestamp_atom = @{ ^"timestamp" ~ keyword_end }
+kw_name_atom = @{ ^"name" ~ keyword_end }
 kw_char_atom = @{ ^"char" ~ keyword_end }
 kw_character_atom = @{ ^"character" ~ keyword_end }
 kw_varchar_atom = @{ ^"varchar" ~ keyword_end }

@@ -13,7 +13,8 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
     AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement,
-    BoundIndexRelation, BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
+    BoundIndexRelation, BoundModifyRowSource, BoundUpdateStatement, BoundAssignmentTarget,
+    Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
     MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement,
     bind_create_table, build_plan,
 };
@@ -461,8 +462,9 @@ pub fn execute_insert(
                 let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
                 let mut values =
                     eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-                for (column_index, expr) in stmt.target_columns.iter().zip(row.iter()) {
-                    values[*column_index] = eval_expr(expr, &mut slot, ctx)?;
+                for (target, expr) in stmt.target_columns.iter().zip(row.iter()) {
+                    let value = eval_expr(expr, &mut slot, ctx)?;
+                    apply_assignment_target(&mut values, target, value, &mut slot, ctx)?;
                 }
                 Ok(values)
             })
@@ -471,8 +473,9 @@ pub fn execute_insert(
             let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
             let mut values =
                 eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-            for (column_index, expr) in stmt.target_columns.iter().zip(defaults.iter()) {
-                values[*column_index] = eval_expr(expr, &mut slot, ctx)?;
+            for (target, expr) in stmt.target_columns.iter().zip(defaults.iter()) {
+                let value = eval_expr(expr, &mut slot, ctx)?;
+                apply_assignment_target(&mut values, target, value, &mut slot, ctx)?;
             }
             vec![values]
         }
@@ -483,9 +486,8 @@ pub fn execute_insert(
                 let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                 let mut values =
                     eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-                for (column_index, value) in stmt.target_columns.iter().zip(row_values.into_iter())
-                {
-                    values[*column_index] = value;
+                for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
+                    apply_assignment_target(&mut values, target, value, slot, ctx)?;
                 }
                 rows.push(values);
             }
@@ -503,6 +505,145 @@ pub fn execute_insert(
         cid,
     )?;
     Ok(StatementResult::AffectedRows(inserted))
+}
+
+fn apply_assignment_target(
+    values: &mut [Value],
+    target: &BoundAssignmentTarget,
+    value: Value,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if target.subscripts.is_empty() {
+        values[target.column_index] = value;
+        return Ok(());
+    }
+    let resolved = target
+        .subscripts
+        .iter()
+        .map(|subscript| {
+            Ok(ResolvedAssignmentSubscript {
+                lower: subscript
+                    .lower
+                    .as_ref()
+                    .map(|expr| eval_expr(expr, slot, ctx))
+                    .transpose()?,
+                upper: subscript
+                    .upper
+                    .as_ref()
+                    .map(|expr| eval_expr(expr, slot, ctx))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    let current = values[target.column_index].clone();
+    values[target.column_index] = assign_array_value(current, &resolved, value)?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ResolvedAssignmentSubscript {
+    lower: Option<Value>,
+    upper: Option<Value>,
+}
+
+fn assign_array_value(
+    current: Value,
+    subscripts: &[ResolvedAssignmentSubscript],
+    replacement: Value,
+) -> Result<Value, ExecError> {
+    if subscripts.is_empty() {
+        return Ok(replacement);
+    }
+    let mut items = match current {
+        Value::Null => Vec::new(),
+        Value::Array(items) => items,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "array assignment",
+                left: other,
+                right: replacement,
+            });
+        }
+    };
+    let subscript = &subscripts[0];
+    if subscript.upper.is_some() {
+        let Some(start) = assignment_subscript_index(subscript.lower.as_ref())? else {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array subscript in assignment must not be null".into(),
+            });
+        };
+        let Some(end) = assignment_subscript_index(subscript.upper.as_ref())? else {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array subscript in assignment must not be null".into(),
+            });
+        };
+        let Value::Array(replacement_items) = replacement else {
+            return Err(ExecError::TypeMismatch {
+                op: "array slice assignment",
+                left: Value::Null,
+                right: replacement,
+            });
+        };
+        let start = start.max(1) as usize;
+        let end = end.max(0) as usize;
+        if end < start {
+            return Ok(Value::Array(items));
+        }
+        if items.len() < end {
+            items.resize(end, Value::Null);
+        }
+        let span = end - start + 1;
+        if replacement_items.len() != span {
+            return Err(ExecError::TypeMismatch {
+                op: "array slice assignment",
+                left: Value::Array(items),
+                right: Value::Array(replacement_items),
+            });
+        }
+        for (idx, item) in replacement_items.into_iter().enumerate() {
+            items[start - 1 + idx] = if subscripts.len() == 1 {
+                item
+            } else {
+                assign_array_value(items[start - 1 + idx].clone(), &subscripts[1..], item)?
+            };
+        }
+        Ok(Value::Array(items))
+    } else {
+        let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array subscript in assignment must not be null".into(),
+            });
+        };
+        let index = index.max(1) as usize;
+        if items.len() < index {
+            items.resize(index, Value::Null);
+        }
+        items[index - 1] = if subscripts.len() == 1 {
+            replacement
+        } else {
+            assign_array_value(items[index - 1].clone(), &subscripts[1..], replacement)?
+        };
+        Ok(Value::Array(items))
+    }
+}
+
+fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {
+    match value {
+        None => Ok(Some(1)),
+        Some(Value::Null) => Ok(None),
+        Some(Value::Int16(v)) => Ok(Some(*v as i32)),
+        Some(Value::Int32(v)) => Ok(Some(*v)),
+        Some(Value::Int64(v)) => i32::try_from(*v).map(Some).map_err(|_| ExecError::Int4OutOfRange),
+        Some(other) => Err(ExecError::TypeMismatch {
+            op: "array assignment",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
 }
 
 pub fn execute_insert_values(
@@ -598,7 +739,17 @@ pub fn execute_update_with_waiter(
         let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
         let mut values = original_values;
         for assignment in &stmt.assignments {
-            values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+            let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+            apply_assignment_target(
+                &mut values,
+                &BoundAssignmentTarget {
+                    column_index: assignment.column_index,
+                    subscripts: assignment.subscripts.clone(),
+                },
+                value,
+                &mut eval_slot,
+                ctx,
+            )?;
         }
 
         let replacement = tuple_from_values(&stmt.desc, &values)?;
@@ -648,8 +799,17 @@ pub fn execute_update_with_waiter(
                     let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
                     let mut new_values = new_values_base;
                     for assignment in &stmt.assignments {
-                        new_values[assignment.column_index] =
-                            eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+                        let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+                        apply_assignment_target(
+                            &mut new_values,
+                            &BoundAssignmentTarget {
+                                column_index: assignment.column_index,
+                                subscripts: assignment.subscripts.clone(),
+                            },
+                            value,
+                            &mut eval_slot,
+                            ctx,
+                        )?;
                     }
                     current_values = new_values.clone();
                     current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
