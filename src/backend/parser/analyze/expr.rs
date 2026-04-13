@@ -1057,24 +1057,49 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ctes,
             )?),
         ),
-        SqlExpr::JsonbExistsAny(left, right) => Expr::JsonbExistsAny(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
+        SqlExpr::JsonbExistsAny(left, right) => {
+            let left_type =
+                infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let right_type = infer_sql_expr_type_with_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-        ),
+            );
+            if is_geometry_type(left_type) || is_geometry_type(right_type) {
+                bind_geometry_binary_expr(
+                    GeometryBinaryOp::IsVertical,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else {
+                Expr::JsonbExistsAny(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
         SqlExpr::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
             Box::new(bind_expr_with_outer_and_ctes(
                 left,
