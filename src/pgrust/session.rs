@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs;
 use std::mem;
 use std::sync::Arc;
 
@@ -228,6 +229,13 @@ impl Session {
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
+        // :HACK: Support simple file-backed COPY FROM on the normal SQL path
+        // until COPY is modeled as a real parsed/bound statement.
+        if let Some((table_name, columns, file_path)) = parse_copy_from_file(sql) {
+            let rows = read_copy_from_file(&file_path)?;
+            let inserted = self.copy_from_rows_into(db, &table_name, columns.as_deref(), &rows)?;
+            return Ok(StatementResult::AffectedRows(inserted));
+        }
         let stmt = if self.standard_conforming_strings() {
             db.plan_cache.get_statement(sql)?
         } else {
@@ -1016,4 +1024,82 @@ impl Session {
             result
         }
     }
+}
+
+fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, String)> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let prefix = "copy ";
+    let from_kw = " from ";
+    if !lower.starts_with(prefix) {
+        return None;
+    }
+    let from_idx = lower.find(from_kw)?;
+    let target = trimmed[prefix.len()..from_idx].trim();
+    let source = trimmed[from_idx + from_kw.len()..].trim();
+    if !(source.starts_with('\'') && source.ends_with('\'')) {
+        return None;
+    }
+    let file_path = source[1..source.len() - 1].to_string();
+    if let Some(open_paren) = target.find('(') {
+        let close_paren = target.rfind(')')?;
+        if close_paren < open_paren {
+            return None;
+        }
+        let table = target[..open_paren].trim();
+        let columns = target[open_paren + 1..close_paren]
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>();
+        if table.is_empty() || columns.is_empty() {
+            return None;
+        }
+        Some((table.to_string(), Some(columns), file_path))
+    } else if target.is_empty() {
+        None
+    } else {
+        Some((target.to_string(), None, file_path))
+    }
+}
+
+fn read_copy_from_file(file_path: &str) -> Result<Vec<Vec<String>>, ExecError> {
+    let resolved = resolve_copy_file_path(file_path);
+    let text = fs::read_to_string(&resolved).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "readable COPY source file",
+            actual: format!("{file_path}: {err}"),
+        })
+    })?;
+    Ok(text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| line.split('\t').map(|field| field.to_string()).collect())
+        .collect())
+}
+
+fn resolve_copy_file_path(file_path: &str) -> String {
+    if std::path::Path::new(file_path).exists() {
+        return file_path.to_string();
+    }
+    if let Some(stripped) = file_path.strip_prefix(':')
+        && let Some((_, remainder)) = stripped.split_once('/')
+        && let Some(root) = postgres_regress_root()
+    {
+        let candidate = root.join(remainder);
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    file_path.to_string()
+}
+
+fn postgres_regress_root() -> Option<std::path::PathBuf> {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let candidates = [
+        here.parent()?.join("postgres/src/test/regress"),
+        here.join("../../postgres/src/test/regress"),
+    ];
+    candidates.into_iter().find(|path| path.exists())
 }
