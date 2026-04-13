@@ -320,6 +320,40 @@ mod tests {
     }
 
     #[test]
+    fn copy_from_stdin_reports_missing_table_without_dropping_connection() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+        send_query(&mut stream, "copy missing_copy_target from stdin");
+        let copy_start = read_message(&mut stream, "copy_start");
+        assert_eq!(copy_start.0, b'G');
+        send_copy_data(&mut stream, b"1\n");
+        send_copy_done(&mut stream);
+        let copy_finish = read_until_ready(&mut stream, "copy_finish");
+        let error = copy_finish
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .expect("copy should return an error");
+        let fields = error_fields(&error.1);
+        assert!(fields.iter().any(|(code, value)| {
+            *code == b'M' && value.contains("unknown table: missing_copy_target")
+        }));
+        assert!(matches!(copy_finish.last(), Some((b'Z', _))));
+
+        send_query(&mut stream, "select 1");
+        let select = read_until_ready(&mut stream, "select_after_copy_error");
+        assert_eq!(
+            select
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("SELECT 1".to_string())
+        );
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
     fn row_description_reports_varchar_typmod() {
         let (mut stream, server) = start_test_connection();
         send_startup(&mut stream);
