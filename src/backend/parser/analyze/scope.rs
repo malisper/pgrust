@@ -12,6 +12,8 @@ pub(crate) struct BoundScope {
 pub(crate) struct ScopeColumn {
     pub(crate) output_name: String,
     pub(crate) relation_names: Vec<String>,
+    pub(crate) hidden_invalid_relation_names: Vec<String>,
+    pub(crate) hidden_missing_relation_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,13 +203,42 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
                 .any(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
                 && column.output_name.eq_ignore_ascii_case(column_name)
         });
-        let first = matches
-            .next()
-            .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
-        if matches.next().is_some() {
-            return Err(ParseError::AmbiguousColumn(name.to_string()));
+        if let Some(first) = matches.next() {
+            if matches.next().is_some() {
+                return Err(ParseError::AmbiguousColumn(name.to_string()));
+            }
+            return Ok(first.0);
         }
-        return Ok(first.0);
+        let normalized_relation = relation.to_ascii_lowercase();
+        if scope.columns.iter().any(|column| {
+            column
+                .hidden_invalid_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(relation))
+                && column.output_name.eq_ignore_ascii_case(column_name)
+        }) {
+            return Err(ParseError::InvalidFromClauseReference(normalized_relation));
+        }
+        if scope.columns.iter().any(|column| {
+            column
+                .hidden_missing_relation_names
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(relation))
+                && column.output_name.eq_ignore_ascii_case(column_name)
+        }) {
+            return Err(ParseError::MissingFromClauseEntry(normalized_relation));
+        }
+        if scope.columns.iter().any(|column| {
+            column
+                .relation_names
+                .iter()
+                .chain(column.hidden_invalid_relation_names.iter())
+                .chain(column.hidden_missing_relation_names.iter())
+                .any(|known| known.eq_ignore_ascii_case(relation))
+        }) {
+            return Err(ParseError::UnknownColumn(name.to_string()));
+        }
+        return Err(ParseError::UnknownColumn(name.to_string()));
     }
 
     let mut matches = scope
@@ -736,7 +767,14 @@ pub(super) fn bind_from_item_with_ctes(
         } => {
             let (plan, scope) =
                 bind_from_item_with_ctes(source, catalog, outer_scopes, grouped_outer, ctes)?;
-            apply_relation_alias(plan, scope, alias, column_aliases, *preserve_source_names)
+            apply_relation_alias(
+                plan,
+                scope,
+                alias,
+                column_aliases,
+                *preserve_source_names,
+                matches!(source.as_ref(), FromItem::Alias { .. }),
+            )
         }
     }
 }
@@ -759,6 +797,8 @@ pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
             .map(|column| ScopeColumn {
                 output_name: column.name.clone(),
                 relation_names: relation_name.into_iter().map(str::to_string).collect(),
+                hidden_invalid_relation_names: vec![],
+                hidden_missing_relation_names: vec![],
             })
             .collect(),
     }
@@ -884,6 +924,8 @@ fn bind_join_using_projection(
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
             relation_names: vec![],
+            hidden_invalid_relation_names: vec![],
+            hidden_missing_relation_names: vec![],
         });
     }
 
@@ -940,6 +982,7 @@ fn apply_relation_alias(
     alias: &str,
     column_aliases: &[String],
     preserve_source_names: bool,
+    source_is_alias: bool,
 ) -> Result<(Plan, BoundScope), ParseError> {
     if column_aliases.len() > scope.columns.len() {
         return Err(ParseError::UnexpectedToken {
@@ -955,6 +998,15 @@ fn apply_relation_alias(
     let mut desc = scope.desc.clone();
     let mut columns = scope.columns.clone();
     let mut renamed = false;
+
+    if columns.iter().any(|column| {
+        column
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(alias))
+    }) {
+        return Err(ParseError::DuplicateTableName(alias.to_string()));
+    }
 
     for (index, column) in columns.iter_mut().enumerate() {
         if let Some(new_name) = column_aliases.get(index) {
@@ -981,6 +1033,28 @@ fn apply_relation_alias(
         }
     } else {
         for column in &mut columns {
+            if !source_is_alias {
+                for hidden in column.relation_names.drain(..) {
+                    if !column
+                        .hidden_invalid_relation_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&hidden))
+                    {
+                        column.hidden_invalid_relation_names.push(hidden);
+                    }
+                }
+            } else {
+                for hidden in column.relation_names.drain(..) {
+                    if !column
+                        .hidden_missing_relation_names
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(&hidden))
+                    {
+                        column.hidden_missing_relation_names.push(hidden);
+                    }
+                }
+                column.relation_names.clear();
+            }
             column.relation_names = vec![alias.to_string()];
         }
     }
