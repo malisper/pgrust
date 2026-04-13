@@ -353,13 +353,27 @@ fn bind_select_list_srf_call(
                 grouped_outer,
                 ctes,
             )?;
-            let start_type =
-                infer_sql_expr_type_with_ctes(&args[0], scope, catalog, outer_scopes, grouped_outer, ctes);
-            let stop_type =
-                infer_sql_expr_type_with_ctes(&args[1], scope, catalog, outer_scopes, grouped_outer, ctes);
+            let start_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let stop_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
-            if !matches!(common.kind, SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric)
-            {
+            if !matches!(
+                common.kind,
+                SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+            ) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "generate_series integer or numeric arguments",
                     actual: sql_type_name(common),
@@ -386,9 +400,9 @@ fn bind_select_list_srf_call(
             } else {
                 match common.kind {
                     SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),
-                    SqlTypeKind::Numeric => {
-                        Expr::Const(Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(1)))
-                    }
+                    SqlTypeKind::Numeric => Expr::Const(Value::Numeric(
+                        crate::include::nodes::datum::NumericValue::from_i64(1),
+                    )),
                     _ => Expr::Const(Value::Int32(1)),
                 }
             };
@@ -519,11 +533,12 @@ fn bind_select_list_srf_call(
                     output_columns[0].sql_type,
                 ))
             } else {
-                let kind =
-                    resolve_regex_table_function(other).ok_or_else(|| ParseError::UnexpectedToken {
+                let kind = resolve_regex_table_function(other).ok_or_else(|| {
+                    ParseError::UnexpectedToken {
                         expected: "supported set-returning function",
                         actual: other.to_string(),
-                    })?;
+                    }
+                })?;
                 let bound_args = args
                     .iter()
                     .map(|arg| {
@@ -538,10 +553,12 @@ fn bind_select_list_srf_call(
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let output_columns = match kind {
-                    crate::include::nodes::plannodes::RegexTableFunction::Matches => vec![QueryColumn {
-                        name: "regexp_matches".into(),
-                        sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                    }],
+                    crate::include::nodes::plannodes::RegexTableFunction::Matches => {
+                        vec![QueryColumn {
+                            name: "regexp_matches".into(),
+                            sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                        }]
+                    }
                     crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
                         vec![QueryColumn::text("regexp_split_to_table")]
                     }

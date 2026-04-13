@@ -123,12 +123,12 @@ impl Session {
             .find(|ch: char| !ch.is_ascii_digit())
             .unwrap_or(trimmed.len());
         let (digits, suffix) = trimmed.split_at(split_at);
-        let value = digits
-            .parse::<usize>()
-            .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+        let value = digits.parse::<usize>().map_err(|_| {
+            ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "valid maintenance_work_mem value",
                 actual: trimmed.to_string(),
-            }))?;
+            })
+        })?;
         let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
             "" | "kb" => 1usize,
             "mb" => 1024usize,
@@ -140,12 +140,12 @@ impl Session {
                 }));
             }
         };
-        value
-            .checked_mul(multiplier)
-            .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
+        value.checked_mul(multiplier).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "maintenance_work_mem within usize range",
                 actual: trimmed.to_string(),
-            }))
+            })
+        })
     }
 
     pub(crate) fn catalog_txn_ctx(&self) -> Option<(TransactionId, u32)> {
@@ -436,13 +436,14 @@ impl Session {
             }
             Statement::AlterTableAddColumn(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let relation = catalog
-                    .lookup_relation(&alter_stmt.table_name)
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::TableDoesNotExist(
-                            alter_stmt.table_name.clone(),
-                        ))
-                    })?;
+                let relation =
+                    catalog
+                        .lookup_relation(&alter_stmt.table_name)
+                        .ok_or_else(|| {
+                            ExecError::Parse(ParseError::TableDoesNotExist(
+                                alter_stmt.table_name.clone(),
+                            ))
+                        })?;
                 let txn = self.active_txn.as_mut().unwrap();
                 if !txn.held_table_locks.contains(&relation.rel) {
                     db.table_locks.lock_table(

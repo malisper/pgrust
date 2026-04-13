@@ -4,9 +4,9 @@
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::value_io::missing_column_value;
+use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
-use crate::include::access::htup::HEAP_NATTS_MASK;
 
 /// A precomputed decode step for one column, eliminating per-tuple type
 /// dispatch and alignment computation.

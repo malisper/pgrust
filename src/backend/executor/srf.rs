@@ -64,9 +64,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
                 "jsonb_object_keys"
             }
             crate::include::nodes::plannodes::JsonTableFunction::JsonbEach => "jsonb_each",
-            crate::include::nodes::plannodes::JsonTableFunction::JsonbEachText => {
-                "jsonb_each_text"
-            }
+            crate::include::nodes::plannodes::JsonTableFunction::JsonbEachText => "jsonb_each_text",
             crate::include::nodes::plannodes::JsonTableFunction::JsonbArrayElements => {
                 "jsonb_array_elements"
             }
@@ -165,7 +163,9 @@ fn eval_generate_series(
             if done {
                 break;
             }
-            rows.push(TupleSlot::virtual_row(vec![Value::Numeric(current.clone())]));
+            rows.push(TupleSlot::virtual_row(vec![Value::Numeric(
+                current.clone(),
+            )]));
             current = current.add(&step);
         }
         return Ok(rows);

@@ -1782,11 +1782,7 @@ fn bind_scalar_function_call(
                         grouped_outer,
                         ctes,
                     );
-                    coerce_bound_expr(
-                        bound_args[idx].clone(),
-                        ty,
-                        SqlType::new(SqlTypeKind::Text),
-                    )
+                    coerce_bound_expr(bound_args[idx].clone(), ty, SqlType::new(SqlTypeKind::Text))
                 })
                 .collect(),
         }),
@@ -2836,14 +2832,8 @@ fn bind_regex_count_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2868,14 +2858,8 @@ fn bind_regex_instr_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2899,14 +2883,8 @@ fn bind_regex_substr_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2943,14 +2921,8 @@ fn bind_regex_replace_args(
         false
     };
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2976,14 +2948,8 @@ fn bind_regex_split_to_array_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
