@@ -1,9 +1,9 @@
 use crate::RelFileLocator;
+use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::include::access::htup::AttributeDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
-use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
-use crate::include::access::htup::AttributeDesc;
 use crate::include::nodes::datum::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +74,12 @@ pub struct OrderByEntry {
     pub expr: Expr,
     pub descending: bool,
     pub nulls_first: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToastRelationRef {
+    pub rel: RelFileLocator,
+    pub relation_oid: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,12 +425,14 @@ pub enum Plan {
     SeqScan {
         rel: RelFileLocator,
         relation_oid: u32,
+        toast: Option<ToastRelationRef>,
         desc: RelationDesc,
     },
     IndexScan {
         rel: RelFileLocator,
         index_rel: RelFileLocator,
         am_oid: u32,
+        toast: Option<ToastRelationRef>,
         desc: RelationDesc,
         index_meta: IndexRelCacheEntry,
         keys: Vec<ScanKeyData>,

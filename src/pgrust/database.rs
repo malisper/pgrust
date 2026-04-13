@@ -14,17 +14,20 @@ use crate::backend::catalog::namespace::{
     normalize_create_table_as_stmt_with_search_path as namespace_normalize_create_table_as_stmt_with_search_path,
     normalize_create_table_stmt_with_search_path as namespace_normalize_create_table_stmt_with_search_path,
 };
-use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
+use crate::backend::catalog::store::{
+    CatalogMutationEffect, CatalogWriteContext, CreateTableResult,
+};
+use crate::backend::catalog::toasting::ToastCatalogChanges;
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
+    ExecError, ExecutorContext, StatementResult, ToastRelationRef, execute_readonly_statement,
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, CatalogLookup, CommentOnTableStatement, CreateIndexStatement,
-    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError, TablePersistence,
-    bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
-    derive_literal_default_value,
+    AlterTableAddColumnStatement, BoundIndexRelation, CatalogLookup, CommentOnTableStatement,
+    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction,
+    ParseError, TablePersistence, bind_delete, bind_insert, bind_update, build_plan,
+    create_relation_desc, derive_literal_default_value,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
@@ -41,11 +44,11 @@ use crate::backend::utils::cache::lsyscache::{
     relation_namespace_name,
 };
 use crate::backend::utils::cache::plancache::PlanCache;
-use crate::backend::utils::cache::relcache::RelCacheEntry;
+use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
     SessionCatalogState, invalidate_session_catalog_state,
 };
-use crate::include::catalog::PgConstraintRow;
+use crate::include::catalog::{BTREE_AM_OID, PgConstraintRow};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
@@ -92,6 +95,7 @@ pub struct Database {
 }
 
 const TEMP_DB_OID_BASE: u32 = 0x7000_0000;
+const TEMP_TOAST_NAMESPACE_OID_BASE: u32 = 0x7800_0000;
 type CatalogTxnContext = Option<(TransactionId, CommandId)>;
 
 #[derive(Debug, Clone)]
@@ -104,8 +108,16 @@ pub(crate) struct TempCatalogEntry {
 pub(crate) struct TempNamespace {
     pub oid: u32,
     pub name: String,
+    pub toast_oid: u32,
+    pub toast_name: String,
     pub tables: BTreeMap<String, TempCatalogEntry>,
     pub generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CreatedTempRelation {
+    entry: RelCacheEntry,
+    toast: Option<ToastCatalogChanges>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +227,14 @@ impl Database {
         Self::temp_db_oid(client_id)
     }
 
+    pub(crate) fn temp_toast_namespace_name(client_id: ClientId) -> String {
+        format!("pg_toast_temp_{client_id}")
+    }
+
+    pub(crate) fn temp_toast_namespace_oid(client_id: ClientId) -> u32 {
+        TEMP_TOAST_NAMESPACE_OID_BASE.saturating_add(client_id)
+    }
+
     #[cfg(test)]
     fn has_active_temp_namespace(&self, client_id: ClientId) -> bool {
         self.temp_relations.read().contains_key(&client_id)
@@ -229,7 +249,11 @@ impl Database {
         client_id: ClientId,
         namespace_oid: u32,
     ) -> bool {
-        namespace_oid >= TEMP_DB_OID_BASE && namespace_oid != Self::temp_namespace_oid(client_id)
+        (namespace_oid >= TEMP_DB_OID_BASE
+            && namespace_oid < TEMP_TOAST_NAMESPACE_OID_BASE
+            && namespace_oid != Self::temp_namespace_oid(client_id))
+            || (namespace_oid >= TEMP_TOAST_NAMESPACE_OID_BASE
+                && namespace_oid != Self::temp_toast_namespace_oid(client_id))
     }
 
     fn invalidate_session_catalog_state(&self, client_id: ClientId) {
@@ -369,6 +393,8 @@ impl Database {
         let namespace = TempNamespace {
             oid: Self::temp_namespace_oid(client_id),
             name: Self::temp_namespace_name(client_id),
+            toast_oid: Self::temp_toast_namespace_oid(client_id),
+            toast_name: Self::temp_toast_namespace_name(client_id),
             tables: BTreeMap::new(),
             generation: 0,
         };
@@ -384,6 +410,12 @@ impl Database {
             .catalog
             .write()
             .create_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        let effect = self
+            .catalog
+            .write()
+            .create_namespace_mvcc(namespace.toast_oid, &namespace.toast_name, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         {
@@ -427,7 +459,7 @@ impl Database {
         cid: CommandId,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
-    ) -> Result<RelCacheEntry, ExecError> {
+    ) -> Result<CreatedTempRelation, ExecError> {
         let normalized = normalize_temp_lookup_name(&table_name);
         let namespace =
             self.ensure_temp_namespace(client_id, xid, cid, catalog_effects, temp_effects)?;
@@ -443,7 +475,7 @@ impl Database {
             client_id,
             waiter: None,
         };
-        let (entry, effect) = self
+        let (created, effect) = self
             .catalog
             .write()
             .create_table_mvcc_with_options(
@@ -452,20 +484,22 @@ impl Database {
                 namespace.oid,
                 Self::temp_db_oid(client_id),
                 't',
+                namespace.toast_oid,
+                &namespace.toast_name,
                 &ctx,
             )
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
         let rel_entry = RelCacheEntry {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            namespace_oid: entry.namespace_oid,
-            row_type_oid: entry.row_type_oid,
-            reltoastrelid: entry.reltoastrelid,
-            relpersistence: entry.relpersistence,
-            relkind: entry.relkind,
-            desc: entry.desc,
+            rel: created.entry.rel,
+            relation_oid: created.entry.relation_oid,
+            namespace_oid: created.entry.namespace_oid,
+            row_type_oid: created.entry.row_type_oid,
+            reltoastrelid: created.entry.reltoastrelid,
+            relpersistence: created.entry.relpersistence,
+            relkind: created.entry.relkind,
+            desc: created.entry.desc.clone(),
             index: None,
         };
         {
@@ -489,7 +523,10 @@ impl Database {
             namespace_created: false,
         });
         self.invalidate_session_catalog_state(client_id);
-        Ok(rel_entry)
+        Ok(CreatedTempRelation {
+            entry: rel_entry,
+            toast: created.toast,
+        })
     }
 
     pub(crate) fn drop_temp_relation_in_transaction(
@@ -626,20 +663,33 @@ impl Database {
             client_id,
             waiter: None,
         };
+        let mut effects = Vec::new();
         if let Ok(effect) =
             self.catalog
                 .write()
                 .drop_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
         {
+            effects.push(effect);
+        }
+        if let Ok(effect) = self.catalog.write().drop_namespace_mvcc(
+            namespace.toast_oid,
+            &namespace.toast_name,
+            &ctx,
+        ) {
+            effects.push(effect);
+        }
+        if !effects.is_empty() {
             let _ = self.finish_txn(
                 client_id,
                 xid,
                 Ok(StatementResult::AffectedRows(0)),
-                &[effect],
+                &effects,
                 &[],
             );
             guard.disarm();
         }
+        self.temp_relations.write().remove(&client_id);
+        self.invalidate_session_catalog_state(client_id);
     }
 
     pub(crate) fn execute_create_table_stmt_with_search_path(
@@ -863,11 +913,11 @@ impl Database {
                             })
                         }
                     }),
-                    Ok((entry, effect)) => {
+                    Ok((created, effect)) => {
                         drop(catalog_guard);
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
-                        let _ = entry;
+                        let _ = created;
                         Ok(StatementResult::AffectedRows(0))
                     }
                 }
@@ -1320,7 +1370,7 @@ impl Database {
                 .collect(),
         };
 
-        let rel = match persistence {
+        let (rel, toast, toast_index) = match persistence {
             TablePersistence::Permanent => {
                 let stmt = CreateTableStatement {
                     schema_name: None,
@@ -1348,7 +1398,7 @@ impl Database {
                     client_id,
                     waiter: None,
                 };
-                let (entry, effect) = catalog_guard
+                let (created, effect) = catalog_guard
                     .create_table_mvcc(table_name.clone(), create_relation_desc(&stmt), &write_ctx)
                     .map_err(|err| match err {
                         CatalogError::TableAlreadyExists(name) => {
@@ -1376,10 +1426,11 @@ impl Database {
                 drop(catalog_guard);
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
-                entry.rel
+                let (toast, toast_index) = toast_bindings_from_create_result(&created);
+                (created.entry.rel, toast, toast_index)
             }
             TablePersistence::Temporary => {
-                self.create_temp_relation_in_transaction(
+                let created = self.create_temp_relation_in_transaction(
                     client_id,
                     table_name.clone(),
                     desc.clone(),
@@ -1388,11 +1439,11 @@ impl Database {
                     cid,
                     catalog_effects,
                     temp_effects,
-                )?
-                .rel
+                )?;
+                let (toast, toast_index) = toast_bindings_from_temp_relation(&created);
+                (created.entry.rel, toast, toast_index)
             }
         };
-
         if rows.is_empty() {
             return Ok(StatementResult::AffectedRows(0));
         }
@@ -1410,6 +1461,8 @@ impl Database {
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
             rel,
+            toast,
+            toast_index.as_ref(),
             &desc,
             &[],
             &rows,
@@ -1809,6 +1862,70 @@ fn normalize_temp_lookup_name(table_name: &str) -> String {
         .strip_prefix("pg_temp.")
         .unwrap_or(table_name)
         .to_ascii_lowercase()
+}
+
+fn toast_index_relation_from_changes(changes: &ToastCatalogChanges) -> Option<BoundIndexRelation> {
+    let meta = changes.index_entry.index_meta.as_ref()?;
+    Some(BoundIndexRelation {
+        name: changes.index_name.clone(),
+        rel: changes.index_entry.rel,
+        relation_oid: changes.index_entry.relation_oid,
+        desc: changes.index_entry.desc.clone(),
+        index_meta: IndexRelCacheEntry {
+            indrelid: meta.indrelid,
+            indnatts: meta.indkey.len() as i16,
+            indnkeyatts: meta.indkey.len() as i16,
+            indisunique: meta.indisunique,
+            indnullsnotdistinct: false,
+            indisprimary: false,
+            indisexclusion: false,
+            indimmediate: false,
+            indisclustered: false,
+            indisvalid: meta.indisvalid,
+            indcheckxmin: false,
+            indisready: meta.indisready,
+            indislive: meta.indislive,
+            indisreplident: false,
+            am_oid: BTREE_AM_OID,
+            am_handler_oid: None,
+            indkey: meta.indkey.clone(),
+            indclass: meta.indclass.clone(),
+            indcollation: meta.indcollation.clone(),
+            indoption: meta.indoption.clone(),
+            opfamily_oids: Vec::new(),
+            opcintype_oids: Vec::new(),
+            indexprs: meta.indexprs.clone(),
+            indpred: meta.indpred.clone(),
+        },
+    })
+}
+
+fn toast_bindings_from_create_result(
+    created: &CreateTableResult,
+) -> (Option<ToastRelationRef>, Option<BoundIndexRelation>) {
+    let toast = created.toast.as_ref().map(|changes| ToastRelationRef {
+        rel: changes.toast_entry.rel,
+        relation_oid: changes.toast_entry.relation_oid,
+    });
+    let toast_index = created
+        .toast
+        .as_ref()
+        .and_then(toast_index_relation_from_changes);
+    (toast, toast_index)
+}
+
+fn toast_bindings_from_temp_relation(
+    created: &CreatedTempRelation,
+) -> (Option<ToastRelationRef>, Option<BoundIndexRelation>) {
+    let toast = created.toast.as_ref().map(|changes| ToastRelationRef {
+        rel: changes.toast_entry.rel,
+        relation_oid: changes.toast_entry.relation_oid,
+    });
+    let toast_index = created
+        .toast
+        .as_ref()
+        .and_then(toast_index_relation_from_changes);
+    (toast, toast_index)
 }
 
 fn collect_rels_from_expr(
@@ -2338,3 +2455,7 @@ impl Drop for AutoCommitGuard<'_> {
 #[cfg(test)]
 #[path = "database_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "toast_tests.rs"]
+mod toast_tests;

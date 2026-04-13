@@ -1,10 +1,13 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
-use crate::include::access::relscan::ScanDirection;
-use crate::include::access::relscan::IndexScanDesc;
-use crate::include::access::scankey::ScanKeyData;
+use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
-use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
+use crate::include::access::relscan::IndexScanDesc;
+use crate::include::access::relscan::ScanDirection;
+use crate::include::access::scankey::ScanKeyData;
+use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
+use parking_lot::RwLock;
+use std::sync::Arc;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -14,6 +17,7 @@ pub use crate::include::nodes::parsenodes::SqlType;
 pub use crate::include::nodes::plannodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JsonTableFunction, OrderByEntry,
     Plan, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall, TargetEntry,
+    ToastRelationRef,
 };
 
 pub struct TupleSlot {
@@ -29,6 +33,16 @@ pub struct TupleSlot {
     /// Compiled tuple decoder, like PG's tts_tupleDescriptor. Set once when
     /// the slot is created; shared via Rc so future scan types can share it.
     pub(crate) decoder: Option<Rc<crate::backend::executor::exec_tuples::CompiledTupleDecoder>>,
+    pub(crate) toast: Option<ToastFetchContext>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ToastFetchContext {
+    pub(crate) relation: ToastRelationRef,
+    pub(crate) pool: Arc<BufferPool<SmgrStorageBackend>>,
+    pub(crate) txns: Arc<RwLock<TransactionManager>>,
+    pub(crate) snapshot: Snapshot,
+    pub(crate) client_id: ClientId,
 }
 
 /// Describes how the slot's underlying tuple data is stored.
@@ -48,6 +62,8 @@ pub(crate) enum SlotKind {
     /// Zero-copy reference to tuple bytes on a pinned buffer page.
     /// Decoded lazily into tts_values via the slot's `decoder` field.
     BufferHeapTuple {
+        desc: Rc<RelationDesc>,
+        attr_descs: Rc<[AttributeDesc]>,
         tuple_ptr: *const u8,
         tuple_len: usize,
         pin: Rc<OwnedBufferPin<SmgrStorageBackend>>,
@@ -127,6 +143,7 @@ impl Clone for TupleSlot {
             tts_nvalid: self.tts_nvalid,
             decode_offset: 0,
             decoder: None,
+            toast: self.toast.clone(),
         }
     }
 }
@@ -187,7 +204,10 @@ pub struct ResultState {
 
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
+    pub(crate) toast_relation: Option<ToastRelationRef>,
     pub(crate) column_names: Vec<String>,
+    pub(crate) desc: Rc<RelationDesc>,
+    pub(crate) attr_descs: Rc<[AttributeDesc]>,
     pub(crate) scan: Option<VisibleHeapScan>,
     /// Reusable slot, like PG's ss_ScanTupleSlot. Holds BufferHeapTuple
     /// with lazy decode into tts_values. The slot's `decoder` field holds
@@ -211,6 +231,7 @@ impl std::fmt::Debug for SeqScanState {
 
 pub struct IndexScanState {
     pub(crate) rel: RelFileLocator,
+    pub(crate) toast_relation: Option<ToastRelationRef>,
     pub(crate) index_rel: RelFileLocator,
     pub(crate) am_oid: u32,
     pub(crate) column_names: Vec<String>,
@@ -357,6 +378,7 @@ impl TupleSlot {
             tts_nvalid: 0,
             decode_offset: 0,
             decoder: None,
+            toast: None,
         }
     }
 
@@ -368,6 +390,7 @@ impl TupleSlot {
             tts_nvalid: nvalid,
             decode_offset: 0,
             decoder: None,
+            toast: None,
         }
     }
 
@@ -378,6 +401,7 @@ impl TupleSlot {
             tts_nvalid: 0,
             decode_offset: 0,
             decoder: None,
+            toast: None,
         }
     }
 
@@ -431,6 +455,7 @@ impl TupleSlot {
             tts_nvalid: self.tts_nvalid,
             decode_offset: 0,
             decoder: None,
+            toast: self.toast,
         })
     }
 
