@@ -47,7 +47,7 @@ use super::expr_string::{
     eval_sha384_function, eval_sha512_function, eval_similar, eval_similar_substring,
     eval_split_part_function, eval_sql_regex_substring, eval_strpos_function, eval_text_substring,
     eval_to_char_function, eval_to_number_function, eval_translate_function,
-    eval_trim_function, eval_bit_count_bytes,
+    eval_trim_function, eval_unistr_function, eval_bit_count_bytes,
 };
 use super::node_types::*;
 pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
@@ -490,6 +490,7 @@ fn eval_plpgsql_builtin_function(
             _ => eval_length_function(&values),
         },
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
@@ -797,6 +798,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),

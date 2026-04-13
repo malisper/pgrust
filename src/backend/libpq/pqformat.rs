@@ -457,6 +457,17 @@ pub(crate) fn send_error(
     message: &str,
     position: Option<usize>,
 ) -> io::Result<()> {
+    send_error_with_fields(w, sqlstate, message, None, None, position)
+}
+
+pub(crate) fn send_error_with_fields(
+    w: &mut impl Write,
+    sqlstate: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
     let mut body = Vec::new();
     body.push(b'S');
     body.extend_from_slice(b"ERROR\0");
@@ -468,6 +479,16 @@ pub(crate) fn send_error(
     body.push(b'M');
     body.extend_from_slice(message.as_bytes());
     body.push(0);
+    if let Some(detail) = detail {
+        body.push(b'D');
+        body.extend_from_slice(detail.as_bytes());
+        body.push(0);
+    }
+    if let Some(hint) = hint {
+        body.push(b'H');
+        body.extend_from_slice(hint.as_bytes());
+        body.push(0);
+    }
     if let Some(position) = position {
         body.push(b'P');
         body.extend_from_slice(position.to_string().as_bytes());

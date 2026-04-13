@@ -197,6 +197,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::JsonbExtractPathText)
                 | Some(BuiltinScalarFunction::BpcharToText)
                 | Some(BuiltinScalarFunction::Lower)
+                | Some(BuiltinScalarFunction::Unistr)
                 | Some(BuiltinScalarFunction::BTrim)
                 | Some(BuiltinScalarFunction::LTrim)
                 | Some(BuiltinScalarFunction::RTrim)

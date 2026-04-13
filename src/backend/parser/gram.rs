@@ -37,14 +37,7 @@ pub fn parse_statement_with_options(
 ) -> Result<Statement, ParseError> {
     let sql = normalize_string_continuation_preserving_layout(sql);
     let sql = strip_sql_comments_preserving_layout(&sql);
-    if !options.standard_conforming_strings && super::comments::contains_unicode_string_literals(&sql)
-    {
-        return Err(ParseError::UnexpectedToken {
-            expected: "string literal without Unicode escapes",
-            actual:
-                "unsafe use of string constant with Unicode escapes".into(),
-        });
-    }
+    validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
     SqlParser::parse(Rule::statement, &sql)
         .map_err(|e| map_pest_error("statement", e))
@@ -114,6 +107,129 @@ fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> Pars
             actual: message,
         },
     }
+}
+
+fn validate_unicode_string_literals(sql: &str, options: ParseOptions) -> Result<(), ParseError> {
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_unicode_string_token(bytes, i) {
+            if !options.standard_conforming_strings {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "string literal without Unicode escapes",
+                    actual: "unsafe use of string constant with Unicode escapes".into(),
+                });
+            }
+
+            let literal_end = parse_delimited_token_end(bytes, i + 2, b'\'');
+            i = validate_unicode_uescape_clause(sql, literal_end)?;
+            continue;
+        }
+
+        let ch = sql[i..].chars().next().expect("valid utf-8");
+        i += ch.len_utf8();
+    }
+
+    Ok(())
+}
+
+fn validate_unicode_uescape_clause(sql: &str, mut i: usize) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if !starts_uescape_keyword(bytes, i) {
+        return Ok(i);
+    }
+
+    i += "UESCAPE".len();
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+
+    if i >= bytes.len() || bytes[i] != b'\'' {
+        let token_end = scan_unicode_clause_token_end(bytes, i);
+        let actual = if i < bytes.len() {
+            &sql[i..token_end]
+        } else {
+            "end of input"
+        };
+        return Err(ParseError::UnexpectedToken {
+            expected: "UESCAPE string literal",
+            actual: format!("UESCAPE must be followed by a simple string literal at or near \"{actual}\""),
+        });
+    }
+
+    let escape_end = parse_delimited_token_end(bytes, i, b'\'');
+    let escape_raw = &sql[i..escape_end];
+    let escape = decode_string_literal(escape_raw)?;
+    let mut chars = escape.chars();
+    let Some(ch) = chars.next() else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "non-empty UESCAPE character",
+            actual: "invalid Unicode escape character".into(),
+        });
+    };
+    if chars.next().is_some() || matches!(ch, '+' | '"' | '\'' | ' ' | '\t' | '\n' | '\r') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "valid UESCAPE character",
+            actual: format!("invalid Unicode escape character at or near \"{escape_raw}\""),
+        });
+    }
+
+    Ok(escape_end)
+}
+
+fn starts_unicode_string_token(bytes: &[u8], i: usize) -> bool {
+    i + 2 < bytes.len()
+        && matches!(bytes[i], b'u' | b'U')
+        && bytes[i + 1] == b'&'
+        && bytes[i + 2] == b'\''
+}
+
+fn starts_uescape_keyword(bytes: &[u8], i: usize) -> bool {
+    let keyword = b"uescape";
+    if i + keyword.len() > bytes.len() {
+        return false;
+    }
+    if !bytes[i..i + keyword.len()].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    let before_ok = i == 0 || !is_identifier_continuation(bytes[i - 1] as char);
+    let after_ok =
+        i + keyword.len() == bytes.len() || !is_identifier_continuation(bytes[i + keyword.len()] as char);
+    before_ok && after_ok
+}
+
+fn scan_unicode_clause_token_end(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len()
+        && !bytes[i].is_ascii_whitespace()
+        && !matches!(bytes[i], b';' | b',' | b')')
+    {
+        i += 1;
+    }
+    i
+}
+
+fn is_identifier_continuation(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn parse_delimited_token_end(bytes: &[u8], start: usize, delimiter: u8) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == delimiter {
+            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    bytes.len()
 }
 
 fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
@@ -2236,7 +2352,7 @@ fn split_unicode_literal_parts(raw: &str) -> Result<(&str, char), ParseError> {
     };
     if let Some(idx) = prefix_stripped.find("uescape") {
         let literal_end = 2 + idx;
-        let literal = raw[..literal_end].trim_end();
+        let literal = raw[2..literal_end].trim_end();
         let clause = raw[literal_end..].trim_start();
         let clause_lower = clause.to_ascii_lowercase();
         if !clause_lower.starts_with("uescape") {

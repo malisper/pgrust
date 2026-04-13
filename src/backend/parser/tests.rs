@@ -2468,6 +2468,52 @@ fn parse_unicode_string_and_identifier_literals() {
 }
 
 #[test]
+fn parse_unicode_uescape_string_and_identifier_literals() {
+    let stmt =
+        parse_statement("select U&'d!0061t\\+000061' UESCAPE '!' as U&\"d*0061t\\+000061\" UESCAPE '*'")
+            .unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(
+                stmt.targets[0].expr,
+                SqlExpr::Const(Value::Text("dat\\+000061".into()))
+            );
+            assert_eq!(stmt.targets[0].output_name, "dat\\+000061");
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_unicode_uescape_allows_non_escape_backslashes() {
+    let stmt = parse_statement(r#"select U&' \' UESCAPE '!' as tricky"#).unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(stmt.targets[0].expr, SqlExpr::Const(Value::Text(" \\".into())));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_unicode_uescape_requires_simple_string_literal() {
+    let err = parse_statement(r#"select U&'wrong: +0061' UESCAPE +"#).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "UESCAPE must be followed by a simple string literal at or near \"+\""
+    );
+}
+
+#[test]
+fn parse_unicode_uescape_rejects_invalid_escape_character() {
+    let err = parse_statement(r#"select U&'wrong: +0061' UESCAPE '+'"#).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "invalid Unicode escape character at or near \"'+'\""
+    );
+}
+
+#[test]
 fn parse_unicode_string_rejects_when_standard_conforming_strings_is_off() {
     let err = parse_statement_with_options(
         "select U&'d\\0061ta'",
