@@ -3458,6 +3458,50 @@ fn pg_input_error_info_reports_float_out_of_range() {
 }
 
 #[test]
+fn pg_input_error_info_reports_jsonb_structured_error_fields() {
+    let base = temp_dir("pg_input_error_info_jsonb");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('{\"a\":true', 'jsonb')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("invalid input syntax for type json".into()),
+            Value::Text("The input string ended unexpectedly.".into()),
+            Value::Null,
+            Value::Text("22P02".into()),
+        ]],
+    );
+}
+
+#[test]
+fn pg_input_error_info_reports_jsonb_numeric_overflow() {
+    let base = temp_dir("pg_input_error_info_jsonb_overflow");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('{\"a\":1e1000000}', 'jsonb')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("value overflows numeric format".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22003".into()),
+        ]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_reports_bool_invalid_input() {
     let base = temp_dir("pg_input_error_info_bool");
     let txns = TransactionManager::new_durable(&base).unwrap();

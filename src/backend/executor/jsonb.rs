@@ -63,13 +63,19 @@ impl JsonbValue {
         Ok(match value {
             SerdeJsonValue::Null => JsonbValue::Null,
             SerdeJsonValue::Bool(v) => JsonbValue::Bool(v),
-            SerdeJsonValue::Number(v) => JsonbValue::Numeric(
-                crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
+            SerdeJsonValue::Number(v) => {
+                let text = v.to_string();
+                if jsonb_numeric_text_overflows(&text)? {
+                    return Err(ExecError::NumericFieldOverflow);
+                }
+                let numeric = crate::backend::executor::exec_expr::parse_numeric_text(&text)
                     .ok_or_else(|| ExecError::InvalidStorageValue {
                         column: "jsonb".into(),
-                        details: format!("invalid input syntax for type jsonb: \"{v}\""),
-                    })?,
-            ),
+                        details: format!("invalid input syntax for type jsonb: \"{text}\""),
+                    })?;
+                validate_jsonb_numeric_value(&numeric)?;
+                JsonbValue::Numeric(numeric)
+            }
             SerdeJsonValue::String(v) => JsonbValue::String(v),
             SerdeJsonValue::Array(items) => JsonbValue::Array(
                 items
@@ -159,10 +165,18 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::Int32(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
         Value::Int64(v) => JsonbValue::Numeric(NumericValue::from_i64(*v)),
         Value::Float64(v) => JsonbValue::Numeric(
-            crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
-                .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?,
+            {
+                let numeric =
+                    crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
+                        .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?;
+                validate_jsonb_numeric_value(&numeric)?;
+                numeric
+            },
         ),
-        Value::Numeric(v) => JsonbValue::Numeric(v.clone()),
+        Value::Numeric(v) => {
+            validate_jsonb_numeric_value(v)?;
+            JsonbValue::Numeric(v.clone())
+        }
         Value::Bool(v) => JsonbValue::Bool(*v),
         Value::Bit(v) => JsonbValue::String(render_bit_text(v)),
         Value::JsonPath(text) => JsonbValue::String(text.to_string()),
@@ -736,6 +750,8 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
         }
         NumericValue::Finite { coeff, scale } => {
             let (sign, mut digits, weight) = decimal_to_pg_digits(coeff, *scale);
+            debug_assert!(*scale <= NUMERIC_DSCALE_MASK as u32);
+            debug_assert!((i16::MIN as i32..=i16::MAX as i32).contains(&weight));
             while matches!(digits.first(), Some(0)) {
                 digits.remove(0);
             }
@@ -744,8 +760,8 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
             }
             let weight = if digits.is_empty() { 0 } else { weight };
             let can_be_short = *scale <= NUMERIC_SHORT_DSCALE_MAX as u32
-                && weight >= NUMERIC_SHORT_WEIGHT_MIN
-                && weight <= NUMERIC_SHORT_WEIGHT_MAX;
+                && weight >= NUMERIC_SHORT_WEIGHT_MIN as i32
+                && weight <= NUMERIC_SHORT_WEIGHT_MAX as i32;
 
             let header_len = if can_be_short { 2 } else { 4 };
             let total_len = 4 + header_len + digits.len() * 2;
@@ -767,7 +783,7 @@ fn encode_pg_numeric(value: &NumericValue) -> Vec<u8> {
                 let sign_dscale = (if sign == NUMERIC_NEG { NUMERIC_NEG } else { 0 })
                     | ((*scale as u16) & NUMERIC_DSCALE_MASK);
                 push_u16(&mut out, sign_dscale);
-                push_i16(&mut out, weight);
+                push_i16(&mut out, weight as i16);
             }
             for digit in digits {
                 push_u16(&mut out, digit);
@@ -864,7 +880,7 @@ fn decode_pg_numeric(bytes: &[u8]) -> Result<NumericValue, ExecError> {
     .normalize())
 }
 
-fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i16) {
+fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i32) {
     let negative = coeff.is_negative();
     let digits = coeff.abs().to_str_radix(10);
     let scale = scale as usize;
@@ -916,9 +932,65 @@ fn decimal_to_pg_digits(coeff: &BigInt, scale: u32) -> (u16, Vec<u16>, i16) {
     let weight = if pg_digits.is_empty() {
         0
     } else {
-        whole_groups as i16 - 1
+        whole_groups as i32 - 1
     };
     (if negative { NUMERIC_NEG } else { 0 }, pg_digits, weight)
+}
+
+fn validate_jsonb_numeric_value(value: &NumericValue) -> Result<(), ExecError> {
+    let NumericValue::Finite { coeff, scale } = value else {
+        return Ok(());
+    };
+    if *scale > NUMERIC_DSCALE_MASK as u32 {
+        return Err(ExecError::NumericFieldOverflow);
+    }
+    let (_, digits, weight) = decimal_to_pg_digits(coeff, *scale);
+    if !digits.is_empty() && !(i16::MIN as i32..=i16::MAX as i32).contains(&weight) {
+        return Err(ExecError::NumericFieldOverflow);
+    }
+    Ok(())
+}
+
+fn jsonb_numeric_text_overflows(text: &str) -> Result<bool, ExecError> {
+    let trimmed = text.trim();
+    let unsigned = trimmed
+        .strip_prefix(['+', '-'])
+        .unwrap_or(trimmed);
+    let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+        Some(index) => {
+            let exponent = unsigned[index + 1..]
+                .parse::<i64>()
+                .map_err(|_| ExecError::NumericFieldOverflow)?;
+            (&unsigned[..index], exponent)
+        }
+        None => (unsigned, 0),
+    };
+    let mut parts = mantissa.split('.');
+    let whole = parts.next().unwrap_or("");
+    let frac = parts.next().unwrap_or("");
+    if parts.next().is_some() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "jsonb".into(),
+            details: format!("invalid input syntax for type jsonb: \"{text}\""),
+        });
+    }
+    let digits = format!("{whole}{frac}");
+    let Some(first_nonzero) = digits.bytes().position(|b| b != b'0') else {
+        return Ok(false);
+    };
+    let last_nonzero = digits.bytes().rposition(|b| b != b'0').unwrap();
+    let decimal_pos = whole.len() as i64 + exponent;
+    let digits_before_decimal = (decimal_pos - first_nonzero as i64).max(0);
+    if digits_before_decimal > ((i16::MAX as i64) + 1) * DEC_DIGITS as i64 {
+        return Ok(true);
+    }
+    let significant_end = last_nonzero as i64 + 1;
+    let scale = if decimal_pos >= significant_end {
+        0
+    } else {
+        significant_end - decimal_pos.max(first_nonzero as i64)
+    };
+    Ok(scale > NUMERIC_DSCALE_MASK as i64)
 }
 
 fn render_jsonb_value(out: &mut String, value: &JsonbValue) {
