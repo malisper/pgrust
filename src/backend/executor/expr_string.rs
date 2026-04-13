@@ -4,6 +4,7 @@ use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::parse_numeric_text;
 use super::node_types::Value;
 use crate::backend::libpq::pqformat::format_bytea_text;
+use crate::backend::parser::ParseError;
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
@@ -189,6 +190,19 @@ pub(super) fn eval_lower_function(values: &[Value]) -> Result<Value, ExecError> 
     Ok(Value::Text(CompactString::from_owned(text.to_lowercase())))
 }
 
+pub(super) fn eval_unistr_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = expect_text_arg("unistr", text_value, &Value::Null)?;
+    Ok(Value::Text(CompactString::from_owned(
+        decode_unistr_text(text)?,
+    )))
+}
+
 pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);
@@ -213,6 +227,105 @@ pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError
         }
     }
     Ok(Value::Text(CompactString::from_owned(out)))
+}
+
+fn decode_unistr_text(text: &str) -> Result<String, ExecError> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '\\' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        if i + 1 < chars.len() && chars[i + 1] == '\\' {
+            out.push('\\');
+            i += 2;
+            continue;
+        }
+        let (code, next) = parse_unistr_escape(chars.as_slice(), i, "invalid Unicode escape")?;
+        let (decoded, consumed) = decode_unistr_codepoint(&chars, next, code)?;
+        out.push(decoded);
+        i = consumed;
+    }
+    Ok(out)
+}
+
+fn decode_unistr_codepoint(
+    chars: &[char],
+    next: usize,
+    code: u32,
+) -> Result<(char, usize), ExecError> {
+    if let Some(high) = unistr_high_surrogate(code) {
+        let Some((low, consumed)) = parse_next_unistr_escape(chars, next)? else {
+            return Err(unistr_error("invalid Unicode surrogate pair"));
+        };
+        let Some(low) = unistr_low_surrogate(low) else {
+            return Err(unistr_error("invalid Unicode surrogate pair"));
+        };
+        let codepoint = 0x10000 + (((high as u32) - 0xD800) << 10) + ((low as u32) - 0xDC00);
+        let decoded =
+            char::from_u32(codepoint).ok_or_else(|| unistr_error("invalid Unicode code point: 2FFFFF"))?;
+        Ok((decoded, consumed))
+    } else if unistr_low_surrogate(code).is_some() {
+        Err(unistr_error("invalid Unicode surrogate pair"))
+    } else {
+        let decoded = char::from_u32(code)
+            .ok_or_else(|| unistr_error("invalid Unicode code point: 2FFFFF"))?;
+        Ok((decoded, next))
+    }
+}
+
+fn parse_next_unistr_escape(chars: &[char], start: usize) -> Result<Option<(u32, usize)>, ExecError> {
+    if start >= chars.len() {
+        return Ok(None);
+    }
+    if chars[start] != '\\' {
+        return Ok(None);
+    }
+    parse_unistr_escape(chars, start, "invalid Unicode surrogate pair").map(Some)
+}
+
+fn unistr_error(message: &'static str) -> ExecError {
+    ExecError::Parse(ParseError::UnexpectedToken {
+        expected: "valid Unicode escape",
+        actual: message.into(),
+    })
+}
+
+fn unistr_high_surrogate(code: u32) -> Option<u16> {
+    (0xD800..=0xDBFF).contains(&code).then_some(code as u16)
+}
+
+fn unistr_low_surrogate(code: u32) -> Option<u16> {
+    (0xDC00..=0xDFFF).contains(&code).then_some(code as u16)
+}
+
+fn parse_unistr_escape(
+    chars: &[char],
+    start: usize,
+    error: &'static str,
+) -> Result<(u32, usize), ExecError> {
+    if start + 1 >= chars.len() {
+        return Err(unistr_error(error));
+    }
+
+    let (prefix_len, digit_count) = match chars[start + 1] {
+        '+' => (2, 6),
+        'u' => (2, 4),
+        'U' => (2, 8),
+        _ => (1, 4),
+    };
+    let digits_start = start + prefix_len;
+    let digits_end = digits_start + digit_count;
+    if digits_end > chars.len() {
+        return Err(unistr_error(error));
+    }
+
+    let digits = chars[digits_start..digits_end].iter().collect::<String>();
+    let code = u32::from_str_radix(&digits, 16).map_err(|_| unistr_error(error))?;
+    Ok((code, digits_end))
 }
 
 pub(super) fn eval_replace_function(values: &[Value]) -> Result<Value, ExecError> {

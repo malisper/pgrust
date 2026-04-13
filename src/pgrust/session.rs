@@ -389,7 +389,11 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_with_search_path(self.client_id, sql, search_path.as_deref())
+                    db.execute_statement_with_search_path(
+                        self.client_id,
+                        stmt,
+                        search_path.as_deref(),
+                    )
                 }
             }
         }
