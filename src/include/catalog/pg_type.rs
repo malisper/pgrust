@@ -2,6 +2,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
     BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
@@ -10,10 +11,9 @@ use crate::include::catalog::{
     INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
     JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID,
-    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    OIDVECTOR_TYPE_OID, PG_ATTRIBUTE_RELATION_OID,
-    PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
+    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID,
+    PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
     PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID,
     PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
@@ -26,6 +26,9 @@ pub struct PgTypeRow {
     pub typname: String,
     pub typnamespace: u32,
     pub typowner: u32,
+    pub typlen: i16,
+    pub typalign: AttributeAlign,
+    pub typstorage: AttributeStorage,
     pub typrelid: u32,
     pub sql_type: SqlType,
 }
@@ -37,6 +40,9 @@ pub fn pg_type_desc() -> RelationDesc {
             column_desc("typname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("typnamespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("typowner", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("typlen", SqlType::new(SqlTypeKind::Int2), false),
+            column_desc("typalign", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc("typstorage", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("typrelid", SqlType::new(SqlTypeKind::Oid), false),
         ],
     }
@@ -226,11 +232,15 @@ pub fn bootstrap_composite_type_rows() -> [PgTypeRow; 6] {
 }
 
 fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
+    let storage = column_desc("datum", sql_type, true).storage;
     PgTypeRow {
         oid,
         typname: name.to_string(),
         typnamespace: PG_CATALOG_NAMESPACE_OID,
         typowner: BOOTSTRAP_SUPERUSER_OID,
+        typlen: storage.attlen,
+        typalign: storage.attalign,
+        typstorage: storage.attstorage,
         typrelid: 0,
         sql_type,
     }
@@ -242,6 +252,9 @@ fn composite_type_row(name: &str, oid: u32, relid: u32) -> PgTypeRow {
         typname: name.to_string(),
         typnamespace: PG_CATALOG_NAMESPACE_OID,
         typowner: BOOTSTRAP_SUPERUSER_OID,
+        typlen: -1,
+        typalign: AttributeAlign::Double,
+        typstorage: AttributeStorage::Extended,
         typrelid: relid,
         sql_type: SqlType::new(SqlTypeKind::Text),
     }
@@ -280,5 +293,16 @@ mod tests {
                 && row.typname == "pg_node_tree"
                 && row.sql_type == SqlType::new(SqlTypeKind::PgNodeTree)
         }));
+    }
+
+    #[test]
+    fn composite_types_use_varlena_storage_metadata() {
+        let row = bootstrap_composite_type_rows()
+            .into_iter()
+            .find(|row| row.typname == "pg_class")
+            .unwrap();
+        assert_eq!(row.typlen, -1);
+        assert_eq!(row.typalign, AttributeAlign::Double);
+        assert_eq!(row.typstorage, AttributeStorage::Extended);
     }
 }

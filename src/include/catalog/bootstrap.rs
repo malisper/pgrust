@@ -1,4 +1,5 @@
 pub const PG_CATALOG_NAMESPACE_OID: u32 = 11;
+pub const PG_TOAST_NAMESPACE_OID: u32 = 99;
 pub const PUBLIC_NAMESPACE_OID: u32 = 2200;
 
 pub const PG_TYPE_RELATION_OID: u32 = 1247;

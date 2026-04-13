@@ -188,6 +188,9 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             typname: relname.to_string(),
             typnamespace: entry.namespace_oid,
             typowner: BOOTSTRAP_SUPERUSER_OID,
+            typlen: -1,
+            typalign: crate::include::access::htup::AttributeAlign::Double,
+            typstorage: crate::include::access::htup::AttributeStorage::Extended,
             typrelid: entry.relation_oid,
             sql_type: SqlType::new(SqlTypeKind::Text),
         });
