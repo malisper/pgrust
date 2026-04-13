@@ -42,6 +42,35 @@ pub fn derived_pg_depend_rows(entry: &CatalogEntry) -> Vec<PgDependRow> {
     rows
 }
 
+pub fn index_backed_constraint_depend_rows(
+    constraint_oid: u32,
+    relation_oid: u32,
+    index_oid: u32,
+) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_CONSTRAINT_RELATION_OID,
+            objid: constraint_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: relation_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_AUTO,
+        },
+        PgDependRow {
+            classid: PG_CONSTRAINT_RELATION_OID,
+            objid: constraint_oid,
+            objsubid: 0,
+            refclassid: PG_CLASS_RELATION_OID,
+            refobjid: index_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_INTERNAL,
+        },
+    ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
 pub fn derived_relation_depend_rows(
     relation_oid: u32,
     namespace_oid: u32,

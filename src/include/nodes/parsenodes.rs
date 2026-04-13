@@ -389,8 +389,24 @@ pub struct CreateTableStatement {
     pub table_name: String,
     pub persistence: TablePersistence,
     pub on_commit: OnCommitAction,
-    pub columns: Vec<ColumnDef>,
+    pub elements: Vec<CreateTableElement>,
     pub if_not_exists: bool,
+}
+
+impl CreateTableStatement {
+    pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
+        self.elements.iter().filter_map(|element| match element {
+            CreateTableElement::Column(column) => Some(column),
+            CreateTableElement::Constraint(_) => None,
+        })
+    }
+
+    pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
+        self.elements.iter().filter_map(|element| match element {
+            CreateTableElement::Column(_) => None,
+            CreateTableElement::Constraint(constraint) => Some(constraint),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +510,24 @@ pub struct ColumnDef {
     pub ty: SqlType,
     pub default_expr: Option<String>,
     pub nullable: bool,
+    pub primary_key: bool,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateTableElement {
+    Column(ColumnDef),
+    Constraint(TableConstraint),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableConstraint {
+    PrimaryKey {
+        columns: Vec<String>,
+    },
+    Unique {
+        columns: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

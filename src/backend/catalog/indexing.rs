@@ -84,6 +84,7 @@ pub fn system_catalog_index_meta(
         indrelid: descriptor.heap_kind.relation_oid(),
         indkey: descriptor.key_attnums.to_vec(),
         indisunique: descriptor.unique,
+        indisprimary: false,
         indisvalid: true,
         indisready: true,
         indislive: true,

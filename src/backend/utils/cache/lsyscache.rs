@@ -13,7 +13,7 @@ use crate::backend::catalog::rowcodec::{
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
-    catalog_snapshot_for_lookup, ensure_class_rows, ensure_type_rows,
+    catalog_snapshot_for_lookup, ensure_class_rows, ensure_constraint_rows, ensure_type_rows,
 };
 use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
@@ -730,6 +730,13 @@ pub fn constraint_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<PgConstraintRow> {
+    let constraint_rows = ensure_constraint_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| row.conrelid == relation_oid)
+        .collect::<Vec<_>>();
+    if !constraint_rows.is_empty() {
+        return constraint_rows;
+    }
     let Some(class) = ensure_class_rows(db, client_id, txn_ctx)
         .into_iter()
         .find(|row| row.oid == relation_oid)

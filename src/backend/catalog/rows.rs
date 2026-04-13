@@ -254,16 +254,21 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             catalog
                 .constraint_rows()
                 .iter()
-                .filter(|row| object_oids.contains(&row.oid))
+                .filter(|row| row.conrelid == entry.relation_oid)
                 .cloned(),
         );
     }
 
+    let constraint_oids = rows
+        .constraints
+        .iter()
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
     rows.depends.extend(
         catalog
             .depend_rows()
             .iter()
-            .filter(|row| object_oids.contains(&row.objid))
+            .filter(|row| object_oids.contains(&row.objid) || constraint_oids.contains(&row.objid))
             .cloned(),
     );
 
@@ -275,7 +280,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             indnkeyatts: index_meta.indkey.len() as i16,
             indisunique: index_meta.indisunique,
             indnullsnotdistinct: false,
-            indisprimary: false,
+            indisprimary: index_meta.indisprimary,
             indisexclusion: false,
             indimmediate: true,
             indisclustered: false,

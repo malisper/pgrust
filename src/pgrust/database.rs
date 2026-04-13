@@ -1,5 +1,5 @@
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +24,10 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, BoundIndexRelation, CatalogLookup, CommentOnTableStatement,
-    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction,
-    ParseError, TablePersistence, bind_delete, bind_insert, bind_update, build_plan,
-    create_relation_desc, derive_literal_default_value,
+    AlterTableAddColumnStatement, CatalogLookup, CommentOnTableStatement, CreateIndexStatement,
+    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError, TablePersistence,
+    BoundIndexRelation, bind_delete, bind_insert, bind_update, build_plan,
+    create_relation_desc, derive_literal_default_value, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
@@ -872,7 +872,8 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let (table_name, persistence) =
             self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
-        let desc = create_relation_desc(create_stmt);
+        let lowered = lower_create_table(create_stmt)?;
+        let desc = lowered.relation_desc;
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
@@ -917,12 +918,93 @@ impl Database {
                         drop(catalog_guard);
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                         catalog_effects.push(effect);
-                        let _ = created;
+                        let relation = crate::backend::parser::BoundRelation {
+                            rel: created.entry.rel,
+                            relation_oid: created.entry.relation_oid,
+                            namespace_oid: created.entry.namespace_oid,
+                            relpersistence: created.entry.relpersistence,
+                            relkind: created.entry.relkind,
+                            desc: created.entry.desc.clone(),
+                        };
+                        for (index, action) in lowered.constraint_actions.iter().enumerate() {
+                            let action_cid = cid
+                                .saturating_add(1)
+                                .saturating_add((index as u32).saturating_mul(3));
+                            let index_name = self.choose_index_backed_constraint_name(
+                                client_id,
+                                xid,
+                                action_cid,
+                                relation.namespace_oid,
+                                &table_name,
+                                &action.columns,
+                                action.primary,
+                            )?;
+                            let index_columns = action
+                                .columns
+                                .iter()
+                                .cloned()
+                                .map(crate::backend::parser::IndexColumnDef::from)
+                                .collect::<Vec<_>>();
+                            let build_options = self.resolve_simple_btree_build_options(
+                                client_id,
+                                Some((xid, action_cid)),
+                                &relation,
+                                &index_columns,
+                            )?;
+                            let index_entry = self.build_simple_btree_index_in_transaction(
+                                client_id,
+                                &relation,
+                                &index_name,
+                                &index_columns,
+                                true,
+                                action.primary,
+                                xid,
+                                action_cid,
+                                build_options.0,
+                                build_options.1,
+                                &build_options.2,
+                                65_536,
+                                catalog_effects,
+                            )?;
+                            let constraint_ctx = CatalogWriteContext {
+                                pool: self.pool.clone(),
+                                txns: self.txns.clone(),
+                                xid,
+                                cid: action_cid.saturating_add(2),
+                                client_id,
+                                waiter: None,
+                            };
+                            let constraint_effect = self
+                                .catalog
+                                .write()
+                                .create_index_backed_constraint_mvcc(
+                                    relation.relation_oid,
+                                    index_entry.relation_oid,
+                                    index_name,
+                                    if action.primary {
+                                        crate::include::catalog::CONSTRAINT_PRIMARY
+                                    } else {
+                                        crate::include::catalog::CONSTRAINT_UNIQUE
+                                    },
+                                    &constraint_ctx,
+                                )
+                                .map_err(map_catalog_error)?;
+                            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
+                            catalog_effects.push(constraint_effect);
+                        }
                         Ok(StatementResult::AffectedRows(0))
                     }
                 }
             }
             TablePersistence::Temporary => {
+                if !lowered.constraint_actions.is_empty() {
+                    // :HACK: Temporary PRIMARY KEY/UNIQUE support needs hidden temp indexes and
+                    // temp-catalog cleanup. Reject it for now rather than partially persisting it.
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "permanent table for PRIMARY KEY/UNIQUE constraints",
+                        actual: "temporary table".into(),
+                    }));
+                }
                 let _ = self.create_temp_relation_in_transaction(
                     client_id,
                     table_name,
@@ -936,6 +1018,258 @@ impl Database {
                 Ok(StatementResult::AffectedRows(0))
             }
         }
+    }
+
+    fn resolve_simple_btree_build_options(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        relation: &crate::backend::parser::BoundRelation,
+        columns: &[crate::backend::parser::IndexColumnDef],
+    ) -> Result<(u32, u32, CatalogIndexBuildOptions), ExecError> {
+        let access_method = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
+            self, client_id, txn_ctx, "btree",
+        )
+        .filter(|row| row.amtype == 'i')
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "USING btree",
+                actual: "unsupported index access method".into(),
+            })
+        })?;
+        if !access_method.amname.eq_ignore_ascii_case("btree") {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "USING btree",
+                actual: "unsupported index access method".into(),
+            }));
+        }
+
+        let type_rows =
+            crate::backend::utils::cache::syscache::ensure_type_rows(self, client_id, txn_ctx);
+        let mut indclass = Vec::with_capacity(columns.len());
+        let mut indcollation = Vec::with_capacity(columns.len());
+        let mut indoption = Vec::with_capacity(columns.len());
+        for column in columns {
+            let bound_column = relation
+                .desc
+                .columns
+                .iter()
+                .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.name.clone())))?;
+            let type_oid = type_rows
+                .iter()
+                .find(|row| row.sql_type == bound_column.sql_type)
+                .map(|row| row.oid)
+                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(column.name.clone())))?;
+            let opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
+                self,
+                client_id,
+                txn_ctx,
+                access_method.oid,
+                type_oid,
+            )
+            .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(column.name.clone())))?;
+            indclass.push(opclass.oid);
+            indcollation.push(0);
+            let mut option = 0i16;
+            if column.descending {
+                option |= 0x0001;
+            }
+            if column.nulls_first.unwrap_or(false) {
+                option |= 0x0002;
+            }
+            indoption.push(option);
+        }
+
+        Ok((
+            access_method.oid,
+            access_method.amhandler,
+            CatalogIndexBuildOptions {
+                am_oid: access_method.oid,
+                indclass,
+                indcollation,
+                indoption,
+            },
+        ))
+    }
+
+    fn build_simple_btree_index_in_transaction(
+        &self,
+        client_id: ClientId,
+        relation: &crate::backend::parser::BoundRelation,
+        index_name: &str,
+        columns: &[crate::backend::parser::IndexColumnDef],
+        unique: bool,
+        primary: bool,
+        xid: TransactionId,
+        cid: CommandId,
+        access_method_oid: u32,
+        access_method_handler: u32,
+        build_options: &CatalogIndexBuildOptions,
+        maintenance_work_mem_kb: usize,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<crate::backend::catalog::CatalogEntry, ExecError> {
+        let mut catalog_guard = self.catalog.write();
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let (index_entry, effect) = catalog_guard
+            .create_index_for_relation_mvcc_with_options(
+                index_name.to_string(),
+                relation.relation_oid,
+                unique,
+                primary,
+                columns,
+                build_options,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        drop(catalog_guard);
+
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+
+        let snapshot = self
+            .txns
+            .read()
+            .snapshot_for_command(xid, cid)
+            .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index build snapshot",
+                actual: "snapshot creation failed".into(),
+            }))?;
+        let index_meta =
+            index_entry
+                .index_meta
+                .clone()
+                .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index metadata",
+                    actual: "missing index metadata".into(),
+                }))?;
+        let build_ctx = crate::include::access::amapi::IndexBuildContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            client_id,
+            snapshot,
+            heap_relation: relation.rel,
+            heap_desc: relation.desc.clone(),
+            index_relation: index_entry.rel,
+            index_name: index_name.to_string(),
+            index_desc: index_entry.desc.clone(),
+            index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry {
+                indrelid: index_meta.indrelid,
+                indnatts: index_meta.indkey.len() as i16,
+                indnkeyatts: index_meta.indkey.len() as i16,
+                indisunique: index_meta.indisunique,
+                indnullsnotdistinct: false,
+                indisprimary: index_meta.indisprimary,
+                indisexclusion: false,
+                indimmediate: false,
+                indisclustered: false,
+                indisvalid: index_meta.indisvalid,
+                indcheckxmin: false,
+                indisready: index_meta.indisready,
+                indislive: index_meta.indislive,
+                indisreplident: false,
+                am_oid: access_method_oid,
+                am_handler_oid: Some(access_method_handler),
+                indkey: index_meta.indkey.clone(),
+                indclass: index_meta.indclass.clone(),
+                indcollation: index_meta.indcollation.clone(),
+                indoption: index_meta.indoption.clone(),
+                opfamily_oids: Vec::new(),
+                opcintype_oids: Vec::new(),
+                indexprs: index_meta.indexprs.clone(),
+                indpred: index_meta.indpred.clone(),
+            },
+            maintenance_work_mem_kb,
+        };
+        crate::backend::access::index::indexam::index_build_stub(&build_ctx, access_method_oid)
+            .map_err(|err| match err {
+                CatalogError::UniqueViolation(constraint) => {
+                    ExecError::UniqueViolation { constraint }
+                }
+                _ => ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index access method build",
+                    actual: "index build failed".into(),
+                }),
+            })?;
+
+        let mut catalog_guard = self.catalog.write();
+        let readiness_ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: cid.saturating_add(1),
+            client_id,
+            waiter: None,
+        };
+        let ready_effect = catalog_guard
+            .set_index_ready_valid_mvcc(index_entry.relation_oid, true, true, &readiness_ctx)
+            .map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index catalog readiness update",
+                    actual: "index readiness update failed".into(),
+                })
+            })?;
+        drop(catalog_guard);
+
+        self.apply_catalog_mutation_effect_immediate(&ready_effect)?;
+        catalog_effects.push(ready_effect);
+        Ok(index_entry)
+    }
+
+    fn choose_index_backed_constraint_name(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        namespace_oid: u32,
+        table_name: &str,
+        columns: &[String],
+        primary: bool,
+    ) -> Result<String, ExecError> {
+        let base = if primary {
+            format!("{table_name}_pkey")
+        } else {
+            format!("{table_name}_{}_key", columns.join("_"))
+        };
+        let snapshot = self
+            .txns
+            .read()
+            .snapshot_for_command(xid, cid)
+            .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "constraint name lookup snapshot",
+                actual: "snapshot creation failed".into(),
+            }))?;
+        let catalog = self.catalog.read();
+        let txns = self.txns.read();
+        let existing = crate::backend::catalog::loader::load_visible_class_rows(
+            catalog.base_dir(),
+            &self.pool,
+            &txns,
+            &snapshot,
+            client_id,
+        )
+        .map_err(map_catalog_error)?
+        .into_iter()
+        .filter(|row| row.relnamespace == namespace_oid)
+        .map(|row| row.relname.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+        if !existing.contains(&base.to_ascii_lowercase()) {
+            return Ok(base);
+        }
+        for suffix in 1.. {
+            let candidate = format!("{base}{suffix}");
+            if !existing.contains(&candidate.to_ascii_lowercase()) {
+                return Ok(candidate);
+            }
+        }
+        unreachable!("numeric suffix search should always find a free index name")
     }
 
     pub(crate) fn execute_create_index_stmt_with_search_path(
@@ -992,20 +1326,11 @@ impl Database {
                 create_stmt.table_name.clone(),
             )));
         }
-        let access_method = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
-            self,
-            client_id,
-            Some((xid, cid)),
-            create_stmt.using_method.as_deref().unwrap_or("btree"),
-        )
-        .filter(|row| row.amtype == 'i')
-        .ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "USING btree",
-                actual: "unsupported index access method".into(),
-            })
-        })?;
-        if !access_method.amname.eq_ignore_ascii_case("btree") {
+        if create_stmt
+            .using_method
+            .as_deref()
+            .is_some_and(|method| !method.eq_ignore_ascii_case("btree"))
+        {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "USING btree",
                 actual: "unsupported index access method".into(),
@@ -1024,191 +1349,29 @@ impl Database {
                 actual: "unsupported CREATE INDEX feature".into(),
             }));
         }
-        let type_rows = crate::backend::utils::cache::syscache::ensure_type_rows(
-            self,
-            client_id,
-            Some((xid, cid)),
-        );
-        let mut indclass = Vec::with_capacity(create_stmt.columns.len());
-        let mut indcollation = Vec::with_capacity(create_stmt.columns.len());
-        let mut indoption = Vec::with_capacity(create_stmt.columns.len());
-        for column in &create_stmt.columns {
-            let bound_column = entry
-                .desc
-                .columns
-                .iter()
-                .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
-                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.name.clone())))?;
-            let type_oid = type_rows
-                .iter()
-                .find(|row| row.sql_type == bound_column.sql_type)
-                .map(|row| row.oid)
-                .ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnsupportedType(column.name.clone()))
-                })?;
-            let opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
-                self,
+        let (access_method_oid, access_method_handler, build_options) =
+            self.resolve_simple_btree_build_options(
                 client_id,
                 Some((xid, cid)),
-                access_method.oid,
-                type_oid,
-            )
-            .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(column.name.clone())))?;
-            indclass.push(opclass.oid);
-            indcollation.push(0);
-            let mut option = 0i16;
-            if column.descending {
-                option |= 0x0001;
-            }
-            if column.nulls_first.unwrap_or(false) {
-                option |= 0x0002;
-            }
-            indoption.push(option);
-        }
-        let build_options = CatalogIndexBuildOptions {
-            am_oid: access_method.oid,
-            indclass,
-            indcollation,
-            indoption,
-        };
-
-        let mut catalog_guard = self.catalog.write();
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
+                &entry,
+                &create_stmt.columns,
+            )?;
+        self.build_simple_btree_index_in_transaction(
+            client_id,
+            &entry,
+            &create_stmt.index_name,
+            &create_stmt.columns,
+            create_stmt.unique,
+            false,
             xid,
             cid,
-            client_id,
-            waiter: None,
-        };
-        let result = catalog_guard.create_index_for_relation_mvcc_with_options(
-            create_stmt.index_name.clone(),
-            entry.relation_oid,
-            create_stmt.unique,
-            &create_stmt.columns,
+            access_method_oid,
+            access_method_handler,
             &build_options,
-            &ctx,
-        );
-        match result {
-            Ok((index_entry, effect)) => {
-                drop(catalog_guard);
-                self.apply_catalog_mutation_effect_immediate(&effect)?;
-                let snapshot = self
-                    .txns
-                    .read()
-                    .snapshot_for_command(xid, cid)
-                    .map_err(|_| {
-                        ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "index build snapshot",
-                            actual: "snapshot creation failed".into(),
-                        })
-                    })?;
-                let index_meta = index_entry.index_meta.clone().ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index metadata",
-                        actual: "missing index metadata".into(),
-                    })
-                })?;
-                let build_ctx = crate::include::access::amapi::IndexBuildContext {
-                    pool: self.pool.clone(),
-                    txns: self.txns.clone(),
-                    client_id,
-                    snapshot,
-                    heap_relation: entry.rel,
-                    heap_desc: entry.desc.clone(),
-                    index_relation: index_entry.rel,
-                    index_name: create_stmt.index_name.clone(),
-                    index_desc: index_entry.desc.clone(),
-                    index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry {
-                        indrelid: index_meta.indrelid,
-                        indnatts: index_meta.indkey.len() as i16,
-                        indnkeyatts: index_meta.indkey.len() as i16,
-                        indisunique: index_meta.indisunique,
-                        indnullsnotdistinct: false,
-                        indisprimary: false,
-                        indisexclusion: false,
-                        indimmediate: false,
-                        indisclustered: false,
-                        indisvalid: index_meta.indisvalid,
-                        indcheckxmin: false,
-                        indisready: index_meta.indisready,
-                        indislive: index_meta.indislive,
-                        indisreplident: false,
-                        am_oid: access_method.oid,
-                        am_handler_oid: Some(access_method.amhandler),
-                        indkey: index_meta.indkey.clone(),
-                        indclass: index_meta.indclass.clone(),
-                        indcollation: index_meta.indcollation.clone(),
-                        indoption: index_meta.indoption.clone(),
-                        opfamily_oids: Vec::new(),
-                        opcintype_oids: Vec::new(),
-                        indexprs: index_meta.indexprs.clone(),
-                        indpred: index_meta.indpred.clone(),
-                    },
-                    maintenance_work_mem_kb,
-                };
-                crate::backend::access::index::indexam::index_build_stub(
-                    &build_ctx,
-                    access_method.oid,
-                )
-                .map_err(|err| match err {
-                    CatalogError::UniqueViolation(constraint) => {
-                        ExecError::UniqueViolation { constraint }
-                    }
-                    _ => ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index access method build",
-                        actual: "index build failed".into(),
-                    }),
-                })?;
-                let mut catalog_guard = self.catalog.write();
-                let readiness_ctx = CatalogWriteContext {
-                    pool: self.pool.clone(),
-                    txns: self.txns.clone(),
-                    xid,
-                    cid: cid.saturating_add(1),
-                    client_id,
-                    waiter: None,
-                };
-                let ready_effect = catalog_guard.set_index_ready_valid_mvcc(
-                    index_entry.relation_oid,
-                    true,
-                    true,
-                    &readiness_ctx,
-                );
-                drop(catalog_guard);
-                catalog_effects.push(effect.clone());
-                catalog_effects.push(ready_effect.map_err(|_| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index catalog readiness update",
-                        actual: "index readiness update failed".into(),
-                    })
-                })?);
-                return Ok(StatementResult::AffectedRows(0));
-            }
-            Err(err) => Err(match err {
-                CatalogError::TableAlreadyExists(name) => {
-                    ExecError::Parse(ParseError::TableAlreadyExists(name))
-                }
-                CatalogError::UnknownTable(name) => {
-                    ExecError::Parse(ParseError::TableDoesNotExist(name))
-                }
-                CatalogError::UnknownColumn(name) => {
-                    ExecError::Parse(ParseError::UnknownColumn(name))
-                }
-                CatalogError::UnknownType(name) => {
-                    ExecError::Parse(ParseError::UnsupportedType(name))
-                }
-                CatalogError::UniqueViolation(constraint) => {
-                    ExecError::UniqueViolation { constraint }
-                }
-                CatalogError::Io(_) | CatalogError::Corrupt(_) => {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "valid catalog state",
-                        actual: "catalog error".into(),
-                    })
-                }
-            }),
-        }
+            maintenance_work_mem_kb,
+            catalog_effects,
+        )?;
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_drop_table_stmt_in_transaction_with_search_path(
@@ -1377,14 +1540,20 @@ impl Database {
                     table_name: table_name.clone(),
                     persistence,
                     on_commit: create_stmt.on_commit,
-                    columns: desc
+                    elements: desc
                         .columns
                         .iter()
-                        .map(|column| crate::backend::parser::ColumnDef {
-                            name: column.name.clone(),
-                            ty: column.sql_type,
-                            nullable: true,
-                            default_expr: None,
+                        .map(|column| {
+                            crate::backend::parser::CreateTableElement::Column(
+                                crate::backend::parser::ColumnDef {
+                                    name: column.name.clone(),
+                                    ty: column.sql_type,
+                                    nullable: true,
+                                    default_expr: None,
+                                    primary_key: false,
+                                    unique: false,
+                                },
+                            )
                         })
                         .collect(),
                     if_not_exists: create_stmt.if_not_exists,
@@ -1399,7 +1568,7 @@ impl Database {
                     waiter: None,
                 };
                 let (created, effect) = catalog_guard
-                    .create_table_mvcc(table_name.clone(), create_relation_desc(&stmt), &write_ctx)
+                    .create_table_mvcc(table_name.clone(), create_relation_desc(&stmt)?, &write_ctx)
                     .map_err(|err| match err {
                         CatalogError::TableAlreadyExists(name) => {
                             ExecError::Parse(ParseError::TableAlreadyExists(name))
@@ -2406,6 +2575,18 @@ fn validate_alter_table_add_column(
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without NOT NULL",
             actual: "NOT NULL".into(),
+        }));
+    }
+    if column.primary_key {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ADD COLUMN without PRIMARY KEY",
+            actual: "PRIMARY KEY".into(),
+        }));
+    }
+    if column.unique {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ADD COLUMN without UNIQUE",
+            actual: "UNIQUE".into(),
         }));
     }
     if matches!(

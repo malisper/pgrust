@@ -291,7 +291,7 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
             indnkeyatts: index.indkey.len() as i16,
             indisunique: index.indisunique,
             indnullsnotdistinct: false,
-            indisprimary: false,
+            indisprimary: index.indisprimary,
             indisexclusion: false,
             indimmediate: true,
             indisclustered: false,

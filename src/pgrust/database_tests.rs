@@ -240,6 +240,15 @@ fn relfilenode_for(db: &Database, client_id: u32, relname: &str) -> i64 {
     }
 }
 
+fn int_value(value: &Value) -> i64 {
+    match value {
+        Value::Int16(value) => i64::from(*value),
+        Value::Int32(value) => i64::from(*value),
+        Value::Int64(value) => *value,
+        other => panic!("expected integer value, got {:?}", other),
+    }
+}
+
 fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::RelFileLocator {
     crate::RelFileLocator {
         spc_oid: 0,
@@ -1147,6 +1156,18 @@ fn alter_table_add_column_rejects_unsupported_forms() {
             if expected == "ADD COLUMN without NOT NULL" && actual == "NOT NULL" => {}
         other => panic!("expected NOT NULL rejection, got {other:?}"),
     }
+
+    match db.execute(1, "alter table items add column key_id int4 primary key") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "ADD COLUMN without PRIMARY KEY" && actual == "PRIMARY KEY" => {}
+        other => panic!("expected PRIMARY KEY rejection, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table items add column code text unique") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "ADD COLUMN without UNIQUE" && actual == "UNIQUE" => {}
+        other => panic!("expected UNIQUE rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1276,6 +1297,151 @@ fn create_unique_index_allows_multiple_nulls() {
         query_rows(&db, 1, "select count(*) from items"),
         vec![vec![Value::Int64(2)]]
     );
+}
+
+#[test]
+fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() {
+    let base = temp_dir("create_table_primary_key_unique");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 primary key, code int4 unique)")
+        .unwrap();
+
+    match db.execute(1, "insert into items values (null, 10)") {
+        Err(ExecError::MissingRequiredColumn(name)) if name == "id" => {}
+        other => panic!("expected primary-key NOT NULL rejection, got {other:?}"),
+    }
+
+    db.execute(1, "insert into items values (1, 10)")
+        .unwrap();
+    db.execute(1, "insert into items values (2, null)")
+        .unwrap();
+    db.execute(1, "insert into items values (3, null)")
+        .unwrap();
+
+    match db.execute(1, "insert into items values (1, 11)") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "items_pkey");
+        }
+        other => panic!("expected primary-key duplicate rejection, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into items values (4, 10)") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "items_code_key");
+        }
+        other => panic!("expected unique duplicate rejection, got {other:?}"),
+    }
+
+    let constraint_rows = query_rows(
+        &db,
+        1,
+        "select conname, contype, conindid \
+         from pg_constraint \
+         where conrelid = (select oid from pg_class where relname = 'items') \
+         order by conname",
+    );
+    assert_eq!(constraint_rows.len(), 3);
+    assert_eq!(constraint_rows[0][0], Value::Text("items_code_key".into()));
+    assert_eq!(constraint_rows[0][1], Value::Text("u".into()));
+    assert!(int_value(&constraint_rows[0][2]) > 0);
+    assert_eq!(constraint_rows[1][0], Value::Text("items_id_not_null".into()));
+    assert_eq!(constraint_rows[1][1], Value::Text("n".into()));
+    assert_eq!(int_value(&constraint_rows[1][2]), 0);
+    assert_eq!(constraint_rows[2][0], Value::Text("items_pkey".into()));
+    assert_eq!(constraint_rows[2][1], Value::Text("p".into()));
+    assert!(int_value(&constraint_rows[2][2]) > 0);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, i.indisprimary \
+             from pg_index i \
+             join pg_class c on c.oid = i.indexrelid \
+             where i.indrelid = (select oid from pg_class where relname = 'items') \
+             order by c.relname",
+        ),
+        vec![
+            vec![Value::Text("items_code_key".into()), Value::Bool(false)],
+            vec![Value::Text("items_pkey".into()), Value::Bool(true)],
+        ]
+    );
+
+    drop(db);
+    let reopened = Database::open(&base, 16).unwrap();
+    assert_eq!(
+        query_rows(
+            &reopened,
+            1,
+            "select conname, contype \
+             from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'items') \
+             order by conname",
+        ),
+        vec![
+            vec![Value::Text("items_code_key".into()), Value::Text("u".into())],
+            vec![Value::Text("items_id_not_null".into()), Value::Text("n".into())],
+            vec![Value::Text("items_pkey".into()), Value::Text("p".into())],
+        ]
+    );
+}
+
+#[test]
+fn create_table_table_level_primary_key_and_unique_constraints_work() {
+    let base = temp_dir("create_table_composite_constraints");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table memberships (id int4, tag int4, note int4, primary key (id, tag), unique (tag, note))",
+    )
+    .unwrap();
+    db.execute(1, "insert into memberships values (1, 10, 100)")
+        .unwrap();
+    db.execute(1, "insert into memberships values (2, 10, null)")
+        .unwrap();
+    db.execute(1, "insert into memberships values (3, 10, null)")
+        .unwrap();
+
+    match db.execute(1, "insert into memberships values (1, 10, 101)") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "memberships_pkey");
+        }
+        other => panic!("expected composite primary-key rejection, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into memberships values (4, 10, 100)") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "memberships_tag_note_key");
+        }
+        other => panic!("expected composite unique rejection, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into memberships values (5, null, 102)") {
+        Err(ExecError::MissingRequiredColumn(name)) if name == "tag" => {}
+        other => panic!("expected primary-key column NOT NULL rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_temp_table_primary_key_and_unique_constraints_are_rejected() {
+    let base = temp_dir("temp_table_primary_key_unique_rejected");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(1, "create temp table temp_items (id int4 primary key)") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "permanent table for PRIMARY KEY/UNIQUE constraints"
+                && actual == "temporary table" => {}
+        other => panic!("expected temp primary-key rejection, got {other:?}"),
+    }
+
+    match db.execute(1, "create temp table temp_items (id int4, unique (id))") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "permanent table for PRIMARY KEY/UNIQUE constraints"
+                && actual == "temporary table" => {}
+        other => panic!("expected temp unique rejection, got {other:?}"),
+    }
 }
 
 #[test]

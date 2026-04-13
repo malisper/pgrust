@@ -107,6 +107,14 @@ pub fn apply_session_catalog_invalidation(
     if invalidation
         .touched_catalogs
         .iter()
+        .any(|kind| matches!(kind, BootstrapCatalogKind::PgConstraint))
+    {
+        state.constraint_rows = None;
+        state.catalog_snapshot = None;
+    }
+    if invalidation
+        .touched_catalogs
+        .iter()
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgAm))
     {
         state.am_rows = None;
