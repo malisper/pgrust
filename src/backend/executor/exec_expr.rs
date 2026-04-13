@@ -37,7 +37,7 @@ use super::expr_string::{
     eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
     eval_length_function, eval_like, eval_lower_function, eval_md5_function,
     eval_position_function, eval_regexp_like, eval_regexp_replace, eval_repeat_function,
-    eval_to_char_function, eval_to_number_function, eval_trim_function,
+    eval_text_substring, eval_to_char_function, eval_to_number_function, eval_trim_function,
 };
 use super::node_types::*;
 pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
@@ -471,10 +471,7 @@ fn eval_plpgsql_builtin_function(
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
-            _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "plpgsql builtin function supported by the standalone evaluator",
-                actual: format!("{func:?}"),
-            })),
+            _ => eval_text_substring(&values),
         },
         BuiltinScalarFunction::Overlay => match values.as_slice() {
             [Value::Bit(bits), Value::Bit(place), Value::Int32(start)] => {
@@ -741,7 +738,7 @@ fn eval_builtin_function(
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
-            _ => unreachable!("validated bit substring arguments"),
+            _ => eval_text_substring(&values),
         },
         BuiltinScalarFunction::Overlay => match values.as_slice() {
             [Value::Bit(bits), Value::Bit(place), Value::Int32(start)] => {

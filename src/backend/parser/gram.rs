@@ -1976,25 +1976,33 @@ fn build_like_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
 }
 
 fn build_trim_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let trim_variant = pair
+        .into_inner()
+        .find(|inner| inner.as_rule() == Rule::trim_variant)
+        .ok_or(ParseError::UnexpectedEof)?;
+    let trim_variant = trim_variant
+        .into_inner()
+        .next()
+        .ok_or(ParseError::UnexpectedEof)?;
+    let trim_variant_rule = trim_variant.as_rule();
     let mut direction = "both";
     let mut trim_source = None;
     let mut trim_chars = None;
-    for part in pair.into_inner() {
+    for part in trim_variant.into_inner() {
         match part.as_rule() {
             Rule::trim_spec => direction = part.as_str(),
-            Rule::trim_arguments => {
-                let exprs = part
-                    .into_inner()
-                    .filter(|inner| inner.as_rule() == Rule::expr)
-                    .map(build_expr)
-                    .collect::<Result<Vec<_>, _>>()?;
-                match exprs.as_slice() {
-                    [source] => trim_source = Some(source.clone()),
-                    [chars, source] => {
-                        trim_chars = Some(chars.clone());
-                        trim_source = Some(source.clone());
-                    }
-                    _ => {}
+            Rule::expr => {
+                let expr = build_expr(part)?;
+                if trim_chars.is_none()
+                    && matches!(
+                        trim_variant_rule,
+                        Rule::trim_spec_chars_from | Rule::trim_chars_from
+                    )
+                    && trim_source.is_none()
+                {
+                    trim_chars = Some(expr);
+                } else {
+                    trim_source = Some(expr);
                 }
             }
             _ => {}

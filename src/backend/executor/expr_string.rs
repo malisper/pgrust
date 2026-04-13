@@ -241,6 +241,74 @@ pub(super) fn eval_trim_function(
     }
 }
 
+pub(super) fn eval_text_substring(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(start_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null) || matches!(start_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let text = text_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "substring",
+            left: text_value.clone(),
+            right: start_value.clone(),
+        })?;
+    let start = match start_value {
+        Value::Int32(v) => *v,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "substring",
+                left: text_value.clone(),
+                right: other.clone(),
+            });
+        }
+    };
+    let len = match values.get(2) {
+        Some(Value::Null) => return Ok(Value::Null),
+        Some(Value::Int32(v)) => Some(*v),
+        Some(other) => {
+            return Err(ExecError::TypeMismatch {
+                op: "substring",
+                left: text_value.clone(),
+                right: other.clone(),
+            });
+        }
+        None => None,
+    };
+    if let Some(len) = len
+        && len < 0
+    {
+        return Err(ExecError::NegativeSubstringLength);
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let start_i64 = i64::from(start);
+    let start_idx = if start_i64 <= 1 {
+        0usize
+    } else {
+        usize::min((start_i64 - 1) as usize, chars.len())
+    };
+    let take_len = match len {
+        None => chars.len().saturating_sub(start_idx),
+        Some(len) => {
+            let skipped_before_start = if start_i64 < 1 { 1 - start_i64 } else { 0 };
+            let adjusted = i64::from(len) - skipped_before_start;
+            if adjusted <= 0 {
+                0
+            } else {
+                usize::min(adjusted as usize, chars.len().saturating_sub(start_idx))
+            }
+        }
+    };
+    Ok(Value::Text(CompactString::from_owned(
+        chars[start_idx..start_idx + take_len].iter().collect(),
+    )))
+}
+
 pub(super) fn eval_like(
     left: &Value,
     pattern: &Value,

@@ -1083,9 +1083,11 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(value_type) || !is_integer_family(start_type) {
+            if !(is_bit_string_type(value_type) || value_type.kind == SqlTypeKind::Text)
+                || !is_integer_family(start_type)
+            {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "substring(bit, int4[, int4])",
+                    expected: "substring(text|bit, int4[, int4])",
                     actual: format!(
                         "{func:?}({}, {})",
                         sql_type_name(value_type),
@@ -1094,7 +1096,15 @@ fn bind_scalar_function_call(
                 });
             }
             let mut coerced = vec![
-                bound_args[0].clone(),
+                if value_type.kind == SqlTypeKind::Text {
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        value_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    )
+                } else {
+                    bound_args[0].clone()
+                },
                 coerce_bound_expr(
                     bound_args[1].clone(),
                     start_type,
