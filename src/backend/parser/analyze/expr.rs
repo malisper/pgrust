@@ -559,6 +559,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     .iter()
                     .map(|subscript| {
                         Ok(crate::include::nodes::plannodes::ExprArraySubscript {
+                            is_slice: subscript.is_slice,
                             lower: subscript
                                 .lower
                                 .as_deref()
@@ -592,24 +593,52 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     .collect::<Result<_, ParseError>>()?,
             }
         }
-        SqlExpr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-            Box::new(bind_expr_with_outer_and_ctes(
+        SqlExpr::ArrayOverlap(left, right) => {
+            let raw_left_type = infer_sql_expr_type_with_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
+            );
+            let raw_right_type = infer_sql_expr_type_with_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-        ),
+            );
+            let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+            let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+            Expr::ArrayOverlap(
+                Box::new(coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    left_type,
+                )),
+                Box::new(coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    right_type,
+                )),
+            )
+        }
         SqlExpr::AggCall { .. } => {
             return Err(ParseError::UnexpectedToken {
                 expected: "non-aggregate expression",

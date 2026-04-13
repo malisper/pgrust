@@ -571,6 +571,7 @@ pub struct AssignmentTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArraySubscript {
+    pub is_slice: bool,
     pub lower: Option<Box<SqlExpr>>,
     pub upper: Option<Box<SqlExpr>>,
 }

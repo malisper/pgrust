@@ -1487,6 +1487,7 @@ pub struct BoundAssignmentTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundArraySubscript {
+    pub is_slice: bool,
     pub lower: Option<Expr>,
     pub upper: Option<Expr>,
 }
@@ -1675,6 +1676,7 @@ fn bind_assignment_subscripts(
         .iter()
         .map(|subscript| {
             Ok(BoundArraySubscript {
+                is_slice: subscript.is_slice,
                 lower: subscript
                     .lower
                     .as_deref()

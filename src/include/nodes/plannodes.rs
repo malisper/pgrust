@@ -429,6 +429,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExprArraySubscript {
+    pub is_slice: bool,
     pub lower: Option<Expr>,
     pub upper: Option<Expr>,
 }

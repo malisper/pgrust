@@ -135,6 +135,9 @@ pub(super) fn coerce_unknown_string_literal_type(
     peer_type: SqlType,
 ) -> SqlType {
     if is_string_literal_expr(expr) {
+        if peer_type.is_array {
+            return peer_type;
+        }
         if is_numeric_family(peer_type) {
             return peer_type.element_type();
         }

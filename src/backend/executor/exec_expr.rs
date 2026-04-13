@@ -1023,6 +1023,7 @@ fn eval_array_subscript(
         .iter()
         .map(|subscript| {
             Ok(ResolvedArraySubscript {
+                is_slice: subscript.is_slice,
                 lower: subscript
                     .lower
                     .as_ref()
@@ -1048,6 +1049,7 @@ fn eval_array_subscript_plpgsql(
         .iter()
         .map(|subscript| {
             Ok(ResolvedArraySubscript {
+                is_slice: subscript.is_slice,
                 lower: subscript
                     .lower
                     .as_ref()
@@ -1066,6 +1068,7 @@ fn eval_array_subscript_plpgsql(
 
 #[derive(Clone)]
 struct ResolvedArraySubscript {
+    is_slice: bool,
     lower: Option<Value>,
     upper: Option<Value>,
 }
@@ -1082,16 +1085,16 @@ fn apply_array_subscripts(
         left: value.clone(),
         right: Value::Null,
     })?;
-    let any_slice = subscripts.iter().any(|subscript| subscript.upper.is_some());
-    if subscripts.len() > array.ndim() {
-        return Ok(Value::Null);
-    }
+    let any_slice = subscripts.iter().any(|subscript| subscript.is_slice);
     if array.dimensions.is_empty() {
         return if any_slice {
             Ok(Value::PgArray(ArrayValue::empty()))
         } else {
             Ok(Value::Null)
         };
+    }
+    if subscripts.len() > array.ndim() {
+        return Ok(Value::Null);
     }
     apply_array_subscripts_to_value(&array, subscripts, any_slice)
 }
@@ -1105,17 +1108,18 @@ fn apply_array_subscripts_to_value(
     let mut result_dimensions = Vec::new();
     for (dim_idx, dim) in array.dimensions.iter().enumerate() {
         if let Some(subscript) = subscripts.get(dim_idx) {
-            if subscript.upper.is_some() || any_slice {
-                let lower = match subscript.upper.as_ref() {
-                    Some(_) => array_subscript_index(subscript.lower.as_ref())?,
-                    None => Some(dim.lower_bound),
-                };
-                let upper = match subscript.upper.as_ref() {
-                    Some(upper) => array_subscript_index(Some(upper))?,
-                    None => array_subscript_index(subscript.lower.as_ref())?,
-                };
-                let (Some(lower), Some(upper)) = (lower, upper) else {
-                    return Ok(Value::Null);
+            if any_slice {
+                let (lower, upper) = if subscript.is_slice {
+                    (
+                        array_slice_bound_index(subscript.lower.as_ref())?.unwrap_or(dim.lower_bound),
+                        array_slice_bound_index(subscript.upper.as_ref())?
+                            .unwrap_or(dim.lower_bound + dim.length as i32 - 1),
+                    )
+                } else {
+                    let Some(index) = array_subscript_index(subscript.lower.as_ref())? else {
+                        return Ok(Value::Null);
+                    };
+                    (1, index)
                 };
                 let clamped_lower = lower.max(dim.lower_bound);
                 let clamped_upper = upper.min(dim.lower_bound + dim.length as i32 - 1);
@@ -1291,34 +1295,56 @@ fn array_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError
     }
 }
 
+fn array_slice_bound_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {
+    match value {
+        None => Ok(None),
+        Some(Value::Null) => Ok(None),
+        Some(Value::Int16(v)) => Ok(Some(*v as i32)),
+        Some(Value::Int32(v)) => Ok(Some(*v)),
+        Some(Value::Int64(v)) => i32::try_from(*v).map(Some).map_err(|_| ExecError::Int4OutOfRange),
+        Some(other) => Err(ExecError::TypeMismatch {
+            op: "array subscript",
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
 fn eval_array_overlap(left: Value, right: Value) -> Result<Value, ExecError> {
-    match (left, right) {
-        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-        (Value::Array(left_items), Value::Array(right_items)) => {
-            for left_item in &left_items {
-                if matches!(left_item, Value::Null) {
-                    continue;
-                }
-                for right_item in &right_items {
-                    if matches!(right_item, Value::Null) {
-                        continue;
-                    }
-                    if matches!(
-                        compare_values("=", left_item.clone(), right_item.clone())?,
-                        Value::Bool(true)
-                    ) {
-                        return Ok(Value::Bool(true));
-                    }
-                }
-            }
-            Ok(Value::Bool(false))
-        }
-        (left, right) => Err(ExecError::TypeMismatch {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let Some(left_array) = normalize_array_value(&left) else {
+        return Err(ExecError::TypeMismatch {
+            op: "&&",
+            left,
+            right: right.clone(),
+        });
+    };
+    let Some(right_array) = normalize_array_value(&right) else {
+        return Err(ExecError::TypeMismatch {
             op: "&&",
             left,
             right,
-        }),
+        });
+    };
+    for left_item in &left_array.elements {
+        if matches!(left_item, Value::Null) {
+            continue;
+        }
+        for right_item in &right_array.elements {
+            if matches!(right_item, Value::Null) {
+                continue;
+            }
+            if matches!(
+                compare_values("=", left_item.clone(), right_item.clone())?,
+                Value::Bool(true)
+            ) {
+                return Ok(Value::Bool(true));
+            }
+        }
     }
+    Ok(Value::Bool(false))
 }
 
 fn eval_scalar_subquery(
