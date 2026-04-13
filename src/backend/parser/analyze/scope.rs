@@ -631,6 +631,46 @@ pub(super) fn bind_from_item_with_ctes(
                         },
                         scope,
                     ))
+                } else if let Some(kind) = resolve_regex_table_function(other) {
+                    let empty_scope = empty_scope();
+                    let bound_args = args
+                        .iter()
+                        .map(|arg| {
+                            bind_expr_with_outer(
+                                arg,
+                                &empty_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let output_columns = match kind {
+                        crate::include::nodes::plannodes::RegexTableFunction::Matches => vec![QueryColumn {
+                            name: "regexp_matches".into(),
+                            sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                        }],
+                        crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+                            vec![QueryColumn::text("regexp_split_to_table")]
+                        }
+                    };
+                    let desc = RelationDesc {
+                        columns: output_columns
+                            .iter()
+                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                            .collect(),
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    Ok((
+                        Plan::FunctionScan {
+                            call: SetReturningCall::RegexTableFunction {
+                                kind,
+                                args: bound_args,
+                                output_columns,
+                            },
+                        },
+                        scope,
+                    ))
                 } else {
                     Err(ParseError::UnknownTable(other.to_string()))
                 }

@@ -1,5 +1,6 @@
 use super::*;
 use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows};
+use crate::include::nodes::plannodes::RegexTableFunction;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -64,6 +65,14 @@ pub(super) fn resolve_json_table_function(name: &str) -> Option<JsonTableFunctio
     json_table_functions_by_name()
         .get(&name.to_ascii_lowercase())
         .copied()
+}
+
+pub(super) fn resolve_regex_table_function(name: &str) -> Option<RegexTableFunction> {
+    match name.to_ascii_lowercase().as_str() {
+        "regexp_matches" => Some(RegexTableFunction::Matches),
+        "regexp_split_to_table" => Some(RegexTableFunction::SplitToTable),
+        _ => None,
+    }
 }
 
 pub(super) fn validate_scalar_function_arity(
@@ -151,7 +160,11 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgInputErrorDetail
             | BuiltinScalarFunction::PgInputErrorHint
             | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
-            BuiltinScalarFunction::RegexpReplace => matches!(args.len(), 3 | 4),
+            BuiltinScalarFunction::RegexpReplace => matches!(args.len(), 3..=6),
+            BuiltinScalarFunction::RegexpCount => matches!(args.len(), 2..=4),
+            BuiltinScalarFunction::RegexpInstr => matches!(args.len(), 2..=7),
+            BuiltinScalarFunction::RegexpSubstr => matches!(args.len(), 2..=6),
+            BuiltinScalarFunction::RegexpSplitToArray => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Substring => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
             BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
@@ -553,6 +566,13 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("rtrim", BuiltinScalarFunction::RTrim),
         ("regexp_like", BuiltinScalarFunction::RegexpLike),
         ("regexp_replace", BuiltinScalarFunction::RegexpReplace),
+        ("regexp_count", BuiltinScalarFunction::RegexpCount),
+        ("regexp_instr", BuiltinScalarFunction::RegexpInstr),
+        ("regexp_substr", BuiltinScalarFunction::RegexpSubstr),
+        (
+            "regexp_split_to_array",
+            BuiltinScalarFunction::RegexpSplitToArray,
+        ),
         ("get_bit", BuiltinScalarFunction::GetBit),
         ("set_bit", BuiltinScalarFunction::SetBit),
         ("bit_count", BuiltinScalarFunction::BitCount),
@@ -775,6 +795,10 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
             | BuiltinScalarFunction::RegexpReplace
+            | BuiltinScalarFunction::RegexpCount
+            | BuiltinScalarFunction::RegexpInstr
+            | BuiltinScalarFunction::RegexpSubstr
+            | BuiltinScalarFunction::RegexpSplitToArray
             | BuiltinScalarFunction::Scale
             | BuiltinScalarFunction::MinScale
             | BuiltinScalarFunction::TrimScale
@@ -812,6 +836,10 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
             | BuiltinScalarFunction::RegexpReplace
+            | BuiltinScalarFunction::RegexpCount
+            | BuiltinScalarFunction::RegexpInstr
+            | BuiltinScalarFunction::RegexpSubstr
+            | BuiltinScalarFunction::RegexpSplitToArray
             | BuiltinScalarFunction::ArrayToJson
             | BuiltinScalarFunction::JsonBuildArray
             | BuiltinScalarFunction::JsonBuildObject

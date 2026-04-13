@@ -5,7 +5,7 @@ use super::node_types::Value;
 use crate::pgrust::compact_string::CompactString;
 use encoding_rs::Encoding;
 use md5::{Digest, Md5};
-use regex::{Regex, RegexBuilder};
+use regex::{Captures, Regex, RegexBuilder};
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
@@ -399,11 +399,15 @@ pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
     } else {
         values.get(2).and_then(Value::as_text).unwrap_or("")
     };
-    let regex = build_regex(pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "regexp_like",
-        left: text.clone(),
-        right: pattern.clone(),
-    })?, flags)?;
+    let regex = build_regex_with_policy(
+        pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+            op: "regexp_like",
+            left: text.clone(),
+            right: pattern.clone(),
+        })?,
+        flags,
+        RegexGlobalPolicy::Reject,
+    )?;
     let haystack = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
         op: "regexp_like",
         left: text.clone(),
@@ -412,48 +416,135 @@ pub(super) fn eval_regexp_like(values: &[Value]) -> Result<Value, ExecError> {
     Ok(Value::Bool(regex.is_match(haystack)))
 }
 
-pub(super) fn eval_regexp_replace(values: &[Value]) -> Result<Value, ExecError> {
-    let Some(text) = values.first() else {
-        return Ok(Value::Null);
-    };
-    let Some(pattern) = values.get(1) else {
-        return Ok(Value::Null);
-    };
-    let Some(replacement) = values.get(2) else {
-        return Ok(Value::Null);
-    };
-    if matches!(text, Value::Null) || matches!(pattern, Value::Null) || matches!(replacement, Value::Null) {
+pub(super) fn eval_regexp_count(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
     }
-    let flags = if let Some(Value::Null) = values.get(3) {
+    let (text, pattern, start, flags) = regex_count_args(values)?;
+    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
+    let subject = slice_from_char_start(text, start)?;
+    Ok(Value::Int32(regex.find_iter(subject).count() as i32))
+}
+
+pub(super) fn eval_regexp_instr(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
-    } else {
-        values.get(3).and_then(Value::as_text).unwrap_or("")
+    }
+    let (text, pattern, start, nth, return_end, flags, subexpr) = regex_instr_args(values)?;
+    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
+    let subject = slice_from_char_start(text, start)?;
+    let Some((captures, base_offset)) =
+        nth_capture_match(&regex, subject, nth, start, subexpr)?
+    else {
+        return Ok(Value::Int32(0));
     };
-    let regex = build_regex(pattern.as_text().ok_or_else(|| ExecError::TypeMismatch {
+    let Some(matched) = capture_by_index(&captures, subexpr) else {
+        return Ok(Value::Int32(0));
+    };
+    let pos = if return_end == 1 {
+        char_index_from_byte(subject, matched.end()) + base_offset + 1
+    } else {
+        char_index_from_byte(subject, matched.start()) + base_offset + 1
+    };
+    Ok(Value::Int32(pos as i32))
+}
+
+pub(super) fn eval_regexp_substr(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (text, pattern, start, nth, flags, subexpr) = regex_substr_args(values)?;
+    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
+    let subject = slice_from_char_start(text, start)?;
+    let Some((captures, _)) = nth_capture_match(&regex, subject, nth, start, subexpr)? else {
+        return Ok(Value::Null);
+    };
+    let Some(matched) = capture_by_index(&captures, subexpr) else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Text(CompactString::from(matched.as_str())))
+}
+
+pub(super) fn eval_regexp_replace(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    let Some(pattern_value) = values.get(1) else {
+        return Ok(Value::Null);
+    };
+    let Some(replacement_value) = values.get(2) else {
+        return Ok(Value::Null);
+    };
+    if matches!(text_value, Value::Null)
+        || matches!(pattern_value, Value::Null)
+        || matches!(replacement_value, Value::Null)
+    {
+        return Ok(Value::Null);
+    }
+    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
         op: "regexp_replace",
-        left: text.clone(),
-        right: pattern.clone(),
-    })?, flags)?;
-    let replacement = replacement.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "regexp_replace",
-        left: text.clone(),
-        right: replacement.clone(),
+        left: text_value.clone(),
+        right: pattern_value.clone(),
     })?;
+    let pattern = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "regexp_replace",
+        left: text_value.clone(),
+        right: pattern_value.clone(),
+    })?;
+    let replacement = replacement_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "regexp_replace",
+        left: text_value.clone(),
+        right: replacement_value.clone(),
+    })?;
+    let (start, nth, flags) = regexp_replace_options(values)?;
+    let (regex, global) = build_regex_and_global(pattern, flags, RegexGlobalPolicy::Allow)?;
     let expanded = translate_regexp_replacement(replacement);
-    let haystack = text.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "regexp_replace",
-        left: text.clone(),
-        right: pattern.clone(),
-    })?;
-    let replaced = if flags.contains('g') {
-        regex
-            .replace_all(haystack, expanded.as_str())
-            .to_string()
+    let start_byte = byte_index_from_char_start(text, start)?;
+    let prefix = &text[..start_byte];
+    let subject = &text[start_byte..];
+    let replaced_subject = if global || nth == 0 {
+        regex.replace_all(subject, expanded.as_str()).to_string()
     } else {
-        regex.replace(haystack, expanded.as_str()).to_string()
+        replace_nth_match(&regex, subject, nth, expanded.as_str())
     };
+    let replaced = format!("{prefix}{replaced_subject}");
     Ok(Value::Text(CompactString::from_owned(replaced)))
+}
+
+pub(super) fn eval_regexp_split_to_array(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let (text, pattern, flags) = regex_text_pattern_flags_only("regexp_split_to_array", values)?;
+    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
+    Ok(Value::Array(
+        regex
+            .split(text)
+            .map(|part| Value::Text(CompactString::from(part)))
+            .collect(),
+    ))
+}
+
+pub(super) fn eval_regexp_matches_rows(values: &[Value]) -> Result<Vec<Value>, ExecError> {
+    let (text, pattern, flags) = regex_text_pattern_flags_only("regexp_matches", values)?;
+    let (regex, global) = build_regex_and_global(pattern, flags, RegexGlobalPolicy::Allow)?;
+    let mut rows = Vec::new();
+    for captures in regex.captures_iter(text) {
+        rows.push(Value::Array(captures_to_array(&captures)));
+        if !global {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
+pub(super) fn eval_regexp_split_to_table_rows(values: &[Value]) -> Result<Vec<Value>, ExecError> {
+    let (text, pattern, flags) = regex_text_pattern_flags_only("regexp_split_to_table", values)?;
+    let regex = build_regex_with_policy(pattern, flags, RegexGlobalPolicy::Reject)?;
+    Ok(regex
+        .split(text)
+        .map(|part| Value::Text(CompactString::from(part)))
+        .collect())
 }
 
 pub(super) fn eval_md5_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -717,8 +808,27 @@ fn like_match_bytes(text: &[u8], pattern: &[u8], escape: Option<&[u8]>) -> Resul
     Ok(pi == pattern.len())
 }
 
-fn build_regex(pattern: &str, flags: &str) -> Result<Regex, ExecError> {
+#[derive(Clone, Copy)]
+enum RegexGlobalPolicy {
+    Allow,
+    Reject,
+}
+
+fn build_regex_with_policy(
+    pattern: &str,
+    flags: &str,
+    global_policy: RegexGlobalPolicy,
+) -> Result<Regex, ExecError> {
+    build_regex_and_global(pattern, flags, global_policy).map(|(regex, _)| regex)
+}
+
+fn build_regex_and_global(
+    pattern: &str,
+    flags: &str,
+    global_policy: RegexGlobalPolicy,
+) -> Result<(Regex, bool), ExecError> {
     let mut builder = RegexBuilder::new(pattern);
+    let mut global = false;
     for flag in flags.chars() {
         match flag {
             'i' => {
@@ -736,7 +846,14 @@ fn build_regex(pattern: &str, flags: &str) -> Result<Regex, ExecError> {
             'n' => {
                 builder.multi_line(true);
             }
-            'g' => {}
+            'g' => match global_policy {
+                RegexGlobalPolicy::Allow => global = true,
+                RegexGlobalPolicy::Reject => {
+                    return Err(ExecError::InvalidRegex(
+                        "regular expression option g is not supported for this function".into(),
+                    ));
+                }
+            },
             other => {
                 return Err(ExecError::InvalidRegex(format!(
                     "invalid regular expression option: {other}"
@@ -744,9 +861,10 @@ fn build_regex(pattern: &str, flags: &str) -> Result<Regex, ExecError> {
             }
         };
     }
-    builder
+    let regex = builder
         .build()
-        .map_err(|e| ExecError::InvalidRegex(e.to_string()))
+        .map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
+    Ok((regex, global))
 }
 
 fn translate_regexp_replacement(replacement: &str) -> String {
@@ -778,4 +896,280 @@ fn translate_regexp_replacement(replacement: &str) -> String {
 
 fn normalize_encoding_label(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn regex_text_pattern_flags_only<'a>(
+    op: &'static str,
+    values: &'a [Value],
+) -> Result<(&'a str, &'a str, &'a str), ExecError> {
+    let Some(text) = values.first() else {
+        return Ok(("", "", ""));
+    };
+    let Some(pattern) = values.get(1) else {
+        return Ok(("", "", ""));
+    };
+    if matches!(text, Value::Null) || matches!(pattern, Value::Null) {
+        return Ok(("", "", ""));
+    }
+    let flags = match values.get(2) {
+        Some(Value::Null) => return Ok(("", "", "")),
+        Some(value) => value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+            op,
+            left: text.clone(),
+            right: value.clone(),
+        })?,
+        None => "",
+    };
+    let text_value = text;
+    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: text_value.clone(),
+        right: pattern.clone(),
+    })?;
+    let pattern_value = pattern;
+    let pattern = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: text_value.clone(),
+        right: pattern_value.clone(),
+    })?;
+    Ok((text, pattern, flags))
+}
+
+fn regex_count_args(values: &[Value]) -> Result<(&str, &str, i32, &str), ExecError> {
+    let (text, pattern) = regex_text_pattern_pair("regexp_count", values)?;
+    let start = optional_regex_i32_arg("regexp_count", values.get(2), 1)?;
+    let flags = optional_regex_text_arg("regexp_count", values.get(3), "")?;
+    if start <= 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_count start position must be greater than zero".into(),
+        ));
+    }
+    Ok((text, pattern, start, flags))
+}
+
+fn regex_instr_args(values: &[Value]) -> Result<(&str, &str, i32, i32, i32, &str, usize), ExecError> {
+    let (text, pattern) = regex_text_pattern_pair("regexp_instr", values)?;
+    let start = optional_regex_i32_arg("regexp_instr", values.get(2), 1)?;
+    let nth = optional_regex_i32_arg("regexp_instr", values.get(3), 1)?;
+    let return_end = optional_regex_i32_arg("regexp_instr", values.get(4), 0)?;
+    let flags = optional_regex_text_arg("regexp_instr", values.get(5), "")?;
+    let subexpr = optional_regex_i32_arg("regexp_instr", values.get(6), 0)?;
+    if start <= 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_instr start position must be greater than zero".into(),
+        ));
+    }
+    if nth <= 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_instr occurrence must be greater than zero".into(),
+        ));
+    }
+    if !matches!(return_end, 0 | 1) {
+        return Err(ExecError::RaiseException(
+            "regexp_instr return option must be 0 or 1".into(),
+        ));
+    }
+    if subexpr < 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_instr subexpression must not be negative".into(),
+        ));
+    }
+    Ok((text, pattern, start, nth, return_end, flags, subexpr as usize))
+}
+
+fn regex_substr_args(values: &[Value]) -> Result<(&str, &str, i32, i32, &str, usize), ExecError> {
+    let (text, pattern) = regex_text_pattern_pair("regexp_substr", values)?;
+    let start = optional_regex_i32_arg("regexp_substr", values.get(2), 1)?;
+    let nth = optional_regex_i32_arg("regexp_substr", values.get(3), 1)?;
+    let flags = optional_regex_text_arg("regexp_substr", values.get(4), "")?;
+    let subexpr = optional_regex_i32_arg("regexp_substr", values.get(5), 0)?;
+    if start <= 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_substr start position must be greater than zero".into(),
+        ));
+    }
+    if nth <= 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_substr occurrence must be greater than zero".into(),
+        ));
+    }
+    if subexpr < 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_substr subexpression must not be negative".into(),
+        ));
+    }
+    Ok((text, pattern, start, nth, flags, subexpr as usize))
+}
+
+fn regexp_replace_options(values: &[Value]) -> Result<(i32, i32, &str), ExecError> {
+    let mut start = 1;
+    let mut nth = 1;
+    let mut flags = "";
+    match values.len() {
+        4 => match values[3] {
+            Value::Int32(v) => start = v,
+            Value::Null => return Ok((1, 1, "")),
+            _ => flags = values[3].as_text().ok_or_else(|| ExecError::TypeMismatch {
+                op: "regexp_replace",
+                left: values[0].clone(),
+                right: values[3].clone(),
+            })?,
+        },
+        5 => {
+            start = optional_regex_i32_arg("regexp_replace", values.get(3), 1)?;
+            nth = optional_regex_i32_arg("regexp_replace", values.get(4), 1)?;
+        }
+        6 => {
+            start = optional_regex_i32_arg("regexp_replace", values.get(3), 1)?;
+            nth = optional_regex_i32_arg("regexp_replace", values.get(4), 1)?;
+            flags = optional_regex_text_arg("regexp_replace", values.get(5), "")?;
+        }
+        _ => {}
+    }
+    if start <= 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_replace start position must be greater than zero".into(),
+        ));
+    }
+    if nth < 0 {
+        return Err(ExecError::RaiseException(
+            "regexp_replace occurrence must not be negative".into(),
+        ));
+    }
+    Ok((start, nth, flags))
+}
+
+fn regex_text_pattern_pair<'a>(
+    op: &'static str,
+    values: &'a [Value],
+) -> Result<(&'a str, &'a str), ExecError> {
+    let Some(text_value) = values.first() else {
+        return Ok(("", ""));
+    };
+    let Some(pattern_value) = values.get(1) else {
+        return Ok(("", ""));
+    };
+    let text = text_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: text_value.clone(),
+        right: pattern_value.clone(),
+    })?;
+    let pattern = pattern_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op,
+        left: text_value.clone(),
+        right: pattern_value.clone(),
+    })?;
+    Ok((text, pattern))
+}
+
+fn optional_regex_i32_arg(
+    op: &'static str,
+    value: Option<&Value>,
+    default: i32,
+) -> Result<i32, ExecError> {
+    match value {
+        None => Ok(default),
+        Some(Value::Null) => Ok(default),
+        Some(Value::Int32(v)) => Ok(*v),
+        Some(other) => Err(ExecError::TypeMismatch {
+            op,
+            left: other.clone(),
+            right: Value::Int32(default),
+        }),
+    }
+}
+
+fn optional_regex_text_arg<'a>(
+    op: &'static str,
+    value: Option<&'a Value>,
+    default: &'a str,
+) -> Result<&'a str, ExecError> {
+    match value {
+        None => Ok(default),
+        Some(Value::Null) => Ok(default),
+        Some(value) => value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Text(default.into()),
+        }),
+    }
+}
+
+fn slice_from_char_start(text: &str, start: i32) -> Result<&str, ExecError> {
+    let start_byte = byte_index_from_char_start(text, start)?;
+    Ok(&text[start_byte..])
+}
+
+fn byte_index_from_char_start(text: &str, start: i32) -> Result<usize, ExecError> {
+    if start <= 0 {
+        return Err(ExecError::RaiseException(
+            "regex start position must be greater than zero".into(),
+        ));
+    }
+    if start == 1 {
+        return Ok(0);
+    }
+    let char_index = (start - 1) as usize;
+    Ok(text
+        .char_indices()
+        .nth(char_index)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len()))
+}
+
+fn char_index_from_byte(text: &str, byte_index: usize) -> usize {
+    text[..byte_index].chars().count()
+}
+
+fn nth_capture_match<'a>(
+    regex: &Regex,
+    subject: &'a str,
+    nth: i32,
+    start: i32,
+    subexpr: usize,
+) -> Result<Option<(Captures<'a>, usize)>, ExecError> {
+    let base_offset = (start - 1) as usize;
+    for (idx, captures) in regex.captures_iter(subject).enumerate() {
+        if idx + 1 == nth as usize {
+            if subexpr >= captures.len() {
+                return Ok(None);
+            }
+            return Ok(Some((captures, base_offset)));
+        }
+    }
+    Ok(None)
+}
+
+fn capture_by_index<'a>(captures: &'a Captures<'a>, index: usize) -> Option<regex::Match<'a>> {
+    captures.get(index)
+}
+
+fn captures_to_array(captures: &Captures<'_>) -> Vec<Value> {
+    if captures.len() <= 1 {
+        return vec![Value::Text(CompactString::from(
+            captures.get(0).map(|m| m.as_str()).unwrap_or(""),
+        ))];
+    }
+    (1..captures.len())
+        .map(|idx| {
+            captures
+                .get(idx)
+                .map(|m| Value::Text(CompactString::from(m.as_str())))
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+fn replace_nth_match(regex: &Regex, subject: &str, nth: i32, replacement: &str) -> String {
+    for (idx, captures) in regex.captures_iter(subject).enumerate() {
+        if idx + 1 == nth as usize {
+            let matched = captures.get(0).unwrap();
+            let mut out = String::with_capacity(subject.len() + replacement.len());
+            out.push_str(&subject[..matched.start()]);
+            captures.expand(replacement, &mut out);
+            out.push_str(&subject[matched.end()..]);
+            return out;
+        }
+    }
+    subject.to_string()
 }

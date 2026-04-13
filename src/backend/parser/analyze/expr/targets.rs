@@ -300,7 +300,9 @@ fn set_returning_function_name(name: &str) -> Option<&str> {
         | "jsonb_each_text"
         | "jsonb_path_query"
         | "jsonb_array_elements"
-        | "jsonb_array_elements_text" => Some(name),
+        | "jsonb_array_elements_text"
+        | "regexp_matches"
+        | "regexp_split_to_table" => Some(name),
         _ => None,
     }
 }
@@ -449,62 +451,98 @@ fn bind_select_list_srf_call(
             ))
         }
         other => {
-            let kind = resolve_json_table_function(other).ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "supported set-returning function",
-                actual: other.to_string(),
-            })?;
-            let bound_args = args
-                .iter()
-                .map(|arg| {
-                    bind_expr_with_outer_and_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let output_columns = match kind {
-                JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
-                JsonTableFunction::ArrayElements => vec![QueryColumn {
-                    name: "json_array_elements".into(),
-                    sql_type: SqlType::new(SqlTypeKind::Json),
-                }],
-                JsonTableFunction::ArrayElementsText => {
-                    vec![QueryColumn::text("json_array_elements_text")]
-                }
-                JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
-                    name: "jsonb_path_query".into(),
-                    sql_type: SqlType::new(SqlTypeKind::Jsonb),
-                }],
-                JsonTableFunction::JsonbObjectKeys => vec![QueryColumn::text("jsonb_object_keys")],
-                JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
-                    name: "jsonb_array_elements".into(),
-                    sql_type: SqlType::new(SqlTypeKind::Jsonb),
-                }],
-                JsonTableFunction::JsonbArrayElementsText => {
-                    vec![QueryColumn::text("jsonb_array_elements_text")]
-                }
-                JsonTableFunction::Each
-                | JsonTableFunction::EachText
-                | JsonTableFunction::JsonbEach
-                | JsonTableFunction::JsonbEachText => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "scalar-output set-returning function in select list",
+            if let Some(kind) = resolve_json_table_function(other) {
+                let bound_args = args
+                    .iter()
+                    .map(|arg| {
+                        bind_expr_with_outer_and_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let output_columns = match kind {
+                    JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
+                    JsonTableFunction::ArrayElements => vec![QueryColumn {
+                        name: "json_array_elements".into(),
+                        sql_type: SqlType::new(SqlTypeKind::Json),
+                    }],
+                    JsonTableFunction::ArrayElementsText => {
+                        vec![QueryColumn::text("json_array_elements_text")]
+                    }
+                    JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
+                        name: "jsonb_path_query".into(),
+                        sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                    }],
+                    JsonTableFunction::JsonbObjectKeys => {
+                        vec![QueryColumn::text("jsonb_object_keys")]
+                    }
+                    JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
+                        name: "jsonb_array_elements".into(),
+                        sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                    }],
+                    JsonTableFunction::JsonbArrayElementsText => {
+                        vec![QueryColumn::text("jsonb_array_elements_text")]
+                    }
+                    JsonTableFunction::Each
+                    | JsonTableFunction::EachText
+                    | JsonTableFunction::JsonbEach
+                    | JsonTableFunction::JsonbEachText => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "scalar-output set-returning function in select list",
+                            actual: other.to_string(),
+                        });
+                    }
+                };
+                Ok((
+                    SetReturningCall::JsonTableFunction {
+                        kind,
+                        args: bound_args,
+                        output_columns: output_columns.clone(),
+                    },
+                    output_columns[0].sql_type,
+                ))
+            } else {
+                let kind =
+                    resolve_regex_table_function(other).ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "supported set-returning function",
                         actual: other.to_string(),
-                    });
-                }
-            };
-            Ok((
-                SetReturningCall::JsonTableFunction {
-                    kind,
-                    args: bound_args,
-                    output_columns: output_columns.clone(),
-                },
-                output_columns[0].sql_type,
-            ))
+                    })?;
+                let bound_args = args
+                    .iter()
+                    .map(|arg| {
+                        bind_expr_with_outer_and_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let output_columns = match kind {
+                    crate::include::nodes::plannodes::RegexTableFunction::Matches => vec![QueryColumn {
+                        name: "regexp_matches".into(),
+                        sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                    }],
+                    crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+                        vec![QueryColumn::text("regexp_split_to_table")]
+                    }
+                };
+                Ok((
+                    SetReturningCall::RegexTableFunction {
+                        kind,
+                        args: bound_args,
+                        output_columns: output_columns.clone(),
+                    },
+                    output_columns[0].sql_type,
+                ))
+            }
         }
     }
 }

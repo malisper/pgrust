@@ -5945,6 +5945,76 @@ fn trim_without_explicit_trim_chars_and_text_substring_work() {
 }
 
 #[test]
+fn regexp_scalar_functions_work() {
+    let base = temp_dir("regexp_scalar_functions");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_count('123123123123', '123', 3), \
+                regexp_instr('abcabcabc', 'a.c', 1, 3), \
+                regexp_substr('1234567890', '(123)(4(56)(78))', 1, 1, 'i', 3), \
+                regexp_split_to_array('the quick brown fox', '\\s+')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(3),
+                    Value::Int32(7),
+                    Value::Text("56".into()),
+                    Value::Array(vec![
+                        Value::Text("the".into()),
+                        Value::Text("quick".into()),
+                        Value::Text("brown".into()),
+                        Value::Text("fox".into()),
+                    ]),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn regexp_set_returning_functions_work() {
+    let base = temp_dir("regexp_set_returning_functions");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_matches('foobarbequebaz', '(bar)(.*)(baz)'), regexp_split_to_table('a b  c', '\\s+')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Array(vec![
+                            Value::Text("bar".into()),
+                            Value::Text("beque".into()),
+                            Value::Text("baz".into()),
+                        ]),
+                        Value::Text("a".into()),
+                    ],
+                    vec![Value::Null, Value::Text("b".into())],
+                    vec![Value::Null, Value::Text("c".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn trim_supports_bytea_arguments() {
     let base = temp_dir("strings_trim_bytea");
     let txns = TransactionManager::new_durable(&base).unwrap();
