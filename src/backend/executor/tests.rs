@@ -4901,6 +4901,74 @@ fn join_alias_hides_inner_relation_names() {
 }
 
 #[test]
+fn ambiguous_cross_join_column_reports_ambiguity() {
+    let base = temp_dir("ambiguous_cross_join_column");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id from people cross join pets",
+        catalog_with_pets(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::AmbiguousColumn(name)) if name == "id"
+    ));
+}
+
+#[test]
+fn join_using_alias_preserves_base_table_visibility() {
+    let base = temp_dir("join_using_alias_base_visibility");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into pets (id, name, owner_id) values (1, 'mocha', 9), (2, 'pixel', 8)",
+        catalog_with_pets(),
+    )
+    .unwrap();
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select people.name, x.id from people join pets using (id) as x where people.name = 'alice'",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![vec![Value::Text("alice".into()), Value::Int32(1)]],
+    );
+}
+
+#[test]
+fn join_using_alias_hides_non_merged_columns() {
+    let base = temp_dir("join_using_alias_hides_non_merged");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x.name from people join pets using (id) as x",
+        catalog_with_pets(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "x.name"));
+}
+
+#[test]
 fn join_using_projects_merged_column_once() {
     let base = temp_dir("join_using_projection");
     let txns = TransactionManager::new_durable(&base).unwrap();

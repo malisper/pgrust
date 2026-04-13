@@ -11,7 +11,7 @@ pub(crate) struct BoundScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScopeColumn {
     pub(crate) output_name: String,
-    pub(crate) relation_name: Option<String>,
+    pub(crate) relation_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,19 +196,16 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
     if let Some((relation, column_name)) = name.rsplit_once('.') {
         let mut matches = scope.columns.iter().enumerate().filter(|(_, column)| {
             column
-                .relation_name
-                .as_deref()
-                .is_some_and(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
+                .relation_names
+                .iter()
+                .any(|visible_relation| visible_relation.eq_ignore_ascii_case(relation))
                 && column.output_name.eq_ignore_ascii_case(column_name)
         });
         let first = matches
             .next()
             .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
         if matches.next().is_some() {
-            return Err(ParseError::UnexpectedToken {
-                expected: "unambiguous column reference",
-                actual: name.to_string(),
-            });
+            return Err(ParseError::AmbiguousColumn(name.to_string()));
         }
         return Ok(first.0);
     }
@@ -222,10 +219,7 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         .next()
         .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
     if matches.next().is_some() {
-        return Err(ParseError::UnexpectedToken {
-            expected: "unambiguous column reference",
-            actual: name.to_string(),
-        });
+        return Err(ParseError::AmbiguousColumn(name.to_string()));
     }
     Ok(first.0)
 }
@@ -236,29 +230,40 @@ pub(super) fn resolve_column_with_outer(
     name: &str,
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<ResolvedColumn, ParseError> {
-    if let Ok(index) = resolve_column(scope, name) {
-        return Ok(ResolvedColumn::Local(index));
+    match resolve_column(scope, name) {
+        Ok(index) => return Ok(ResolvedColumn::Local(index)),
+        Err(ParseError::AmbiguousColumn(name)) => return Err(ParseError::AmbiguousColumn(name)),
+        Err(ParseError::UnknownColumn(_)) => {}
+        Err(other) => return Err(other),
     }
 
     for (depth, outer_scope) in outer_scopes.iter().enumerate() {
-        if let Ok(index) = resolve_column(outer_scope, name) {
-            if depth == 0
-                && let Some(grouped) = grouped_outer
-                && scopes_match(&grouped.scope, outer_scope)
-                && !outer_column_is_grouped(index, &grouped.scope, &grouped.group_by_exprs)
-            {
-                let column = &outer_scope.columns[index];
-                let display_name = match &column.relation_name {
-                    Some(relation_name) => format!("{relation_name}.{}", column.output_name),
-                    None => column.output_name.clone(),
-                };
-                return Err(ParseError::UngroupedColumn {
-                    display_name,
-                    token: name.to_string(),
-                    clause: UngroupedColumnClause::Other,
-                });
+        match resolve_column(outer_scope, name) {
+            Ok(index) => {
+                if depth == 0
+                    && let Some(grouped) = grouped_outer
+                    && scopes_match(&grouped.scope, outer_scope)
+                    && !outer_column_is_grouped(index, &grouped.scope, &grouped.group_by_exprs)
+                {
+                    let column = &outer_scope.columns[index];
+                    let display_name = column
+                        .relation_names
+                        .first()
+                        .map(|relation_name| format!("{relation_name}.{}", column.output_name))
+                        .unwrap_or_else(|| column.output_name.clone());
+                    return Err(ParseError::UngroupedColumn {
+                        display_name,
+                        token: name.to_string(),
+                        clause: UngroupedColumnClause::Other,
+                    });
+                }
+                return Ok(ResolvedColumn::Outer { depth, index });
             }
-            return Ok(ResolvedColumn::Outer { depth, index });
+            Err(ParseError::AmbiguousColumn(name)) => {
+                return Err(ParseError::AmbiguousColumn(name));
+            }
+            Err(ParseError::UnknownColumn(_)) => {}
+            Err(other) => return Err(other),
         }
     }
 
@@ -727,10 +732,11 @@ pub(super) fn bind_from_item_with_ctes(
             source,
             alias,
             column_aliases,
+            preserve_source_names,
         } => {
             let (plan, scope) =
                 bind_from_item_with_ctes(source, catalog, outer_scopes, grouped_outer, ctes)?;
-            apply_relation_alias(plan, scope, alias, column_aliases)
+            apply_relation_alias(plan, scope, alias, column_aliases, *preserve_source_names)
         }
     }
 }
@@ -752,7 +758,7 @@ pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDes
             .iter()
             .map(|column| ScopeColumn {
                 output_name: column.name.clone(),
-                relation_name: relation_name.map(str::to_string),
+                relation_names: relation_name.into_iter().map(str::to_string).collect(),
             })
             .collect(),
     }
@@ -877,7 +883,7 @@ fn bind_join_using_projection(
         desc_columns.push(column_desc(name.clone(), left_ty, true));
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
-            relation_name: None,
+            relation_names: vec![],
         });
     }
 
@@ -933,6 +939,7 @@ fn apply_relation_alias(
     scope: BoundScope,
     alias: &str,
     column_aliases: &[String],
+    preserve_source_names: bool,
 ) -> Result<(Plan, BoundScope), ParseError> {
     if column_aliases.len() > scope.columns.len() {
         return Err(ParseError::UnexpectedToken {
@@ -956,7 +963,26 @@ fn apply_relation_alias(
             desc.columns[index].name = new_name.clone();
             desc.columns[index].storage.name = new_name.clone();
         }
-        column.relation_name = Some(alias.to_string());
+    }
+
+    if preserve_source_names {
+        let alias_only_anonymous = columns.iter().any(|column| column.relation_names.is_empty());
+        for column in &mut columns {
+            if alias_only_anonymous && !column.relation_names.is_empty() {
+                continue;
+            }
+            if !column
+                .relation_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(alias))
+            {
+                column.relation_names.push(alias.to_string());
+            }
+        }
+    } else {
+        for column in &mut columns {
+            column.relation_names = vec![alias.to_string()];
+        }
     }
 
     if renamed {

@@ -20,6 +20,7 @@ pub enum ParseError {
     InvalidNumeric(String),
     UnknownTable(String),
     UnknownColumn(String),
+    AmbiguousColumn(String),
     EmptySelectList,
     UnsupportedQualifiedName(String),
     InvalidInsertTargetCount {
@@ -60,6 +61,9 @@ impl fmt::Display for ParseError {
             ParseError::InvalidNumeric(value) => write!(f, "invalid numeric: {value}"),
             ParseError::UnknownTable(name) => write!(f, "unknown table: {name}"),
             ParseError::UnknownColumn(name) => write!(f, "unknown column: {name}"),
+            ParseError::AmbiguousColumn(name) => {
+                write!(f, "column reference \"{name}\" is ambiguous")
+            }
             ParseError::EmptySelectList => {
                 write!(f, "SELECT requires a target list or FROM clause")
             }
@@ -265,6 +269,7 @@ pub enum FromItem {
         source: Box<FromItem>,
         alias: String,
         column_aliases: Vec<String>,
+        preserve_source_names: bool,
     },
 }
 

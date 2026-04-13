@@ -714,6 +714,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     source: Box::new(item),
                     alias,
                     column_aliases,
+                    preserve_source_names: true,
                 })
             } else {
                 Ok(item)
@@ -777,6 +778,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     source: Box::new(item),
                     alias,
                     column_aliases,
+                    preserve_source_names: false,
                 })
             } else {
                 Ok(item)

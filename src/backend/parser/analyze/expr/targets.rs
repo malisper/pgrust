@@ -570,9 +570,9 @@ fn expand_star_targets(
         .filter(|(_, column)| {
             relation.is_none_or(|relation_name| {
                 column
-                    .relation_name
-                    .as_deref()
-                    .is_some_and(|visible| visible.eq_ignore_ascii_case(relation_name))
+                    .relation_names
+                    .iter()
+                    .any(|visible| visible.eq_ignore_ascii_case(relation_name))
             })
         })
         .map(|(index, column)| TargetEntry {
