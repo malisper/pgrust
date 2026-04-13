@@ -205,6 +205,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::ConvertFrom)
                 | Some(BuiltinScalarFunction::RegexpSubstr)
                 | Some(BuiltinScalarFunction::RegexpReplace)
+                | Some(BuiltinScalarFunction::SimilarSubstring)
                 | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::Length)
                 | Some(BuiltinScalarFunction::RegexpCount)
@@ -218,7 +219,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     SqlType::array_of(SqlType::new(SqlTypeKind::Text))
                 }
                 Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
-                Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => {
+                Some(
+                    BuiltinScalarFunction::Substring
+                    | BuiltinScalarFunction::Overlay,
+                ) => {
                     function_arg_values(args).next().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
                         infer_sql_expr_type_with_ctes(
                             arg,

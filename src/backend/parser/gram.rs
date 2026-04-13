@@ -1710,28 +1710,68 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             })
         }
         Rule::substring_expr => {
-            let mut inner = pair.into_inner().filter(|part| {
-                !matches!(
-                    part.as_rule(),
-                    Rule::kw_from | Rule::kw_from_atom | Rule::kw_for | Rule::kw_for_atom
-                )
-            });
-            let value = parse_expr(
-                inner
-                    .next()
-                    .ok_or(ParseError::UnexpectedEof)?
-                    .as_str()
-                    .trim(),
-            )?;
-            let start = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-            let mut args = vec![value, start];
-            if let Some(len) = inner.next() {
-                args.push(build_expr(len)?);
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            match inner.as_rule() {
+                Rule::substring_from_expr => {
+                    let mut inner = inner.into_inner().filter(|part| {
+                        !matches!(
+                            part.as_rule(),
+                            Rule::kw_from | Rule::kw_from_atom | Rule::kw_for | Rule::kw_for_atom
+                        )
+                    });
+                    let value = parse_expr(
+                        inner
+                            .next()
+                            .ok_or(ParseError::UnexpectedEof)?
+                            .as_str()
+                            .trim(),
+                    )?;
+                    let start = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+                    let mut args = vec![value, start];
+                    if let Some(len) = inner.next() {
+                        args.push(build_expr(len)?);
+                    }
+                    Ok(SqlExpr::FuncCall {
+                        name: "substring".into(),
+                        args: args.into_iter().map(SqlFunctionArg::positional).collect(),
+                    })
+                }
+                Rule::substring_similar_expr => {
+                    let mut inner = inner.into_inner().filter(|part| {
+                        !matches!(
+                            part.as_rule(),
+                            Rule::kw_similar
+                                | Rule::kw_similar_atom
+                                | Rule::kw_to
+                                | Rule::kw_to_atom
+                        )
+                    });
+                    let value = parse_expr(
+                        inner
+                            .next()
+                            .ok_or(ParseError::UnexpectedEof)?
+                            .as_str()
+                            .trim(),
+                    )?;
+                    let pattern = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+                    let mut args = vec![SqlFunctionArg::positional(value), SqlFunctionArg::positional(pattern)];
+                    if let Some(escape_clause) = inner.next() {
+                        let expr = escape_clause
+                            .into_inner()
+                            .find(|inner| inner.as_rule() == Rule::concat_expr)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        args.push(SqlFunctionArg::positional(build_expr(expr)?));
+                    }
+                    Ok(SqlExpr::FuncCall {
+                        name: "similar_substring".into(),
+                        args,
+                    })
+                }
+                _ => Err(ParseError::UnexpectedToken {
+                    expected: "substring expression",
+                    actual: inner.as_str().into(),
+                }),
             }
-            Ok(SqlExpr::FuncCall {
-                name: "substring".into(),
-                args: args.into_iter().map(SqlFunctionArg::positional).collect(),
-            })
         }
         Rule::overlay_expr => {
             let mut inner = pair.into_inner().filter(|part| {

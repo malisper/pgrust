@@ -722,6 +722,7 @@ fn insert_sql_inserts_row() {
     .unwrap()
     {
         StatementResult::Query { rows, .. } => {
+            println!("{rows:?}");
             assert_eq!(
                 rows,
                 vec![vec![
@@ -5977,6 +5978,51 @@ fn regexp_scalar_functions_work() {
             );
         }
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn sql_regex_substring_forms_work() {
+    let base = temp_dir("sql_regex_substring_forms");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    for (sql, expected) in [
+        (
+            "select substring('abcdefg' similar 'a#\"(b_d)#\"%' escape '#')",
+            Value::Text("bcd".into()),
+        ),
+        (
+            "select substring('abcdefg' from 'a#\"(b_d)#\"%' for '#')",
+            Value::Text("bcd".into()),
+        ),
+        (
+            "select substring('abcdefg' similar 'a#\"%#\"g' escape '#')",
+            Value::Text("bcdef".into()),
+        ),
+        ("select substring('abcdefg' from 'c.e')", Value::Text("cde".into())),
+        (
+            "select substring('abcdefg' from 'b(.*)f')",
+            Value::Text("cde".into()),
+        ),
+    ] {
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![expected.clone()]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
+    }
+
+    for sql in [
+        "select substring('foo' from 'foo(bar)?') is null",
+        "select substring('abcdefg' similar '%' escape null) is null",
+    ] {
+        match run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(rows, vec![vec![Value::Bool(true)]]);
+            }
+            other => panic!("expected query result, got {:?}", other),
+        }
     }
 }
 

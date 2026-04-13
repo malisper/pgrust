@@ -151,6 +151,7 @@ pub enum BuiltinScalarFunction {
     RegexpInstr,
     RegexpSubstr,
     RegexpSplitToArray,
+    SimilarSubstring,
     Left,
     Repeat,
     Length,
