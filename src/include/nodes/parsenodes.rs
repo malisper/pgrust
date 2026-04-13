@@ -307,7 +307,7 @@ pub struct OrderByItem {
 pub struct InsertStatement {
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
-    pub columns: Option<Vec<String>>,
+    pub columns: Option<Vec<AssignmentTarget>>,
     pub source: InsertSource,
 }
 
@@ -559,8 +559,20 @@ pub struct DeleteStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
-    pub column: String,
+    pub target: AssignmentTarget,
     pub expr: SqlExpr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentTarget {
+    pub column: String,
+    pub subscripts: Vec<ArraySubscript>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArraySubscript {
+    pub lower: Option<Box<SqlExpr>>,
+    pub upper: Option<Box<SqlExpr>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -654,6 +666,10 @@ pub enum SqlExpr {
         op: SubqueryComparisonOp,
         is_all: bool,
         array: Box<SqlExpr>,
+    },
+    ArraySubscript {
+        array: Box<SqlExpr>,
+        subscripts: Vec<ArraySubscript>,
     },
     Random,
     JsonGet(Box<SqlExpr>, Box<SqlExpr>),

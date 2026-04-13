@@ -1073,6 +1073,57 @@ pub(super) fn bind_agg_output_expr_in_clause(
             agg_list,
             n_keys,
         ),
+        SqlExpr::ArraySubscript { array, subscripts } => Ok(Expr::ArraySubscript {
+            array: Box::new(bind_agg_output_expr(
+                array,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?),
+            subscripts: subscripts
+                .iter()
+                .map(|subscript| {
+                    Ok(crate::include::nodes::plannodes::ExprArraySubscript {
+                        lower: subscript
+                            .lower
+                            .as_deref()
+                            .map(|expr| {
+                                bind_agg_output_expr(
+                                    expr,
+                                    group_by_exprs,
+                                    input_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                    agg_list,
+                                    n_keys,
+                                )
+                            })
+                            .transpose()?,
+                        upper: subscript
+                            .upper
+                            .as_deref()
+                            .map(|expr| {
+                                bind_agg_output_expr(
+                                    expr,
+                                    group_by_exprs,
+                                    input_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                    agg_list,
+                                    n_keys,
+                                )
+                            })
+                            .transpose()?,
+                    })
+                })
+                .collect::<Result<_, ParseError>>()?,
+        }),
         SqlExpr::Random => Ok(Expr::Random),
         SqlExpr::FuncCall { name, args } => bind_grouped_func_call(
             name,

@@ -266,6 +266,10 @@ pub fn eval_expr(
             let right_value = eval_expr(right, slot, ctx)?;
             eval_quantified_array(&left_value, *op, true, &right_value)
         }
+        Expr::ArraySubscript { array, subscripts } => {
+            let value = eval_expr(array, slot, ctx)?;
+            eval_array_subscript(value, subscripts, slot, ctx)
+        }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
         Expr::JsonGet(left, right) => eval_json_get(left, right, false, slot, ctx),
         Expr::JsonGetText(left, right) => eval_json_get(left, right, true, slot, ctx),
@@ -438,6 +442,10 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 values.push(cast_value(eval_plpgsql_expr(expr, slot)?, element_type)?);
             }
             Ok(Value::Array(values))
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            let value = eval_plpgsql_expr(array, slot)?;
+            eval_array_subscript_plpgsql(value, subscripts, slot)
         }
         Expr::FuncCall { func, args } => eval_plpgsql_builtin_function(*func, args, slot),
         Expr::CurrentTimestamp => Ok(Value::Text(CompactString::from_owned(
@@ -996,6 +1004,131 @@ fn eval_quantified_array(
         }
         other => Err(ExecError::TypeMismatch {
             op: if is_all { "ALL" } else { "ANY" },
+            left: other.clone(),
+            right: Value::Null,
+        }),
+    }
+}
+
+fn eval_array_subscript(
+    value: Value,
+    subscripts: &[crate::include::nodes::plannodes::ExprArraySubscript],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let resolved = subscripts
+        .iter()
+        .map(|subscript| {
+            Ok(ResolvedArraySubscript {
+                lower: subscript
+                    .lower
+                    .as_ref()
+                    .map(|expr| eval_expr(expr, slot, ctx))
+                    .transpose()?,
+                upper: subscript
+                    .upper
+                    .as_ref()
+                    .map(|expr| eval_expr(expr, slot, ctx))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    apply_array_subscripts(value, &resolved)
+}
+
+fn eval_array_subscript_plpgsql(
+    value: Value,
+    subscripts: &[crate::include::nodes::plannodes::ExprArraySubscript],
+    slot: &mut TupleSlot,
+) -> Result<Value, ExecError> {
+    let resolved = subscripts
+        .iter()
+        .map(|subscript| {
+            Ok(ResolvedArraySubscript {
+                lower: subscript
+                    .lower
+                    .as_ref()
+                    .map(|expr| eval_plpgsql_expr(expr, slot))
+                    .transpose()?,
+                upper: subscript
+                    .upper
+                    .as_ref()
+                    .map(|expr| eval_plpgsql_expr(expr, slot))
+                    .transpose()?,
+            })
+        })
+        .collect::<Result<Vec<_>, ExecError>>()?;
+    apply_array_subscripts(value, &resolved)
+}
+
+#[derive(Clone)]
+struct ResolvedArraySubscript {
+    lower: Option<Value>,
+    upper: Option<Value>,
+}
+
+fn apply_array_subscripts(
+    value: Value,
+    subscripts: &[ResolvedArraySubscript],
+) -> Result<Value, ExecError> {
+    let mut current = value;
+    for subscript in subscripts {
+        current = apply_single_array_subscript(current, subscript)?;
+    }
+    Ok(current)
+}
+
+fn apply_single_array_subscript(
+    value: Value,
+    subscript: &ResolvedArraySubscript,
+) -> Result<Value, ExecError> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Array(items) => {
+            if let Some(upper) = &subscript.upper {
+                let Some(start) = array_subscript_index(subscript.lower.as_ref())? else {
+                    return Ok(Value::Null);
+                };
+                let Some(end) = array_subscript_index(Some(upper))? else {
+                    return Ok(Value::Null);
+                };
+                if items.is_empty() {
+                    return Ok(Value::Array(Vec::new()));
+                }
+                let start = start.max(1) as usize;
+                let end = end.max(0) as usize;
+                if start == 0 || start > items.len() || end < start {
+                    return Ok(Value::Array(Vec::new()));
+                }
+                let end = end.min(items.len());
+                Ok(Value::Array(items[start - 1..end].to_vec()))
+            } else {
+                let Some(index) = array_subscript_index(subscript.lower.as_ref())? else {
+                    return Ok(Value::Null);
+                };
+                if index < 1 || index as usize > items.len() {
+                    return Ok(Value::Null);
+                }
+                Ok(items[index as usize - 1].clone())
+            }
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "array subscript",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn array_subscript_index(value: Option<&Value>) -> Result<Option<i32>, ExecError> {
+    match value {
+        None => Ok(Some(1)),
+        Some(Value::Null) => Ok(None),
+        Some(Value::Int16(v)) => Ok(Some(*v as i32)),
+        Some(Value::Int32(v)) => Ok(Some(*v)),
+        Some(Value::Int64(v)) => i32::try_from(*v).map(Some).map_err(|_| ExecError::Int4OutOfRange),
+        Some(other) => Err(ExecError::TypeMismatch {
+            op: "array subscript",
             left: other.clone(),
             right: Value::Null,
         }),

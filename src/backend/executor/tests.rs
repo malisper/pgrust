@@ -163,6 +163,39 @@ fn multidimensional_array_catalog() -> Catalog {
     catalog
 }
 
+fn array_subscript_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "t",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14003,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "a",
+                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        )),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "b",
+                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        )),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    catalog
+}
+
 fn varchar_catalog(name: &str, len: i32) -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert(
@@ -2202,6 +2235,81 @@ fn multidimensional_array_columns_round_trip_through_storage() {
                     Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
                     Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
                 ])])]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn array_subscript_select_and_update_work() {
+    let base = temp_dir("array_subscript_update");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t values (ARRAY[1,2,3], ARRAY[4,5,6])",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a[2], b[1:2] from t",
+        array_subscript_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(2),
+                    Value::Array(vec![Value::Int32(4), Value::Int32(5)]),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let update_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            update_xid,
+            "update t set a[2] = 22, b[2:3] = ARRAY[50,60]",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(update_xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a, b from t",
+        array_subscript_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Array(vec![Value::Int32(1), Value::Int32(22), Value::Int32(3)]),
+                    Value::Array(vec![Value::Int32(4), Value::Int32(50), Value::Int32(60)]),
+                ]]
             );
         }
         other => panic!("expected query result, got {:?}", other),

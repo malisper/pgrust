@@ -47,6 +47,21 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::Const(Value::Null) => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Const(Value::Array(_)) => SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Const(Value::Float64(_)) => SqlType::new(SqlTypeKind::Float8),
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            let array_type = infer_sql_expr_type_with_ctes(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if subscripts.iter().any(|subscript| subscript.upper.is_some()) {
+                SqlType::array_of(array_type.element_type())
+            } else {
+                array_type.element_type()
+            }
+        }
         SqlExpr::IntegerLiteral(value) => infer_integer_literal_type(value),
         SqlExpr::NumericLiteral(_) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Add(left, right)
