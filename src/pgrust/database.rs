@@ -21,9 +21,10 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    CatalogLookup, CommentOnTableStatement, CreateIndexStatement, CreateTableAsStatement,
-    CreateTableStatement, OnCommitAction, ParseError, TablePersistence, bind_delete,
-    bind_insert, bind_update, build_plan, create_relation_desc,
+    AlterTableAddColumnStatement, CatalogLookup, CommentOnTableStatement, CreateIndexStatement,
+    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError, TablePersistence,
+    bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
+    derive_literal_default_value,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
@@ -691,6 +692,37 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_alter_table_add_column_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableAddColumnStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let relation = self
+            .lazy_catalog_lookup(client_id, None, configured_search_path)
+            .lookup_relation(&alter_stmt.table_name)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.table_name.clone()))
+            })?;
+        self.table_locks
+            .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
     pub(crate) fn execute_comment_on_table_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -723,6 +755,43 @@ impl Database {
             .catalog
             .write()
             .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_table_add_column_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTableAddColumnStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = catalog.lookup_relation(&alter_stmt.table_name).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.table_name.clone()))
+        })?;
+        if relation.relpersistence == 't' {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "permanent table for ALTER TABLE ADD COLUMN",
+                actual: "temporary table".into(),
+            }));
+        }
+        let column = validate_alter_table_add_column(&relation.desc, &alter_stmt.column)?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .alter_table_add_column_mvcc(relation.relation_oid, column, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
@@ -1411,6 +1480,12 @@ impl Database {
                     65_536,
                 )
             }
+            Statement::AlterTableAddColumn(ref alter_stmt) => self
+                .execute_alter_table_add_column_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::Set(_)
             | Statement::Reset(_)
             // :HACK: numeric.sql also sets parallel_workers reloptions. Accept and ignore that
@@ -2060,6 +2135,44 @@ impl Drop for Database {
     fn drop(&mut self) {
         self.txns.write().flush_clog();
     }
+}
+
+fn validate_alter_table_add_column(
+    desc: &crate::backend::executor::RelationDesc,
+    column: &crate::backend::parser::ColumnDef,
+) -> Result<crate::backend::executor::ColumnDesc, ExecError> {
+    if !column.nullable {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ADD COLUMN without NOT NULL",
+            actual: "NOT NULL".into(),
+        }));
+    }
+    if matches!(
+        column.name.to_ascii_lowercase().as_str(),
+        "tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
+    ) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "non-system column name",
+            actual: column.name.clone(),
+        }));
+    }
+    if desc
+        .columns
+        .iter()
+        .any(|existing| existing.name.eq_ignore_ascii_case(&column.name))
+    {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "new column name",
+            actual: format!("column already exists: {}", column.name),
+        }));
+    }
+
+    let mut desc = column_desc(column.name.clone(), column.ty, true);
+    desc.default_expr = column.default_expr.clone();
+    if let Some(sql) = desc.default_expr.as_deref() {
+        desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+    }
+    Ok(desc)
 }
 
 fn map_catalog_error(err: CatalogError) -> ExecError {

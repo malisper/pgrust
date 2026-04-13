@@ -23,6 +23,7 @@ use crate::backend::catalog::rowcodec::{
     pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
     pg_tablespace_row_from_values, pg_type_row_from_values,
 };
+use crate::backend::executor::value_io::missing_column_value;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
@@ -168,9 +169,18 @@ pub(crate) fn catalog_from_physical_rows(
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
                     desc.default_expr = Some(attrdef.adbin.clone());
+                    desc.missing_default_value =
+                        crate::backend::parser::derive_literal_default_value(
+                            &attrdef.adbin,
+                            desc.sql_type,
+                        )
+                        .ok();
                 } else if let Some(expr) = legacy_default_exprs.get(&(row.oid, attr.attnum)) {
                     desc.default_expr = Some(expr.clone());
                     desc.attrdef_oid = Some(catalog.next_oid);
+                    desc.missing_default_value =
+                        crate::backend::parser::derive_literal_default_value(expr, desc.sql_type)
+                            .ok();
                     catalog.next_oid = catalog.next_oid.saturating_add(1);
                 }
                 if let Some(constraint_oid) = not_null_constraint_oids.get(&(
@@ -1332,9 +1342,13 @@ fn scan_catalog_relation(
         let row = desc
             .columns
             .iter()
-            .zip(raw.into_iter())
-            .map(|(column, datum)| {
-                decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+            .enumerate()
+            .map(|(index, column)| {
+                if let Some(datum) = raw.get(index) {
+                    decode_value(column, *datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+                } else {
+                    Ok(missing_column_value(column))
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         rows.push(row);
@@ -1365,9 +1379,13 @@ fn scan_catalog_relation_visible(
         let row = desc
             .columns
             .iter()
-            .zip(raw.into_iter())
-            .map(|(column, datum)| {
-                decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+            .enumerate()
+            .map(|(index, column)| {
+                if let Some(datum) = raw.get(index) {
+                    decode_value(column, *datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+                } else {
+                    Ok(missing_column_value(column))
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         rows.push(row);

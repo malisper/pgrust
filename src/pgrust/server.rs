@@ -2,17 +2,28 @@ pub use crate::backend::tcop::postgres::serve;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::backend::libpq::pqcomm::{cstr_from_bytes, read_i16_bytes, read_i32_bytes};
-    use crate::backend::tcop::postgres::{PROTOCOL_VERSION_3_0, handle_connection};
+    use crate::backend::tcop::postgres::PROTOCOL_VERSION_3_0;
+    #[cfg(not(unix))]
+    use crate::backend::tcop::postgres::handle_connection;
+    #[cfg(unix)]
+    use crate::backend::tcop::postgres::handle_connection_with_io;
     use crate::pgrust::database::Database;
     use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::net::Shutdown;
+    #[cfg(not(unix))]
+    use std::net::{TcpListener, TcpStream};
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::Duration;
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+    #[cfg(unix)]
+    type TestStream = UnixStream;
+    #[cfg(not(unix))]
+    type TestStream = TcpStream;
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
@@ -22,7 +33,24 @@ mod tests {
         path
     }
 
-    fn start_test_connection() -> (TcpStream, thread::JoinHandle<()>) {
+    #[cfg(unix)]
+    fn start_test_connection() -> (TestStream, thread::JoinHandle<()>) {
+        let db = Database::open(temp_dir("wire_copy"), 16).unwrap();
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+
+        let server = thread::spawn(move || {
+            let reader = server_stream.try_clone().unwrap();
+            handle_connection_with_io(reader, server_stream, &db, 1).unwrap();
+        });
+
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        (client_stream, server)
+    }
+
+    #[cfg(not(unix))]
+    fn start_test_connection() -> (TestStream, thread::JoinHandle<()>) {
         let db = Database::open(temp_dir("wire_copy"), 16).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -39,7 +67,7 @@ mod tests {
         (stream, server)
     }
 
-    fn send_startup(stream: &mut TcpStream) {
+    fn send_startup(stream: &mut impl Write) {
         let mut body = Vec::new();
         body.extend_from_slice(&PROTOCOL_VERSION_3_0.to_be_bytes());
         body.extend_from_slice(b"user\0postgres\0database\0postgres\0\0");
@@ -50,7 +78,7 @@ mod tests {
         stream.flush().unwrap();
     }
 
-    fn send_typed_message(stream: &mut TcpStream, kind: u8, body: &[u8]) {
+    fn send_typed_message(stream: &mut impl Write, kind: u8, body: &[u8]) {
         stream.write_all(&[kind]).unwrap();
         stream
             .write_all(&((body.len() + 4) as i32).to_be_bytes())
@@ -59,21 +87,21 @@ mod tests {
         stream.flush().unwrap();
     }
 
-    fn send_query(stream: &mut TcpStream, sql: &str) {
+    fn send_query(stream: &mut impl Write, sql: &str) {
         let mut body = sql.as_bytes().to_vec();
         body.push(0);
         send_typed_message(stream, b'Q', &body);
     }
 
-    fn send_copy_data(stream: &mut TcpStream, data: &[u8]) {
+    fn send_copy_data(stream: &mut impl Write, data: &[u8]) {
         send_typed_message(stream, b'd', data);
     }
 
-    fn send_copy_done(stream: &mut TcpStream) {
+    fn send_copy_done(stream: &mut impl Write) {
         send_typed_message(stream, b'c', &[]);
     }
 
-    fn read_message(stream: &mut TcpStream, label: &str) -> (u8, Vec<u8>) {
+    fn read_message(stream: &mut impl Read, label: &str) -> (u8, Vec<u8>) {
         let mut kind = [0u8; 1];
         stream
             .read_exact(&mut kind)
@@ -93,7 +121,7 @@ mod tests {
         (kind[0], body)
     }
 
-    fn read_until_ready(stream: &mut TcpStream, label: &str) -> Vec<(u8, Vec<u8>)> {
+    fn read_until_ready(stream: &mut impl Read, label: &str) -> Vec<(u8, Vec<u8>)> {
         let mut messages = Vec::new();
         loop {
             let msg = read_message(stream, label);

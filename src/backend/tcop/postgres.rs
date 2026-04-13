@@ -210,13 +210,17 @@ pub fn serve(addr: &str, db: Database) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn handle_connection(
-    stream: TcpStream,
+pub(crate) fn handle_connection_with_io<R, W>(
+    mut reader: R,
+    writer: W,
     db: &Database,
     client_id: ClientId,
-) -> io::Result<()> {
-    let mut reader = stream.try_clone()?;
-    let mut writer = BufWriter::new(stream);
+) -> io::Result<()>
+where
+    R: Read,
+    W: Write,
+{
+    let mut writer = BufWriter::new(writer);
 
     loop {
         let len = read_i32(&mut reader)? as usize;
@@ -343,6 +347,15 @@ pub(crate) fn handle_connection(
     };
     db.cleanup_client_temp_relations(client_id);
     result
+}
+
+pub(crate) fn handle_connection(
+    stream: TcpStream,
+    db: &Database,
+    client_id: ClientId,
+) -> io::Result<()> {
+    let reader = stream.try_clone()?;
+    handle_connection_with_io(reader, stream, db, client_id)
 }
 
 fn handle_query(

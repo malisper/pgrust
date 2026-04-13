@@ -98,6 +98,12 @@ impl RelCache {
                     {
                         desc.attrdef_oid = Some(attrdef.oid);
                         desc.default_expr = Some(attrdef.adbin.clone());
+                        desc.missing_default_value =
+                            crate::backend::parser::derive_literal_default_value(
+                                &attrdef.adbin,
+                                desc.sql_type,
+                            )
+                            .ok();
                     }
                     Ok(desc)
                 })

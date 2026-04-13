@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_set_stmt | comment_on_table_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | analyze_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_set_stmt | comment_on_table_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -43,6 +43,7 @@ create_index_item = { identifier ~ (kw_asc | kw_desc)? ~ nulls_ordering? }
 create_index_include_clause = { kw_include ~ "(" ~ ident_list ~ ")" }
 create_index_where_clause = { kw_where ~ expr }
 create_index_with_clause = { kw_with ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
+alter_table_add_column_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_add ~ kw_column? ~ column_def }
 alter_table_set_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
 comment_on_table_stmt = { kw_comment ~ kw_on ~ kw_table ~ identifier ~ kw_is ~ (quoted_string_literal | kw_null) }
 reloption = { identifier ~ "=" ~ set_value_atom }
@@ -208,6 +209,8 @@ kw_select = _{ kw_select_atom }
 kw_do = _{ kw_do_atom }
 kw_language = _{ kw_language_atom }
 kw_show = _{ kw_show_atom }
+kw_add = _{ kw_add_atom }
+kw_column = _{ kw_column_atom }
 kw_reset = _{ kw_reset_atom }
 kw_session = _{ kw_session_atom }
 kw_local = _{ kw_local_atom }
@@ -343,6 +346,8 @@ kw_show_atom = @{ ^"show" ~ keyword_end }
 kw_reset_atom = @{ ^"reset" ~ keyword_end }
 kw_do_atom = @{ ^"do" ~ keyword_end }
 kw_language_atom = @{ ^"language" ~ keyword_end }
+kw_add_atom = @{ ^"add" ~ keyword_end }
+kw_column_atom = @{ ^"column" ~ keyword_end }
 kw_session_atom = @{ ^"session" ~ keyword_end }
 kw_local_atom = @{ ^"local" ~ keyword_end }
 kw_temp_atom = @{ ^"temp" ~ keyword_end }

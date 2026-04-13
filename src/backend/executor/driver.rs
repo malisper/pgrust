@@ -54,6 +54,10 @@ pub fn execute_statement(
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::AlterTableAddColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
+            actual: "ALTER TABLE ADD COLUMN".into(),
+        })),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
@@ -92,7 +96,10 @@ pub fn execute_readonly_statement(
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
         Statement::Values(stmt) => execute_plan(build_values_plan(&stmt, catalog)?, ctx),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
-        Statement::Set(_) | Statement::Reset(_) | Statement::AlterTableSet(_) => {
+        Statement::Set(_)
+        | Statement::Reset(_)
+        | Statement::AlterTableSet(_)
+        | Statement::AlterTableAddColumn(_) => {
             Ok(StatementResult::AffectedRows(0))
         }
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {

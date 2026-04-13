@@ -1,7 +1,7 @@
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
-use crate::backend::executor::value_io::decode_value;
+use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::format_indkey;
 use crate::include::catalog::{
@@ -151,9 +151,13 @@ pub(crate) fn decode_catalog_tuple_values(
         .map_err(|e| CatalogError::Io(format!("{e:?}")))?;
     desc.columns
         .iter()
-        .zip(raw.into_iter())
-        .map(|(column, datum)| {
-            decode_value(column, datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+        .enumerate()
+        .map(|(index, column)| {
+            if let Some(datum) = raw.get(index) {
+                decode_value(column, *datum).map_err(|e| CatalogError::Io(format!("{e:?}")))
+            } else {
+                Ok(missing_column_value(column))
+            }
         })
         .collect()
 }

@@ -207,17 +207,17 @@ impl HeapTuple {
         desc: &[AttributeDesc],
     ) -> Result<Vec<Option<&'a [u8]>>, TupleError> {
         let natts = usize::from(self.header.infomask2 & HEAP_NATTS_MASK);
-        if natts != desc.len() {
+        if natts > desc.len() {
             return Err(TupleError::WrongValueCount {
-                expected: natts,
-                actual: desc.len(),
+                expected: desc.len(),
+                actual: natts,
             });
         }
 
-        let mut values = Vec::with_capacity(desc.len());
+        let mut values = Vec::with_capacity(natts);
         let mut off = 0usize;
 
-        for (i, attr) in desc.iter().enumerate() {
+        for (i, attr) in desc.iter().take(natts).enumerate() {
             let is_null =
                 self.header.infomask & HEAP_HASNULL != 0 && att_isnull(i, &self.header.null_bitmap);
             if is_null {
@@ -290,10 +290,10 @@ pub fn deform_raw<'a>(
     let infomask2 = u16::from_le_bytes([bytes[18], bytes[19]]);
     let infomask = u16::from_le_bytes([bytes[20], bytes[21]]);
     let natts = usize::from(infomask2 & HEAP_NATTS_MASK);
-    if natts != desc.len() {
+    if natts > desc.len() {
         return Err(TupleError::WrongValueCount {
-            expected: natts,
-            actual: desc.len(),
+            expected: desc.len(),
+            actual: natts,
         });
     }
 
@@ -304,10 +304,10 @@ pub fn deform_raw<'a>(
     };
     let data = &bytes[usize::from(hoff)..];
 
-    let mut values = Vec::with_capacity(desc.len());
+    let mut values = Vec::with_capacity(natts);
     let mut off = 0usize;
 
-    for (i, attr) in desc.iter().enumerate() {
+    for (i, attr) in desc.iter().take(natts).enumerate() {
         let is_null = infomask & HEAP_HASNULL != 0 && att_isnull(i, null_bitmap);
         if is_null {
             values.push(None);

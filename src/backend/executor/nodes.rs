@@ -8,6 +8,7 @@ use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::{
     compare_order_by_keys, decode_value, eval_expr, eval_json_table_function,
 };
+use crate::backend::executor::value_io::missing_column_value;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
@@ -950,8 +951,12 @@ impl TupleSlot {
             } => {
                 let raw = tuple.deform(attr_descs)?;
                 self.tts_values.clear();
-                for (column, datum) in desc.columns.iter().zip(raw.into_iter()) {
-                    self.tts_values.push(decode_value(column, datum)?);
+                for (index, column) in desc.columns.iter().enumerate() {
+                    if let Some(datum) = raw.get(index) {
+                        self.tts_values.push(decode_value(column, *datum)?);
+                    } else {
+                        self.tts_values.push(missing_column_value(column));
+                    }
                 }
                 self.tts_nvalid = self.tts_values.len();
                 Ok(&self.tts_values[..natts])

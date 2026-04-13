@@ -540,6 +540,32 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_table_add_column_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column: crate::backend::executor::ColumnDesc,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (_name, old_entry, new_entry) = catalog.alter_table_add_column(relation_oid, column)?;
+        self.persist_control_state(&catalog)?;
+
+        let mut kinds = vec![BootstrapCatalogKind::PgAttribute, BootstrapCatalogKind::PgDepend];
+        if new_entry.desc.columns.iter().any(|column| column.attrdef_oid.is_some()) {
+            kinds.push(BootstrapCatalogKind::PgAttrdef);
+        }
+        let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &_name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &_name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn comment_relation_mvcc(
         &mut self,
         relation_oid: u32,
