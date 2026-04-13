@@ -159,6 +159,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         }
         SqlExpr::Random => SqlType::new(SqlTypeKind::Float8),
         SqlExpr::FuncCall { name, args } => {
+            if name.eq_ignore_ascii_case("coalesce") {
+                let values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+                return infer_common_scalar_expr_type_with_ctes(
+                    &values,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    "COALESCE arguments with a common type",
+                )
+                .unwrap_or(SqlType::new(SqlTypeKind::Text));
+            }
             let resolved = resolve_scalar_function(name);
             if let Some(func) = resolved
                 && let Some(sql_type) = fixed_scalar_return_type(func)
@@ -485,6 +498,35 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         }
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
     }
+}
+
+pub(super) fn infer_common_scalar_expr_type_with_ctes(
+    exprs: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+    expected: &'static str,
+) -> Result<SqlType, ParseError> {
+    let mut common: Option<SqlType> = None;
+    for expr in exprs {
+        if matches!(expr, SqlExpr::Const(Value::Null)) {
+            continue;
+        }
+        let ty = infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+            .element_type();
+        common = Some(match common {
+            None => ty,
+            Some(current) => resolve_common_scalar_type(current, ty).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected,
+                    actual: format!("{} and {}", sql_type_name(current), sql_type_name(ty)),
+                }
+            })?,
+        });
+    }
+    Ok(common.unwrap_or(SqlType::new(SqlTypeKind::Text)))
 }
 
 pub(super) fn infer_array_literal_type_with_ctes(

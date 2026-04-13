@@ -2300,6 +2300,23 @@ fn build_plan_reports_ambiguous_column_reference() {
 }
 
 #[test]
+fn build_plan_lowers_coalesce_to_nested_expr() {
+    let stmt = parse_select("select coalesce(null, id, 7) from people").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].sql_type, SqlType::new(SqlTypeKind::Int4));
+            assert!(matches!(
+                targets[0].expr,
+                Expr::Coalesce(_, _)
+            ));
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
 fn build_plan_join_using_alias_preserves_base_table_names() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());

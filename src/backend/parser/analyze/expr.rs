@@ -890,6 +890,16 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?),
         ),
         SqlExpr::FuncCall { name, args } => {
+            if name.eq_ignore_ascii_case("coalesce") {
+                return bind_coalesce_call(
+                    args,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             if let Some(target_type) = resolve_function_cast_type(catalog, name) {
                 if args.iter().any(|arg| arg.name.is_some()) {
                     return Err(ParseError::UnexpectedToken {
@@ -948,6 +958,52 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
+}
+
+fn bind_coalesce_call(
+    args: &[SqlFunctionArg],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "positional COALESCE arguments",
+            actual: "COALESCE with named arguments".into(),
+        });
+    }
+    if args.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "at least one COALESCE argument",
+            actual: format!("COALESCE({} args)", args.len()),
+        });
+    }
+    let lowered_args = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    let common_type = infer_common_scalar_expr_type_with_ctes(
+        &lowered_args,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+        "COALESCE arguments with a common type",
+    )?;
+    let mut bound_args = Vec::with_capacity(lowered_args.len());
+    for arg in &lowered_args {
+        let arg_type =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
+        let bound =
+            bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        bound_args.push(coerce_bound_expr(bound, arg_type, common_type));
+    }
+    let mut iter = bound_args.into_iter().rev();
+    let mut expr = iter.next().expect("coalesce arity validated");
+    for arg in iter {
+        expr = Expr::Coalesce(Box::new(arg), Box::new(expr));
+    }
+    Ok(expr)
 }
 
 fn validate_catalog_backed_explicit_cast(
