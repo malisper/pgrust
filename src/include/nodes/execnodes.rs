@@ -258,6 +258,7 @@ pub struct NestedLoopJoinState {
     pub(crate) left: PlanState,
     pub(crate) right: PlanState,
     pub(crate) kind: JoinType,
+    pub(crate) cross_right_outer: bool,
     pub(crate) on: Expr,
     pub(crate) combined_names: Vec<String>,
     pub(crate) left_rows: Option<Vec<TupleSlot>>,

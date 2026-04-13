@@ -81,6 +81,15 @@ pub fn executor_start(plan: Plan) -> PlanState {
             kind,
             on,
         } => {
+            let cross_right_outer =
+                matches!(kind, crate::include::nodes::plannodes::JoinType::Cross)
+                    && !matches!(
+                        &*left,
+                        Plan::NestedLoopJoin {
+                            kind: crate::include::nodes::plannodes::JoinType::Cross,
+                            ..
+                        }
+                    );
             let left_width = left.column_names().len();
             let right_width = right.column_names().len();
             let combined_names: Vec<String> = left
@@ -93,6 +102,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 left: executor_start(*left),
                 right: executor_start(*right),
                 kind,
+                cross_right_outer,
                 on,
                 combined_names,
                 left_rows: None,

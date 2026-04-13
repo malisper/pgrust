@@ -409,7 +409,7 @@ impl PlanNode for NestedLoopJoinState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-        if matches!(self.kind, JoinType::Cross) {
+        if matches!(self.kind, JoinType::Cross) && self.cross_right_outer {
             return exec_cross_join(self, ctx);
         }
 
