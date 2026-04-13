@@ -5,16 +5,16 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines;
-use crate::backend::executor::exec_expr::{
-    compare_order_by_keys, decode_value, eval_expr, eval_json_table_function,
+use crate::backend::executor::exec_expr::{compare_order_by_keys, decode_value, eval_expr};
+use crate::backend::executor::srf::{
+    eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
 use crate::backend::executor::value_io::missing_column_value;
-use crate::backend::parser::SqlTypeKind;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
-    AggregateState, FilterState, GenerateSeriesState, IndexScanState, JsonTableFunctionState,
-    LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState,
-    ResultState, SeqScanState, SlotKind, TupleSlot, UnnestState, ValuesState,
+    AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState,
+    ProjectSetState, ResultState, SeqScanState, SlotKind, TupleSlot, ValuesState,
 };
 
 use std::time::Instant;
@@ -621,120 +621,32 @@ impl PlanNode for AggregateState {
     }
 }
 
-impl PlanNode for GenerateSeriesState {
+impl PlanNode for FunctionScanState {
     fn exec_proc_node<'a>(
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-        if !self.initialized {
+        if self.rows.is_none() {
             let mut dummy = TupleSlot::empty(0);
-            let start_val = eval_expr(&self.start, &mut dummy, ctx)?;
-            let stop_val = eval_expr(&self.stop, &mut dummy, ctx)?;
-            let step_val = eval_expr(&self.step, &mut dummy, ctx)?;
-
-            if matches!(self.output_type.kind, SqlTypeKind::Numeric) {
-                use crate::include::nodes::datum::NumericValue;
-                let to_numeric =
-                    |v: Value, label: &'static str| -> Result<NumericValue, ExecError> {
-                        match v {
-                            Value::Numeric(n) => Ok(n),
-                            Value::Int32(i) => Ok(NumericValue::from_i64(i64::from(i))),
-                            Value::Int64(i) => Ok(NumericValue::from_i64(i)),
-                            other => Err(ExecError::TypeMismatch {
-                                op: label,
-                                left: other,
-                                right: Value::Null,
-                            }),
-                        }
-                    };
-                let start = to_numeric(start_val, "generate_series start")?;
-                let stop = to_numeric(stop_val, "generate_series stop")?;
-                let step = to_numeric(step_val, "generate_series step")?;
-                let validate = |value: &NumericValue, arg: &'static str| -> Result<(), ExecError> {
-                    match value {
-                        NumericValue::NaN => Err(ExecError::GenerateSeriesInvalidArg(arg, "NaN")),
-                        NumericValue::PosInf | NumericValue::NegInf => {
-                            Err(ExecError::GenerateSeriesInvalidArg(arg, "infinity"))
-                        }
-                        NumericValue::Finite { .. } => Ok(()),
-                    }
-                };
-                validate(&start, "start")?;
-                validate(&stop, "stop")?;
-                validate(&step, "step size")?;
-                self.num_current = Some(start);
-                self.num_end = Some(stop);
-                self.num_step = Some(step);
-            } else {
-                let to_i64 = |v: Value, label: &'static str| -> Result<i64, ExecError> {
-                    match v {
-                        Value::Int32(v) => Ok(i64::from(v)),
-                        Value::Int64(v) => Ok(v),
-                        other => Err(ExecError::TypeMismatch {
-                            op: label,
-                            left: other,
-                            right: Value::Null,
-                        }),
-                    }
-                };
-                self.current = to_i64(start_val, "generate_series start")?;
-                self.end = to_i64(stop_val, "generate_series stop")?;
-                self.step_val = to_i64(step_val, "generate_series step")?;
-            }
-            self.initialized = true;
+            self.rows = Some(eval_set_returning_call(&self.call, &mut dummy, ctx)?);
         }
 
-        if matches!(self.output_type.kind, SqlTypeKind::Numeric) {
-            use crate::include::nodes::datum::NumericValue;
-            use std::cmp::Ordering;
-            let current = self.num_current.as_ref().unwrap();
-            let end = self.num_end.as_ref().unwrap();
-            let step = self.num_step.as_ref().unwrap();
-            let step_cmp = step.cmp(&NumericValue::zero());
-            let done = match step_cmp {
-                Ordering::Greater => current.cmp(end) == Ordering::Greater,
-                Ordering::Less => current.cmp(end) == Ordering::Less,
-                Ordering::Equal => return Err(ExecError::GenerateSeriesZeroStep),
-            };
-            if done {
-                return Ok(None);
-            }
-            let val = current.clone();
-            self.num_current = Some(current.add(step));
-            self.slot.kind = SlotKind::Virtual;
-            self.slot.tts_values.clear();
-            self.slot.tts_values.push(Value::Numeric(val));
-            self.slot.tts_nvalid = 1;
-            return Ok(Some(&mut self.slot));
-        }
-
-        let done = if self.step_val > 0 {
-            self.current > self.end
-        } else if self.step_val < 0 {
-            self.current < self.end
-        } else {
-            return Err(ExecError::GenerateSeriesZeroStep);
-        };
-
-        if done {
+        let rows = self.rows.as_mut().unwrap();
+        if self.next_index >= rows.len() {
             return Ok(None);
         }
 
-        self.slot.kind = SlotKind::Virtual;
-        self.slot.tts_values.clear();
-        self.slot.tts_values.push(match self.output_type.kind {
-            SqlTypeKind::Int8 => Value::Int64(self.current),
-            _ => Value::Int32(self.current as i32),
-        });
-        self.slot.tts_nvalid = 1;
-        self.current += self.step_val;
-        Ok(Some(&mut self.slot))
+        let idx = self.next_index;
+        self.next_index += 1;
+        Ok(Some(&mut rows[idx]))
     }
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        Some(&mut self.slot)
+        let rows = self.rows.as_mut()?;
+        let idx = self.next_index.checked_sub(1)?;
+        rows.get_mut(idx)
     }
     fn column_names(&self) -> &[String] {
-        &self.column_names
+        &self.output_columns
     }
     fn node_stats(&self) -> &NodeExecStats {
         &self.stats
@@ -743,7 +655,7 @@ impl PlanNode for GenerateSeriesState {
         &mut self.stats
     }
     fn node_label(&self) -> String {
-        "Function Scan on generate_series".into()
+        format!("Function Scan on {}", set_returning_call_label(&self.call))
     }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
@@ -798,60 +710,85 @@ impl PlanNode for ValuesState {
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
-impl PlanNode for UnnestState {
+impl PlanNode for ProjectSetState {
     fn exec_proc_node<'a>(
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-        if self.rows.is_none() {
-            let mut dummy = TupleSlot::empty(0);
-            let mut arrays = Vec::with_capacity(self.args.len());
-            let mut max_len = 0usize;
-            for arg in &self.args {
-                match eval_expr(arg, &mut dummy, ctx)? {
-                    Value::Null => arrays.push(None),
-                    Value::Array(values) => {
-                        max_len = max_len.max(values.len());
-                        arrays.push(Some(values));
+        loop {
+            if self.current_input.is_none() || self.next_index >= self.current_row_count {
+                let Some(input_slot) = self.input.exec_proc_node(ctx)? else {
+                    return Ok(None);
+                };
+                let mut materialized = TupleSlot::virtual_row(input_slot.values()?.to_vec());
+                let mut srf_rows = Vec::new();
+                let mut max_rows = 0usize;
+                for target in &self.targets {
+                    if let crate::include::nodes::plannodes::ProjectSetTarget::Set {
+                        call, ..
+                    } = target
+                    {
+                        let rows = eval_scalar_set_returning_call(call, &mut materialized, ctx)?;
+                        max_rows = max_rows.max(rows.len());
+                        srf_rows.push(rows);
                     }
-                    other => {
-                        return Err(ExecError::TypeMismatch {
-                            op: "unnest",
-                            left: other,
-                            right: Value::Null,
-                        });
+                }
+
+                if max_rows == 0 {
+                    self.current_input = None;
+                    self.current_srf_rows.clear();
+                    self.current_row_count = 0;
+                    self.next_index = 0;
+                    continue;
+                }
+
+                self.current_input = Some(materialized);
+                self.current_srf_rows = srf_rows;
+                self.current_row_count = max_rows;
+                self.next_index = 0;
+            }
+
+            let input_slot = self.current_input.as_mut().unwrap();
+            let row_idx = self.next_index;
+            self.next_index += 1;
+
+            let mut values = Vec::with_capacity(self.targets.len());
+            let mut srf_idx = 0usize;
+            for target in &self.targets {
+                match target {
+                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                        values.push(eval_expr(&entry.expr, input_slot, ctx)?.to_owned_value());
+                    }
+                    crate::include::nodes::plannodes::ProjectSetTarget::Set { .. } => {
+                        values.push(
+                            self.current_srf_rows[srf_idx]
+                                .get(row_idx)
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        );
+                        srf_idx += 1;
                     }
                 }
             }
 
-            let mut rows = Vec::with_capacity(max_len);
-            for idx in 0..max_len {
-                let mut row = Vec::with_capacity(arrays.len());
-                for array in &arrays {
-                    match array {
-                        Some(values) => row.push(values.get(idx).cloned().unwrap_or(Value::Null)),
-                        None => row.push(Value::Null),
-                    }
-                }
-                rows.push(TupleSlot::virtual_row(row));
+            self.slot.kind = SlotKind::Virtual;
+            self.slot.tts_values = values;
+            self.slot.tts_nvalid = self.slot.tts_values.len();
+            self.slot.decode_offset = 0;
+
+            if self.next_index >= self.current_row_count {
+                self.current_input = None;
+                self.current_srf_rows.clear();
+                self.current_row_count = 0;
+                self.next_index = 0;
             }
-            self.rows = Some(rows);
-        }
 
-        let rows = self.rows.as_mut().unwrap();
-        if self.next_index >= rows.len() {
-            return Ok(None);
+            return Ok(Some(&mut self.slot));
         }
-
-        let idx = self.next_index;
-        self.next_index += 1;
-        Ok(Some(&mut rows[idx]))
     }
 
     fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        let rows = self.rows.as_mut()?;
-        let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx)
+        Some(&mut self.slot)
     }
 
     fn column_names(&self) -> &[String] {
@@ -864,50 +801,11 @@ impl PlanNode for UnnestState {
         &mut self.stats
     }
     fn node_label(&self) -> String {
-        "Function Scan on unnest".into()
+        "ProjectSet".into()
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
-}
-
-impl PlanNode for JsonTableFunctionState {
-    fn exec_proc_node<'a>(
-        &'a mut self,
-        ctx: &mut ExecutorContext,
-    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-        if self.rows.is_none() {
-            let mut dummy = TupleSlot::empty(0);
-            self.rows = Some(eval_json_table_function(
-                self.kind, &self.arg, &mut dummy, ctx,
-            )?);
-        }
-
-        let rows = self.rows.as_mut().unwrap();
-        if self.next_index >= rows.len() {
-            return Ok(None);
-        }
-
-        let idx = self.next_index;
-        self.next_index += 1;
-        Ok(Some(&mut rows[idx]))
+    fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
+        format_explain_lines(&*self.input, indent, analyze, lines);
     }
-    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
-        let rows = self.rows.as_mut()?;
-        let idx = self.next_index.checked_sub(1)?;
-        rows.get_mut(idx)
-    }
-    fn column_names(&self) -> &[String] {
-        &self.output_columns
-    }
-    fn node_stats(&self) -> &NodeExecStats {
-        &self.stats
-    }
-    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
-        &mut self.stats
-    }
-    fn node_label(&self) -> String {
-        "Function Scan on json".into()
-    }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }
 
 impl TupleSlot {

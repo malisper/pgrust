@@ -219,6 +219,45 @@ pub enum JsonTableFunction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetReturningCall {
+    GenerateSeries {
+        start: Expr,
+        stop: Expr,
+        step: Expr,
+        output: QueryColumn,
+    },
+    Unnest {
+        args: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
+    JsonTableFunction {
+        kind: JsonTableFunction,
+        arg: Expr,
+        output_columns: Vec<QueryColumn>,
+    },
+}
+
+impl SetReturningCall {
+    pub fn output_columns(&self) -> &[QueryColumn] {
+        match self {
+            SetReturningCall::GenerateSeries { output, .. } => std::slice::from_ref(output),
+            SetReturningCall::Unnest { output_columns, .. }
+            | SetReturningCall::JsonTableFunction { output_columns, .. } => output_columns,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectSetTarget {
+    Scalar(TargetEntry),
+    Set {
+        name: String,
+        call: SetReturningCall,
+        sql_type: SqlType,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggAccum {
     pub func: AggFunc,
     pub args: Vec<Expr>,
@@ -355,24 +394,16 @@ pub enum Plan {
         having: Option<Expr>,
         output_columns: Vec<QueryColumn>,
     },
-    GenerateSeries {
-        start: Expr,
-        stop: Expr,
-        step: Expr,
-        output: QueryColumn,
+    FunctionScan {
+        call: SetReturningCall,
     },
     Values {
         rows: Vec<Vec<Expr>>,
         output_columns: Vec<QueryColumn>,
     },
-    Unnest {
-        args: Vec<Expr>,
-        output_columns: Vec<QueryColumn>,
-    },
-    JsonTableFunction {
-        kind: JsonTableFunction,
-        arg: Expr,
-        output_columns: Vec<QueryColumn>,
+    ProjectSet {
+        input: Box<Plan>,
+        targets: Vec<ProjectSetTarget>,
     },
 }
 
@@ -412,10 +443,21 @@ impl Plan {
                 cols.extend(right.columns());
                 cols
             }
-            Plan::GenerateSeries { output, .. } => vec![output.clone()],
+            Plan::FunctionScan { call } => call.output_columns().to_vec(),
             Plan::Values { output_columns, .. } => output_columns.clone(),
-            Plan::Unnest { output_columns, .. } => output_columns.clone(),
-            Plan::JsonTableFunction { output_columns, .. } => output_columns.clone(),
+            Plan::ProjectSet { targets, .. } => targets
+                .iter()
+                .map(|target| match target {
+                    ProjectSetTarget::Scalar(entry) => QueryColumn {
+                        name: entry.name.clone(),
+                        sql_type: entry.sql_type,
+                    },
+                    ProjectSetTarget::Set { name, sql_type, .. } => QueryColumn {
+                        name: name.clone(),
+                        sql_type: *sql_type,
+                    },
+                })
+                .collect(),
         }
     }
 

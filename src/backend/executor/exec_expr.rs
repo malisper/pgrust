@@ -10,7 +10,6 @@ use super::expr_casts::{cast_value, soft_input_error_info};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
-pub(crate) use super::expr_json::eval_json_table_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
 };

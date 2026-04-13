@@ -13,7 +13,7 @@ pub use crate::include::nodes::datum::{NumericValue, Value};
 pub use crate::include::nodes::parsenodes::SqlType;
 pub use crate::include::nodes::plannodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JsonTableFunction, OrderByEntry,
-    Plan, QueryColumn, RelationDesc, ScalarType, TargetEntry,
+    Plan, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall, TargetEntry,
 };
 
 pub struct TupleSlot {
@@ -308,24 +308,6 @@ pub struct AggregateState {
 }
 
 #[derive(Debug)]
-pub struct GenerateSeriesState {
-    pub(crate) start: Expr,
-    pub(crate) stop: Expr,
-    pub(crate) step: Expr,
-    pub(crate) output_type: SqlType,
-    pub(crate) current: i64,
-    pub(crate) end: i64,
-    pub(crate) step_val: i64,
-    pub(crate) num_current: Option<crate::include::nodes::datum::NumericValue>,
-    pub(crate) num_end: Option<crate::include::nodes::datum::NumericValue>,
-    pub(crate) num_step: Option<crate::include::nodes::datum::NumericValue>,
-    pub(crate) initialized: bool,
-    pub(crate) slot: TupleSlot,
-    pub(crate) column_names: Vec<String>,
-    pub(crate) stats: NodeExecStats,
-}
-
-#[derive(Debug)]
 pub struct ValuesState {
     pub(crate) rows: Vec<Vec<Expr>>,
     pub(crate) output_columns: Vec<String>,
@@ -335,8 +317,8 @@ pub struct ValuesState {
 }
 
 #[derive(Debug)]
-pub struct UnnestState {
-    pub(crate) args: Vec<Expr>,
+pub struct FunctionScanState {
+    pub(crate) call: SetReturningCall,
     pub(crate) output_columns: Vec<String>,
     pub(crate) rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
@@ -344,12 +326,15 @@ pub struct UnnestState {
 }
 
 #[derive(Debug)]
-pub struct JsonTableFunctionState {
-    pub(crate) kind: JsonTableFunction,
-    pub(crate) arg: Expr,
+pub struct ProjectSetState {
+    pub(crate) input: PlanState,
+    pub(crate) targets: Vec<ProjectSetTarget>,
     pub(crate) output_columns: Vec<String>,
-    pub(crate) rows: Option<Vec<TupleSlot>>,
+    pub(crate) current_input: Option<TupleSlot>,
+    pub(crate) current_srf_rows: Vec<Vec<Value>>,
+    pub(crate) current_row_count: usize,
     pub(crate) next_index: usize,
+    pub(crate) slot: TupleSlot,
     pub(crate) stats: NodeExecStats,
 }
 

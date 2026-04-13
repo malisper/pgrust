@@ -1,10 +1,9 @@
 use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::include::nodes::execnodes::{
-    AggregateState, FilterState, GenerateSeriesState, JsonTableFunctionState, LimitState,
-    IndexScanState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState,
-    ResultState, SeqScanState,
-    UnnestState, ValuesState,
+    AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState, ProjectSetState,
+    ResultState, SeqScanState, ValuesState,
 };
 
 use std::rc::Rc;
@@ -176,25 +175,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::GenerateSeries {
-            start,
-            stop,
-            step,
-            output,
-        } => Box::new(GenerateSeriesState {
-            start,
-            stop,
-            step,
-            output_type: output.sql_type,
-            current: 0,
-            end: 0,
-            step_val: 0,
-            num_current: None,
-            num_end: None,
-            num_step: None,
-            initialized: false,
-            slot: TupleSlot::empty(1),
-            column_names: vec![output.name],
+        Plan::FunctionScan { call } => Box::new(FunctionScanState {
+            output_columns: call.output_columns().iter().map(|c| c.name.clone()).collect(),
+            call,
+            rows: None,
+            next_index: 0,
             stats: NodeExecStats::default(),
         }),
         Plan::Values {
@@ -207,31 +192,27 @@ pub fn executor_start(plan: Plan) -> PlanState {
             next_index: 0,
             stats: NodeExecStats::default(),
         }),
-        Plan::Unnest {
-            args,
-            output_columns,
-        } => {
-            let column_names = output_columns.into_iter().map(|c| c.name).collect();
-            Box::new(UnnestState {
-                args,
-                output_columns: column_names,
-                rows: None,
+        Plan::ProjectSet { input, targets } => {
+            let column_names = targets
+                .iter()
+                .map(|target| match target {
+                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                        entry.name.clone()
+                    }
+                    crate::include::nodes::plannodes::ProjectSetTarget::Set { name, .. } => {
+                        name.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            Box::new(ProjectSetState {
+                input: executor_start(*input),
+                targets,
+                output_columns: column_names.clone(),
+                current_input: None,
+                current_srf_rows: Vec::new(),
+                current_row_count: 0,
                 next_index: 0,
-                stats: NodeExecStats::default(),
-            })
-        }
-        Plan::JsonTableFunction {
-            kind,
-            arg,
-            output_columns,
-        } => {
-            let column_names = output_columns.into_iter().map(|c| c.name).collect();
-            Box::new(JsonTableFunctionState {
-                kind,
-                arg,
-                output_columns: column_names,
-                rows: None,
-                next_index: 0,
+                slot: TupleSlot::empty(column_names.len()),
                 stats: NodeExecStats::default(),
             })
         }
