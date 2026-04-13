@@ -32,6 +32,7 @@ use scope::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundIndexRelation {
+    pub name: String,
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub desc: RelationDesc,
@@ -131,9 +132,10 @@ impl CatalogLookup for Catalog {
         let relcache = RelCache::from_catalog(self);
         relcache
             .entries()
-            .filter_map(|(_, entry)| {
+            .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
                 (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                    name: name.rsplit('.').next().unwrap_or(name).to_string(),
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
                     desc: entry.desc.clone(),
@@ -158,9 +160,10 @@ impl CatalogLookup for RelCache {
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
         self.entries()
-            .filter_map(|(_, entry)| {
+            .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
                 (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                    name: name.rsplit('.').next().unwrap_or(name).to_string(),
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
                     desc: entry.desc.clone(),
@@ -392,6 +395,13 @@ pub fn bind_create_table(
             }
             crate::backend::catalog::catalog::CatalogError::UnknownType(name) => {
                 ParseError::UnsupportedType(name)
+            }
+            crate::backend::catalog::catalog::CatalogError::UniqueViolation(name) => {
+                let _ = name;
+                ParseError::UnexpectedToken {
+                    expected: "valid catalog state",
+                    actual: "catalog error".into(),
+                }
             }
             crate::backend::catalog::catalog::CatalogError::Io(_)
             | crate::backend::catalog::catalog::CatalogError::Corrupt(_) => {

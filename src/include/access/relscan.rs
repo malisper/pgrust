@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::backend::access::transam::xact::Snapshot;
+use crate::backend::storage::buffer::OwnedBufferPin;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::executor::RelationDesc;
@@ -15,14 +16,17 @@ pub enum ScanDirection {
     Backward,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct BtIndexScanOpaque {
     pub current_block: Option<u32>,
+    pub current_pin: Option<OwnedBufferPin<SmgrStorageBackend>>,
+    pub page_prev: Option<u32>,
+    pub page_next: Option<u32>,
     pub next_offset: usize,
     pub current_items: Vec<IndexTuple>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum IndexScanOpaque {
     None,
     Btree(BtIndexScanOpaque),

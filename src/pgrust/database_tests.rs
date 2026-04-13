@@ -156,6 +156,30 @@ fn relfilenode_for(db: &Database, client_id: u32, relname: &str) -> i64 {
     }
 }
 
+fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::RelFileLocator {
+    crate::RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: relfilenode_for(db, client_id, relname) as u32,
+    }
+}
+
+fn read_relation_block(
+    db: &Database,
+    rel: crate::RelFileLocator,
+    block: u32,
+) -> [u8; crate::backend::storage::smgr::BLCKSZ] {
+    let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
+    db.pool
+        .with_storage_mut(|storage| {
+            storage
+                .smgr
+                .read_block(rel, crate::backend::storage::smgr::ForkNumber::Main, block, &mut page)
+        })
+        .unwrap();
+    page
+}
+
 fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
     let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
@@ -867,6 +891,74 @@ fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
 }
 
 #[test]
+fn create_index_builds_multilevel_btree_root() {
+    let base = temp_dir("btree_multilevel_root");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    for i in 0..1500 {
+        db.execute(
+            1,
+            &format!("insert into items values ({i}, 'row{i}')"),
+        )
+        .unwrap();
+    }
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    let rel = relation_locator_for(&db, 1, "items_id_idx");
+    let meta_page = read_relation_block(&db, rel, 0);
+    let meta = crate::include::access::nbtree::bt_page_get_meta(&meta_page).unwrap();
+    assert!(meta.btm_level > 0, "expected multilevel root, got {meta:?}");
+    assert!(meta.btm_root > 1, "expected root above leaf block 1, got {meta:?}");
+
+    let root_page = read_relation_block(&db, rel, meta.btm_root);
+    let root_opaque = crate::include::access::nbtree::bt_page_get_opaque(&root_page).unwrap();
+    assert!(root_opaque.is_root());
+    assert!(!root_opaque.is_leaf(), "expected internal root, got {root_opaque:?}");
+
+    assert_explain_uses_index(&db, 1, "select note from items where id = 1499", "items_id_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 1499"),
+        vec![vec![Value::Text("row1499".into())]]
+    );
+}
+
+#[test]
+fn create_unique_index_rejects_duplicate_live_keys() {
+    let base = temp_dir("create_unique_index_rejects_duplicates");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "insert into items values (1, 'a'), (1, 'b')")
+        .unwrap();
+
+    match db.execute(1, "create unique index items_id_key on items (id)") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "items_id_key");
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_unique_index_allows_multiple_nulls() {
+    let base = temp_dir("create_unique_index_allows_nulls");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "insert into items values (null, 'a'), (null, 'b')")
+        .unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
 fn insert_and_copy_from_maintain_btree_index() {
     let base = temp_dir("btree_index_insert_copy");
     let db = Database::open(&base, 16).unwrap();
@@ -930,6 +1022,92 @@ fn indexed_update_maintains_indexes() {
     );
     assert_eq!(
         query_rows(&db, 1, "select name from items where id = 2"),
+        vec![vec![Value::Text("beta".into())]]
+    );
+}
+
+#[test]
+fn unique_index_insert_rejects_duplicate_key() {
+    let base = temp_dir("unique_index_insert_rejects_duplicate_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
+
+    match db.execute(1, "insert into items values (1, 'beta')") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "items_id_key");
+            assert_eq!(
+                crate::backend::libpq::pqformat::format_exec_error(
+                    &ExecError::UniqueViolation {
+                        constraint: constraint.clone()
+                    }
+                ),
+                "duplicate key value violates unique constraint \"items_id_key\""
+            );
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+}
+
+#[test]
+fn unique_index_update_rejects_duplicate_key() {
+    let base = temp_dir("unique_index_update_rejects_duplicate_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "insert into items values (1, 'alpha'), (2, 'beta')")
+        .unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+
+    match db.execute(1, "update items set id = 1 where id = 2") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "items_id_key");
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select id from items order by id"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
+fn unique_index_update_same_key_succeeds_without_self_conflict() {
+    let base = temp_dir("unique_index_update_same_key_succeeds");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+    db.execute(1, "update items set note = 'beta' where id = 1")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items where id = 1"),
+        vec![vec![Value::Int32(1), Value::Text("beta".into())]]
+    );
+}
+
+#[test]
+fn unique_index_delete_then_reinsert_same_key_succeeds() {
+    let base = temp_dir("unique_index_delete_then_reinsert_same_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+    db.execute(1, "delete from items where id = 1").unwrap();
+    db.execute(1, "insert into items values (1, 'beta')").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 1"),
         vec![vec![Value::Text("beta".into())]]
     );
 }
@@ -1023,6 +1201,287 @@ fn indexed_truncate_reinitializes_indexes() {
     assert_eq!(
         query_rows(&db, 1, "select name from items where id = 3"),
         vec![vec![Value::Text("gamma".into())]]
+    );
+}
+
+#[test]
+fn concurrent_indexed_inserts_and_lookups_remain_correct() {
+    let base = temp_dir("concurrent_indexed_inserts_and_lookups");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    let writers: Vec<_> = (0..4)
+        .map(|worker| {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                for i in 0..75 {
+                    let id = worker * 1000 + i;
+                    db.execute(
+                        (worker + 10) as ClientId,
+                        &format!("insert into items values ({id}, 'w{worker}-{i}')"),
+                    )
+                    .unwrap();
+                    let rows = query_rows(&db, 1, &format!("select note from items where id = {id}"));
+                    assert_eq!(rows.len(), 1, "expected one row for id {id}, got {rows:?}");
+                }
+            })
+        })
+        .collect();
+
+    let readers: Vec<_> = (0..2)
+        .map(|reader| {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                for i in 0..120 {
+                    let id = (i % 75) as i32;
+                    db.execute(
+                        (reader + 100) as ClientId,
+                        &format!("select note from items where id = {id}"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(writers, TEST_TIMEOUT);
+    join_all_with_timeout(readers, TEST_TIMEOUT);
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(300)]]
+    );
+    assert_explain_uses_index(&db, 1, "select note from items where id = 1005", "items_id_idx");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 1005"),
+        vec![vec![Value::Text("w1-5".into())]]
+    );
+}
+
+#[test]
+fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
+    let base = temp_dir("concurrent_indexed_inserts_and_range_scans_survive_splits");
+    let db = Database::open(&base, 128).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    let writers: Vec<_> = (0..4)
+        .map(|worker| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..200 {
+                    let id = worker * 10_000 + i;
+                    db.execute(
+                        (worker + 20) as ClientId,
+                        &format!("insert into items values ({id}, 'w{worker}-{i}')"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    let readers: Vec<_> = (0..3)
+        .map(|reader| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for _ in 0..80 {
+                    let rows = query_rows(
+                        &db,
+                        (reader + 200) as ClientId,
+                        "select id from items where id >= 0 order by id limit 20",
+                    );
+                    let ids = rows
+                        .into_iter()
+                        .map(|row| match &row[0] {
+                            Value::Int32(v) => *v,
+                            other => panic!("expected int row, got {:?}", other),
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        ids.windows(2).all(|w| w[0] <= w[1]),
+                        "range scan returned unsorted ids: {ids:?}"
+                    );
+                }
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(writers, TEST_TIMEOUT);
+    join_all_with_timeout(readers, TEST_TIMEOUT);
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from items where id >= 0 order by id limit 20",
+        "items_id_idx",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(800)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 30042"),
+        vec![vec![Value::Text("w3-42".into())]]
+    );
+}
+
+#[test]
+fn concurrent_unique_index_inserts_only_allow_one_live_key() {
+    let base = temp_dir("concurrent_unique_index_inserts_only_allow_one_live_key");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "create unique index items_id_key on items (id)")
+        .unwrap();
+
+    let handles: Vec<_> = (0..8)
+        .map(|worker| {
+            let db = db.clone();
+            thread::spawn(move || {
+                db.execute(
+                    (worker + 300) as ClientId,
+                    &format!("insert into items values (1, 'worker{worker}')"),
+                )
+            })
+        })
+        .collect();
+
+    let mut successes = 0usize;
+    let mut violations = 0usize;
+    for handle in handles {
+        match handle.join().unwrap() {
+            Ok(StatementResult::AffectedRows(1)) => successes += 1,
+            Err(ExecError::UniqueViolation { constraint }) => {
+                assert_eq!(constraint, "items_id_key");
+                violations += 1;
+            }
+            other => panic!("unexpected concurrent insert result: {:?}", other),
+        }
+    }
+
+    assert_eq!(successes, 1, "expected one successful insert");
+    assert_eq!(violations, 7, "expected seven unique violations");
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items where id = 1"),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_explain_uses_index(&db, 1, "select note from items where id = 1", "items_id_key");
+}
+
+#[test]
+fn concurrent_indexed_updates_and_deletes_keep_index_results_correct() {
+    let base = temp_dir("concurrent_indexed_updates_and_deletes_keep_index_results_correct");
+    let db = Database::open(&base, 128).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    for i in 0..120 {
+        db.execute(1, &format!("insert into items values ({i}, 'row{i}')"))
+            .unwrap();
+    }
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    let updaters: Vec<_> = (0..3)
+        .map(|worker| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..20 {
+                    let old_id = worker * 20 + i;
+                    let new_id = 1000 + worker * 20 + i;
+                    db.execute(
+                        (worker + 400) as ClientId,
+                        &format!(
+                            "update items set id = {new_id}, note = 'u{worker}-{i}' where id = {old_id}"
+                        ),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    let deleters: Vec<_> = (0..2)
+        .map(|worker| {
+            let db = db.clone();
+            thread::spawn(move || {
+                for i in 0..15 {
+                    let id = 60 + worker * 15 + i;
+                    db.execute(
+                        (worker + 500) as ClientId,
+                        &format!("delete from items where id = {id}"),
+                    )
+                    .unwrap();
+                }
+            })
+        })
+        .collect();
+
+    join_all_with_timeout(updaters, TEST_TIMEOUT);
+    join_all_with_timeout(deleters, TEST_TIMEOUT);
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(90)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 5"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 1005"),
+        vec![vec![Value::Text("u0-5".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 74"),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_explain_uses_index(&db, 1, "select note from items where id = 1005", "items_id_idx");
+    assert_explain_uses_index(&db, 1, "select note from items where id = 74", "items_id_idx");
+}
+
+#[test]
+fn reopening_database_replays_btree_wal() {
+    let base = temp_dir("reopening_database_replays_btree_wal");
+    {
+        let db = Database::open_with_options(&base, 256, true).unwrap();
+        db.execute(1, "create table items (id int4 not null, note text)")
+            .unwrap();
+        for i in 0..400 {
+            db.execute(1, &format!("insert into items values ({i}, 'before{i}')"))
+                .unwrap();
+        }
+        db.execute(1, "create index items_id_idx on items (id)")
+            .unwrap();
+        for i in 400..900 {
+            db.execute(1, &format!("insert into items values ({i}, 'after{i}')"))
+                .unwrap();
+        }
+        assert_explain_uses_index(&db, 1, "select note from items where id = 777", "items_id_idx");
+    }
+
+    let reopened = Database::open_with_options(&base, 256, true).unwrap();
+    assert_explain_uses_index(
+        &reopened,
+        1,
+        "select note from items where id = 777",
+        "items_id_idx",
+    );
+    assert_eq!(
+        query_rows(&reopened, 1, "select note from items where id = 777"),
+        vec![vec![Value::Text("after777".into())]]
+    );
+    assert_eq!(
+        query_rows(&reopened, 1, "select count(*) from items where id >= 890"),
+        vec![vec![Value::Int64(10)]]
     );
 }
 

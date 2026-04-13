@@ -147,6 +147,7 @@ fn main() -> Result<(), ExecError> {
     let mut ctx = ExecutorContext {
         pool: std::sync::Arc::clone(&pool),
         txns: txns.clone(),
+        txn_waiter: None,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
         next_command_id: 0,

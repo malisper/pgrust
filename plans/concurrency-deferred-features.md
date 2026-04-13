@@ -107,6 +107,28 @@ contention on a single row, some threads could be starved.
 
 **To add:** A per-tuple or per-page wait queue that grants access in order.
 
+### B-tree writers are serialized per index
+
+PostgreSQL btree inserts and splits rely on page pins, page content locks,
+lock-coupled descent, and the `BTP_INCOMPLETE_SPLIT` protocol described in
+`src/backend/access/nbtree/README`. Multiple backends can insert into the same
+index concurrently as long as they coordinate at the page level.
+
+The current implementation is coarser: `btinsert()` takes a per-index mutex
+before entering the write path, so only one thread at a time can modify a given
+index relation. Scans still run concurrently, but concurrent writers to the same
+index do not.
+
+This is safe, but it is less capable than PostgreSQL and can hide bugs in the
+page-level writer protocol by preventing true write/write interleavings.
+
+**To improve:** Remove the per-index writer mutex and finish the PostgreSQL-style
+writer path:
+- lock-coupled descent through internal pages
+- page-local exclusive locking during insert/split
+- incomplete-split recovery during descent/ascent
+- parent insertion/root split without relation-wide writer serialization
+
 ### Single-threaded transaction status persistence
 
 `TransactionManager::persist` rewrites the entire status file on every
