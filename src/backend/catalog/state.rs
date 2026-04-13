@@ -9,9 +9,10 @@ use crate::backend::catalog::pg_depend::{
 };
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::RelationDesc;
+use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::catalog::{
-    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow,
+    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow, builtin_type_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -193,6 +194,7 @@ impl Catalog {
         if self.tables.contains_key(&name) {
             return Err(CatalogError::TableAlreadyExists(name));
         }
+        validate_builtin_type_rows(&desc)?;
 
         let relation_oid = self.next_oid;
         let row_type_oid = relation_oid.saturating_add(1);
@@ -655,4 +657,128 @@ fn entry_owned_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {
         }
     }
     oids
+}
+
+fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
+    let builtin_rows = builtin_type_rows();
+    for column in &desc.columns {
+        let present = builtin_rows.iter().any(|row| {
+            row.sql_type.kind == column.sql_type.kind && row.sql_type.is_array == column.sql_type.is_array
+        });
+        if !present {
+            return Err(CatalogError::UnknownType(format!(
+                "{} (missing builtin pg_type row)",
+                format_sql_type_name(column.sql_type)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+    if sql_type.is_array {
+        return match sql_type.kind {
+            SqlTypeKind::Bool => "_bool",
+            SqlTypeKind::Bit => "_bit",
+            SqlTypeKind::VarBit => "_varbit",
+            SqlTypeKind::Bytea => "_bytea",
+            SqlTypeKind::InternalChar => "_char",
+            SqlTypeKind::Int8 => "_int8",
+            SqlTypeKind::Name => "_name",
+            SqlTypeKind::Int2 => "_int2",
+            SqlTypeKind::Int4 => "_int4",
+            SqlTypeKind::Text => "_text",
+            SqlTypeKind::Oid => "_oid",
+            SqlTypeKind::Float4 => "_float4",
+            SqlTypeKind::Float8 => "_float8",
+            SqlTypeKind::Varchar => "_varchar",
+            SqlTypeKind::Char => "_bpchar",
+            SqlTypeKind::Date => "_date",
+            SqlTypeKind::Time => "_time",
+            SqlTypeKind::TimeTz => "_timetz",
+            SqlTypeKind::Timestamp => "_timestamp",
+            SqlTypeKind::TimestampTz => "_timestamptz",
+            SqlTypeKind::Numeric => "_numeric",
+            SqlTypeKind::Json => "_json",
+            SqlTypeKind::Jsonb => "_jsonb",
+            SqlTypeKind::JsonPath => "_jsonpath",
+            SqlTypeKind::TsVector => "_tsvector",
+            SqlTypeKind::TsQuery => "_tsquery",
+            SqlTypeKind::RegConfig => "_regconfig",
+            SqlTypeKind::RegDictionary => "_regdictionary",
+            SqlTypeKind::Int2Vector
+            | SqlTypeKind::OidVector
+            | SqlTypeKind::Point
+            | SqlTypeKind::Lseg
+            | SqlTypeKind::Path
+            | SqlTypeKind::Line
+            | SqlTypeKind::Box
+            | SqlTypeKind::Polygon
+            | SqlTypeKind::Circle
+            | SqlTypeKind::PgNodeTree => "unsupported array",
+        };
+    }
+
+    match sql_type.kind {
+        SqlTypeKind::Bool => "bool",
+        SqlTypeKind::Bit => "bit",
+        SqlTypeKind::VarBit => "varbit",
+        SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::InternalChar => "\"char\"",
+        SqlTypeKind::Int8 => "int8",
+        SqlTypeKind::Name => "name",
+        SqlTypeKind::Int2 => "int2",
+        SqlTypeKind::Int2Vector => "int2vector",
+        SqlTypeKind::Int4 => "int4",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Oid => "oid",
+        SqlTypeKind::OidVector => "oidvector",
+        SqlTypeKind::Float4 => "float4",
+        SqlTypeKind::Float8 => "float8",
+        SqlTypeKind::Varchar => "varchar",
+        SqlTypeKind::Char => "bpchar",
+        SqlTypeKind::Date => "date",
+        SqlTypeKind::Time => "time",
+        SqlTypeKind::TimeTz => "timetz",
+        SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::TimestampTz => "timestamptz",
+        SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Json => "json",
+        SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Point => "point",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
+        SqlTypeKind::Line => "line",
+        SqlTypeKind::Box => "box",
+        SqlTypeKind::Polygon => "polygon",
+        SqlTypeKind::Circle => "circle",
+        SqlTypeKind::TsVector => "tsvector",
+        SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::RegConfig => "regconfig",
+        SqlTypeKind::RegDictionary => "regdictionary",
+        SqlTypeKind::PgNodeTree => "pg_node_tree",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::catalog::column_desc;
+
+    #[test]
+    fn create_table_accepts_datetime_types_with_bootstrap_rows() {
+        let mut catalog = Catalog::default();
+        let desc = RelationDesc {
+            columns: vec![
+                column_desc("d", SqlType::new(SqlTypeKind::Date), true),
+                column_desc("t", SqlType::new(SqlTypeKind::Time), true),
+                column_desc("tz", SqlType::new(SqlTypeKind::TimeTz), true),
+                column_desc("ts", SqlType::new(SqlTypeKind::Timestamp), true),
+                column_desc("tstz", SqlType::new(SqlTypeKind::TimestampTz), true),
+            ],
+        };
+        let entry = catalog.create_table("dt_test", desc).expect("datetime create table");
+        assert_eq!(entry.desc.columns.len(), 5);
+    }
 }
