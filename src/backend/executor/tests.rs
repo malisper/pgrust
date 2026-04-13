@@ -5110,6 +5110,87 @@ fn full_join_using_coalesces_join_column() {
 }
 
 #[test]
+fn sql_visible_coalesce_returns_first_non_null_value() {
+    let base = temp_dir("sql_visible_coalesce");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select coalesce(note, name, 'fallback') from people order by id",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("alice".into())],
+            vec![Value::Text("b".into())],
+        ],
+    );
+}
+
+#[test]
+fn sql_visible_coalesce_supports_common_numeric_type() {
+    let base = temp_dir("sql_visible_coalesce_numeric");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select coalesce(null, id, 7) from people order by id",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+}
+
+#[test]
+fn sql_visible_coalesce_accepts_single_argument() {
+    let base = temp_dir("sql_visible_coalesce_single_arg");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', null), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select coalesce(note) from people order by id",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![vec![Value::Null], vec![Value::Text("b".into())]],
+    );
+}
+
+#[test]
 fn left_join_on_emits_null_extended_rows() {
     let base = temp_dir("left_join_on");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

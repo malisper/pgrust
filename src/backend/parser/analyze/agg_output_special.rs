@@ -196,6 +196,18 @@ pub(super) fn bind_grouped_func_call(
     agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
+    if name.eq_ignore_ascii_case("coalesce") {
+        return bind_grouped_coalesce_call(
+            args,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        );
+    }
     let func = resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
         expected: "supported builtin function",
         actual: name.to_string(),
@@ -268,6 +280,61 @@ pub(super) fn bind_grouped_func_call(
             args: bound_args,
         }),
     }
+}
+
+fn bind_grouped_coalesce_call(
+    args: &[SqlFunctionArg],
+    group_by_exprs: &[SqlExpr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "positional COALESCE arguments",
+            actual: "COALESCE with named arguments".into(),
+        });
+    }
+    if args.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "at least one COALESCE argument",
+            actual: format!("COALESCE({} args)", args.len()),
+        });
+    }
+    let lowered_args = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    let common_type = infer_common_scalar_expr_type_with_ctes(
+        &lowered_args,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        &[],
+        "COALESCE arguments with a common type",
+    )?;
+    let mut bound_args = Vec::with_capacity(lowered_args.len());
+    for arg in &lowered_args {
+        let arg_type = infer_sql_expr_type(arg, input_scope, catalog, outer_scopes, grouped_outer);
+        let bound = bind_agg_output_expr(
+            arg,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )?;
+        bound_args.push(coerce_bound_expr(bound, arg_type, common_type));
+    }
+    let mut iter = bound_args.into_iter().rev();
+    let mut expr = iter.next().expect("coalesce arity validated");
+    for arg in iter {
+        expr = Expr::Coalesce(Box::new(arg), Box::new(expr));
+    }
+    Ok(expr)
 }
 
 pub(super) fn bind_grouped_array_literal(
