@@ -6140,6 +6140,45 @@ fn text_helper_functions_work() {
 }
 
 #[test]
+fn unistr_function_decodes_and_validates_unicode_escapes() {
+    let base = temp_dir("strings_unistr");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            r"select unistr('\0064at\+0000610'), unistr('d\u0061t\U000000610'), unistr('a\\b')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("data0".into()),
+            Value::Text("data0".into()),
+            Value::Text(r"a\b".into()),
+        ]],
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        r"select unistr('wrong: \db99')",
+    )
+    .unwrap_err();
+    assert!(format!("{err:?}").contains("invalid Unicode surrogate pair"));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        r"select unistr('wrong: \U002FFFFF')",
+    )
+    .unwrap_err();
+    assert!(format!("{err:?}").contains("invalid Unicode code point: 2FFFFF"));
+}
+
+#[test]
 fn bytea_hash_and_encoding_functions_work() {
     let base = temp_dir("strings_bytea_helper_functions");
     let txns = TransactionManager::new_durable(&base).unwrap();

@@ -14,7 +14,8 @@ use crate::backend::libpq::pqformat::{
     FloatFormatOptions, format_exec_error, format_exec_error_hint, infer_command_tag,
     send_auth_ok, send_backend_key_data, send_bind_complete, send_close_complete,
     send_command_complete, send_copy_in_response, send_empty_query, send_error,
-    send_error_with_hint, send_no_data, send_notice, send_notice_with_severity,
+    send_error_with_fields, send_error_with_hint, send_no_data, send_notice,
+    send_notice_with_severity,
     send_parameter_description, send_parameter_status, send_parse_complete, send_query_result,
     send_ready_for_query, send_row_description, send_typed_data_row,
 };
@@ -108,6 +109,180 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     };
     let needle = format!("'{}'", value.replace('\'', "''"));
     sql.rfind(&needle).map(|index| index + 1)
+}
+
+struct ExecErrorResponse {
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+    position: Option<usize>,
+}
+
+fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
+    let message = format_exec_error(e);
+    let mut response = ExecErrorResponse {
+        message,
+        detail: None,
+        hint: None,
+        position: exec_error_position(sql, e),
+    };
+
+    match response.message.as_str() {
+        "unsafe use of string constant with Unicode escapes" => {
+            response.detail = Some(
+                "String constants with Unicode escapes cannot be used when \"standard_conforming_strings\" is off.".into(),
+            );
+            response.position = find_unicode_string_position(sql).or(response.position);
+        }
+        "invalid Unicode escape" => {
+            response.hint = Some(if sql.contains("unistr(") {
+                "Unicode escapes must be \\XXXX, \\+XXXXXX, \\uXXXX, or \\UXXXXXXXX.".into()
+            } else if sql.contains("E'") {
+                "Unicode escapes must be \\uXXXX or \\UXXXXXXXX.".into()
+            } else {
+                "Unicode escapes must be \\XXXX or \\+XXXXXX.".into()
+            });
+            if sql.contains("unistr(") {
+                response.position = None;
+            } else {
+                response.position = find_unicode_escape_position(sql).or(response.position);
+            }
+        }
+        "invalid Unicode surrogate pair" | "invalid Unicode escape value" => {
+            if sql.contains("unistr(") {
+                response.position = None;
+            } else {
+                response.position = find_unicode_escape_position(sql).or(response.position);
+            }
+            if sql.contains("E'") {
+                if response.message == "invalid Unicode surrogate pair" {
+                    if let Some(token) = find_e_unicode_near_token(sql) {
+                        response.message =
+                            format!("invalid Unicode surrogate pair at or near \"{token}\"");
+                    }
+                } else if response.message == "invalid Unicode escape value" {
+                    if let Some(token) = find_e_unicode_escape_token(sql) {
+                        response.message =
+                            format!("invalid Unicode escape value at or near \"{token}\"");
+                    }
+                }
+            }
+        }
+        msg if msg.starts_with("UESCAPE must be followed by a simple string literal") => {
+            response.position = find_uescape_token_position(sql).or(response.position);
+        }
+        msg if msg.starts_with("invalid Unicode escape character at or near") => {
+            response.position = find_uescape_literal_position(sql).or(response.position);
+        }
+        _ => {}
+    }
+
+    response
+}
+
+fn find_unicode_string_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    lower.find("u&'").map(|idx| idx + 1)
+}
+
+fn find_unicode_escape_position(sql: &str) -> Option<usize> {
+    sql.find('\\').map(|idx| idx + 1)
+}
+
+fn find_uescape_token_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    lower.find("uescape").and_then(|idx| {
+        let tail = &sql[idx + "UESCAPE".len()..];
+        let offset = tail.find(|ch: char| !ch.is_ascii_whitespace())?;
+        Some(idx + "UESCAPE".len() + offset + 1)
+    })
+}
+
+fn find_uescape_literal_position(sql: &str) -> Option<usize> {
+    sql.rfind("'+'").map(|idx| idx + 1)
+}
+
+fn extract_e_literal(sql: &str) -> Option<&str> {
+    let start = sql.find("E'")? + 2;
+    let end = sql[start..].rfind('\'')? + start;
+    Some(&sql[start..end])
+}
+
+fn find_e_unicode_near_token(sql: &str) -> Option<String> {
+    let raw = extract_e_literal(sql)?;
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        let (len, code) = parse_e_unicode_escape(bytes, i)?;
+        if !(0xD800..=0xDBFF).contains(&code) {
+            i += len;
+            continue;
+        }
+        let next = i + len;
+        if next >= bytes.len() {
+            return Some("'".into());
+        }
+        if bytes[next] != b'\\' {
+            return Some((bytes[next] as char).to_string());
+        }
+        if next + 1 >= bytes.len() || bytes[next + 1] == b'\\' {
+            return Some("\\".into());
+        }
+        let next_len = match bytes[next + 1] {
+            b'u' => 6,
+            b'U' => 10,
+            _ => 1,
+        };
+        let end = (next + next_len).min(bytes.len());
+        return Some(raw[next..end].to_string());
+    }
+    None
+}
+
+fn find_e_unicode_escape_token(sql: &str) -> Option<String> {
+    let raw = extract_e_literal(sql)?;
+    let start = raw.find('\\')?;
+    let bytes = raw.as_bytes();
+    let len = match bytes.get(start + 1)? {
+        b'u' => 6,
+        b'U' => 10,
+        _ => 5,
+    };
+    let end = (start + len).min(bytes.len());
+    Some(raw[start..end].to_string())
+}
+
+fn parse_e_unicode_escape(bytes: &[u8], start: usize) -> Option<(usize, u32)> {
+    if start + 2 > bytes.len() || bytes[start] != b'\\' {
+        return None;
+    }
+    let (len, digits_start, digits_end) = match bytes[start + 1] {
+        b'u' => (6, start + 2, start + 6),
+        b'U' => (10, start + 2, start + 10),
+        _ => return None,
+    };
+    let digits = std::str::from_utf8(&bytes[digits_start..digits_end]).ok()?;
+    let code = u32::from_str_radix(digits, 16).ok()?;
+    Some((len, code))
+}
+
+fn send_exec_error(stream: &mut impl Write, sql: &str, e: &ExecError) -> io::Result<()> {
+    let mut response = exec_error_response(sql, e);
+    if response.hint.is_none() {
+        response.hint = format_exec_error_hint(e);
+    }
+    send_error_with_fields(
+        stream,
+        exec_error_sqlstate(e),
+        &response.message,
+        response.detail.as_deref(),
+        response.hint.as_deref(),
+        response.position,
+    )
 }
 
 fn find_bit_literal_position(sql: &str) -> Option<usize> {
@@ -406,10 +581,19 @@ fn handle_query(
         return Ok(());
     }
 
-    let parsed = db
-        .plan_cache
-        .get_statement(&sql)
-        .map_err(|e| io::Error::other(format!("{e:?}")));
+    let parsed = if state.session.standard_conforming_strings() {
+        db.plan_cache
+            .get_statement(&sql)
+            .map_err(|e| io::Error::other(format!("{e:?}")))
+    } else {
+        crate::backend::parser::parse_statement_with_options(
+            &sql,
+            crate::backend::parser::ParseOptions {
+                standard_conforming_strings: false,
+            },
+        )
+        .map_err(|e| io::Error::other(format!("{e:?}")))
+    };
     if let Ok(Statement::Select(ref select_stmt)) = parsed {
         clear_notices();
         match state.session.execute_streaming(db, select_stmt) {
@@ -459,15 +643,7 @@ fn handle_query(
 
                 if let Some(e) = err {
                     send_plpgsql_notices(stream, &take_notices())?;
-                    let message = format_exec_error(&e);
-                    let hint = format_exec_error_hint(&e);
-                    send_error_with_hint(
-                        stream,
-                        exec_error_sqlstate(&e),
-                        &message,
-                        hint.as_deref(),
-                        exec_error_position(&sql, &e),
-                    )?;
+                    send_exec_error(stream, &sql, &e)?;
                 } else {
                     send_plpgsql_notices(stream, &take_notices())?;
                     if !header_sent {
@@ -478,15 +654,7 @@ fn handle_query(
             }
             Err(e) => {
                 send_plpgsql_notices(stream, &take_notices())?;
-                let message = format_exec_error(&e);
-                let hint = format_exec_error_hint(&e);
-                send_error_with_hint(
-                    stream,
-                    exec_error_sqlstate(&e),
-                    &message,
-                    hint.as_deref(),
-                    exec_error_position(&sql, &e),
-                )?;
+                send_exec_error(stream, &sql, &e)?;
             }
         }
     } else {
@@ -511,15 +679,7 @@ fn handle_query(
             }
             Err(e) => {
                 send_plpgsql_notices(stream, &take_notices())?;
-                let message = format_exec_error(&e);
-                let hint = format_exec_error_hint(&e);
-                send_error_with_hint(
-                    stream,
-                    exec_error_sqlstate(&e),
-                    &message,
-                    hint.as_deref(),
-                    exec_error_position(&sql, &e),
-                )?;
+                send_exec_error(stream, &sql, &e)?;
             }
         }
     }
