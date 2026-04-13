@@ -12,7 +12,7 @@ pub use crate::include::catalog::toasting::{
 };
 use crate::include::catalog::{
     BTREE_AM_OID, DEPENDENCY_INTERNAL, INT4_BTREE_OPCLASS_OID, OID_BTREE_OPCLASS_OID,
-    PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID, PgDependRow,
+    PG_CLASS_RELATION_OID, PgDependRow,
 };
 use crate::include::nodes::parsenodes::IndexColumnDef;
 
@@ -126,6 +126,8 @@ fn toast_relation_desc() -> RelationDesc {
 pub fn new_relation_create_toast_table(
     catalog: &mut Catalog,
     relation_oid: u32,
+    toast_namespace_name: &str,
+    toast_namespace_oid: u32,
 ) -> Result<Option<ToastCatalogChanges>, CatalogError> {
     let Some((parent_name, parent)) = catalog
         .entries()
@@ -136,18 +138,17 @@ pub fn new_relation_create_toast_table(
     };
 
     if parent.relkind != 'r'
-        || parent.relpersistence == 't'
         || parent.reltoastrelid != 0
         || !relation_needs_toast_table(&parent.desc)
     {
         return Ok(None);
     }
 
-    let toast_name = format!("{PG_TOAST_NAMESPACE}.{}", toast_relation_name(relation_oid));
+    let toast_name = format!("{toast_namespace_name}.{}", toast_relation_name(relation_oid));
     let toast_entry = catalog.create_table_with_relkind(
         toast_name.clone(),
         toast_relation_desc(),
-        PG_TOAST_NAMESPACE_OID,
+        toast_namespace_oid,
         parent.rel.db_oid,
         parent.relpersistence,
         't',
@@ -162,7 +163,7 @@ pub fn new_relation_create_toast_table(
         deptype: DEPENDENCY_INTERNAL,
     });
 
-    let index_name = format!("{PG_TOAST_NAMESPACE}.{}", toast_index_name(relation_oid));
+    let index_name = format!("{toast_namespace_name}.{}", toast_index_name(relation_oid));
     let toast_index = catalog.create_index_for_relation_with_options(
         index_name.clone(),
         toast_entry.relation_oid,
@@ -239,9 +240,14 @@ mod tests {
             )
             .unwrap();
 
-        let changes = new_relation_create_toast_table(&mut catalog, table.relation_oid)
-            .unwrap()
-            .unwrap();
+        let changes = new_relation_create_toast_table(
+            &mut catalog,
+            table.relation_oid,
+            PG_TOAST_NAMESPACE,
+            PG_TOAST_NAMESPACE_OID,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(changes.new_parent.reltoastrelid, changes.toast_entry.relation_oid);
         assert_eq!(changes.toast_entry.relkind, 't');
@@ -261,5 +267,38 @@ mod tests {
                 && row.refobjid == table.relation_oid
                 && row.deptype == DEPENDENCY_INTERNAL
         }));
+    }
+
+    #[test]
+    fn new_relation_create_toast_table_uses_supplied_namespace() {
+        let mut catalog = Catalog::default();
+        let table = catalog
+            .create_table_with_options(
+                "pg_temp_1.docs",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("payload", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+                0x7000_0001,
+                0x7000_0001,
+                't',
+            )
+            .unwrap();
+
+        let changes = new_relation_create_toast_table(
+            &mut catalog,
+            table.relation_oid,
+            "pg_toast_temp_1",
+            0x7800_0001,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(changes.new_parent.reltoastrelid, changes.toast_entry.relation_oid);
+        assert_eq!(changes.toast_entry.relkind, 't');
+        assert_eq!(changes.toast_entry.namespace_oid, 0x7800_0001);
+        assert!(changes.toast_name.starts_with("pg_toast_temp_1."));
     }
 }

@@ -9,19 +9,27 @@ use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_j
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::{HeapTuple, TupleValue};
+use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn tuple_from_values(
     desc: &RelationDesc,
     values: &[Value],
 ) -> Result<HeapTuple, ExecError> {
-    let tuple_values = desc
+    let tuple_values = encode_tuple_values(desc, values)?;
+    HeapTuple::from_values(&desc.attribute_descs(), &tuple_values).map_err(ExecError::from)
+}
+
+pub(crate) fn encode_tuple_values(
+    desc: &RelationDesc,
+    values: &[Value],
+) -> Result<Vec<TupleValue>, ExecError> {
+    desc
         .columns
         .iter()
         .zip(values.iter())
         .map(|(column, value)| encode_value(column, value))
-        .collect::<Result<Vec<_>, _>>()?;
-    HeapTuple::from_values(&desc.attribute_descs(), &tuple_values).map_err(ExecError::from)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleValue, ExecError> {
@@ -137,8 +145,27 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
 }
 
 pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<Value, ExecError> {
+    decode_value_with_toast(column, bytes, None)
+}
+
+pub(crate) fn decode_value_with_toast(
+    column: &ColumnDesc,
+    bytes: Option<&[u8]>,
+    toast: Option<&ToastFetchContext>,
+) -> Result<Value, ExecError> {
     let Some(bytes) = bytes else {
         return Ok(Value::Null);
+    };
+    let owned;
+    let bytes = if let Some(toast) = toast {
+        if crate::include::access::detoast::is_ondisk_toast_pointer(bytes) {
+            owned = crate::backend::access::common::detoast::detoast_value_bytes(toast, bytes)?;
+            &owned[..]
+        } else {
+            bytes
+        }
+    } else {
+        bytes
     };
 
     match column.ty {

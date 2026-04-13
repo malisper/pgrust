@@ -549,6 +549,22 @@ pub fn relation_entry_by_oid(
     Some(entry)
 }
 
+fn toast_relation_from_entry(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    entry: &RelCacheEntry,
+) -> Option<crate::include::nodes::plannodes::ToastRelationRef> {
+    let toast_oid = entry.reltoastrelid;
+    (toast_oid != 0)
+        .then(|| relation_entry_by_oid(db, client_id, txn_ctx, toast_oid))
+        .flatten()
+        .map(|toast| crate::include::nodes::plannodes::ToastRelationRef {
+            rel: toast.rel,
+            relation_oid: toast.relation_oid,
+        })
+}
+
 pub fn lookup_any_relation(
     db: &Database,
     client_id: ClientId,
@@ -569,6 +585,7 @@ pub fn lookup_any_relation(
         return Some(BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
+            toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
@@ -590,6 +607,7 @@ pub fn lookup_any_relation(
         return Some(BoundRelation {
             rel: temp.rel,
             relation_oid: temp.relation_oid,
+            toast: toast_relation_from_entry(db, client_id, txn_ctx, &temp),
             namespace_oid: temp.namespace_oid,
             relpersistence: temp.relpersistence,
             relkind: temp.relkind,
@@ -612,6 +630,7 @@ pub fn lookup_any_relation(
         return Some(BoundRelation {
             rel: entry.rel,
             relation_oid: entry.relation_oid,
+            toast: toast_relation_from_entry(db, client_id, txn_ctx, &entry),
             namespace_oid: entry.namespace_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,

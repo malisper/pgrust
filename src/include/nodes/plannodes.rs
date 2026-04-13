@@ -77,6 +77,12 @@ pub struct OrderByEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToastRelationRef {
+    pub rel: RelFileLocator,
+    pub relation_oid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggFunc {
     Count,
     Sum,
@@ -448,12 +454,14 @@ pub enum Plan {
     SeqScan {
         rel: RelFileLocator,
         relation_oid: u32,
+        toast: Option<ToastRelationRef>,
         desc: RelationDesc,
     },
     IndexScan {
         rel: RelFileLocator,
         index_rel: RelFileLocator,
         am_oid: u32,
+        toast: Option<ToastRelationRef>,
         desc: RelationDesc,
         index_meta: IndexRelCacheEntry,
         keys: Vec<ScanKeyData>,

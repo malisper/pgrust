@@ -1,5 +1,5 @@
-use std::rc::Rc;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use parking_lot::RwLock;
 
@@ -8,14 +8,18 @@ use crate::backend::access::heap::heapam::{
     heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
     heap_update_with_waiter,
 };
+use crate::backend::access::heap::heaptoast::{
+    StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple, encoded_pointer_bytes,
+    store_external_value,
+};
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
-    AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement,
-    BoundIndexRelation, BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
-    MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement,
-    bind_create_table, build_plan,
+    AnalyzeStatement, BoundDeleteStatement, BoundIndexRelation, BoundInsertSource,
+    BoundInsertStatement, BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup,
+    DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
+    TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -23,11 +27,17 @@ use crate::pgrust::database::TransactionWaiter;
 
 use super::explain::{format_buffer_usage, format_explain_lines};
 use crate::backend::executor::exec_expr::{
-    compile_predicate_with_decoder, eval_expr, tuple_from_values,
+    compile_predicate_with_decoder, eval_expr,
 };
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
-use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start, Expr};
+use crate::backend::executor::value_io::encode_tuple_values;
+use crate::backend::executor::{
+    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, executor_start,
+};
+use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
+use crate::include::access::detoast::is_ondisk_toast_pointer;
 use crate::include::access::itemptr::ItemPointerData;
+use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::nodes::execnodes::*;
 
 pub(crate) fn execute_explain(
@@ -156,6 +166,80 @@ fn maintain_indexes_for_row(
     Ok(())
 }
 
+fn slot_toast_context(
+    toast: Option<ToastRelationRef>,
+    ctx: &ExecutorContext,
+) -> Option<crate::include::nodes::execnodes::ToastFetchContext> {
+    toast.map(|relation| crate::include::nodes::execnodes::ToastFetchContext {
+        relation,
+        pool: ctx.pool.clone(),
+        txns: ctx.txns.clone(),
+        snapshot: ctx.snapshot.clone(),
+        client_id: ctx.client_id,
+    })
+}
+
+fn toast_tuple_for_write(
+    desc: &RelationDesc,
+    values: &[Value],
+    toast: Option<ToastRelationRef>,
+    toast_index: Option<&BoundIndexRelation>,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<(HeapTuple, Vec<StoredToastValue>), ExecError> {
+    let mut tuple_values = encode_tuple_values(desc, values)?;
+    let attr_descs = desc.attribute_descs();
+    let mut tuple = HeapTuple::from_values(&attr_descs, &tuple_values)?;
+    let Some(toast) = toast else {
+        return Ok((tuple, Vec::new()));
+    };
+
+    let mut stored = Vec::new();
+    while tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {
+        let Some((attno, data)) = desc
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| match &tuple_values[index] {
+                TupleValue::Bytes(bytes)
+                    if column.storage.attlen == -1
+                        && column.storage.attstorage
+                            != crate::include::access::htup::AttributeStorage::Plain
+                        && !is_ondisk_toast_pointer(bytes) =>
+                {
+                    Some((index, bytes.clone()))
+                }
+                _ => None,
+            })
+            .max_by_key(|(_, bytes)| bytes.len())
+        else {
+            break;
+        };
+
+        let toasted = store_external_value(ctx, toast, toast_index, &data, xid, cid)?;
+        tuple_values[attno] = TupleValue::Bytes(encoded_pointer_bytes(toasted.pointer));
+        tuple = HeapTuple::from_values(&attr_descs, &tuple_values)?;
+        stored.push(toasted);
+    }
+    Ok((tuple, stored))
+}
+
+fn cleanup_toast_attempt(
+    toast: Option<ToastRelationRef>,
+    toasted: &[StoredToastValue],
+    ctx: &ExecutorContext,
+    xid: TransactionId,
+) -> Result<(), ExecError> {
+    let Some(toast) = toast else {
+        return Ok(());
+    };
+    for value in toasted {
+        cleanup_new_toast_value(ctx, toast, &value.chunk_tids, xid)?;
+    }
+    Ok(())
+}
+
 fn reinitialize_index_relation(
     index: &BoundIndexRelation,
     ctx: &mut ExecutorContext,
@@ -174,16 +258,19 @@ fn reinitialize_index_relation(
         },
         index.index_meta.am_oid,
     )
-    .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
-        expected: "index reinitialization",
-        actual: format!("{err:?}"),
-    }))?;
+    .map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index reinitialization",
+            actual: format!("{err:?}"),
+        })
+    })?;
     Ok(())
 }
 
 fn collect_matching_rows_heap(
     rel: crate::backend::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
+    toast: Option<ToastRelationRef>,
     predicate: Option<&Expr>,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<(ItemPointerData, Vec<Value>)>, ExecError> {
@@ -196,6 +283,7 @@ fn collect_matching_rows_heap(
 
     let mut slot = TupleSlot::empty(decoder.ncols());
     slot.decoder = Some(Rc::clone(&decoder));
+    slot.toast = slot_toast_context(toast, ctx);
     let mut rows = Vec::new();
 
     loop {
@@ -215,6 +303,8 @@ fn collect_matching_rows_heap(
         let mut page_rows = Vec::new();
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
             slot.kind = SlotKind::BufferHeapTuple {
+                desc: Rc::clone(&desc),
+                attr_descs: Rc::clone(&attr_descs),
                 tuple_ptr: tuple_bytes.as_ptr(),
                 tuple_len: tuple_bytes.len(),
                 pin: Rc::clone(&pin),
@@ -246,6 +336,7 @@ fn collect_matching_rows_heap(
 fn collect_matching_rows_index(
     rel: crate::backend::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
+    toast: Option<ToastRelationRef>,
     index: &BoundIndexRelation,
     keys: &[crate::include::access::scankey::ScanKeyData],
     predicate: Option<&Expr>,
@@ -277,18 +368,17 @@ fn collect_matching_rows_index(
     let mut rows = Vec::new();
 
     loop {
-        let has_tuple = indexam::index_getnext(&mut scan, index.index_meta.am_oid).map_err(|err| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "index access method tuple",
-                actual: format!("{err:?}"),
-            })
-        })?;
+        let has_tuple =
+            indexam::index_getnext(&mut scan, index.index_meta.am_oid).map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index access method tuple",
+                    actual: format!("{err:?}"),
+                })
+            })?;
         if !has_tuple {
             break;
         }
-        let tid = scan
-            .xs_heaptid
-            .expect("index scan tuple must set heap tid");
+        let tid = scan.xs_heaptid.expect("index scan tuple must set heap tid");
         if !seen.insert(tid) {
             continue;
         }
@@ -299,12 +389,9 @@ fn collect_matching_rows_index(
         let Some(tuple) = visible else {
             continue;
         };
-        let mut slot = TupleSlot::from_heap_tuple(
-            Rc::clone(&desc),
-            Rc::clone(&attr_descs),
-            tid,
-            tuple,
-        );
+        let mut slot =
+            TupleSlot::from_heap_tuple(Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple);
+        slot.toast = slot_toast_context(toast, ctx);
         if let Some(q) = &qual {
             if !q(&mut slot, ctx)? {
                 continue;
@@ -493,20 +580,25 @@ pub fn execute_insert(
         }
     };
 
-    let inserted = execute_insert_values(
-        stmt.rel,
-        &stmt.desc,
-        &stmt.indexes,
-        &values,
-        ctx,
-        xid,
-        cid,
-    )?;
+    let inserted =
+        execute_insert_values(
+            stmt.rel,
+            stmt.toast,
+            stmt.toast_index.as_ref(),
+            &stmt.desc,
+            &stmt.indexes,
+            &values,
+            ctx,
+            xid,
+            cid,
+        )?;
     Ok(StatementResult::AffectedRows(inserted))
 }
 
 pub fn execute_insert_values(
     rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
@@ -515,7 +607,7 @@ pub fn execute_insert_values(
     cid: CommandId,
 ) -> Result<usize, ExecError> {
     for values in rows {
-        let tuple = tuple_from_values(desc, values)?;
+        let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
         let heap_tid = heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
         maintain_indexes_for_row(rel, desc, indexes, values, heap_tid, ctx)?;
     }
@@ -541,7 +633,15 @@ pub fn execute_prepared_insert_row(
     for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
         values[*column_index] = param.clone();
     }
-    let tuple = tuple_from_values(&prepared.desc, &values)?;
+    let (tuple, _toasted) = toast_tuple_for_write(
+        &prepared.desc,
+        &values,
+        prepared.toast,
+        prepared.toast_index.as_ref(),
+        ctx,
+        xid,
+        cid,
+    )?;
     let heap_tid =
         heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, prepared.rel, xid, cid, &tuple)?;
     maintain_indexes_for_row(
@@ -582,11 +682,12 @@ pub fn execute_update_with_waiter(
         .map(|p| compile_predicate_with_decoder(p, &decoder));
     let target_rows = match &stmt.row_source {
         BoundModifyRowSource::Heap => {
-            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.predicate.as_ref(), ctx)?
+            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.toast, stmt.predicate.as_ref(), ctx)?
         }
         BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
             stmt.rel,
             &stmt.desc,
+            stmt.toast,
             index,
             keys,
             stmt.predicate.as_ref(),
@@ -601,11 +702,19 @@ pub fn execute_update_with_waiter(
             values[assignment.column_index] = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
         }
 
-        let replacement = tuple_from_values(&stmt.desc, &values)?;
         let mut current_tid = tid;
-        let mut current_replacement = replacement;
         let mut current_values = values;
         loop {
+            let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, current_tid)?;
+            let (current_replacement, toasted) = toast_tuple_for_write(
+                &stmt.desc,
+                &current_values,
+                stmt.toast,
+                stmt.toast_index.as_ref(),
+                ctx,
+                xid,
+                cid,
+            )?;
             match heap_update_with_waiter(
                 &*ctx.pool,
                 ctx.client_id,
@@ -618,6 +727,9 @@ pub fn execute_update_with_waiter(
                 waiter,
             ) {
                 Ok(new_tid) => {
+                    if let Some(toast) = stmt.toast {
+                        delete_external_from_tuple(ctx, toast, &stmt.desc, &old_tuple, xid)?;
+                    }
                     maintain_indexes_for_row(
                         stmt.rel,
                         &stmt.desc,
@@ -630,6 +742,7 @@ pub fn execute_update_with_waiter(
                     break;
                 }
                 Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                    cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
                     let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
                     let mut new_slot = TupleSlot::from_heap_tuple(
                         Rc::clone(&desc),
@@ -637,6 +750,7 @@ pub fn execute_update_with_waiter(
                         new_ctid,
                         new_tuple,
                     );
+                    new_slot.toast = slot_toast_context(stmt.toast, ctx);
                     let passes = match &qual {
                         Some(q) => q(&mut new_slot, ctx)?,
                         None => true,
@@ -652,13 +766,16 @@ pub fn execute_update_with_waiter(
                             eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
                     }
                     current_values = new_values.clone();
-                    current_replacement = tuple_from_values(&stmt.desc, &new_values)?;
                     current_tid = new_ctid;
                 }
                 Err(HeapError::TupleAlreadyModified(_)) => {
+                    cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
                     break;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+                    return Err(e.into());
+                }
             }
         }
     }
@@ -689,7 +806,7 @@ pub fn execute_delete_with_waiter(
         .map(|p| compile_predicate_with_decoder(p, &decoder));
     let targets = match &stmt.row_source {
         BoundModifyRowSource::Heap => {
-            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.predicate.as_ref(), ctx)?
+            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.toast, stmt.predicate.as_ref(), ctx)?
                 .into_iter()
                 .map(|(tid, _)| tid)
                 .collect::<Vec<_>>()
@@ -697,6 +814,7 @@ pub fn execute_delete_with_waiter(
         BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
             stmt.rel,
             &stmt.desc,
+            stmt.toast,
             index,
             keys,
             stmt.predicate.as_ref(),
@@ -712,6 +830,11 @@ pub fn execute_delete_with_waiter(
     for tid in &targets {
         let mut current_tid = *tid;
         loop {
+            let old_tuple = if stmt.toast.is_some() {
+                Some(heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, current_tid)?)
+            } else {
+                None
+            };
             match heap_delete_with_waiter(
                 &*ctx.pool,
                 ctx.client_id,
@@ -723,6 +846,9 @@ pub fn execute_delete_with_waiter(
                 waiter,
             ) {
                 Ok(()) => {
+                    if let (Some(toast), Some(old_tuple)) = (stmt.toast, old_tuple.as_ref()) {
+                        delete_external_from_tuple(ctx, toast, &stmt.desc, old_tuple, xid)?;
+                    }
                     affected_rows += 1;
                     break;
                 }
@@ -740,6 +866,7 @@ pub fn execute_delete_with_waiter(
                         new_ctid,
                         new_tuple,
                     );
+                    new_slot.toast = slot_toast_context(stmt.toast, ctx);
                     let passes = match &qual {
                         Some(q) => q(&mut new_slot, ctx)?,
                         None => true,
