@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::loader::load_physical_catalog_rows;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_amop::sort_pg_amop_rows;
 use crate::backend::catalog::pg_amproc::sort_pg_amproc_rows;
@@ -18,11 +19,10 @@ use crate::backend::catalog::pg_depend::sort_pg_depend_rows;
 use crate::backend::catalog::pg_index::sort_pg_index_rows;
 use crate::backend::catalog::pg_language::sort_pg_language_rows;
 use crate::backend::catalog::pg_opclass::sort_pg_opclass_rows;
-use crate::backend::catalog::pg_opfamily::sort_pg_opfamily_rows;
 use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
+use crate::backend::catalog::pg_opfamily::sort_pg_opfamily_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
-use crate::backend::catalog::loader::load_physical_catalog_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
@@ -32,18 +32,17 @@ use crate::include::catalog::{
     INT8_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_ARRAY_TYPE_OID,
     JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
     JSONPATH_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow,
-    PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow,
-    PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
-    PgOperatorRow, PgProcRow, PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
-    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows,
-    bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_constraint_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_opfamily_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
-    builtin_type_rows,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
+    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
+    PgTablespaceRow, PgTypeRow, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
+    VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -158,6 +157,7 @@ impl CatCache {
                 reltype: entry.row_type_oid,
                 relowner: BOOTSTRAP_SUPERUSER_OID,
                 relam: crate::include::catalog::relam_for_relkind(entry.relkind),
+                reltablespace: 0,
                 relfilenode: entry.rel.rel_number,
                 relpersistence: entry.relpersistence,
                 relkind: entry.relkind,
@@ -573,6 +573,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::InternalChar, true) => INTERNAL_CHAR_ARRAY_TYPE_OID,
         (SqlTypeKind::Int8, false) => INT8_TYPE_OID,
         (SqlTypeKind::Int8, true) => INT8_ARRAY_TYPE_OID,
+        (SqlTypeKind::Name, false) => crate::include::catalog::NAME_TYPE_OID,
+        (SqlTypeKind::Name, true) => crate::include::catalog::NAME_ARRAY_TYPE_OID,
         (SqlTypeKind::Int2, false) => INT2_TYPE_OID,
         (SqlTypeKind::Int2, true) => INT2_ARRAY_TYPE_OID,
         (SqlTypeKind::Int2Vector, false) => crate::include::catalog::INT2VECTOR_TYPE_OID,
@@ -1046,7 +1048,9 @@ mod tests {
         assert_eq!(lower[0].pronargs, 1);
 
         assert_eq!(
-            cache.proc_by_oid(TEXT_STARTS_WITH_PROC_OID).map(|row| row.proname.as_str()),
+            cache
+                .proc_by_oid(TEXT_STARTS_WITH_PROC_OID)
+                .map(|row| row.proname.as_str()),
             Some("starts_with")
         );
         assert_eq!(
@@ -1061,6 +1065,10 @@ mod tests {
                 .map(|row| row.castmethod),
             Some('b')
         );
-        assert!(cache.proc_rows_by_name("pg_catalog.no_such_proc").is_empty());
+        assert!(
+            cache
+                .proc_rows_by_name("pg_catalog.no_such_proc")
+                .is_empty()
+        );
     }
 }
