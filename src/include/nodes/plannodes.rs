@@ -324,6 +324,15 @@ pub struct AggAccum {
     pub sql_type: SqlType,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Cross,
+    Left,
+    Right,
+    Full,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Column(usize),
@@ -388,6 +397,7 @@ pub enum Expr {
     JsonbPathMatch(Box<Expr>, Box<Expr>),
     ScalarSubquery(Box<Plan>),
     ExistsSubquery(Box<Plan>),
+    Coalesce(Box<Expr>, Box<Expr>),
     AnySubquery {
         left: Box<Expr>,
         op: SubqueryComparisonOp,
@@ -440,6 +450,7 @@ pub enum Plan {
     NestedLoopJoin {
         left: Box<Plan>,
         right: Box<Plan>,
+        kind: JoinType,
         on: Expr,
     },
     Filter {

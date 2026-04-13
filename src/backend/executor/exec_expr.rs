@@ -122,6 +122,14 @@ pub fn eval_expr(
         Expr::Negate(inner) => negate_value(eval_expr(inner, slot, ctx)?),
         Expr::BitNot(inner) => bitwise_not_value(eval_expr(inner, slot, ctx)?),
         Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot, ctx)?, *ty),
+        Expr::Coalesce(left, right) => {
+            let left = eval_expr(left, slot, ctx)?;
+            if !matches!(left, Value::Null) {
+                Ok(left)
+            } else {
+                eval_expr(right, slot, ctx)
+            }
+        }
         Expr::Eq(left, right) => compare_values(
             "=",
             eval_expr(left, slot, ctx)?,
@@ -330,6 +338,14 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         Expr::Negate(inner) => negate_value(eval_plpgsql_expr(inner, slot)?),
         Expr::BitNot(inner) => bitwise_not_value(eval_plpgsql_expr(inner, slot)?),
         Expr::Cast(inner, ty) => cast_value(eval_plpgsql_expr(inner, slot)?, *ty),
+        Expr::Coalesce(left, right) => {
+            let left = eval_plpgsql_expr(left, slot)?;
+            if !matches!(left, Value::Null) {
+                Ok(left)
+            } else {
+                eval_plpgsql_expr(right, slot)
+            }
+        }
         Expr::Eq(left, right) => compare_values(
             "=",
             eval_plpgsql_expr(left, slot)?,

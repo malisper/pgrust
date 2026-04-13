@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
+use crate::include::nodes::plannodes::JoinType;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -686,38 +687,41 @@ pub(super) fn bind_from_item_with_ctes(
             left,
             right,
             kind,
-            on,
+            constraint,
         } => {
             let (left_plan, left_scope) =
                 bind_from_item_with_ctes(left, catalog, outer_scopes, grouped_outer, ctes)?;
             let (right_plan, right_scope) =
                 bind_from_item_with_ctes(right, catalog, outer_scopes, grouped_outer, ctes)?;
-            let scope = combine_scopes(&left_scope, &right_scope);
-            let on = match (kind, on) {
-                (JoinKind::Inner, Some(on)) => bind_expr_with_outer_and_ctes(
-                    on,
-                    &scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?,
-                (JoinKind::Cross, None) => Expr::Const(Value::Bool(true)),
-                _ => {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "valid join clause",
-                        actual: format!("{stmt:?}"),
-                    });
-                }
+            let raw_scope = combine_scopes(&left_scope, &right_scope);
+            let (on, projection) = bind_join_constraint_with_ctes(
+                kind,
+                constraint,
+                &left_scope,
+                &right_scope,
+                &raw_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let plan = Plan::NestedLoopJoin {
+                left: Box::new(left_plan),
+                right: Box::new(right_plan),
+                kind: plan_join_type(*kind),
+                on,
             };
-            Ok((
-                Plan::NestedLoopJoin {
-                    left: Box::new(left_plan),
-                    right: Box::new(right_plan),
-                    on,
-                },
-                scope,
-            ))
+            if let Some((targets, scope)) = projection {
+                Ok((
+                    Plan::Projection {
+                        input: Box::new(plan),
+                        targets,
+                    },
+                    scope,
+                ))
+            } else {
+                Ok((plan, raw_scope))
+            }
         }
         FromItem::Alias {
             source,
@@ -760,6 +764,157 @@ pub(super) fn combine_scopes(left: &BoundScope, right: &BoundScope) -> BoundScop
     let mut columns = left.columns.clone();
     columns.extend(right.columns.clone());
     BoundScope { desc, columns }
+}
+
+fn plan_join_type(kind: JoinKind) -> JoinType {
+    match kind {
+        JoinKind::Inner => JoinType::Inner,
+        JoinKind::Cross => JoinType::Cross,
+        JoinKind::Left => JoinType::Left,
+        JoinKind::Right => JoinType::Right,
+        JoinKind::Full => JoinType::Full,
+    }
+}
+
+type JoinProjection = Option<(Vec<TargetEntry>, BoundScope)>;
+
+#[allow(clippy::too_many_arguments)]
+fn bind_join_constraint_with_ctes(
+    kind: &JoinKind,
+    constraint: &JoinConstraint,
+    left_scope: &BoundScope,
+    right_scope: &BoundScope,
+    raw_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(Expr, JoinProjection), ParseError> {
+    match constraint {
+        JoinConstraint::None => {
+            if !matches!(kind, JoinKind::Cross) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "valid join clause",
+                    actual: format!("{kind:?}"),
+                });
+            }
+            Ok((Expr::Const(Value::Bool(true)), None))
+        }
+        JoinConstraint::On(on) => Ok((
+            bind_expr_with_outer_and_ctes(
+                on,
+                raw_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            None,
+        )),
+        JoinConstraint::Using(columns) => bind_join_using_projection(columns, left_scope, right_scope),
+        JoinConstraint::Natural => {
+            let columns = natural_join_columns(left_scope, right_scope);
+            bind_join_using_projection(&columns, left_scope, right_scope)
+        }
+    }
+}
+
+fn natural_join_columns(left_scope: &BoundScope, right_scope: &BoundScope) -> Vec<String> {
+    let mut out = Vec::new();
+    for left in &left_scope.columns {
+        if right_scope
+            .columns
+            .iter()
+            .any(|right| right.output_name.eq_ignore_ascii_case(&left.output_name))
+            && !out
+                .iter()
+                .any(|name: &String| name.eq_ignore_ascii_case(&left.output_name))
+        {
+            out.push(left.output_name.clone());
+        }
+    }
+    out
+}
+
+fn bind_join_using_projection(
+    columns: &[String],
+    left_scope: &BoundScope,
+    right_scope: &BoundScope,
+) -> Result<(Expr, JoinProjection), ParseError> {
+    let mut using_pairs = Vec::with_capacity(columns.len());
+    for name in columns {
+        let left_index = resolve_column(left_scope, name)?;
+        let right_index = resolve_column(right_scope, name)?;
+        using_pairs.push((name.clone(), left_index, right_index));
+    }
+
+    let on = using_pairs.iter().fold(Expr::Const(Value::Bool(true)), |expr, (_, left, right)| {
+        let right_index = left_scope.columns.len() + *right;
+        let predicate = Expr::Eq(Box::new(Expr::Column(*left)), Box::new(Expr::Column(right_index)));
+        match expr {
+            Expr::Const(Value::Bool(true)) => predicate,
+            other => Expr::And(Box::new(other), Box::new(predicate)),
+        }
+    });
+
+    let mut targets = Vec::new();
+    let mut desc_columns = Vec::new();
+    let mut scope_columns = Vec::new();
+    let mut used_left = vec![false; left_scope.columns.len()];
+    let mut used_right = vec![false; right_scope.columns.len()];
+
+    for (name, left_index, right_index) in &using_pairs {
+        used_left[*left_index] = true;
+        used_right[*right_index] = true;
+        let left_ty = left_scope.desc.columns[*left_index].sql_type;
+        let left_expr = Expr::Column(*left_index);
+        let right_expr = Expr::Column(left_scope.columns.len() + *right_index);
+        targets.push(TargetEntry {
+            name: name.clone(),
+            expr: Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
+            sql_type: left_ty,
+        });
+        desc_columns.push(column_desc(name.clone(), left_ty, true));
+        scope_columns.push(ScopeColumn {
+            output_name: name.clone(),
+            relation_name: None,
+        });
+    }
+
+    for (index, column) in left_scope.columns.iter().enumerate() {
+        if used_left[index] {
+            continue;
+        }
+        targets.push(TargetEntry {
+            name: column.output_name.clone(),
+            expr: Expr::Column(index),
+            sql_type: left_scope.desc.columns[index].sql_type,
+        });
+        desc_columns.push(left_scope.desc.columns[index].clone());
+        scope_columns.push(column.clone());
+    }
+
+    for (index, column) in right_scope.columns.iter().enumerate() {
+        if used_right[index] {
+            continue;
+        }
+        let raw_index = left_scope.columns.len() + index;
+        targets.push(TargetEntry {
+            name: column.output_name.clone(),
+            expr: Expr::Column(raw_index),
+            sql_type: right_scope.desc.columns[index].sql_type,
+        });
+        desc_columns.push(right_scope.desc.columns[index].clone());
+        scope_columns.push(column.clone());
+    }
+
+    let scope = BoundScope {
+        desc: RelationDesc {
+            columns: desc_columns,
+        },
+        columns: scope_columns,
+    };
+    Ok((on, Some((targets, scope))))
 }
 
 fn synthetic_desc_from_plan(plan: &Plan) -> RelationDesc {

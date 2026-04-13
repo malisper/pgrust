@@ -12,8 +12,9 @@ use crate::backend::executor::{AccumState, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
 pub use crate::include::nodes::parsenodes::SqlType;
 pub use crate::include::nodes::plannodes::{
-    AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JsonTableFunction, OrderByEntry,
-    Plan, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall, TargetEntry,
+    AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
+    OrderByEntry, Plan, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType,
+    SetReturningCall, TargetEntry,
 };
 
 pub struct TupleSlot {
@@ -256,11 +257,17 @@ impl std::fmt::Debug for FilterState {
 pub struct NestedLoopJoinState {
     pub(crate) left: PlanState,
     pub(crate) right: PlanState,
+    pub(crate) kind: JoinType,
     pub(crate) on: Expr,
     pub(crate) combined_names: Vec<String>,
     pub(crate) right_rows: Option<Vec<TupleSlot>>,
+    pub(crate) right_matched: Option<Vec<bool>>,
     pub(crate) current_left: Option<TupleSlot>,
+    pub(crate) current_left_matched: bool,
     pub(crate) right_index: usize,
+    pub(crate) left_width: usize,
+    pub(crate) right_width: usize,
+    pub(crate) unmatched_right_index: usize,
     pub(crate) slot: TupleSlot,
     pub(crate) stats: NodeExecStats,
 }

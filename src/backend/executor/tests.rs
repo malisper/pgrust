@@ -4899,6 +4899,112 @@ fn join_alias_hides_inner_relation_names() {
     .unwrap_err();
     assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "p.name"));
 }
+
+#[test]
+fn join_using_projects_merged_column_once() {
+    let base = temp_dir("join_using_projection");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into pets (id, name, owner_id) values (1, 'mocha', 1), (3, 'pixel', 2)",
+        catalog_with_pets(),
+    )
+    .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from people join pets using (id) order by 1, 2, 3, 4, 5",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("alice".into()),
+            Value::Text("a".into()),
+            Value::Text("mocha".into()),
+            Value::Int32(1),
+        ]],
+    );
+}
+
+#[test]
+fn full_join_using_coalesces_join_column() {
+    let base = temp_dir("full_join_using");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into pets (id, name, owner_id) values (1, 'mocha', 1), (3, 'pixel', 2)",
+        catalog_with_pets(),
+    )
+    .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, people.name, pets.name from people full join pets using (id) order by 1, 2, 3",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("alice".into()),
+                Value::Text("mocha".into()),
+            ],
+            vec![Value::Int32(2), Value::Text("bob".into()), Value::Null],
+            vec![Value::Int32(3), Value::Null, Value::Text("pixel".into())],
+        ],
+    );
+}
+
+#[test]
+fn left_join_on_emits_null_extended_rows() {
+    let base = temp_dir("left_join_on");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select people.id, pets.id from people left join pets on people.id = pets.owner_id order by 1, 2",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(11)],
+            vec![Value::Int32(2), Value::Int32(12)],
+            vec![Value::Int32(3), Value::Null],
+        ],
+    );
+}
 #[test]
 fn non_lateral_derived_table_rejects_outer_refs() {
     let base = temp_dir("derived_table_outer_ref");
