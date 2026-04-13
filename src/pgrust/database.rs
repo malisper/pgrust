@@ -1460,14 +1460,22 @@ impl Database {
         sql: &str,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let stmt = self.plan_cache.get_statement(sql)?;
+        self.execute_statement_with_search_path(client_id, stmt, configured_search_path)
+    }
+
+    pub(crate) fn execute_statement_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: Statement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
             execute_analyze, execute_delete_with_waiter, execute_insert, execute_truncate_table,
             execute_update_with_waiter, execute_vacuum,
         };
         use crate::backend::executor::execute_readonly_statement;
-
-        let stmt = self.plan_cache.get_statement(sql)?;
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),

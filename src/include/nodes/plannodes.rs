@@ -164,6 +164,7 @@ pub enum BuiltinScalarFunction {
     Strpos,
     Length,
     Lower,
+    Unistr,
     Ascii,
     Chr,
     QuoteLiteral,

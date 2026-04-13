@@ -96,6 +96,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Log10
             | BuiltinScalarFunction::Length
             | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Scale
             | BuiltinScalarFunction::MinScale
             | BuiltinScalarFunction::TrimScale
@@ -589,6 +590,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
         ("lower", BuiltinScalarFunction::Lower),
+        ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
@@ -796,6 +798,12 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
                 by_func.push((func, sql_type));
             }
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::Unistr)
+        {
+            by_func.push((BuiltinScalarFunction::Unistr, SqlType::new(SqlTypeKind::Text)));
+        }
         by_func
     })
 }
@@ -841,6 +849,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Length
             | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Unistr
             | BuiltinScalarFunction::Ascii
             | BuiltinScalarFunction::Chr
             | BuiltinScalarFunction::Replace

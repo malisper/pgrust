@@ -14,10 +14,31 @@ use crate::include::nodes::datum::BitString;
 #[grammar = "backend/parser/gram.pest"]
 struct SqlParser;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOptions {
+    pub standard_conforming_strings: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            standard_conforming_strings: true,
+        }
+    }
+}
+
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
+    parse_statement_with_options(sql, ParseOptions::default())
+}
+
+pub fn parse_statement_with_options(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Statement, ParseError> {
     let sql = normalize_string_continuation_preserving_layout(sql);
-    let sql =
-        normalize_position_syntax_preserving_layout(&strip_sql_comments_preserving_layout(&sql));
+    let sql = strip_sql_comments_preserving_layout(&sql);
+    validate_unicode_string_literals(&sql, options)?;
+    let sql = normalize_position_syntax_preserving_layout(&sql);
     SqlParser::parse(Rule::statement, &sql)
         .map_err(|e| map_pest_error("statement", e))
         .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
@@ -86,6 +107,129 @@ fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> Pars
             actual: message,
         },
     }
+}
+
+fn validate_unicode_string_literals(sql: &str, options: ParseOptions) -> Result<(), ParseError> {
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if starts_unicode_string_token(bytes, i) {
+            if !options.standard_conforming_strings {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "string literal without Unicode escapes",
+                    actual: "unsafe use of string constant with Unicode escapes".into(),
+                });
+            }
+
+            let literal_end = parse_delimited_token_end(bytes, i + 2, b'\'');
+            i = validate_unicode_uescape_clause(sql, literal_end)?;
+            continue;
+        }
+
+        let ch = sql[i..].chars().next().expect("valid utf-8");
+        i += ch.len_utf8();
+    }
+
+    Ok(())
+}
+
+fn validate_unicode_uescape_clause(sql: &str, mut i: usize) -> Result<usize, ParseError> {
+    let bytes = sql.as_bytes();
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if !starts_uescape_keyword(bytes, i) {
+        return Ok(i);
+    }
+
+    i += "UESCAPE".len();
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+
+    if i >= bytes.len() || bytes[i] != b'\'' {
+        let token_end = scan_unicode_clause_token_end(bytes, i);
+        let actual = if i < bytes.len() {
+            &sql[i..token_end]
+        } else {
+            "end of input"
+        };
+        return Err(ParseError::UnexpectedToken {
+            expected: "UESCAPE string literal",
+            actual: format!("UESCAPE must be followed by a simple string literal at or near \"{actual}\""),
+        });
+    }
+
+    let escape_end = parse_delimited_token_end(bytes, i, b'\'');
+    let escape_raw = &sql[i..escape_end];
+    let escape = decode_string_literal(escape_raw)?;
+    let mut chars = escape.chars();
+    let Some(ch) = chars.next() else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "non-empty UESCAPE character",
+            actual: "invalid Unicode escape character".into(),
+        });
+    };
+    if chars.next().is_some() || matches!(ch, '+' | '"' | '\'' | ' ' | '\t' | '\n' | '\r') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "valid UESCAPE character",
+            actual: format!("invalid Unicode escape character at or near \"{escape_raw}\""),
+        });
+    }
+
+    Ok(escape_end)
+}
+
+fn starts_unicode_string_token(bytes: &[u8], i: usize) -> bool {
+    i + 2 < bytes.len()
+        && matches!(bytes[i], b'u' | b'U')
+        && bytes[i + 1] == b'&'
+        && bytes[i + 2] == b'\''
+}
+
+fn starts_uescape_keyword(bytes: &[u8], i: usize) -> bool {
+    let keyword = b"uescape";
+    if i + keyword.len() > bytes.len() {
+        return false;
+    }
+    if !bytes[i..i + keyword.len()].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    let before_ok = i == 0 || !is_identifier_continuation(bytes[i - 1] as char);
+    let after_ok =
+        i + keyword.len() == bytes.len() || !is_identifier_continuation(bytes[i + keyword.len()] as char);
+    before_ok && after_ok
+}
+
+fn scan_unicode_clause_token_end(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len()
+        && !bytes[i].is_ascii_whitespace()
+        && !matches!(bytes[i], b';' | b',' | b')')
+    {
+        i += 1;
+    }
+    i
+}
+
+fn is_identifier_continuation(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn parse_delimited_token_end(bytes: &[u8], start: usize, delimiter: u8) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == delimiter {
+            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+                i += 2;
+            } else {
+                return i + 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    bytes.len()
 }
 
 fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
@@ -2208,7 +2352,7 @@ fn split_unicode_literal_parts(raw: &str) -> Result<(&str, char), ParseError> {
     };
     if let Some(idx) = prefix_stripped.find("uescape") {
         let literal_end = 2 + idx;
-        let literal = raw[..literal_end].trim_end();
+        let literal = raw[2..literal_end].trim_end();
         let clause = raw[literal_end..].trim_start();
         let clause_lower = clause.to_ascii_lowercase();
         if !clause_lower.starts_with("uescape") {
@@ -2262,31 +2406,21 @@ fn decode_unicode_escapes(text: &str, escape_char: char) -> Result<String, Parse
         }
         let (digits, next) = if chars[i + 1] == '+' {
             if i + 8 > chars.len() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "8-digit Unicode escape",
-                    actual: text.into(),
-                });
+                return Err(unicode_error("invalid Unicode escape"));
             }
             (chars[i + 2..i + 8].iter().collect::<String>(), i + 8)
         } else {
             if i + 5 > chars.len() {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "4-digit Unicode escape",
-                    actual: text.into(),
-                });
+                return Err(unicode_error("invalid Unicode escape"));
             }
             (chars[i + 1..i + 5].iter().collect::<String>(), i + 5)
         };
-        let code = u32::from_str_radix(&digits, 16).map_err(|_| ParseError::UnexpectedToken {
-            expected: "valid Unicode escape digits",
-            actual: text.into(),
-        })?;
-        let decoded = char::from_u32(code).ok_or(ParseError::UnexpectedToken {
-            expected: "valid Unicode codepoint",
-            actual: text.into(),
-        })?;
+        let code = u32::from_str_radix(&digits, 16)
+            .map_err(|_| unicode_error("invalid Unicode escape"))?;
+        let (decoded, consumed_next) =
+            decode_unicode_codepoint_with_surrogates(&chars, i, next, code, escape_char)?;
         out.push(decoded);
-        i = next;
+        i = consumed_next;
     }
     Ok(out)
 }
@@ -2384,19 +2518,13 @@ fn decode_escape_string(raw: &str) -> Result<String, ParseError> {
                 out.push(value as char);
             }
             'u' => {
-                let code = collect_escape_digits(&mut chars, 4, raw)?;
-                let ch = char::from_u32(code).ok_or(ParseError::UnexpectedToken {
-                    expected: "valid unicode escape",
-                    actual: raw.into(),
-                })?;
+                let code = collect_escape_digits(&mut chars, 4)?;
+                let ch = decode_escape_codepoint(&mut chars, code)?;
                 out.push(ch);
             }
             'U' => {
-                let code = collect_escape_digits(&mut chars, 8, raw)?;
-                let ch = char::from_u32(code).ok_or(ParseError::UnexpectedToken {
-                    expected: "valid unicode escape",
-                    actual: raw.into(),
-                })?;
+                let code = collect_escape_digits(&mut chars, 8)?;
+                let ch = decode_escape_codepoint(&mut chars, code)?;
                 out.push(ch);
             }
             '0'..='7' => {
@@ -2426,16 +2554,15 @@ fn decode_escape_string(raw: &str) -> Result<String, ParseError> {
 fn collect_escape_digits(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     len: usize,
-    raw: &str,
 ) -> Result<u32, ParseError> {
     let mut digits = String::with_capacity(len);
     for _ in 0..len {
-        digits.push(chars.next().ok_or(ParseError::UnexpectedEof)?);
+        let Some(ch) = chars.next() else {
+            return Err(unicode_error("invalid Unicode escape"));
+        };
+        digits.push(ch);
     }
-    u32::from_str_radix(&digits, 16).map_err(|_| ParseError::UnexpectedToken {
-        expected: "valid unicode escape",
-        actual: raw.into(),
-    })
+    u32::from_str_radix(&digits, 16).map_err(|_| unicode_error("invalid Unicode escape"))
 }
 
 fn decode_dollar_string(raw: &str) -> Result<String, ParseError> {
@@ -2450,4 +2577,108 @@ fn decode_dollar_string(raw: &str) -> Result<String, ParseError> {
         actual: raw.into(),
     })?;
     Ok(suffix[..closing].to_string())
+}
+
+fn decode_escape_codepoint(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    code: u32,
+) -> Result<char, ParseError> {
+    if let Some(high) = as_high_surrogate(code) {
+        let low_prefix = chars.next().ok_or_else(|| unicode_error("invalid Unicode surrogate pair"))?;
+        let expected_len = match low_prefix {
+            '\\' => match chars.next().ok_or_else(|| unicode_error("invalid Unicode surrogate pair"))? {
+                'u' => 4,
+                'U' => 8,
+                _ => return Err(unicode_error("invalid Unicode surrogate pair")),
+            },
+            _ => return Err(unicode_error("invalid Unicode surrogate pair")),
+        };
+        let low = collect_escape_digits(chars, expected_len)?;
+        let Some(low) = as_low_surrogate(low) else {
+            return Err(unicode_error("invalid Unicode surrogate pair"));
+        };
+        let codepoint = 0x10000 + (((high as u32) - 0xD800) << 10) + ((low as u32) - 0xDC00);
+        char::from_u32(codepoint).ok_or_else(|| unicode_error("invalid Unicode escape value"))
+    } else if as_low_surrogate(code).is_some() {
+        Err(unicode_error("invalid Unicode surrogate pair"))
+    } else {
+        char::from_u32(code).ok_or_else(|| unicode_error("invalid Unicode escape value"))
+    }
+}
+
+fn decode_unicode_codepoint_with_surrogates(
+    chars: &[char],
+    start: usize,
+    next: usize,
+    code: u32,
+    escape_char: char,
+) -> Result<(char, usize), ParseError> {
+    if let Some(high) = as_high_surrogate(code) {
+        let Some((low, consumed)) = parse_next_unicode_escape(chars, next, escape_char)? else {
+            return Err(unicode_error("invalid Unicode surrogate pair"));
+        };
+        let Some(low) = as_low_surrogate(low) else {
+            return Err(unicode_error("invalid Unicode surrogate pair"));
+        };
+        let codepoint = 0x10000 + (((high as u32) - 0xD800) << 10) + ((low as u32) - 0xDC00);
+        let decoded =
+            char::from_u32(codepoint).ok_or_else(|| unicode_error("invalid Unicode escape value"))?;
+        Ok((decoded, consumed))
+    } else if as_low_surrogate(code).is_some() {
+        let _ = start;
+        Err(unicode_error("invalid Unicode surrogate pair"))
+    } else {
+        let decoded =
+            char::from_u32(code).ok_or_else(|| unicode_error("invalid Unicode escape value"))?;
+        Ok((decoded, next))
+    }
+}
+
+fn parse_next_unicode_escape(
+    chars: &[char],
+    start: usize,
+    escape_char: char,
+) -> Result<Option<(u32, usize)>, ParseError> {
+    if start >= chars.len() {
+        return Ok(None);
+    }
+    if chars[start] != escape_char {
+        return Ok(None);
+    }
+    if start + 1 >= chars.len() {
+        return Err(unicode_error("invalid Unicode surrogate pair"));
+    }
+    let (digits, next) = if chars[start + 1] == '+' {
+        if start + 8 > chars.len() {
+            return Err(unicode_error("invalid Unicode surrogate pair"));
+        }
+        (chars[start + 2..start + 8].iter().collect::<String>(), start + 8)
+    } else {
+        if start + 5 > chars.len() {
+            return Err(unicode_error("invalid Unicode surrogate pair"));
+        }
+        (chars[start + 1..start + 5].iter().collect::<String>(), start + 5)
+    };
+    let code = u32::from_str_radix(&digits, 16)
+        .map_err(|_| unicode_error("invalid Unicode surrogate pair"))?;
+    Ok(Some((code, next)))
+}
+
+fn unicode_error(message: &'static str) -> ParseError {
+    ParseError::UnexpectedToken {
+        expected: "valid Unicode string literal",
+        actual: message.into(),
+    }
+}
+
+fn as_high_surrogate(code: u32) -> Option<u16> {
+    (0xD800..=0xDBFF)
+        .contains(&code)
+        .then_some(code as u16)
+}
+
+fn as_low_surrogate(code: u32) -> Option<u16> {
+    (0xDC00..=0xDFFF)
+        .contains(&code)
+        .then_some(code as u16)
 }

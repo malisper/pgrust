@@ -200,6 +200,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::ConcatWs)
                 | Some(BuiltinScalarFunction::Format)
                 | Some(BuiltinScalarFunction::Lower)
+                | Some(BuiltinScalarFunction::Unistr)
                 | Some(BuiltinScalarFunction::BTrim)
                 | Some(BuiltinScalarFunction::LTrim)
                 | Some(BuiltinScalarFunction::RTrim)
