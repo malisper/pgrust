@@ -6015,6 +6015,37 @@ fn regexp_set_returning_functions_work() {
 }
 
 #[test]
+fn similar_to_predicates_work() {
+    let base = temp_dir("similar_to_predicates");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'abcdefg' similar to '_bcd%', \
+                'abcdefg' similar to '_bcd#%' escape '#', \
+                'abcd%' similar to '_bcd#%' escape '#', \
+                'abcdefg' not similar to 'bcd%'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn trim_supports_bytea_arguments() {
     let base = temp_dir("strings_trim_bytea");
     let txns = TransactionManager::new_durable(&base).unwrap();

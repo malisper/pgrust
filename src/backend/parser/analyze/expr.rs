@@ -373,6 +373,41 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             case_insensitive: *case_insensitive,
             negated: *negated,
         },
+        SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?),
+            pattern: Box::new(bind_expr_with_outer_and_ctes(
+                pattern,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?),
+            escape: match escape {
+                Some(value) => Some(Box::new(bind_expr_with_outer_and_ctes(
+                    value,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?)),
+                None => None,
+            },
+            negated: *negated,
+        },
         SqlExpr::And(left, right) => Expr::And(
             Box::new(bind_expr_with_outer_and_ctes(
                 left,

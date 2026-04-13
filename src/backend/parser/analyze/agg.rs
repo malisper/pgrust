@@ -64,6 +64,16 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
                 || expr_contains_agg(pattern)
                 || escape.as_ref().is_some_and(|e| expr_contains_agg(e))
         }
+        SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_agg(expr)
+                || expr_contains_agg(pattern)
+                || escape.as_ref().is_some_and(|e| expr_contains_agg(e))
+        }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
         | SqlExpr::BitNot(inner)
@@ -134,6 +144,16 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
             expr_references_input_scope(l) || expr_references_input_scope(r)
         }
         SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_input_scope(expr)
+                || expr_references_input_scope(pattern)
+                || escape.as_ref().is_some_and(|e| expr_references_input_scope(e))
+        }
+        SqlExpr::Similar {
             expr,
             pattern,
             escape,
@@ -231,6 +251,18 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlFunct
             collect_aggs(r, aggs);
         }
         SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_aggs(expr, aggs);
+            collect_aggs(pattern, aggs);
+            if let Some(escape) = escape {
+                collect_aggs(escape, aggs);
+            }
+        }
+        SqlExpr::Similar {
             expr,
             pattern,
             escape,

@@ -1867,6 +1867,18 @@ fn collect_rels_from_expr(
                 collect_rels_from_expr(escape, rels);
             }
         }
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_rels_from_expr(expr, rels);
+            collect_rels_from_expr(pattern, rels);
+            if let Some(escape) = escape {
+                collect_rels_from_expr(escape, rels);
+            }
+        }
         Expr::FuncCall { args, .. } => {
             for arg in args {
                 collect_rels_from_expr(arg, rels);

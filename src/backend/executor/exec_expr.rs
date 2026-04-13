@@ -38,7 +38,8 @@ use super::expr_string::{
     eval_length_function, eval_like, eval_lower_function, eval_md5_function,
     eval_position_function, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
     eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr, eval_repeat_function,
-    eval_text_substring, eval_to_char_function, eval_to_number_function, eval_trim_function,
+    eval_similar, eval_text_substring, eval_to_char_function, eval_to_number_function,
+    eval_trim_function,
 };
 use super::node_types::*;
 pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
@@ -176,6 +177,20 @@ pub fn eval_expr(
                 *case_insensitive,
                 *negated,
             )
+        }
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => {
+            let left = eval_expr(expr, slot, ctx)?;
+            let pattern = eval_expr(pattern, slot, ctx)?;
+            let escape = match escape {
+                Some(value) => Some(eval_expr(value, slot, ctx)?),
+                None => None,
+            };
+            eval_similar(&left, &pattern, escape.as_ref(), *negated)
         }
         Expr::And(left, right) => {
             eval_and(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
@@ -386,6 +401,20 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 *case_insensitive,
                 *negated,
             )
+        }
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => {
+            let left = eval_plpgsql_expr(expr, slot)?;
+            let pattern = eval_plpgsql_expr(pattern, slot)?;
+            let escape = match escape {
+                Some(value) => Some(eval_plpgsql_expr(value, slot)?),
+                None => None,
+            };
+            eval_similar(&left, &pattern, escape.as_ref(), *negated)
         }
         Expr::And(left, right) => eval_and(
             eval_plpgsql_expr(left, slot)?,

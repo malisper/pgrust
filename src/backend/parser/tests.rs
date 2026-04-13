@@ -2510,3 +2510,18 @@ fn parse_trim_without_explicit_trim_chars() {
         SqlExpr::FuncCall { name, args } if name == "rtrim" && args.len() == 1
     ));
 }
+
+#[test]
+fn parse_similar_to_syntax() {
+    let stmt =
+        parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert!(matches!(
+                &stmt.targets[0].expr,
+                SqlExpr::Similar { negated: false, .. }
+            ));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}

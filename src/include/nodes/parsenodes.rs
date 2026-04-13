@@ -609,6 +609,12 @@ pub enum SqlExpr {
         case_insensitive: bool,
         negated: bool,
     },
+    Similar {
+        expr: Box<SqlExpr>,
+        pattern: Box<SqlExpr>,
+        escape: Option<Box<SqlExpr>>,
+        negated: bool,
+    },
     And(Box<SqlExpr>, Box<SqlExpr>),
     Or(Box<SqlExpr>, Box<SqlExpr>),
     Not(Box<SqlExpr>),
