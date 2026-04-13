@@ -85,6 +85,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         | SqlExpr::Gt(_, _)
         | SqlExpr::GtEq(_, _)
         | SqlExpr::RegexMatch(_, _)
+        | SqlExpr::Like { .. }
         | SqlExpr::And(_, _)
         | SqlExpr::Or(_, _)
         | SqlExpr::Not(_)
@@ -194,10 +195,14 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::JsonbExtractPathText)
                 | Some(BuiltinScalarFunction::BpcharToText)
                 | Some(BuiltinScalarFunction::Lower)
+                | Some(BuiltinScalarFunction::BTrim)
+                | Some(BuiltinScalarFunction::LTrim)
+                | Some(BuiltinScalarFunction::RTrim)
                 | Some(BuiltinScalarFunction::Left)
                 | Some(BuiltinScalarFunction::Repeat)
                 | Some(BuiltinScalarFunction::Md5)
                 | Some(BuiltinScalarFunction::ConvertFrom)
+                | Some(BuiltinScalarFunction::RegexpReplace)
                 | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::Length)
                 | Some(BuiltinScalarFunction::JsonArrayLength)
@@ -233,7 +238,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::BitCount) => SqlType::new(SqlTypeKind::Int8),
                 Some(BuiltinScalarFunction::JsonbPathExists)
-                | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
+                | Some(BuiltinScalarFunction::JsonbPathMatch)
+                | Some(BuiltinScalarFunction::RegexpLike) => SqlType::new(SqlTypeKind::Bool),
                 Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
                 Some(BuiltinScalarFunction::Abs) => {
                     function_arg_values(args).next().map_or(SqlType::new(SqlTypeKind::Text), |arg| {

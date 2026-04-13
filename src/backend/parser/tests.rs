@@ -2439,3 +2439,54 @@ fn build_plan_rejects_multi_column_scalar_subquery() {
     let stmt = parse_select("select (select id, name from people)").unwrap();
     assert!(build_plan(&stmt, &catalog()).is_err());
 }
+
+#[test]
+fn parse_sql_string_continuation_literal() {
+    let stmt = parse_statement("select 'first line'\n' - next line' as joined").unwrap();
+    match stmt {
+        Statement::Select(stmt) => assert_eq!(
+            stmt.targets[0].expr,
+            SqlExpr::Const(Value::Text("first line - next line".into()))
+        ),
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_unicode_string_and_identifier_literals() {
+    let stmt = parse_statement("select U&'d\\0061t\\+000061' as U&\"d\\0061t\\+000061\"").unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(
+                stmt.targets[0].expr,
+                SqlExpr::Const(Value::Text("data".into()))
+            );
+            assert_eq!(stmt.targets[0].output_name, "data");
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_like_and_trim_syntax() {
+    let stmt =
+        parse_statement("select trim(leading 'x' from 'xxxabc'), 'abc' ilike 'A%' escape '#'")
+            .unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert!(matches!(
+                &stmt.targets[0].expr,
+                SqlExpr::FuncCall { name, .. } if name == "ltrim"
+            ));
+            assert!(matches!(
+                &stmt.targets[1].expr,
+                SqlExpr::Like {
+                    case_insensitive: true,
+                    negated: false,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+}

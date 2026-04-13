@@ -3,7 +3,8 @@ use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use super::comments::{
-    normalize_position_syntax_preserving_layout, strip_sql_comments_preserving_layout,
+    normalize_position_syntax_preserving_layout, normalize_string_continuation_preserving_layout,
+    strip_sql_comments_preserving_layout,
 };
 use super::parsenodes::*;
 use crate::backend::executor::{AggFunc, Value};
@@ -14,8 +15,9 @@ use crate::include::nodes::datum::BitString;
 struct SqlParser;
 
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
+    let sql = normalize_string_continuation_preserving_layout(sql);
     let sql =
-        normalize_position_syntax_preserving_layout(&strip_sql_comments_preserving_layout(sql));
+        normalize_position_syntax_preserving_layout(&strip_sql_comments_preserving_layout(&sql));
     SqlParser::parse(Rule::statement, &sql)
         .map_err(|e| map_pest_error("statement", e))
         .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
@@ -149,7 +151,7 @@ fn build_do(pair: Pair<'_, Rule>) -> Result<DoStatement, ParseError> {
     let mut code = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::do_body => code = Some(decode_string_literal(part.as_str())?),
+            Rule::do_body => code = Some(decode_string_literal_pair(part)?),
             Rule::do_language_clause => {
                 let ident = part
                     .into_inner()
@@ -247,8 +249,9 @@ fn build_option_scalar_value(pair: Pair<'_, Rule>) -> Result<String, ParseError>
     Ok(match pair.as_rule() {
         Rule::quoted_string_literal
         | Rule::string_literal
+        | Rule::unicode_string_literal
         | Rule::escape_string_literal
-        | Rule::dollar_string_literal => decode_string_literal(pair.as_str())?,
+        | Rule::dollar_string_literal => decode_string_literal_pair(pair)?,
         Rule::option_bool_value => {
             let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
             inner.as_str().to_string()
@@ -300,8 +303,9 @@ fn build_simple_set_value_atom(pair: Pair<'_, Rule>) -> String {
         Rule::signed_set_value => pair.as_str().to_string(),
         Rule::quoted_string_literal
         | Rule::string_literal
+        | Rule::unicode_string_literal
         | Rule::escape_string_literal
-        | Rule::dollar_string_literal => decode_string_literal(pair.as_str()).unwrap_or_default(),
+        | Rule::dollar_string_literal => decode_string_literal_pair(pair).unwrap_or_default(),
         Rule::kw_true => "true".to_string(),
         Rule::kw_false => "false".to_string(),
         Rule::kw_on_value => "on".to_string(),
@@ -887,8 +891,9 @@ fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatemen
             Rule::identifier => table_name = Some(build_identifier(part)),
             Rule::quoted_string_literal
             | Rule::string_literal
+            | Rule::unicode_string_literal
             | Rule::escape_string_literal
-            | Rule::dollar_string_literal => comment = Some(Some(decode_string_literal(part.as_str())?)),
+            | Rule::dollar_string_literal => comment = Some(Some(decode_string_literal_pair(part)?)),
             Rule::kw_null => comment = Some(None),
             _ => {}
         }
@@ -922,8 +927,9 @@ fn build_set_value_atom(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
         Rule::signed_set_value => Ok(part.as_str().to_string()),
         Rule::quoted_string_literal
         | Rule::string_literal
+        | Rule::unicode_string_literal
         | Rule::escape_string_literal
-        | Rule::dollar_string_literal => decode_string_literal(part.as_str()),
+        | Rule::dollar_string_literal => decode_string_literal_pair(part),
         Rule::identifier | Rule::numeric_literal | Rule::integer => Ok(part.as_str().to_string()),
         Rule::kw_default | Rule::kw_true | Rule::kw_false | Rule::kw_on_value | Rule::kw_off => {
             Ok(part.as_str().to_ascii_lowercase())
@@ -1397,7 +1403,15 @@ fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseErr
 }
 
 fn build_identifier(pair: Pair<'_, Rule>) -> String {
+    if pair.as_rule() == Rule::identifier {
+        if let Some(inner) = pair.clone().into_inner().next() {
+            return build_identifier(inner);
+        }
+    }
     let raw = pair.as_str();
+    if pair.as_rule() == Rule::unicode_quoted_identifier {
+        return decode_unicode_quoted_identifier(raw).unwrap_or_else(|_| raw.to_string());
+    }
     if raw.starts_with('"') && raw.ends_with('"') {
         raw[1..raw.len() - 1].replace("\"\"", "\"")
     } else {
@@ -1581,6 +1595,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         }
                     })
                 }
+                Rule::like_suffix => build_like_predicate(left, next),
                 Rule::comp_op => {
                     let right = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
                     Ok(match next.as_str() {
@@ -1753,11 +1768,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 args: args.into_iter().map(SqlFunctionArg::positional).collect(),
             })
         }
+        Rule::trim_expr => build_trim_expr(pair),
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let literal =
-                decode_string_literal(inner.next().ok_or(ParseError::UnexpectedEof)?.as_str())?;
+            let literal = decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             Ok(SqlExpr::Cast(
                 Box::new(SqlExpr::Const(Value::Text(literal.into()))),
                 ty,
@@ -1772,9 +1787,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::integer => Ok(SqlExpr::IntegerLiteral(pair.as_str().to_string())),
         Rule::quoted_string_literal
         | Rule::string_literal
+        | Rule::unicode_string_literal
         | Rule::escape_string_literal
         | Rule::dollar_string_literal => Ok(SqlExpr::Const(Value::Text(
-            decode_string_literal(pair.as_str())?.into(),
+            decode_string_literal_pair(pair)?.into(),
         ))),
         Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
@@ -1925,6 +1941,82 @@ fn build_null_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, 
     })
 }
 
+fn build_like_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut negated = false;
+    let mut case_insensitive = false;
+    let mut pattern = None;
+    let mut escape = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_not => negated = true,
+            Rule::kw_like => case_insensitive = false,
+            Rule::kw_ilike => case_insensitive = true,
+            Rule::concat_expr => {
+                if pattern.is_none() {
+                    pattern = Some(build_expr(part)?);
+                }
+            }
+            Rule::escape_clause => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::concat_expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                escape = Some(Box::new(build_expr(expr)?));
+            }
+            _ => {}
+        }
+    }
+    Ok(SqlExpr::Like {
+        expr: Box::new(left),
+        pattern: Box::new(pattern.ok_or(ParseError::UnexpectedEof)?),
+        escape,
+        case_insensitive,
+        negated,
+    })
+}
+
+fn build_trim_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut direction = "both";
+    let mut trim_source = None;
+    let mut trim_chars = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::trim_spec => direction = part.as_str(),
+            Rule::trim_arguments => {
+                let exprs = part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::expr)
+                    .map(build_expr)
+                    .collect::<Result<Vec<_>, _>>()?;
+                match exprs.as_slice() {
+                    [source] => trim_source = Some(source.clone()),
+                    [chars, source] => {
+                        trim_chars = Some(chars.clone());
+                        trim_source = Some(source.clone());
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut args = vec![SqlFunctionArg::positional(
+        trim_source.ok_or(ParseError::UnexpectedEof)?,
+    )];
+    if let Some(chars) = trim_chars {
+        args.push(SqlFunctionArg::positional(chars));
+    }
+    Ok(SqlExpr::FuncCall {
+        name: match direction.to_ascii_lowercase().as_str() {
+            "leading" => "ltrim",
+            "trailing" => "rtrim",
+            _ => "btrim",
+        }
+        .into(),
+        args,
+    })
+}
+
 fn fold_infix(
     first: SqlExpr,
     mut tail: pest::iterators::Pairs<'_, Rule>,
@@ -1972,6 +2064,13 @@ fn fold_infix(
 }
 
 fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
+    if raw.len() >= 2
+        && matches!(raw.as_bytes()[0], b'u' | b'U')
+        && raw.as_bytes()[1] == b'&'
+    {
+        return decode_unicode_string_literal(raw);
+    }
+
     if raw.starts_with('\'') {
         return Ok(raw[1..raw.len() - 1].replace("''", "'"));
     }
@@ -1988,6 +2087,129 @@ fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
         expected: "string literal",
         actual: raw.into(),
     })
+}
+
+fn decode_string_literal_pair(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    match pair.as_rule() {
+        Rule::unicode_string_literal => decode_unicode_string_literal(pair.as_str()),
+        Rule::quoted_string_literal => {
+            let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            decode_string_literal_pair(inner)
+        }
+        _ => decode_string_literal(pair.as_str()),
+    }
+}
+
+fn decode_unicode_quoted_identifier(raw: &str) -> Result<String, ParseError> {
+    let (literal, escape_char) = split_unicode_literal_parts(raw)?;
+    let text = literal
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .ok_or(ParseError::UnexpectedToken {
+            expected: "unicode quoted identifier",
+            actual: raw.into(),
+        })?
+        .replace("\"\"", "\"");
+    decode_unicode_escapes(&text, escape_char)
+}
+
+fn decode_unicode_string_literal(raw: &str) -> Result<String, ParseError> {
+    let (literal, escape_char) = split_unicode_literal_parts(raw)?;
+    let text = decode_string_literal(literal)?;
+    decode_unicode_escapes(&text, escape_char)
+}
+
+fn split_unicode_literal_parts(raw: &str) -> Result<(&str, char), ParseError> {
+    let lower = raw.to_ascii_lowercase();
+    let Some(prefix_stripped) = lower.strip_prefix("u&") else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "unicode string literal",
+            actual: raw.into(),
+        });
+    };
+    if let Some(idx) = prefix_stripped.find("uescape") {
+        let literal_end = 2 + idx;
+        let literal = raw[..literal_end].trim_end();
+        let clause = raw[literal_end..].trim_start();
+        let clause_lower = clause.to_ascii_lowercase();
+        if !clause_lower.starts_with("uescape") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "UESCAPE clause",
+                actual: clause.into(),
+            });
+        }
+        let escape_raw = clause["UESCAPE".len()..].trim();
+        let escape = decode_string_literal(escape_raw)?;
+        let mut chars = escape.chars();
+        let Some(ch) = chars.next() else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "non-empty UESCAPE character",
+                actual: raw.into(),
+            });
+        };
+        if chars.next().is_some() || matches!(ch, '+' | '"' | '\'' | ' ' | '\t' | '\n' | '\r') {
+            return Err(ParseError::UnexpectedToken {
+                expected: "valid UESCAPE character",
+                actual: raw.into(),
+            });
+        }
+        Ok((literal.trim(), ch))
+    } else {
+        Ok((raw[2..].trim(), '\\'))
+    }
+}
+
+fn decode_unicode_escapes(text: &str, escape_char: char) -> Result<String, ParseError> {
+    let mut out = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch != escape_char {
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if i + 1 < chars.len() && chars[i + 1] == escape_char {
+            out.push(escape_char);
+            i += 2;
+            continue;
+        }
+        if i + 1 >= chars.len() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "valid Unicode escape sequence",
+                actual: text.into(),
+            });
+        }
+        let (digits, next) = if chars[i + 1] == '+' {
+            if i + 8 > chars.len() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "8-digit Unicode escape",
+                    actual: text.into(),
+                });
+            }
+            (chars[i + 2..i + 8].iter().collect::<String>(), i + 8)
+        } else {
+            if i + 5 > chars.len() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "4-digit Unicode escape",
+                    actual: text.into(),
+                });
+            }
+            (chars[i + 1..i + 5].iter().collect::<String>(), i + 5)
+        };
+        let code = u32::from_str_radix(&digits, 16).map_err(|_| ParseError::UnexpectedToken {
+            expected: "valid Unicode escape digits",
+            actual: text.into(),
+        })?;
+        let decoded = char::from_u32(code).ok_or(ParseError::UnexpectedToken {
+            expected: "valid Unicode codepoint",
+            actual: text.into(),
+        })?;
+        out.push(decoded);
+        i = next;
+    }
+    Ok(out)
 }
 
 fn parse_bit_string_literal(raw: &str) -> Result<BitString, ParseError> {

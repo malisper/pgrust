@@ -336,6 +336,43 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ctes,
             )?),
         ),
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?),
+            pattern: Box::new(bind_expr_with_outer_and_ctes(
+                pattern,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?),
+            escape: match escape {
+                Some(value) => Some(Box::new(bind_expr_with_outer_and_ctes(
+                    value,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?)),
+                None => None,
+            },
+            case_insensitive: *case_insensitive,
+            negated: *negated,
+        },
         SqlExpr::And(left, right) => Expr::And(
             Box::new(bind_expr_with_outer_and_ctes(
                 left,
@@ -1336,6 +1373,83 @@ fn bind_scalar_function_call(
                 )],
             })
         }
+        BuiltinScalarFunction::BTrim
+        | BuiltinScalarFunction::LTrim
+        | BuiltinScalarFunction::RTrim => {
+            let value_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let mut coerced = vec![bound_args[0].clone()];
+            if let Some(chars_arg) = args.get(1) {
+                let chars_type = infer_sql_expr_type_with_ctes(
+                    chars_arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                let target = if value_type.kind == SqlTypeKind::Bytea {
+                    SqlType::new(SqlTypeKind::Bytea)
+                } else {
+                    SqlType::new(SqlTypeKind::Text)
+                };
+                coerced[0] = coerce_bound_expr(bound_args[0].clone(), value_type, target);
+                coerced.push(coerce_bound_expr(bound_args[1].clone(), chars_type, target));
+            } else if value_type.kind != SqlTypeKind::Bytea {
+                coerced[0] = coerce_bound_expr(
+                    bound_args[0].clone(),
+                    value_type,
+                    SqlType::new(SqlTypeKind::Text),
+                );
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: coerced,
+            })
+        }
+        BuiltinScalarFunction::RegexpLike => Ok(Expr::FuncCall {
+            func,
+            args: args
+                .iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    let target = SqlType::new(SqlTypeKind::Text);
+                    coerce_bound_expr(bound_args[idx].clone(), ty, target)
+                })
+                .collect(),
+        }),
+        BuiltinScalarFunction::RegexpReplace => Ok(Expr::FuncCall {
+            func,
+            args: args
+                .iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    coerce_bound_expr(bound_args[idx].clone(), ty, SqlType::new(SqlTypeKind::Text))
+                })
+                .collect(),
+        }),
         BuiltinScalarFunction::Md5 => {
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],

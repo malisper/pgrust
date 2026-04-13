@@ -35,8 +35,9 @@ use super::expr_ops::{
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_string::{
     eval_bpchar_to_text_function, eval_convert_from_function, eval_left_function,
-    eval_length_function, eval_lower_function, eval_md5_function, eval_position_function,
-    eval_repeat_function, eval_to_char_function, eval_to_number_function,
+    eval_length_function, eval_like, eval_lower_function, eval_md5_function,
+    eval_position_function, eval_regexp_like, eval_regexp_replace, eval_repeat_function,
+    eval_to_char_function, eval_to_number_function, eval_trim_function,
 };
 use super::node_types::*;
 pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
@@ -153,6 +154,27 @@ pub fn eval_expr(
             let re =
                 regex::Regex::new(pat_str).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
             Ok(Value::Bool(re.is_match(text_str)))
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => {
+            let left = eval_expr(expr, slot, ctx)?;
+            let pattern = eval_expr(pattern, slot, ctx)?;
+            let escape = match escape {
+                Some(value) => Some(eval_expr(value, slot, ctx)?),
+                None => None,
+            };
+            eval_like(
+                &left,
+                &pattern,
+                escape.as_ref(),
+                *case_insensitive,
+                *negated,
+            )
         }
         Expr::And(left, right) => {
             eval_and(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
@@ -343,6 +365,27 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 regex::Regex::new(pat_str).map_err(|e| ExecError::InvalidRegex(e.to_string()))?;
             Ok(Value::Bool(re.is_match(text_str)))
         }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => {
+            let left = eval_plpgsql_expr(expr, slot)?;
+            let pattern = eval_plpgsql_expr(pattern, slot)?;
+            let escape = match escape {
+                Some(value) => Some(eval_plpgsql_expr(value, slot)?),
+                None => None,
+            };
+            eval_like(
+                &left,
+                &pattern,
+                escape.as_ref(),
+                *case_insensitive,
+                *negated,
+            )
+        }
         Expr::And(left, right) => eval_and(
             eval_plpgsql_expr(left, slot)?,
             eval_plpgsql_expr(right, slot)?,
@@ -409,6 +452,9 @@ fn eval_plpgsql_builtin_function(
             _ => eval_length_function(&values),
         },
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
+        BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
+        BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
@@ -479,6 +525,8 @@ fn eval_plpgsql_builtin_function(
         },
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
+        BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
+        BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
@@ -675,6 +723,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
+        BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
+        BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::Position => match values.as_slice() {
@@ -728,6 +779,8 @@ fn eval_builtin_function(
             _ => unreachable!("validated bit_count arguments"),
         },
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
+        BuiltinScalarFunction::RegexpLike => eval_regexp_like(&values),
+        BuiltinScalarFunction::RegexpReplace => eval_regexp_replace(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
