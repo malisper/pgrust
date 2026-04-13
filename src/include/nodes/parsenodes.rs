@@ -21,6 +21,9 @@ pub enum ParseError {
     UnknownTable(String),
     UnknownColumn(String),
     AmbiguousColumn(String),
+    InvalidFromClauseReference(String),
+    MissingFromClauseEntry(String),
+    DuplicateTableName(String),
     EmptySelectList,
     UnsupportedQualifiedName(String),
     InvalidInsertTargetCount {
@@ -63,6 +66,15 @@ impl fmt::Display for ParseError {
             ParseError::UnknownColumn(name) => write!(f, "unknown column: {name}"),
             ParseError::AmbiguousColumn(name) => {
                 write!(f, "column reference \"{name}\" is ambiguous")
+            }
+            ParseError::InvalidFromClauseReference(name) => {
+                write!(f, "invalid reference to FROM-clause entry for table \"{name}\"")
+            }
+            ParseError::MissingFromClauseEntry(name) => {
+                write!(f, "missing FROM-clause entry for table \"{name}\"")
+            }
+            ParseError::DuplicateTableName(name) => {
+                write!(f, "table name \"{name}\" specified more than once")
             }
             ParseError::EmptySelectList => {
                 write!(f, "SELECT requires a target list or FROM clause")

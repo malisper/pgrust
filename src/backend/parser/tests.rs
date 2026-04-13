@@ -2246,7 +2246,45 @@ fn build_plan_join_alias_hides_inner_relation_names() {
         parse_select("select p.id from (people p join pets q on p.id = q.owner_id) j").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog),
-        Err(ParseError::UnknownColumn(name)) if name == "p.id"
+        Err(ParseError::InvalidFromClauseReference(name)) if name == "p"
+    ));
+}
+
+#[test]
+fn build_plan_parenthesized_join_alias_reports_invalid_from_clause_reference() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt =
+        parse_select("select * from (people p join pets q on p.id = q.owner_id) j where p.id = 1")
+            .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog),
+        Err(ParseError::InvalidFromClauseReference(name)) if name == "p"
+    ));
+}
+
+#[test]
+fn build_plan_wrapped_join_alias_reports_missing_from_clause_entry() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select * from (people join pets on people.id = pets.owner_id as x) xx where x.id = 1",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog),
+        Err(ParseError::MissingFromClauseEntry(name)) if name == "x"
+    ));
+}
+
+#[test]
+fn build_plan_join_alias_rejects_duplicate_table_name() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select("select * from people a1 join pets a2 using (id) as a1").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog),
+        Err(ParseError::DuplicateTableName(name)) if name == "a1"
     ));
 }
 

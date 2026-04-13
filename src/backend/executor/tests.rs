@@ -4897,7 +4897,9 @@ fn join_alias_hides_inner_relation_names() {
         catalog_with_pets(),
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "p.name"));
+    assert!(
+        matches!(err, ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "p")
+    );
 }
 
 #[test]
@@ -4966,6 +4968,63 @@ fn join_using_alias_hides_non_merged_columns() {
     )
     .unwrap_err();
     assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "x.name"));
+}
+
+#[test]
+fn parenthesized_join_alias_reports_invalid_from_clause_reference() {
+    let base = temp_dir("parenthesized_join_alias_invalid_ref");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from (people p join pets q on p.id = q.owner_id) j where p.id = 1",
+        catalog_with_pets(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "p"
+    ));
+}
+
+#[test]
+fn wrapped_join_alias_reports_missing_from_clause_entry() {
+    let base = temp_dir("wrapped_join_alias_missing_ref");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from (people join pets on people.id = pets.owner_id as x) xx where x.id = 1",
+        catalog_with_pets(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::MissingFromClauseEntry(name)) if name == "x"
+    ));
+}
+
+#[test]
+fn join_alias_rejects_duplicate_table_name() {
+    let base = temp_dir("join_alias_duplicate_name");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from people a1 join pets a2 using (id) as a1",
+        catalog_with_pets(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DuplicateTableName(name)) if name == "a1"
+    ));
 }
 
 #[test]
