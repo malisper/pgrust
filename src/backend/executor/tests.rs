@@ -1451,8 +1451,8 @@ fn cross_join_returns_cartesian_product() {
                 rows,
                 vec![
                     vec![Value::Text("alice".into()), Value::Text("Kitchen".into())],
-                    vec![Value::Text("alice".into()), Value::Text("Mocha".into())],
                     vec![Value::Text("bob".into()), Value::Text("Kitchen".into())],
+                    vec![Value::Text("alice".into()), Value::Text("Mocha".into())],
                     vec![Value::Text("bob".into()), Value::Text("Mocha".into())]
                 ]
             );
@@ -5002,6 +5002,32 @@ fn left_join_on_emits_null_extended_rows() {
             vec![Value::Int32(1), Value::Int32(11)],
             vec![Value::Int32(2), Value::Int32(12)],
             vec![Value::Int32(3), Value::Null],
+        ],
+    );
+}
+
+#[test]
+fn cross_join_uses_right_side_as_outer_loop_for_output_order() {
+    let base = temp_dir("cross_join_row_order");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select people.id, pets.id from people, pets limit 6",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Int32(10)],
+            vec![Value::Int32(3), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(11)],
+            vec![Value::Int32(2), Value::Int32(11)],
+            vec![Value::Int32(3), Value::Int32(11)],
         ],
     );
 }
