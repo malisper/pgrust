@@ -1096,10 +1096,11 @@ fn build_ungrouped_column_error(
     clause: UngroupedColumnClause,
 ) -> ParseError {
     let column = &input_scope.columns[col_index];
-    let display_name = match &column.relation_name {
-        Some(relation_name) => format!("{relation_name}.{}", column.output_name),
-        None => column.output_name.clone(),
-    };
+    let display_name = column
+        .relation_names
+        .first()
+        .map(|relation_name| format!("{relation_name}.{}", column.output_name))
+        .unwrap_or_else(|| column.output_name.clone());
     ParseError::UngroupedColumn {
         display_name,
         token: token.to_string(),

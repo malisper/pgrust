@@ -635,6 +635,7 @@ fn parse_table_alias() {
             }),
             alias: "s".into(),
             column_aliases: vec![],
+            preserve_source_names: false,
         })
     );
 }
@@ -651,6 +652,7 @@ fn parse_table_alias_with_as() {
             }),
             alias: "s".into(),
             column_aliases: vec![],
+            preserve_source_names: false,
         })
     );
 }
@@ -672,6 +674,7 @@ fn parse_select_star_with_table_alias() {
             }),
             alias: "p".into(),
             column_aliases: vec![],
+            preserve_source_names: false,
         })
     );
     assert_eq!(stmt.targets[0].output_name, "*");
@@ -1051,6 +1054,7 @@ fn parse_cross_join_with_aliases() {
                 }),
                 alias: "p".into(),
                 column_aliases: vec![],
+                preserve_source_names: false,
             }),
             right: Box::new(FromItem::Alias {
                 source: Box::new(FromItem::Table {
@@ -1058,6 +1062,7 @@ fn parse_cross_join_with_aliases() {
                 }),
                 alias: "q".into(),
                 column_aliases: vec![],
+                preserve_source_names: false,
             }),
             kind: JoinKind::Cross,
             constraint: JoinConstraint::None,
@@ -1914,6 +1919,7 @@ fn parse_srf_with_column_alias() {
             source,
             alias,
             column_aliases,
+            preserve_source_names,
         }) => {
             let FromItem::FunctionCall { name, args } = source.as_ref() else {
                 panic!("expected FunctionCall source, got {:?}", source);
@@ -1922,6 +1928,7 @@ fn parse_srf_with_column_alias() {
             assert_eq!(args.len(), 2);
             assert_eq!(alias, "g");
             assert_eq!(column_aliases, &["val"]);
+            assert!(!preserve_source_names);
         }
         other => panic!("expected Alias, got {:?}", other),
     }
@@ -1934,10 +1941,12 @@ fn parse_srf_with_table_alias_only() {
         Some(FromItem::Alias {
             alias,
             column_aliases,
+            preserve_source_names,
             ..
         }) => {
             assert_eq!(alias, "g");
             assert!(column_aliases.is_empty());
+            assert!(!preserve_source_names);
         }
         other => panic!("expected Alias, got {:?}", other),
     }
@@ -1951,10 +1960,12 @@ fn parse_derived_table_with_alias() {
             source,
             alias,
             column_aliases,
+            preserve_source_names,
         }) => {
             assert_eq!(alias, "p");
             assert!(column_aliases.is_empty());
             assert!(matches!(*source, FromItem::DerivedTable(_)));
+            assert!(!preserve_source_names);
         }
         other => panic!("expected aliased derived table, got {:?}", other),
     }
@@ -1968,10 +1979,12 @@ fn parse_derived_table_with_column_aliases() {
             source,
             alias,
             column_aliases,
+            preserve_source_names,
         }) => {
             assert_eq!(alias, "p");
             assert_eq!(column_aliases, vec!["x", "y"]);
             assert!(matches!(*source, FromItem::DerivedTable(_)));
+            assert!(!preserve_source_names);
         }
         other => panic!("expected aliased derived table, got {:?}", other),
     }
@@ -1994,6 +2007,7 @@ fn parse_parenthesized_table_keyword_from_item() {
             }),
             alias: "p".into(),
             column_aliases: vec![],
+            preserve_source_names: false,
         })
     );
 }
@@ -2127,8 +2141,9 @@ fn parse_join_alias_without_parentheses() {
         Some(FromItem::Alias {
             source,
             alias,
+            preserve_source_names,
             ..
-        }) if alias == "j" && matches!(*source, FromItem::Join { .. })
+        }) if alias == "j" && preserve_source_names && matches!(*source, FromItem::Join { .. })
     ));
 }
 
@@ -2163,9 +2178,11 @@ fn parse_values_from_item() {
             source,
             alias,
             column_aliases,
+            preserve_source_names,
         }) => {
             assert_eq!(alias, "t");
             assert_eq!(column_aliases, vec!["x"]);
+            assert!(!preserve_source_names);
             assert!(
                 matches!(*source, FromItem::Values { ref rows } if rows.len() == 2 && rows[0].len() == 1)
             );
@@ -2230,6 +2247,39 @@ fn build_plan_join_alias_hides_inner_relation_names() {
     assert!(matches!(
         build_plan(&stmt, &catalog),
         Err(ParseError::UnknownColumn(name)) if name == "p.id"
+    ));
+}
+
+#[test]
+fn build_plan_reports_ambiguous_column_reference() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select("select id from people cross join pets").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog),
+        Err(ParseError::AmbiguousColumn(name)) if name == "id"
+    ));
+}
+
+#[test]
+fn build_plan_join_using_alias_preserves_base_table_names() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select x.id from people J1 join pets J2 using (id) as x where J1.name = 'alice'",
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog).is_ok());
+}
+
+#[test]
+fn build_plan_join_using_alias_exposes_only_merged_columns() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select("select x.name from people join pets using (id) as x").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog),
+        Err(ParseError::UnknownColumn(name)) if name == "x.name"
     ));
 }
 
