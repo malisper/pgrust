@@ -159,8 +159,10 @@ impl CatCache {
                 relam: crate::include::catalog::relam_for_relkind(entry.relkind),
                 reltablespace: 0,
                 relfilenode: entry.rel.rel_number,
+                reltoastrelid: entry.reltoastrelid,
                 relpersistence: entry.relpersistence,
                 relkind: entry.relkind,
+                relnatts: entry.desc.columns.len() as i16,
             };
             cache.classes_by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),
@@ -194,9 +196,13 @@ impl CatCache {
                     attrelid: entry.relation_oid,
                     attname: column.name.clone(),
                     atttypid: sql_type_oid(column.sql_type),
+                    attlen: column.storage.attlen,
                     attnum: idx.saturating_add(1) as i16,
                     attnotnull: !column.storage.nullable,
                     atttypmod: column.sql_type.typmod,
+                    attalign: column.storage.attalign,
+                    attstorage: column.storage.attstorage,
+                    attcompression: column.storage.attcompression,
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();

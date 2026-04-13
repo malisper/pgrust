@@ -97,6 +97,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel.rel_number),
         namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
         rel,
@@ -2005,8 +2006,10 @@ fn pg_attribute_exposes_bootstrap_columns() {
             vec![Value::Text("relam".into())],
             vec![Value::Text("reltablespace".into())],
             vec![Value::Text("relfilenode".into())],
+            vec![Value::Text("reltoastrelid".into())],
             vec![Value::Text("relpersistence".into())],
             vec![Value::Text("relkind".into())],
+            vec![Value::Text("relnatts".into())],
         ],
     );
 }
@@ -4777,7 +4780,13 @@ fn select_list_generate_series_expands_rows() {
     let base = temp_dir("project_set_generate_series");
     let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
-        run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select generate_series(1, 3)").unwrap(),
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select generate_series(1, 3)",
+        )
+        .unwrap(),
         vec![
             vec![Value::Int32(1)],
             vec![Value::Int32(2)],
@@ -4818,10 +4827,7 @@ fn select_list_json_scalar_srfs_work() {
             "select json_object_keys('{\"a\":1,\"b\":2}'::json)",
         )
         .unwrap(),
-        vec![
-            vec![Value::Text("a".into())],
-            vec![Value::Text("b".into())],
-        ],
+        vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())]],
     );
     assert_query_rows(
         run_sql(
@@ -4870,7 +4876,10 @@ fn select_list_composite_srf_is_rejected() {
         "select json_each('{\"a\":1}'::json)",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::Parse(ParseError::UnexpectedToken { .. })));
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnexpectedToken { .. })
+    ));
 }
 #[test]
 fn join_alias_hides_inner_relation_names() {
@@ -5681,7 +5690,10 @@ fn jsonb_object_and_pretty_functions_work() {
                         )
                         .unwrap()
                     ),
-                    Value::Text("{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": 3\n  }\n}".into()),
+                    Value::Text(
+                        "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": 3\n  }\n}"
+                            .into()
+                    ),
                 ]]
             );
         }
@@ -5713,8 +5725,7 @@ fn jsonb_delete_and_delete_path_functions_work() {
                             .unwrap()
                     ),
                     Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("[\"a\",\"c\"]")
-                            .unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("[\"a\",\"c\"]").unwrap()
                     ),
                     Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("[10,30]").unwrap()
@@ -6000,7 +6011,10 @@ fn sql_regex_substring_forms_work() {
             "select substring('abcdefg' similar 'a#\"%#\"g' escape '#')",
             Value::Text("bcdef".into()),
         ),
-        ("select substring('abcdefg' from 'c.e')", Value::Text("cde".into())),
+        (
+            "select substring('abcdefg' from 'c.e')",
+            Value::Text("cde".into()),
+        ),
         (
             "select substring('abcdefg' from 'b(.*)f')",
             Value::Text("cde".into()),
@@ -6214,10 +6228,7 @@ fn json_jsonb_table_functions_accept_named_sql_args() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![
-                    vec![Value::Text("a".into())],
-                    vec![Value::Text("b".into())],
-                ]
+                vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())],]
             );
         }
         other => panic!("expected query result, got {:?}", other),

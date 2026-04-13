@@ -22,6 +22,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel_number),
         namespace_oid: 11,
         row_type_oid: 60_000u32.saturating_add(rel_number),
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
         desc,
@@ -60,6 +61,7 @@ fn catalog_with_people_id_index() -> Catalog {
             relation_oid: 50010,
             namespace_oid: 11,
             row_type_oid: 60010,
+            reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
             desc: RelationDesc {
@@ -1861,10 +1863,7 @@ fn build_plan_for_unnest_uses_array_element_types() {
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::FunctionScan {
-            call: crate::include::nodes::plannodes::SetReturningCall::Unnest {
-                output_columns,
-                ..
-            },
+            call: crate::include::nodes::plannodes::SetReturningCall::Unnest { output_columns, .. },
         } => {
             assert_eq!(output_columns.len(), 2);
             assert_eq!(
@@ -2513,8 +2512,7 @@ fn parse_trim_without_explicit_trim_chars() {
 
 #[test]
 fn parse_similar_to_syntax() {
-    let stmt =
-        parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
+    let stmt = parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
     match stmt {
         Statement::Select(stmt) => {
             assert!(matches!(
