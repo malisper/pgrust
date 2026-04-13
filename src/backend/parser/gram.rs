@@ -1430,7 +1430,11 @@ fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseEr
     } else {
         None
     };
-    Ok(ArraySubscript { lower, upper })
+    Ok(ArraySubscript {
+        is_slice: has_slice,
+        lower,
+        upper,
+    })
 }
 
 fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {

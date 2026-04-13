@@ -12,7 +12,6 @@ use super::expr_bit::{
 use super::expr_bool::order_bool_values;
 use super::expr_casts::cast_value;
 use super::node_types::*;
-use super::value_io::{format_array_text, format_array_value_text};
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
@@ -84,7 +83,12 @@ pub(crate) fn compare_order_values(
             a.as_text().unwrap().cmp(b.as_text().unwrap())
         }
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        (Value::Array(a), Value::Array(b)) => format_array_text(a).cmp(&format_array_text(b)),
+        (a, b) if normalize_array_value(a).is_some() && normalize_array_value(b).is_some() => {
+            compare_array_values(
+                &normalize_array_value(a).unwrap(),
+                &normalize_array_value(b).unwrap(),
+            )
+        }
         _ => Ordering::Equal,
     }
 }
@@ -155,10 +159,13 @@ pub(crate) fn compare_values(
             Ok(Value::Bool(l.as_text() == r.as_text()))
         }
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
-        (Value::Array(l), Value::Array(r)) => Ok(Value::Bool(l == r)),
-        (Value::PgArray(l), Value::PgArray(r)) => Ok(Value::Bool(l == r)),
-        (Value::PgArray(l), Value::Array(r)) | (Value::Array(r), Value::PgArray(l)) => {
-            Ok(Value::Bool(*l == ArrayValue::from_1d(r.clone())))
+        (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => {
+            Ok(Value::Bool(
+                compare_array_values(
+                    &normalize_array_value(l).unwrap(),
+                    &normalize_array_value(r).unwrap(),
+                ) == Ordering::Equal,
+            ))
         }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
@@ -203,10 +210,11 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
             .unwrap_or(true),
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => l.as_text() != r.as_text(),
         (Value::Bool(l), Value::Bool(r)) => l != r,
-        (Value::Array(l), Value::Array(r)) => l != r,
-        (Value::PgArray(l), Value::PgArray(r)) => l != r,
-        (Value::PgArray(l), Value::Array(r)) | (Value::Array(r), Value::PgArray(l)) => {
-            *l != ArrayValue::from_1d(r.clone())
+        (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => {
+            compare_array_values(
+                &normalize_array_value(l).unwrap(),
+                &normalize_array_value(r).unwrap(),
+            ) != Ordering::Equal
         }
         _ => true,
     }
@@ -601,32 +609,16 @@ pub(crate) fn order_values(
             ">=" => l.as_text().unwrap() >= r.as_text().unwrap(),
             _ => unreachable!(),
         })),
-        (Value::Array(l), Value::Array(r)) => {
-            let left = format_array_text(l);
-            let right = format_array_text(r);
-            Ok(Value::Bool(match op {
-                "<" => left < right,
-                "<=" => left <= right,
-                ">" => left > right,
-                ">=" => left >= right,
-                _ => unreachable!(),
-            }))
-        }
-        (Value::PgArray(l), Value::PgArray(r)) => {
-            let left = format_array_value_text(l);
-            let right = format_array_value_text(r);
-            Ok(Value::Bool(compare_ord(left, right, op)))
-        }
-        (Value::PgArray(l), Value::Array(r)) => {
-            let left = format_array_value_text(l);
-            let right = format_array_text(r);
-            Ok(Value::Bool(compare_ord(left, right, op)))
-        }
-        (Value::Array(l), Value::PgArray(r)) => {
-            let left = format_array_text(l);
-            let right = format_array_value_text(r);
-            Ok(Value::Bool(compare_ord(left, right, op)))
-        }
+        (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => Ok(
+            Value::Bool(compare_ord(
+                compare_array_values(
+                    &normalize_array_value(l).unwrap(),
+                    &normalize_array_value(r).unwrap(),
+                ),
+                Ordering::Equal,
+                op,
+            )),
+        ),
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
 }
@@ -639,6 +631,55 @@ fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
         ">=" => left >= right,
         _ => unreachable!(),
     }
+}
+
+fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
+    match value {
+        Value::PgArray(array) => Some(array.clone()),
+        Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
+        _ => None,
+    }
+}
+
+fn compare_array_values(left: &ArrayValue, right: &ArrayValue) -> Ordering {
+    for (left_item, right_item) in left.elements.iter().zip(right.elements.iter()) {
+        match (left_item, right_item) {
+            (Value::Null, Value::Null) => {}
+            (Value::Null, _) => return Ordering::Greater,
+            (_, Value::Null) => return Ordering::Less,
+            _ => {
+                if matches!(
+                    compare_values("=", left_item.clone(), right_item.clone()),
+                    Ok(Value::Bool(true))
+                ) {
+                    continue;
+                }
+                if matches!(
+                    order_values("<", left_item.clone(), right_item.clone()),
+                    Ok(Value::Bool(true))
+                ) {
+                    return Ordering::Less;
+                }
+                return Ordering::Greater;
+            }
+        }
+    }
+    left.elements
+        .len()
+        .cmp(&right.elements.len())
+        .then_with(|| left.dimensions.len().cmp(&right.dimensions.len()))
+        .then_with(|| {
+            left.dimensions
+                .iter()
+                .map(|dim| dim.length)
+                .cmp(right.dimensions.iter().map(|dim| dim.length))
+        })
+        .then_with(|| {
+            left.dimensions
+                .iter()
+                .map(|dim| dim.lower_bound)
+                .cmp(right.dimensions.iter().map(|dim| dim.lower_bound))
+        })
 }
 
 fn pg_float_eq(left: f64, right: f64) -> bool {

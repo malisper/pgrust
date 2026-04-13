@@ -1088,6 +1088,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 .iter()
                 .map(|subscript| {
                     Ok(crate::include::nodes::plannodes::ExprArraySubscript {
+                        is_slice: subscript.is_slice,
                         lower: subscript
                             .lower
                             .as_deref()

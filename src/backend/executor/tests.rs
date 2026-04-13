@@ -2309,7 +2309,13 @@ fn array_subscript_select_and_update_work() {
                 rows,
                 vec![vec![
                     Value::Int32(2),
-                    Value::Array(vec![Value::Int32(4), Value::Int32(5)]),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 2,
+                        }],
+                        vec![Value::Int32(4), Value::Int32(5)],
+                    )),
                 ]]
             );
         }
@@ -2343,8 +2349,20 @@ fn array_subscript_select_and_update_work() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::Array(vec![Value::Int32(1), Value::Int32(22), Value::Int32(3)]),
-                    Value::Array(vec![Value::Int32(4), Value::Int32(50), Value::Int32(60)]),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        }],
+                        vec![Value::Int32(1), Value::Int32(22), Value::Int32(3)],
+                    )),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        }],
+                        vec![Value::Int32(4), Value::Int32(50), Value::Int32(60)],
+                    )),
                 ]]
             );
         }
@@ -4625,6 +4643,83 @@ fn array_overlap_false_and_null_cases() {
     let base = temp_dir("array_overlap_false_null");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a']::varchar[] && ARRAY['b']::varchar[], ARRAY['a', null]::varchar[] && ARRAY['b', null]::varchar[], ARRAY['a']::varchar[] && (null)::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), }
+}
+
+#[test]
+fn array_slice_omitted_upper_and_mixed_slice_shape_work() {
+    let base = temp_dir("array_slice_shape");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('{1,2,3}'::int[])[2:], ('{1,2,3}'::int[])[:], ('{{1,2,3},{4,5,6},{7,8,9}}'::int[])[1:2][2]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 2,
+                            length: 2,
+                        }],
+                        vec![Value::Int32(2), Value::Int32(3)],
+                    )),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        }],
+                        vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)],
+                    )),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![
+                            crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 2,
+                            },
+                            crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 2,
+                            },
+                        ],
+                        vec![
+                            Value::Int32(1),
+                            Value::Int32(2),
+                            Value::Int32(4),
+                            Value::Int32(5),
+                        ],
+                    )),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn bound_aware_array_comparison_and_overlap_follow_array_ordering() {
+    let base = temp_dir("array_literal_compare");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ARRAY[1,2] = '{1,2}'::int[], ARRAY[1,2] && '{2,3}'::int[], ARRAY[1] < '[2:2]={1}'::int[]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(true)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 #[test]
 fn array_equality_and_inequality_work_for_same_type_arrays() {
