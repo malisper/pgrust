@@ -176,8 +176,10 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relam: crate::include::catalog::relam_for_relkind(entry.relkind),
         reltablespace: 0,
         relfilenode: entry.rel.rel_number,
+        reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relnatts: entry.desc.columns.len() as i16,
     });
 
     if entry.row_type_oid != 0 {
@@ -202,9 +204,13 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     attrelid: entry.relation_oid,
                     attname: column.name.clone(),
                     atttypid: sql_type_oid(column.sql_type),
+                    attlen: column.storage.attlen,
                     attnum: idx.saturating_add(1) as i16,
                     attnotnull: !column.storage.nullable,
                     atttypmod: column.sql_type.typmod,
+                    attalign: column.storage.attalign,
+                    attstorage: column.storage.attstorage,
+                    attcompression: column.storage.attcompression,
                     sql_type: column.sql_type,
                 }),
         );

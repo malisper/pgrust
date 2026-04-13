@@ -43,6 +43,7 @@ pub struct RelCacheEntry {
     pub relation_oid: u32,
     pub namespace_oid: u32,
     pub row_type_oid: u32,
+    pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
     pub desc: RelationDesc,
@@ -94,6 +95,10 @@ impl RelCache {
                         },
                         !attr.attnotnull,
                     );
+                    desc.storage.attlen = attr.attlen;
+                    desc.storage.attalign = attr.attalign;
+                    desc.storage.attstorage = attr.attstorage;
+                    desc.storage.attcompression = attr.attcompression;
                     if let Some(attrdef) = catcache.attrdef_by_relid_attnum(class.oid, attr.attnum)
                     {
                         desc.attrdef_oid = Some(attrdef.oid);
@@ -117,6 +122,7 @@ impl RelCache {
                 relation_oid: class.oid,
                 namespace_oid: class.relnamespace,
                 row_type_oid: class.reltype,
+                reltoastrelid: class.reltoastrelid,
                 relpersistence: class.relpersistence,
                 relkind: class.relkind,
                 desc: RelationDesc { columns },
@@ -275,6 +281,7 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         relation_oid: entry.relation_oid,
         namespace_oid: entry.namespace_oid,
         row_type_oid: entry.row_type_oid,
+        reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         desc: entry.desc.clone(),

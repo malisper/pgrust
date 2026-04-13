@@ -402,6 +402,7 @@ impl Database {
                 relation_oid: namespace.oid,
                 namespace_oid: namespace.oid,
                 row_type_oid: 0,
+                reltoastrelid: 0,
                 relpersistence: 't',
                 relkind: 'n',
                 desc: crate::backend::executor::RelationDesc {
@@ -461,6 +462,7 @@ impl Database {
             relation_oid: entry.relation_oid,
             namespace_oid: entry.namespace_oid,
             row_type_oid: entry.row_type_oid,
+            reltoastrelid: entry.reltoastrelid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc,
@@ -674,7 +676,9 @@ impl Database {
             .lazy_catalog_lookup(client_id, None, configured_search_path)
             .lookup_relation(&comment_stmt.table_name)
             .ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(comment_stmt.table_name.clone()))
+                ExecError::Parse(ParseError::TableDoesNotExist(
+                    comment_stmt.table_name.clone(),
+                ))
             })?;
         self.table_locks
             .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
@@ -736,9 +740,13 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = catalog.lookup_relation(&comment_stmt.table_name).ok_or_else(|| {
-            ExecError::Parse(ParseError::TableDoesNotExist(comment_stmt.table_name.clone()))
-        })?;
+        let relation = catalog
+            .lookup_relation(&comment_stmt.table_name)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(
+                    comment_stmt.table_name.clone(),
+                ))
+            })?;
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for COMMENT ON TABLE",
@@ -773,9 +781,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = catalog.lookup_relation(&alter_stmt.table_name).ok_or_else(|| {
-            ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.table_name.clone()))
-        })?;
+        let relation = catalog
+            .lookup_relation(&alter_stmt.table_name)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.table_name.clone()))
+            })?;
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for ALTER TABLE ADD COLUMN",
@@ -1037,17 +1047,18 @@ impl Database {
                     .txns
                     .read()
                     .snapshot_for_command(xid, cid)
-                    .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "index build snapshot",
-                        actual: "snapshot creation failed".into(),
-                    }))?;
-                let index_meta = index_entry
-                    .index_meta
-                    .clone()
-                    .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
+                    .map_err(|_| {
+                        ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "index build snapshot",
+                            actual: "snapshot creation failed".into(),
+                        })
+                    })?;
+                let index_meta = index_entry.index_meta.clone().ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "index metadata",
                         actual: "missing index metadata".into(),
-                    }))?;
+                    })
+                })?;
                 let build_ctx = crate::include::access::amapi::IndexBuildContext {
                     pool: self.pool.clone(),
                     txns: self.txns.clone(),
@@ -1988,7 +1999,9 @@ fn collect_rels_from_plan(
                     collect_rels_from_expr(arg, rels);
                 }
             }
-            crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction { args, .. } => {
+            crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction {
+                args, ..
+            } => {
                 for arg in args {
                     collect_rels_from_expr(arg, rels);
                 }

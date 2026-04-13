@@ -22,6 +22,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel_number),
         namespace_oid: 11,
         row_type_oid: 60_000u32.saturating_add(rel_number),
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
         desc,
@@ -60,6 +61,7 @@ fn catalog_with_people_id_index() -> Catalog {
             relation_oid: 50010,
             namespace_oid: 11,
             row_type_oid: 60010,
+            reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
             desc: RelationDesc {

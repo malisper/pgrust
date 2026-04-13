@@ -29,6 +29,7 @@ pub mod rowcodec;
 pub mod rows;
 pub mod state;
 pub mod store;
+pub mod toasting;
 
 pub use bootstrap::*;
 pub use catalog::*;
@@ -57,3 +58,4 @@ pub use pg_tablespace::*;
 pub use pg_type::*;
 pub use state::*;
 pub use store::*;
+pub use toasting::*;

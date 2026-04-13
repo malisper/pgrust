@@ -4,7 +4,9 @@ pub use crate::backend::access::common::heaptuple::{
 };
 use crate::backend::storage::page::bufpage::PageError;
 pub use crate::include::access::itemptr::ItemPointerData;
-pub use crate::include::access::tupdesc::{AttributeAlign, AttributeDesc};
+pub use crate::include::access::tupdesc::{
+    AttributeAlign, AttributeCompression, AttributeDesc, AttributeStorage,
+};
 
 pub const HEAP_HASNULL: u16 = 0x0001;
 pub const HEAP_HASVARWIDTH: u16 = 0x0002;
@@ -140,18 +142,24 @@ mod tests {
                 name: "a".into(),
                 attlen: 2,
                 attalign: AttributeAlign::Short,
+                attstorage: AttributeStorage::Plain,
+                attcompression: AttributeCompression::Default,
                 nullable: false,
             },
             AttributeDesc {
                 name: "b".into(),
                 attlen: 4,
                 attalign: AttributeAlign::Int,
+                attstorage: AttributeStorage::Plain,
+                attcompression: AttributeCompression::Default,
                 nullable: false,
             },
             AttributeDesc {
                 name: "c".into(),
                 attlen: -1,
                 attalign: AttributeAlign::Int,
+                attstorage: AttributeStorage::Extended,
+                attcompression: AttributeCompression::Default,
                 nullable: true,
             },
         ];
@@ -190,18 +198,24 @@ mod tests {
                 name: "a".into(),
                 attlen: 4,
                 attalign: AttributeAlign::Int,
+                attstorage: AttributeStorage::Plain,
+                attcompression: AttributeCompression::Default,
                 nullable: false,
             },
             AttributeDesc {
                 name: "b".into(),
                 attlen: 2,
                 attalign: AttributeAlign::Short,
+                attstorage: AttributeStorage::Plain,
+                attcompression: AttributeCompression::Default,
                 nullable: true,
             },
             AttributeDesc {
                 name: "c".into(),
                 attlen: 4,
                 attalign: AttributeAlign::Int,
+                attstorage: AttributeStorage::Plain,
+                attcompression: AttributeCompression::Default,
                 nullable: false,
             },
         ];

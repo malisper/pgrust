@@ -42,6 +42,7 @@ pub struct CatalogEntry {
     pub relation_oid: u32,
     pub namespace_oid: u32,
     pub row_type_oid: u32,
+    pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
     pub desc: RelationDesc,
@@ -190,6 +191,7 @@ impl Catalog {
             relation_oid,
             namespace_oid,
             row_type_oid,
+            reltoastrelid: 0,
             relpersistence,
             relkind: 'r',
             desc,
@@ -286,6 +288,7 @@ impl Catalog {
             relation_oid: self.next_oid,
             namespace_oid: table.namespace_oid,
             row_type_oid: 0,
+            reltoastrelid: 0,
             relpersistence: table.relpersistence,
             relkind: 'i',
             desc: RelationDesc {
@@ -438,10 +441,9 @@ impl Catalog {
             .tables
             .get_mut(&name)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let index_meta = entry
-            .index_meta
-            .as_mut()
-            .ok_or(CatalogError::Corrupt("index relation missing index metadata"))?;
+        let index_meta = entry.index_meta.as_mut().ok_or(CatalogError::Corrupt(
+            "index relation missing index metadata",
+        ))?;
         index_meta.indisready = indisready;
         index_meta.indisvalid = indisvalid;
         let new_entry = entry.clone();
