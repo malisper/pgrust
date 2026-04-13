@@ -12,7 +12,8 @@ This skill moves `perf-optimization` so it sits on top of the currently checked 
 - Capture the starting branch with `git branch --show-current`.
 - If the current branch is `perf-optimization`, stop and say there is no separate base branch to rebase onto.
 - Check `git status --short` before switching branches.
-- Do not discard uncommitted changes. If the worktree is dirty, explain that checking out `perf-optimization` may fail or may require stashing.
+- Require a clean worktree before switching branches. If there are uncommitted changes, tell the user to commit them first before continuing.
+- Do not discard uncommitted changes.
 - Return to the original branch after the rebase unless the user asks to stay on `perf-optimization`.
 
 ## Default command sequence
