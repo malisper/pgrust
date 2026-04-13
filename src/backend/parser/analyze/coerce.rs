@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
-    if from.element_type() == to.element_type() {
+    if from == to {
         return expr;
     }
     if let Some(expr) = lower_special_cast(&expr, from, to) {
@@ -92,8 +92,9 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
 }
 
 pub(super) fn is_numeric_family(ty: SqlType) -> bool {
-    matches!(
-        ty.element_type().kind,
+    !ty.is_array
+        && matches!(
+        ty.kind,
         SqlTypeKind::Int2
             | SqlTypeKind::Int4
             | SqlTypeKind::Int8
@@ -105,10 +106,11 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
 }
 
 pub(super) fn is_integer_family(ty: SqlType) -> bool {
-    matches!(
-        ty.element_type().kind,
-        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
-    )
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Oid
+        )
 }
 
 pub(super) fn is_bit_string_type(ty: SqlType) -> bool {

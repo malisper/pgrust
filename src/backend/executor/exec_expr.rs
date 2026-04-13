@@ -999,9 +999,12 @@ fn eval_quantified_array(
     is_all: bool,
     array_value: &Value,
 ) -> Result<Value, ExecError> {
-    match array_value {
-        Value::Null => Ok(Value::Null),
-        Value::Array(items) => {
+    if matches!(array_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if let Some(array) = normalize_array_value(array_value) {
+        let items = &array.elements;
+        {
             let mut saw_null = false;
             for item in items {
                 match compare_subquery_values(left_value, item, op)? {
@@ -1025,11 +1028,12 @@ fn eval_quantified_array(
                 Ok(Value::Bool(is_all))
             }
         }
-        other => Err(ExecError::TypeMismatch {
+    } else {
+        Err(ExecError::TypeMismatch {
             op: if is_all { "ALL" } else { "ANY" },
-            left: other.clone(),
+            left: array_value.clone(),
             right: Value::Null,
-        }),
+        })
     }
 }
 

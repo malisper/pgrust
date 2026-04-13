@@ -738,45 +738,84 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             is_all,
             array,
         } => {
+            let raw_left_type = infer_sql_expr_type_with_ctes(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let raw_array_type = infer_sql_expr_type_with_ctes(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let left_type =
+                coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
+            let array_type = if raw_array_type.is_array {
+                coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)
+            } else {
+                SqlType::array_of(left_type.element_type())
+            };
             if *is_all {
                 Expr::AllArray {
-                    left: Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    left: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            left,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_left_type,
+                        left_type,
+                    )),
                     op: *op,
-                    right: Box::new(bind_expr_with_outer_and_ctes(
-                        array,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    right: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            array,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_array_type,
+                        array_type,
+                    )),
                 }
             } else {
                 Expr::AnyArray {
-                    left: Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    left: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            left,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_left_type,
+                        left_type,
+                    )),
                     op: *op,
-                    right: Box::new(bind_expr_with_outer_and_ctes(
-                        array,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    right: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            array,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_array_type,
+                        array_type,
+                    )),
                 }
             }
         }
