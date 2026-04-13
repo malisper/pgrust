@@ -252,7 +252,7 @@ pub enum FromItem {
     },
     FunctionCall {
         name: String,
-        args: Vec<SqlExpr>,
+        args: Vec<SqlFunctionArg>,
     },
     DerivedTable(Box<SelectStatement>),
     Join {
@@ -266,6 +266,22 @@ pub enum FromItem {
         alias: String,
         column_aliases: Vec<String>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlFunctionArg {
+    pub name: Option<String>,
+    pub value: SqlExpr,
+}
+
+impl SqlFunctionArg {
+    pub fn positional(value: SqlExpr) -> Self {
+        Self { name: None, value }
+    }
+}
+
+pub fn function_arg_values(args: &[SqlFunctionArg]) -> impl Iterator<Item = &SqlExpr> {
+    args.iter().map(|arg| &arg.value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,7 +620,7 @@ pub enum SqlExpr {
     JsonbPathMatch(Box<SqlExpr>, Box<SqlExpr>),
     AggCall {
         func: AggFunc,
-        args: Vec<SqlExpr>,
+        args: Vec<SqlFunctionArg>,
         distinct: bool,
     },
     ScalarSubquery(Box<SelectStatement>),
@@ -633,7 +649,7 @@ pub enum SqlExpr {
     JsonPathText(Box<SqlExpr>, Box<SqlExpr>),
     FuncCall {
         name: String,
-        args: Vec<SqlExpr>,
+        args: Vec<SqlFunctionArg>,
     },
     CurrentTimestamp,
 }

@@ -3,6 +3,19 @@ use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_typ
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+#[derive(Clone, Copy)]
+enum NamedArgDefault {
+    Bool(bool),
+    Text(&'static str),
+    JsonbEmptyObject,
+}
+
+struct NamedArgSignature {
+    params: &'static [&'static str],
+    required: usize,
+    defaults: &'static [Option<NamedArgDefault>],
+}
+
 pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunction> {
     scalar_functions_by_name()
         .get(&name.to_ascii_lowercase())
@@ -176,6 +189,32 @@ pub(super) fn validate_scalar_function_arity(
     }
 }
 
+pub(super) fn lower_named_scalar_function_args(
+    func: BuiltinScalarFunction,
+    args: &[SqlFunctionArg],
+) -> Result<Vec<SqlExpr>, ParseError> {
+    lower_named_function_args(
+        scalar_named_arg_signature(func),
+        args,
+        "builtin scalar function",
+    )
+}
+
+pub(super) fn lower_named_table_function_args(
+    name: &str,
+    args: &[SqlFunctionArg],
+) -> Result<Vec<SqlExpr>, ParseError> {
+    lower_named_function_args(
+        table_function_named_arg_signature(name),
+        args,
+        "table function",
+    )
+}
+
+pub(super) fn aggregate_args_are_named(args: &[SqlFunctionArg]) -> bool {
+    args.iter().any(|arg| arg.name.is_some())
+}
+
 pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Result<(), ParseError> {
     let valid = aggregate_arity_overrides()
         .iter()
@@ -249,6 +288,164 @@ fn scalar_functions_by_name() -> &'static BTreeMap<String, BuiltinScalarFunction
         }
         by_name
     })
+}
+
+fn lower_named_function_args(
+    signature: Option<NamedArgSignature>,
+    args: &[SqlFunctionArg],
+    context: &'static str,
+) -> Result<Vec<SqlExpr>, ParseError> {
+    let has_named = args.iter().any(|arg| arg.name.is_some());
+    if !has_named {
+        return Ok(args.iter().map(|arg| arg.value.clone()).collect());
+    }
+
+    let Some(signature) = signature else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "function supporting named arguments",
+            actual: context.into(),
+        });
+    };
+
+    let mut saw_named = false;
+    let mut positional_count = 0usize;
+    for arg in args {
+        if arg.name.is_some() {
+            saw_named = true;
+        } else if saw_named {
+            return Err(ParseError::UnexpectedToken {
+                expected: "named arguments after positional arguments",
+                actual: "positional argument after named argument".into(),
+            });
+        } else {
+            positional_count += 1;
+        }
+    }
+
+    if positional_count > signature.params.len() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "valid builtin function arity",
+            actual: format!("function call with {} args", args.len()),
+        });
+    }
+
+    let mut lowered: Vec<Option<SqlExpr>> = vec![None; signature.params.len()];
+    for (idx, arg) in args.iter().take(positional_count).enumerate() {
+        lowered[idx] = Some(arg.value.clone());
+    }
+
+    let mut param_lookup = BTreeMap::new();
+    for (idx, name) in signature.params.iter().enumerate() {
+        param_lookup.insert((*name).to_ascii_lowercase(), idx);
+    }
+
+    for arg in args.iter().skip(positional_count) {
+        let arg_name = arg.name.as_ref().expect("named arg");
+        let Some(&idx) = param_lookup.get(&arg_name.to_ascii_lowercase()) else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "known named function argument",
+                actual: arg_name.clone(),
+            });
+        };
+        if lowered[idx].is_some() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "argument assigned once",
+                actual: arg_name.clone(),
+            });
+        }
+        lowered[idx] = Some(arg.value.clone());
+    }
+
+    for (idx, slot) in lowered.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = signature
+                .defaults
+                .get(idx)
+                .and_then(|default| *default)
+                .map(default_sql_expr);
+        }
+    }
+
+    if lowered
+        .iter()
+        .take(signature.required)
+        .any(|slot| slot.is_none())
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "all required function arguments",
+            actual: "missing required named argument".into(),
+        });
+    }
+
+    Ok(lowered
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>())
+}
+
+fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
+    match default {
+        NamedArgDefault::Bool(value) => SqlExpr::Const(Value::Bool(value)),
+        NamedArgDefault::Text(value) => SqlExpr::Const(Value::Text(value.into())),
+        NamedArgDefault::JsonbEmptyObject => SqlExpr::Cast(
+            Box::new(SqlExpr::Const(Value::Text("{}".into()))),
+            SqlType::new(SqlTypeKind::Jsonb),
+        ),
+    }
+}
+
+fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSignature> {
+    match func {
+        BuiltinScalarFunction::JsonbPathExists
+        | BuiltinScalarFunction::JsonbPathMatch
+        | BuiltinScalarFunction::JsonbPathQueryArray
+        | BuiltinScalarFunction::JsonbPathQueryFirst => Some(NamedArgSignature {
+            params: &["target", "path", "vars", "silent"],
+            required: 2,
+            defaults: &[
+                None,
+                None,
+                Some(NamedArgDefault::JsonbEmptyObject),
+                Some(NamedArgDefault::Bool(false)),
+            ],
+        }),
+        BuiltinScalarFunction::JsonbSetLax => Some(NamedArgSignature {
+            params: &[
+                "target",
+                "path",
+                "new_value",
+                "create_if_missing",
+                "null_value_treatment",
+            ],
+            required: 3,
+            defaults: &[
+                None,
+                None,
+                None,
+                Some(NamedArgDefault::Bool(true)),
+                Some(NamedArgDefault::Text("use_json_null")),
+            ],
+        }),
+        _ => None,
+    }
+}
+
+fn table_function_named_arg_signature(name: &str) -> Option<NamedArgSignature> {
+    if name.eq_ignore_ascii_case("generate_series") {
+        return Some(NamedArgSignature {
+            params: &["start", "stop", "step"],
+            required: 2,
+            defaults: &[None, None, None],
+        });
+    }
+    if name.eq_ignore_ascii_case("json_each") {
+        return Some(NamedArgSignature {
+            params: &["from_json"],
+            required: 1,
+            defaults: &[None],
+        });
+    }
+    None
 }
 
 fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {

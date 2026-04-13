@@ -635,10 +635,8 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
-                    Rule::expr_list => {
-                        for expr_pair in part.into_inner() {
-                            args.push(build_expr(expr_pair)?);
-                        }
+                    Rule::function_arg_list => {
+                        args = build_function_arg_list(part)?;
                     }
                     _ => {}
                 }
@@ -1448,17 +1446,17 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             if raw.starts_with("||/") {
                 Ok(SqlExpr::FuncCall {
                     name: "cbrt".into(),
-                    args: vec![expr],
+                    args: vec![SqlFunctionArg::positional(expr)],
                 })
             } else if raw.starts_with("|/") {
                 Ok(SqlExpr::FuncCall {
                     name: "sqrt".into(),
-                    args: vec![expr],
+                    args: vec![SqlFunctionArg::positional(expr)],
                 })
             } else if raw.starts_with('@') {
                 Ok(SqlExpr::FuncCall {
                     name: "abs".into(),
-                    args: vec![expr],
+                    args: vec![SqlFunctionArg::positional(expr)],
                 })
             } else if raw.starts_with('~') {
                 Ok(SqlExpr::BitNot(Box::new(expr)))
@@ -1665,13 +1663,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             let mut inner = pair.into_inner();
             let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
             let args = inner
-                .find(|part| part.as_rule() == Rule::expr_list)
-                .map(|list| {
-                    list.into_inner()
-                        .filter(|part| part.as_rule() == Rule::expr)
-                        .map(build_expr)
-                        .collect::<Result<Vec<_>, _>>()
-                })
+                .find(|part| part.as_rule() == Rule::function_arg_list)
+                .map(build_function_arg_list)
                 .transpose()?
                 .unwrap_or_default();
             if name.eq_ignore_ascii_case("random") && args.is_empty() {
@@ -1688,7 +1681,16 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             let haystack = build_expr(args.next().ok_or(ParseError::UnexpectedEof)?)?;
             Ok(SqlExpr::FuncCall {
                 name: "position".into(),
-                args: vec![needle, haystack],
+                args: vec![
+                    SqlFunctionArg {
+                        name: None,
+                        value: needle,
+                    },
+                    SqlFunctionArg {
+                        name: None,
+                        value: haystack,
+                    },
+                ],
             })
         }
         Rule::substring_expr => {
@@ -1712,7 +1714,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             }
             Ok(SqlExpr::FuncCall {
                 name: "substring".into(),
-                args,
+                args: args.into_iter().map(SqlFunctionArg::positional).collect(),
             })
         }
         Rule::overlay_expr => {
@@ -1748,7 +1750,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             }
             Ok(SqlExpr::FuncCall {
                 name: "overlay".into(),
-                args,
+                args: args.into_iter().map(SqlFunctionArg::positional).collect(),
             })
         }
         Rule::typed_string_literal => {
@@ -1787,7 +1789,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
 fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut func = None;
-    let mut args = Vec::new();
+    let mut args: Vec<SqlFunctionArg> = Vec::new();
     let mut is_star = false;
     let mut distinct = false;
     for part in pair.into_inner() {
@@ -1816,12 +1818,8 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             }
             Rule::agg_distinct => distinct = true,
             Rule::star => is_star = true,
-            Rule::expr_list => {
-                args = part
-                    .into_inner()
-                    .filter(|part| part.as_rule() == Rule::expr)
-                    .map(build_expr)
-                    .collect::<Result<Vec<_>, _>>()?;
+            Rule::function_arg_list => {
+                args = build_function_arg_list(part)?;
             }
             _ => {}
         }
@@ -1831,6 +1829,36 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         args: if is_star { Vec::new() } else { args },
         distinct,
     })
+}
+
+fn build_function_arg_list(pair: Pair<'_, Rule>) -> Result<Vec<SqlFunctionArg>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::function_arg)
+        .map(build_function_arg)
+        .collect()
+}
+
+fn build_function_arg(pair: Pair<'_, Rule>) -> Result<SqlFunctionArg, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::named_function_arg => {
+            let mut inner = inner.into_inner();
+            let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+            let value = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            Ok(SqlFunctionArg {
+                name: Some(name),
+                value,
+            })
+        }
+        Rule::expr => Ok(SqlFunctionArg {
+            name: None,
+            value: build_expr(inner)?,
+        }),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "function argument",
+            actual: inner.as_str().into(),
+        }),
+    }
 }
 
 fn build_null_predicate(left: SqlExpr, pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
@@ -1920,7 +1948,10 @@ fn fold_infix(
             },
             Rule::pow_op => SqlExpr::FuncCall {
                 name: "power".into(),
-                args: vec![expr, rhs],
+                args: vec![
+                    SqlFunctionArg::positional(expr),
+                    SqlFunctionArg::positional(rhs),
+                ],
             },
             Rule::shift_op => match op.as_str() {
                 "<<" => SqlExpr::Shl(Box::new(expr), Box::new(rhs)),

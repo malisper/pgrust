@@ -5828,6 +5828,78 @@ fn jsonpath_cast_and_silent_behavior_work() {
 }
 
 #[test]
+fn jsonpath_functions_accept_named_sql_args() {
+    let base = temp_dir("jsonpath_named_args");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_exists(target => '[{\"a\":1},{\"a\":2},{\"a\":3}]'::jsonb, path => '$[*] ? (@.a > $min && @.a < $max)', vars => '{\"min\":1,\"max\":3}'::jsonb, silent => false)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_set_lax_accepts_named_sql_args() {
+    let base = temp_dir("jsonb_set_lax_named_args");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_set_lax(target => '{\"a\":1,\"b\":2}'::jsonb, path => ARRAY['b']::varchar[], new_value => null, null_value_treatment => 'delete_key')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1}").unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn generate_series_accepts_named_sql_args_in_from() {
+    let base = temp_dir("generate_series_named_args");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from generate_series(stop => 3, start => 1)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1)],
+                    vec![Value::Int32(2)],
+                    vec![Value::Int32(3)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonpath_arithmetic_recursive_and_subscripts_work() {
     let base = temp_dir("jsonpath_extended");
     let txns = TransactionManager::new_durable(&base).unwrap();

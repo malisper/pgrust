@@ -161,7 +161,7 @@ fn bind_plain_select_targets(
 
 #[derive(Default)]
 struct TargetSrfInfo {
-    top_level: Option<(String, Vec<SqlExpr>)>,
+    top_level: Option<(String, Vec<SqlFunctionArg>)>,
     has_nested: bool,
 }
 
@@ -181,7 +181,7 @@ fn classify_select_target_srf(expr: &SqlExpr) -> TargetSrfInfo {
     }
 }
 
-fn top_level_set_returning_call(expr: &SqlExpr) -> Option<(String, Vec<SqlExpr>)> {
+fn top_level_set_returning_call(expr: &SqlExpr) -> Option<(String, Vec<SqlFunctionArg>)> {
     match expr {
         SqlExpr::FuncCall { name, args } if set_returning_function_name(name).is_some() => {
             Some((name.clone(), args.clone()))
@@ -197,7 +197,7 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
                 info.has_nested = true;
             }
             for arg in args {
-                visit_nested_srfs(arg, info);
+                visit_nested_srfs(&arg.value, info);
             }
         }
         SqlExpr::Add(left, right)
@@ -251,7 +251,7 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
         }
         SqlExpr::AggCall { args, .. } => {
             for arg in args {
-                visit_nested_srfs(arg, info);
+                visit_nested_srfs(&arg.value, info);
             }
         }
         SqlExpr::InSubquery { expr, .. } => visit_nested_srfs(expr, info),
@@ -294,13 +294,14 @@ fn set_returning_function_name(name: &str) -> Option<&str> {
 
 fn bind_select_list_srf_call(
     name: &str,
-    args: &[SqlExpr],
+    args: &[SqlFunctionArg],
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<(SetReturningCall, SqlType), ParseError> {
+    let args = lower_named_table_function_args(name, args)?;
     match name.to_ascii_lowercase().as_str() {
         "generate_series" => {
             if args.len() < 2 || args.len() > 3 {

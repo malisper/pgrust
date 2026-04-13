@@ -303,7 +303,9 @@ pub(super) fn bind_from_item_with_ctes(
         FromItem::Values { rows } => {
             bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
         }
-        FromItem::FunctionCall { name, args } => match name.as_str() {
+        FromItem::FunctionCall { name, args } => {
+            let args = lower_named_table_function_args(name, args)?;
+            match name.as_str() {
             "generate_series" => {
                 if args.len() < 2 || args.len() > 3 {
                     return Err(ParseError::UnexpectedToken {
@@ -630,6 +632,7 @@ pub(super) fn bind_from_item_with_ctes(
                     Err(ParseError::UnknownTable(other.to_string()))
                 }
             }
+        }
         },
         FromItem::DerivedTable(select) => {
             let plan = build_plan_with_outer(select, catalog, &[], None, ctes)?;
