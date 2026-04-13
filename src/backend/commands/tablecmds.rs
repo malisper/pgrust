@@ -16,7 +16,7 @@ use crate::backend::parser::{
     BoundIndexRelation, BoundModifyRowSource, BoundUpdateStatement, BoundAssignmentTarget,
     Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
     MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement,
-    bind_create_table, build_plan,
+    SqlType, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -27,6 +27,7 @@ use crate::backend::executor::exec_expr::{
     compile_predicate_with_decoder, eval_expr, tuple_from_values,
 };
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
+use crate::backend::executor::value_io::coerce_assignment_value;
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start, Expr};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::execnodes::*;
@@ -464,7 +465,7 @@ pub fn execute_insert(
                     eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
                 for (target, expr) in stmt.target_columns.iter().zip(row.iter()) {
                     let value = eval_expr(expr, &mut slot, ctx)?;
-                    apply_assignment_target(&mut values, target, value, &mut slot, ctx)?;
+                    apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
                 }
                 Ok(values)
             })
@@ -475,7 +476,7 @@ pub fn execute_insert(
                 eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
             for (target, expr) in stmt.target_columns.iter().zip(defaults.iter()) {
                 let value = eval_expr(expr, &mut slot, ctx)?;
-                apply_assignment_target(&mut values, target, value, &mut slot, ctx)?;
+                apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
             }
             vec![values]
         }
@@ -487,7 +488,7 @@ pub fn execute_insert(
                 let mut values =
                     eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
                 for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
-                    apply_assignment_target(&mut values, target, value, slot, ctx)?;
+                    apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
                 }
                 rows.push(values);
             }
@@ -508,12 +509,14 @@ pub fn execute_insert(
 }
 
 fn apply_assignment_target(
+    desc: &RelationDesc,
     values: &mut [Value],
     target: &BoundAssignmentTarget,
     value: Value,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    let value = coerce_assignment_value(&value, assignment_target_sql_type(desc, target))?;
     if target.subscripts.is_empty() {
         values[target.column_index] = value;
         return Ok(());
@@ -539,6 +542,17 @@ fn apply_assignment_target(
     let current = values[target.column_index].clone();
     values[target.column_index] = assign_array_value(current, &resolved, value)?;
     Ok(())
+}
+
+fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarget) -> SqlType {
+    let column_type = desc.columns[target.column_index].sql_type;
+    if target.subscripts.is_empty() {
+        return column_type;
+    }
+    if target.subscripts.iter().any(|subscript| subscript.upper.is_some()) {
+        return SqlType::array_of(column_type.element_type());
+    }
+    column_type.element_type()
 }
 
 #[derive(Clone)]
@@ -741,6 +755,7 @@ pub fn execute_update_with_waiter(
         for assignment in &stmt.assignments {
             let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
             apply_assignment_target(
+                &stmt.desc,
                 &mut values,
                 &BoundAssignmentTarget {
                     column_index: assignment.column_index,
@@ -801,6 +816,7 @@ pub fn execute_update_with_waiter(
                     for assignment in &stmt.assignments {
                         let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
                         apply_assignment_target(
+                            &stmt.desc,
                             &mut new_values,
                             &BoundAssignmentTarget {
                                 column_index: assignment.column_index,

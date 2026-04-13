@@ -2,7 +2,8 @@ use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
-    cast_numeric_value, cast_text_value, cast_value, render_internal_char_text,
+    cast_numeric_value, cast_text_value, cast_value, parse_text_array_literal_with_options,
+    render_internal_char_text,
 };
 use super::node_types::*;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
@@ -82,7 +83,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
     }
 }
 
-fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, ExecError> {
+pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, ExecError> {
     if target.is_array {
         return match value {
             Value::Null => Ok(Value::Null),
@@ -94,11 +95,19 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
                 }
                 Ok(Value::Array(coerced))
             }
-            other => Err(ExecError::TypeMismatch {
-                op: "copy assignment",
-                left: Value::Null,
-                right: other.clone(),
-            }),
+            other => match other.as_text() {
+                Some(text) => parse_text_array_literal_with_options(
+                    text,
+                    target.element_type(),
+                    "copy assignment",
+                    false,
+                ),
+                None => Err(ExecError::TypeMismatch {
+                    op: "copy assignment",
+                    left: Value::Null,
+                    right: other.clone(),
+                }),
+            },
         };
     }
 

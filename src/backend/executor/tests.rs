@@ -196,6 +196,42 @@ fn array_subscript_catalog() -> Catalog {
     catalog
 }
 
+fn array_assignment_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "t",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14004,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "a",
+                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        )),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "f",
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::with_char_len(
+                                crate::backend::parser::SqlTypeKind::Char,
+                                5,
+                            ),
+                        ),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    catalog
+}
+
 fn varchar_catalog(name: &str, len: i32) -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert(
@@ -2314,6 +2350,60 @@ fn array_subscript_select_and_update_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn array_assignment_coerces_text_literals_using_target_type() {
+    let base = temp_dir("array_assignment_text_literals");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t (a) values ('{1,2,3}')",
+            array_assignment_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a from t",
+        array_assignment_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Array(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(3),
+                ])]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into t (f) values ('{\"too long\"}')",
+        array_assignment_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::StringDataRightTruncation { ref ty } if ty == "character(5)"
+    ));
 }
 #[test]
 fn any_array_truth_table_and_overlap_work() {
