@@ -440,7 +440,8 @@ fn run_statement(
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Set(_)
         | Statement::Reset(_)
-        | Statement::AlterTableSet(_) => {
+        | Statement::AlterTableSet(_)
+        | Statement::AlterTableAddColumn(_) => {
             Ok(StatementResult::AffectedRows(0))
         }
         Statement::CommentOnTable(stmt) => {

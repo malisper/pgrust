@@ -11,7 +11,7 @@ use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, Plan,
-    QueryColumn, RelationDesc, TargetEntry, Value,
+    QueryColumn, RelationDesc, TargetEntry, Value, cast_value,
 };
 use crate::include::catalog::{
     PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
@@ -186,10 +186,98 @@ pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
             .map(|column| {
                 let mut desc = column_desc(column.name.clone(), column.ty, column.nullable);
                 desc.default_expr = column.default_expr.clone();
+                desc.missing_default_value = column
+                    .default_expr
+                    .as_deref()
+                    .and_then(|sql| derive_literal_default_value(sql, column.ty).ok());
                 desc
             })
             .collect(),
     }
+}
+
+#[derive(Default)]
+struct LiteralDefaultCatalog;
+
+impl CatalogLookup for LiteralDefaultCatalog {
+    fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+        None
+    }
+}
+
+fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
+    match expr {
+        SqlExpr::Const(value) => Some(value.clone()),
+        SqlExpr::IntegerLiteral(value) => Some(Value::Text(value.clone().into())),
+        SqlExpr::NumericLiteral(value) => Some(Value::Text(value.clone().into())),
+        SqlExpr::UnaryPlus(inner) => literal_sql_expr_value(inner),
+        SqlExpr::Negate(inner) => match literal_sql_expr_value(inner)? {
+            Value::Text(text) => Some(Value::Text(format!("-{}", text.as_str()).into())),
+            Value::TextRef(_, _) => None,
+            Value::Int16(v) => Some(Value::Int16(-v)),
+            Value::Int32(v) => Some(Value::Int32(-v)),
+            Value::Int64(v) => Some(Value::Int64(-v)),
+            Value::Float64(v) => Some(Value::Float64(-v)),
+            Value::Numeric(v) => Some(Value::Numeric(v.negate())),
+            _ => None,
+        },
+        SqlExpr::Cast(inner, ty) => {
+            let inner = literal_sql_expr_value(inner)?;
+            cast_value(inner, *ty).ok()
+        }
+        SqlExpr::ArrayLiteral(items) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(literal_sql_expr_value(item)?);
+            }
+            Some(Value::Array(values))
+        }
+        _ => None,
+    }
+}
+
+pub fn derive_literal_default_value(sql: &str, target: SqlType) -> Result<Value, ParseError> {
+    let parsed = crate::backend::parser::parse_expr(sql)?;
+    let value = if let Some(value) = literal_sql_expr_value(&parsed) {
+        value
+    } else {
+        let catalog = LiteralDefaultCatalog;
+        let (bound, from_type) = bind_scalar_expr_in_scope(&parsed, &[], &catalog)?;
+        if matches!(bound, Expr::Column(_) | Expr::OuterColumn { .. }) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "literal DEFAULT expression",
+                actual: sql.to_string(),
+            });
+        }
+        match cast_value(
+            match bound {
+                Expr::Const(value) => value,
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "literal DEFAULT expression",
+                        actual: sql.to_string(),
+                    });
+                }
+            },
+            if from_type == target {
+                target
+            } else {
+                target
+            },
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "literal DEFAULT expression",
+                    actual: sql.to_string(),
+                });
+            }
+        }
+    };
+    cast_value(value, target).map_err(|_| ParseError::UnexpectedToken {
+        expected: "literal DEFAULT expression",
+        actual: sql.to_string(),
+    })
 }
 
 pub(crate) fn bind_scalar_expr_in_scope(

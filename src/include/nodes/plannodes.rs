@@ -33,6 +33,7 @@ pub struct ColumnDesc {
     pub not_null_constraint_oid: Option<u32>,
     pub attrdef_oid: Option<u32>,
     pub default_expr: Option<String>,
+    pub missing_default_value: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

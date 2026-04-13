@@ -298,6 +298,23 @@ fn parse_create_index_with_method_and_ordering() {
 }
 
 #[test]
+fn parse_alter_table_add_column_statement() {
+    let stmt = parse_statement("alter table items add column note text default 'hello'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddColumn(AlterTableAddColumnStatement {
+            table_name: "items".into(),
+            column: ColumnDef {
+                name: "note".into(),
+                ty: SqlType::new(SqlTypeKind::Text),
+                default_expr: Some("'hello'".into()),
+                nullable: true,
+            },
+        })
+    );
+}
+
+#[test]
 fn parse_alter_table_set_statement() {
     let stmt = parse_statement("alter table num_variance set (parallel_workers = 4)").unwrap();
     assert_eq!(

@@ -139,6 +139,7 @@ pub enum Statement {
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
     CreateIndex(CreateIndexStatement),
+    AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableSet(AlterTableSetStatement),
     CommentOnTable(CommentOnTableStatement),
     DropTable(DropTableStatement),
@@ -365,6 +366,12 @@ impl From<String> for IndexColumnDef {
 pub struct AlterTableSetStatement {
     pub table_name: String,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAddColumnStatement {
+    pub table_name: String,
+    pub column: ColumnDef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

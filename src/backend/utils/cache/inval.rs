@@ -241,6 +241,7 @@ pub fn finalize_committed_catalog_effects(
         }
     }
     for invalidation in invalidations {
+        apply_session_catalog_invalidation(db, source_client_id, invalidation);
         publish_session_catalog_invalidation(db, Some(source_client_id), invalidation);
     }
 }

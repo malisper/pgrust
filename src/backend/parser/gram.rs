@@ -98,6 +98,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
+        Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
+            build_alter_table_add_column(inner)?,
+        )),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
@@ -1270,6 +1273,24 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         ty,
         default_expr,
         nullable,
+    })
+}
+
+fn build_alter_table_add_column(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAddColumnStatement, ParseError> {
+    let mut table_name = None;
+    let mut column = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::column_def => column = Some(build_column_def(part)?),
+            _ => {}
+        }
+    }
+    Ok(AlterTableAddColumnStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column: column.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

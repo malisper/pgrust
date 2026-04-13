@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::executor::{ExecError, Value};
-use crate::backend::parser::{CatalogLookup, ParseError};
+use crate::backend::parser::{CatalogLookup, ParseError, SqlType, SqlTypeKind};
+use crate::include::nodes::plannodes::QueryColumn;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
@@ -966,6 +967,88 @@ fn comment_on_temp_table_is_unsupported() {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
             if expected == "permanent table for COMMENT ON TABLE" && actual == "temporary table" => {}
         other => panic!("expected temp-table comment rejection, got {:?}", other),
+    }
+}
+
+#[test]
+fn alter_table_add_column_reads_old_rows_with_null_or_default() {
+    let base = temp_dir("alter_table_add_column_reads_old_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "insert into items values (1), (2)").unwrap();
+    db.execute(1, "alter table items add column note text").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, note from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Null],
+            vec![Value::Int32(2), Value::Null],
+        ]
+    );
+
+    db.execute(1, "alter table items add column bucket int4 default 3")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, note, bucket from items order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Null, Value::Int32(3)],
+            vec![Value::Int32(2), Value::Null, Value::Int32(3)],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_add_column_uses_command_end_invalidation_and_rolls_back() {
+    let base = temp_dir("alter_table_add_column_txn");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null)")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter table items add column note text default 'x'")
+        .unwrap();
+    assert_eq!(
+        session.execute(&db, "select note from items").unwrap(),
+        StatementResult::Query {
+            columns: vec![QueryColumn {
+                name: "note".into(),
+                sql_type: SqlType::new(SqlTypeKind::Text),
+            }],
+            column_names: vec!["note".into()],
+            rows: vec![],
+        }
+    );
+    session.execute(&db, "rollback").unwrap();
+
+    match db.execute(1, "select note from items") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name)))
+        | Err(ExecError::Parse(ParseError::UnexpectedToken { actual: name, .. }))
+            if name.contains("note") => {}
+        other => panic!("expected rolled-back column to be absent, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_column_rejects_unsupported_forms() {
+    let base = temp_dir("alter_table_add_column_rejects_unsupported");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)").unwrap();
+
+    match db.execute(1, "alter table items add column xmin int4") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "non-system column name" && actual == "xmin" => {}
+        other => panic!("expected system-column rejection, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table items add column note text not null") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "ADD COLUMN without NOT NULL" && actual == "NOT NULL" => {}
+        other => panic!("expected NOT NULL rejection, got {other:?}"),
     }
 }
 

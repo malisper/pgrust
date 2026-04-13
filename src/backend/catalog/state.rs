@@ -373,6 +373,47 @@ impl Catalog {
         Ok(entry)
     }
 
+    pub fn alter_table_add_column(
+        &mut self,
+        relation_oid: u32,
+        column: crate::backend::executor::ColumnDesc,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        if old_entry
+            .desc
+            .columns
+            .iter()
+            .any(|existing| existing.name.eq_ignore_ascii_case(&column.name))
+        {
+            return Err(CatalogError::TableAlreadyExists(column.name));
+        }
+
+        let mut new_entry = old_entry.clone();
+        new_entry.desc.columns.push(column);
+        allocate_relation_object_oids(&mut new_entry.desc, &mut self.next_oid);
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
+    }
+
     pub fn set_index_ready_valid(
         &mut self,
         relation_oid: u32,

@@ -349,6 +349,19 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
     }
 }
 
+pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
+    column
+        .missing_default_value
+        .clone()
+        .or_else(|| {
+            column
+                .default_expr
+                .as_deref()
+                .and_then(|sql| crate::backend::parser::derive_literal_default_value(sql, column.sql_type).ok())
+        })
+        .unwrap_or(Value::Null)
+}
+
 fn encode_array_bytes(element_type: SqlType, items: &[Value]) -> Result<Vec<u8>, ExecError> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&(items.len() as u32).to_le_bytes());

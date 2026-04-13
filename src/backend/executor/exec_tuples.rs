@@ -3,8 +3,10 @@
 
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
+use super::value_io::missing_column_value;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
+use crate::include::access::htup::HEAP_NATTS_MASK;
 
 /// A precomputed decode step for one column, eliminating per-tuple type
 /// dispatch and alignment computation.
@@ -38,6 +40,7 @@ enum DecodeStep {
 pub(crate) struct CompiledTupleDecoder {
     steps: Vec<DecodeStep>,
     ncols: usize,
+    missing_defaults: Vec<Option<Value>>,
 }
 
 impl CompiledTupleDecoder {
@@ -114,6 +117,11 @@ impl CompiledTupleDecoder {
         Self {
             steps,
             ncols: desc.columns.len(),
+            missing_defaults: desc
+                .columns
+                .iter()
+                .map(|column| Some(missing_column_value(column)))
+                .collect(),
         }
     }
 
@@ -160,7 +168,9 @@ impl CompiledTupleDecoder {
             ));
         }
         let hoff = tuple_bytes[22] as usize;
+        let infomask2 = u16::from_le_bytes([tuple_bytes[18], tuple_bytes[19]]);
         let infomask = u16::from_le_bytes([tuple_bytes[20], tuple_bytes[21]]);
+        let physical_natts = usize::from(infomask2 & HEAP_NATTS_MASK);
         let has_null = infomask & HEAP_HASNULL != 0;
         let null_bitmap = if has_null {
             &tuple_bytes[SIZEOF_HEAP_TUPLE_HEADER..]
@@ -172,6 +182,11 @@ impl CompiledTupleDecoder {
         let mut off = *byte_offset;
 
         for i in start_attr..end_attr {
+            if i >= physical_natts {
+                values.push(self.missing_attr_value(i));
+                continue;
+            }
+
             let step = &self.steps[i];
 
             if has_null && crate::include::access::htup::att_isnull(i, null_bitmap) {
@@ -449,6 +464,13 @@ impl CompiledTupleDecoder {
 
         *byte_offset = off;
         Ok(())
+    }
+
+    fn missing_attr_value(&self, index: usize) -> Value {
+        self.missing_defaults
+            .get(index)
+            .and_then(|value| value.clone())
+            .unwrap_or(Value::Null)
     }
 }
 
