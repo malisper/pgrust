@@ -16,6 +16,13 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::FuncCall { .. }
         | SqlExpr::CurrentTimestamp => false,
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_contains_agg),
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            expr_contains_agg(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript.lower.as_deref().is_some_and(expr_contains_agg)
+                        || subscript.upper.as_deref().is_some_and(expr_contains_agg)
+                })
+        }
         SqlExpr::ArrayOverlap(l, r)
         | SqlExpr::QuantifiedArray {
             left: l, array: r, ..
@@ -100,6 +107,13 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
             .iter()
             .any(|arg| expr_references_input_scope(&arg.value)),
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_references_input_scope),
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            expr_references_input_scope(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript.lower.as_deref().is_some_and(expr_references_input_scope)
+                        || subscript.upper.as_deref().is_some_and(expr_references_input_scope)
+                })
+        }
         SqlExpr::ScalarSubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::InSubquery { .. }
@@ -212,6 +226,17 @@ pub(super) fn collect_aggs(
         SqlExpr::ArrayLiteral(elements) => {
             for element in elements {
                 collect_aggs(element, aggs);
+            }
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            collect_aggs(array, aggs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_aggs(lower, aggs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_aggs(upper, aggs);
+                }
             }
         }
         SqlExpr::ArrayOverlap(l, r)
@@ -342,6 +367,15 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             Some(kind) => SqlType::new(kind),
             None => SqlType::new(Numeric),
         },
+        AggFunc::ArrayAgg => arg_type
+            .map(|ty| {
+                if ty.is_array {
+                    ty
+                } else {
+                    SqlType::array_of(ty)
+                }
+            })
+            .unwrap_or(SqlType::array_of(SqlType::new(Text))),
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Count
         | AggFunc::JsonAgg

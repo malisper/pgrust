@@ -1178,6 +1178,51 @@ fn parse_unary_minus_in_expression() {
 }
 
 #[test]
+fn parse_array_subscript_expressions_and_targets() {
+    let stmt = parse_select("select a[1], b[1:2], c[:], d[2:] from widgets").unwrap();
+    assert!(matches!(
+        stmt.targets[0].expr,
+        SqlExpr::ArraySubscript { ref subscripts, .. }
+            if subscripts.len() == 1 && !subscripts[0].is_slice && subscripts[0].upper.is_none()
+    ));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::ArraySubscript { ref subscripts, .. }
+            if subscripts[0].is_slice && subscripts[0].upper.is_some()
+    ));
+    assert!(matches!(
+        stmt.targets[2].expr,
+        SqlExpr::ArraySubscript { ref subscripts, .. }
+            if subscripts[0].is_slice && subscripts[0].lower.is_none() && subscripts[0].upper.is_none()
+    ));
+    assert!(matches!(
+        stmt.targets[3].expr,
+        SqlExpr::ArraySubscript { ref subscripts, .. }
+            if subscripts[0].is_slice && subscripts[0].lower.is_some() && subscripts[0].upper.is_none()
+    ));
+
+    match parse_statement("update widgets set a[1] = 1, b[1:2] = array[1,2]").unwrap() {
+        Statement::Update(UpdateStatement { assignments, .. }) => {
+            assert_eq!(assignments[0].target.column, "a");
+            assert_eq!(assignments[0].target.subscripts.len(), 1);
+            assert_eq!(assignments[1].target.column, "b");
+            assert_eq!(assignments[1].target.subscripts.len(), 1);
+        }
+        other => panic!("expected update, got {:?}", other),
+    }
+
+    match parse_statement("insert into widgets (a[1], b[1:2]) values (1, array[1,2])").unwrap() {
+        Statement::Insert(InsertStatement { columns: Some(columns), .. }) => {
+            assert_eq!(columns[0].column, "a");
+            assert_eq!(columns[0].subscripts.len(), 1);
+            assert_eq!(columns[1].column, "b");
+            assert_eq!(columns[1].subscripts.len(), 1);
+        }
+        other => panic!("expected insert, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_unary_plus_numeric_literal_and_new_operators() {
     let stmt =
         parse_select("select +1.5, 5 - 2, 3 * 4, 8 / 2, 9 % 4, 1 <= 2, 3 >= 2, 4 != 5").unwrap();
@@ -1271,6 +1316,46 @@ fn build_plan_accepts_same_type_array_comparisons() {
         &catalog(),
     )
     .is_ok());
+}
+
+#[test]
+fn build_plan_coerces_unknown_string_literals_for_array_ops() {
+    let plan = build_plan(
+        &parse_select(
+            "select ARRAY[1, 2] = '{1,2}', ARRAY[1, 2] && '{2,3}', 2 = any ('{1,2,3}')"
+        )
+        .unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::Eq(left, right)
+            if matches!(left.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+                && matches!(right.as_ref(), Expr::Cast(inner, ty)
+                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+    assert!(matches!(
+        &targets[1].expr,
+        Expr::ArrayOverlap(left, right)
+            if matches!(left.as_ref(), Expr::ArrayLiteral { array_type, .. }
+                if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+                && matches!(right.as_ref(), Expr::Cast(inner, ty)
+                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+    assert!(matches!(
+        &targets[2].expr,
+        Expr::AnyArray { right, .. }
+            if matches!(right.as_ref(), Expr::Cast(inner, ty)
+                if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                    && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
 }
 
 #[test]
@@ -1732,6 +1817,23 @@ fn parse_multidimensional_array_cast_type() {
         SqlExpr::Cast(_, ty)
             if ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
     ));
+}
+
+#[test]
+fn parse_create_table_with_multidimensional_array_types() {
+    match parse_statement("create table widgets (a int4[][][], b text[][])").unwrap() {
+        Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+            assert_eq!(
+                columns[0].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            );
+            assert_eq!(
+                columns[1].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            );
+        }
+        other => panic!("expected create table, got {other:?}"),
+    }
 }
 
 #[test]

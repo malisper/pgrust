@@ -44,6 +44,7 @@ pub(crate) use expr_casts::cast_value;
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
+pub use value_io::format_array_value_text;
 pub use startup::executor_start;
 
 use crate::backend::access::heap::heapam::HeapError;
@@ -106,6 +107,12 @@ pub enum ExecError {
     InvalidStorageValue {
         column: String,
         details: String,
+    },
+    ArrayInput {
+        message: String,
+        value: String,
+        detail: Option<String>,
+        sqlstate: &'static str,
     },
     StringDataRightTruncation {
         ty: String,

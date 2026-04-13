@@ -33,6 +33,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
         | ExecError::InvalidIntegerInput { .. }
+        | ExecError::ArrayInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
         | ExecError::InvalidBitInput { .. }
@@ -74,6 +75,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
 fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Regex(err) => err.detail.as_deref(),
+        ExecError::ArrayInput { detail, .. } => detail.as_deref(),
         _ => None,
     }
 }
@@ -114,6 +116,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return sql.find(op).map(|index| index + 1);
         }
         ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
+        ExecError::ArrayInput { value, .. } => value.as_str(),
         ExecError::IntegerOutOfRange { value, .. } => value.as_str(),
         ExecError::InvalidNumericInput(value) => value.as_str(),
         ExecError::InvalidByteaInput { value } => value.as_str(),

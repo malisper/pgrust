@@ -42,6 +42,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
             format!("duplicate key value violates unique constraint \"{constraint}\"")
         }
         ExecError::StringDataRightTruncation { ty } => format!("value too long for type {ty}"),
+        ExecError::ArrayInput { message, .. } => message.clone(),
         ExecError::InvalidIntegerInput { ty, value } => {
             format!("invalid input syntax for type {ty}: \"{value}\"")
         }
@@ -381,6 +382,11 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Array(items) => {
                 let rendered = format_array_text(items);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::PgArray(array) => {
+                let rendered = crate::backend::executor::value_io::format_array_value_text(array);
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

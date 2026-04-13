@@ -2,10 +2,12 @@
 //! per-tuple type dispatch, alignment computation, and branch overhead.
 
 use super::ExecError;
+use super::expr_casts::parse_text_array_literal_with_op;
 use super::exec_expr::parse_numeric_text;
 use super::value_io::missing_column_value;
 use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::execnodes::{RelationDesc, ScalarType, Value};
 
 /// A precomputed decode step for one column, eliminating per-tuple type
@@ -30,6 +32,7 @@ enum DecodeStep {
         attlen: i16,
         align: crate::include::access::htup::AttributeAlign,
         ty: ScalarType,
+        sql_type: crate::backend::parser::SqlType,
         is_oid: bool,
     },
 }
@@ -69,6 +72,7 @@ impl CompiledTupleDecoder {
                             attlen: attr.attlen,
                             align: attr.attalign,
                             ty: column.ty.clone(),
+                            sql_type: column.sql_type,
                             is_oid: matches!(
                                 column.sql_type.kind,
                                 crate::backend::parser::SqlTypeKind::Oid
@@ -87,6 +91,7 @@ impl CompiledTupleDecoder {
                             attlen: attr.attlen,
                             align: attr.attalign,
                             ty: column.ty.clone(),
+                            sql_type: column.sql_type,
                             is_oid: matches!(
                                 column.sql_type.kind,
                                 crate::backend::parser::SqlTypeKind::Oid
@@ -104,6 +109,7 @@ impl CompiledTupleDecoder {
                 attlen: attr.attlen,
                 align: attr.attalign,
                 ty: column.ty.clone(),
+                sql_type: column.sql_type,
                 is_oid: matches!(
                     column.sql_type.kind,
                     crate::backend::parser::SqlTypeKind::Oid
@@ -245,6 +251,7 @@ impl CompiledTupleDecoder {
                     attlen,
                     align,
                     ty,
+                    sql_type,
                     is_oid,
                 } => match *attlen {
                     len if len > 0 => {
@@ -386,7 +393,8 @@ impl CompiledTupleDecoder {
                                 ));
                             }
                             ScalarType::Array(elem_ty) => {
-                                values.push(decode_array_value(elem_ty, bytes_slice)?);
+                                let _ = elem_ty;
+                                values.push(decode_array_value(sql_type.element_type(), bytes_slice)?);
                             }
                             _ => values.push(Value::Null),
                         }
@@ -452,7 +460,8 @@ impl CompiledTupleDecoder {
                                 values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
                             }
                             ScalarType::Array(elem_ty) => {
-                                values.push(decode_array_value(elem_ty, bytes)?);
+                                let _ = elem_ty;
+                                values.push(decode_array_value(sql_type.element_type(), bytes)?);
                             }
                             _ => values.push(Value::Null),
                         }
@@ -474,15 +483,43 @@ impl CompiledTupleDecoder {
     }
 }
 
-fn decode_array_value(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, ExecError> {
+fn decode_array_value(
+    element_type: crate::backend::parser::SqlType,
+    bytes: &[u8],
+) -> Result<Value, ExecError> {
     if bytes.len() < 4 {
         return Err(ExecError::InvalidStorageValue {
             column: "<array>".into(),
             details: "array payload too short".into(),
         });
     }
-    let count = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let ndim = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
     let mut offset = 4usize;
+    let mut dimensions = Vec::with_capacity(ndim);
+    for _ in 0..ndim {
+        if offset + 8 > bytes.len() {
+            return Err(ExecError::InvalidStorageValue {
+                column: "<array>".into(),
+                details: "array dimension header truncated".into(),
+            });
+        }
+        let length = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        let lower_bound = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        dimensions.push(ArrayDimension {
+            lower_bound,
+            length,
+        });
+    }
+    if offset + 4 > bytes.len() {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array element count header truncated".into(),
+        });
+    }
+    let count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         if offset + 4 > bytes.len() {
@@ -504,17 +541,27 @@ fn decode_array_value(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, 
                 details: "array element payload truncated".into(),
             });
         }
-        items.push(decode_array_element(
-            element_type,
-            &bytes[offset..offset + len],
-        )?);
+        let text = unsafe { std::str::from_utf8_unchecked(&bytes[offset..offset + len]) };
+        items.push(
+            parse_text_array_literal_with_op(text, element_type, "array decode").unwrap_or_else(
+                |_| {
+                    decode_scalar_array_element(element_type, &bytes[offset..offset + len])
+                        .unwrap_or(Value::Null)
+                },
+            ),
+        );
         offset += len;
     }
-    Ok(Value::Array(items))
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        dimensions, items,
+    )))
 }
 
-fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value, ExecError> {
-    match element_type {
+fn decode_scalar_array_element(
+    element_type: crate::backend::parser::SqlType,
+    bytes: &[u8],
+) -> Result<Value, ExecError> {
+    match scalar_type_for_sql_type(element_type) {
         ScalarType::Int16 => {
             if bytes.len() != 2 {
                 return Err(ExecError::InvalidStorageValue {
@@ -606,9 +653,33 @@ fn decode_array_element(element_type: &ScalarType, bytes: &[u8]) -> Result<Value
                 std::str::from_utf8_unchecked(bytes)
             }),
         )),
-        ScalarType::Array(_) => Err(ExecError::InvalidStorageValue {
-            column: "<array>".into(),
-            details: "nested arrays are not supported".into(),
-        }),
+        ScalarType::Array(_) => unreachable!("array elements use the nested array sentinel"),
+    }
+}
+
+fn scalar_type_for_sql_type(sql_type: crate::backend::parser::SqlType) -> ScalarType {
+    use crate::backend::parser::SqlTypeKind;
+
+    match sql_type.kind {
+        SqlTypeKind::Bool => ScalarType::Bool,
+        SqlTypeKind::Bit | SqlTypeKind::VarBit => ScalarType::BitString,
+        SqlTypeKind::Bytea => ScalarType::Bytea,
+        SqlTypeKind::InternalChar
+        | SqlTypeKind::Char
+        | SqlTypeKind::Varchar
+        | SqlTypeKind::Name
+        | SqlTypeKind::Text => ScalarType::Text,
+        SqlTypeKind::Int2 => ScalarType::Int16,
+        SqlTypeKind::Int2Vector => ScalarType::Text,
+        SqlTypeKind::Int4 | SqlTypeKind::Oid => ScalarType::Int32,
+        SqlTypeKind::Int8 => ScalarType::Int64,
+        SqlTypeKind::OidVector => ScalarType::Text,
+        SqlTypeKind::Float4 => ScalarType::Float32,
+        SqlTypeKind::Float8 => ScalarType::Float64,
+        SqlTypeKind::Numeric => ScalarType::Numeric,
+        SqlTypeKind::Json => ScalarType::Json,
+        SqlTypeKind::Jsonb => ScalarType::Jsonb,
+        SqlTypeKind::JsonPath => ScalarType::JsonPath,
+        SqlTypeKind::Timestamp | SqlTypeKind::PgNodeTree => ScalarType::Text,
     }
 }

@@ -2,6 +2,7 @@ use super::*;
 use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+use crate::backend::libpq::pqformat::format_exec_error;
 use crate::backend::parser::{Catalog, CatalogEntry};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
@@ -137,6 +138,99 @@ fn pets_relation_desc() -> RelationDesc {
 fn catalog_with_pets() -> Catalog {
     let mut catalog = catalog();
     catalog.insert("pets", test_catalog_entry(pets_rel(), pets_relation_desc()));
+    catalog
+}
+
+fn multidimensional_array_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "t",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14002,
+            },
+            RelationDesc {
+                columns: vec![crate::backend::catalog::catalog::column_desc(
+                    "a",
+                    crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                        crate::backend::parser::SqlTypeKind::Int4,
+                    )),
+                    true,
+                )],
+            },
+        ),
+    );
+    catalog
+}
+
+fn array_subscript_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "t",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14003,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "a",
+                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        )),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "b",
+                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        )),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    catalog
+}
+
+fn array_assignment_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "t",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14004,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "a",
+                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        )),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "f",
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::with_char_len(
+                                crate::backend::parser::SqlTypeKind::Char,
+                                5,
+                            ),
+                        ),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
     catalog
 }
 
@@ -2124,6 +2218,217 @@ fn select_array_literal_round_trips() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn multidimensional_array_text_input_round_trips() {
+    let base = temp_dir("multidim_array_round_trip");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '{{1,2},{3,4}}'::int4[]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Array(vec![
+                    Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
+                    Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
+                ])]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn multidimensional_array_columns_round_trip_through_storage() {
+    let base = temp_dir("multidim_array_storage_roundtrip");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('{{{1,2},{3,4}}}'::int4[])",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a from t",
+        multidimensional_array_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Array(vec![Value::Array(vec![
+                    Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
+                    Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
+                ])])]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn array_subscript_select_and_update_work() {
+    let base = temp_dir("array_subscript_update");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t values (ARRAY[1,2,3], ARRAY[4,5,6])",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a[2], b[1:2] from t",
+        array_subscript_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(2),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 2,
+                        }],
+                        vec![Value::Int32(4), Value::Int32(5)],
+                    )),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let update_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            update_xid,
+            "update t set a[2] = 22, b[2:3] = ARRAY[50,60]",
+            array_subscript_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(update_xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a, b from t",
+        array_subscript_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        }],
+                        vec![Value::Int32(1), Value::Int32(22), Value::Int32(3)],
+                    )),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        }],
+                        vec![Value::Int32(4), Value::Int32(50), Value::Int32(60)],
+                    )),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn array_assignment_coerces_text_literals_using_target_type() {
+    let base = temp_dir("array_assignment_text_literals");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            xid,
+            "insert into t (a) values ('{1,2,3}')",
+            array_assignment_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a from t",
+        array_assignment_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Array(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(3),
+                ])]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into t (f) values ('{\"too long\"}')",
+        array_assignment_catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::StringDataRightTruncation { ref ty } if ty == "character(5)"
+    ));
+}
 #[test]
 fn any_array_truth_table_and_overlap_work() {
     let base = temp_dir("array_any_overlap");
@@ -3167,6 +3472,28 @@ fn pg_input_error_info_reports_bool_invalid_input() {
         .unwrap(),
         vec![vec![
             Value::Text("invalid input syntax for type boolean: \"junk\"".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22P02".into()),
+        ]],
+    );
+}
+
+#[test]
+fn pg_input_error_info_reports_array_element_input_error() {
+    let base = temp_dir("pg_input_error_info_array");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('{1,zed}', 'integer[]')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("invalid input syntax for type integer: \"zed\"".into()),
             Value::Null,
             Value::Null,
             Value::Text("22P02".into()),
@@ -4345,12 +4672,127 @@ fn array_overlap_false_and_null_cases() {
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY['a']::varchar[] && ARRAY['b']::varchar[], ARRAY['a', null]::varchar[] && ARRAY['b', null]::varchar[], ARRAY['a']::varchar[] && (null)::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(false), Value::Bool(false), Value::Null]]); } other => panic!("expected query result, got {:?}", other), }
 }
+
+#[test]
+fn array_slice_omitted_upper_and_mixed_slice_shape_work() {
+    let base = temp_dir("array_slice_shape");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('{1,2,3}'::int[])[2:], ('{1,2,3}'::int[])[:], ('{{1,2,3},{4,5,6},{7,8,9}}'::int[])[1:2][2]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 2,
+                            length: 2,
+                        }],
+                        vec![Value::Int32(2), Value::Int32(3)],
+                    )),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![crate::include::nodes::datum::ArrayDimension {
+                            lower_bound: 1,
+                            length: 3,
+                        }],
+                        vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)],
+                    )),
+                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![
+                            crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 2,
+                            },
+                            crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 2,
+                            },
+                        ],
+                        vec![
+                            Value::Int32(1),
+                            Value::Int32(2),
+                            Value::Int32(4),
+                            Value::Int32(5),
+                        ],
+                    )),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn bound_aware_array_comparison_and_overlap_follow_array_ordering() {
+    let base = temp_dir("array_literal_compare");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ARRAY[1,2] = '{1,2}'::int[], ARRAY[1,2] && '{2,3}'::int[], ARRAY[1] < '[2:2]={1}'::int[]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(true)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
 #[test]
 fn array_equality_and_inequality_work_for_same_type_arrays() {
     let base = temp_dir("array_equality_ops");
     let txns = TransactionManager::new_durable(&base).unwrap();
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select ARRAY[1, 2] = ARRAY[1, 2], ARRAY[1, 2] <> ARRAY[2, 1], ARRAY['a']::varchar[] = ARRAY['a']::varchar[]").unwrap() { StatementResult::Query { rows, .. } => { assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(true), Value::Bool(true)]]); } other => panic!("expected query result, got {:?}", other), }
 }
+
+#[test]
+fn unknown_string_literals_coerce_to_array_types_in_comparisons() {
+    let base = temp_dir("array_unknown_literal_compare");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ARRAY[1,2] = '{}', ARRAY[NULL]::int[] = '{NULL}', 2 = any ('{1,2,3}')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn malformed_array_literals_report_array_input_errors() {
+    let base = temp_dir("array_malformed_input");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '{1,}'::text[]").unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "malformed array literal: \"{1,}\""
+    );
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '[2]={1}'::int[]").unwrap_err();
+    assert_eq!(format_exec_error(&err), "malformed array literal: \"[2]={1}\"");
+}
+
 #[test]
 fn typed_empty_array_selects_as_empty_value() {
     let base = temp_dir("typed_empty_array");

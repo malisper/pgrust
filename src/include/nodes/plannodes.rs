@@ -91,6 +91,7 @@ pub enum AggFunc {
     Stddev,
     Min,
     Max,
+    ArrayAgg,
     JsonAgg,
     JsonbAgg,
     JsonObjectAgg,
@@ -107,6 +108,7 @@ impl AggFunc {
             AggFunc::Stddev => "stddev",
             AggFunc::Min => "min",
             AggFunc::Max => "max",
+            AggFunc::ArrayAgg => "array_agg",
             AggFunc::JsonAgg => "json_agg",
             AggFunc::JsonbAgg => "jsonb_agg",
             AggFunc::JsonObjectAgg => "json_object_agg",
@@ -170,6 +172,19 @@ pub enum BuiltinScalarFunction {
     Repeat,
     Strpos,
     Length,
+    ArrayNdims,
+    ArrayDims,
+    ArrayLower,
+    ArrayFill,
+    StringToArray,
+    ArrayToString,
+    ArrayLength,
+    Cardinality,
+    ArrayPosition,
+    ArrayPositions,
+    ArrayRemove,
+    ArrayReplace,
+    ArraySort,
     Lower,
     Unistr,
     Ascii,
@@ -434,6 +449,10 @@ pub enum Expr {
         op: SubqueryComparisonOp,
         right: Box<Expr>,
     },
+    ArraySubscript {
+        array: Box<Expr>,
+        subscripts: Vec<ExprArraySubscript>,
+    },
     Random,
     JsonGet(Box<Expr>, Box<Expr>),
     JsonGetText(Box<Expr>, Box<Expr>),
@@ -446,6 +465,13 @@ pub enum Expr {
         func_variadic: bool,
     },
     CurrentTimestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExprArraySubscript {
+    pub is_slice: bool,
+    pub lower: Option<Expr>,
+    pub upper: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

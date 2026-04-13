@@ -186,6 +186,13 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
                 .map(jsonb_from_value)
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        Value::PgArray(array) => JsonbValue::Array(
+            array
+                .to_nested_values()
+                .iter()
+                .map(jsonb_from_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
     })
 }
 
@@ -400,6 +407,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Json(text) => Ok(text.to_string()),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes),
         Value::Array(items) => Ok(format_array_text(items)),
+        Value::PgArray(array) => Ok(crate::backend::executor::value_io::format_array_value_text(array)),
     }
 }
 

@@ -62,6 +62,18 @@ pub(super) fn bind_comparison_expr(
             coerce_bound_expr(left_bound, raw_left_type, common),
             coerce_bound_expr(right_bound, raw_right_type, common),
         )
+    } else if left_type.is_array && right_type.is_array {
+        if !supports_comparison_operator(catalog, op, left_type, right_type) {
+            return Err(ParseError::UndefinedOperator {
+                op,
+                left_type: sql_type_name(left_type),
+                right_type: sql_type_name(right_type),
+            });
+        }
+        (
+            coerce_bound_expr(left_bound, raw_left_type, left_type),
+            coerce_bound_expr(right_bound, raw_right_type, right_type),
+        )
     } else {
         let (left, right, resolved_left_type, resolved_right_type) =
             if !left_type.is_array && !right_type.is_array {

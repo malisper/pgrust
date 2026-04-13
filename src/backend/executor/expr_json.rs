@@ -659,6 +659,7 @@ fn render_json_string_pairs(pairs: &[(String, Value)]) -> String {
 fn array_values_for_json_object(value: &Value, op: &'static str) -> Result<Vec<Value>, ExecError> {
     match value {
         Value::Array(items) => Ok(items.clone()),
+        Value::PgArray(array) => Ok(array.to_nested_values()),
         other => Err(ExecError::TypeMismatch {
             op,
             left: other.clone(),
@@ -683,7 +684,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::JsonPath(v) => Ok(v.to_string()),
         Value::Json(v) => Ok(v.to_string()),
         Value::Jsonb(v) => render_jsonb_bytes(v),
-        Value::Array(_) => Err(ExecError::TypeMismatch {
+        Value::Array(_) | Value::PgArray(_) => Err(ExecError::TypeMismatch {
             op,
             left: value.clone(),
             right: Value::Null,
@@ -1437,6 +1438,9 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         }
         Value::Array(items) => {
             SerdeJsonValue::Array(items.iter().map(value_to_json_serde).collect())
+        }
+        Value::PgArray(array) => {
+            SerdeJsonValue::Array(array.to_nested_values().iter().map(value_to_json_serde).collect())
         }
     }
 }
