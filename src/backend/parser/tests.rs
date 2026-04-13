@@ -2016,7 +2016,8 @@ fn parse_multidimensional_array_cast_type() {
 #[test]
 fn parse_create_table_with_multidimensional_array_types() {
     match parse_statement("create table widgets (a int4[][][], b text[][])").unwrap() {
-        Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+        Statement::CreateTable(stmt) => {
+            let columns = stmt.columns().collect::<Vec<_>>();
             assert_eq!(
                 columns[0].ty,
                 SqlType::array_of(SqlType::new(SqlTypeKind::Int4))

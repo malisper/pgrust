@@ -13,6 +13,7 @@ use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{parse_date_text, parse_time_text, parse_timetz_text};
+use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
 use crate::pgrust::compact_string::CompactString;
@@ -690,13 +691,17 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::InvalidGeometryInput { .. }
         | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. } => "22P02",
-        ExecError::InvalidStorageValue { column, .. }
+        ExecError::InvalidStorageValue { column, details }
             if matches!(
                 column.as_str(),
                 "date" | "time" | "timetz" | "timestamp" | "timestamptz"
             ) =>
         {
-            "22007"
+            if details.starts_with("time zone \"") {
+                "22023"
+            } else {
+                "22007"
+            }
         }
         ExecError::BitStringLengthMismatch { .. } => "22026",
         ExecError::BitStringTooLong { .. } => "22001",
@@ -711,6 +716,18 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::InvalidFloatInput { .. } => "22P02",
         _ => "XX000",
+    }
+}
+
+fn datetime_parse_error_details(ty: &'static str, text: &str, err: DateTimeParseError) -> String {
+    match err {
+        DateTimeParseError::Invalid => format!("invalid input syntax for type {ty}: \"{text}\""),
+        DateTimeParseError::FieldOutOfRange => {
+            format!("date/time field value out of range: \"{text}\"")
+        }
+        DateTimeParseError::UnknownTimeZone(zone) => {
+            format!("time zone \"{zone}\" not recognized")
+        }
     }
 }
 
@@ -1093,8 +1110,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::Date
             | SqlTypeKind::Time
             | SqlTypeKind::TimeTz => cast_text_value(
-                &render_datetime_value_text(&Value::Timestamp(v))
-                    .expect("datetime values render"),
+                &render_datetime_value_text(&Value::Timestamp(v)).expect("datetime values render"),
                 ty,
                 true,
             ),
@@ -1144,11 +1160,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::Timestamp
             | SqlTypeKind::TimestampTz
             | SqlTypeKind::Bit
-            | SqlTypeKind::VarBit => {
-                Ok(Value::Text(CompactString::from_owned(
-                    render_internal_char_text(byte),
-                )))
-            }
+            | SqlTypeKind::VarBit => Ok(Value::Text(CompactString::from_owned(
+                render_internal_char_text(byte),
+            ))),
             SqlTypeKind::Json => {
                 let rendered = render_internal_char_text(byte);
                 validate_json_text(&rendered)?;
@@ -1426,9 +1440,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::Time
             | SqlTypeKind::TimeTz
             | SqlTypeKind::Timestamp
-            | SqlTypeKind::TimestampTz => Ok(Value::Text(
-                CompactString::from_owned(render_bit_text(&bits)),
-            )),
+            | SqlTypeKind::TimestampTz => Ok(Value::Text(CompactString::from_owned(
+                render_bit_text(&bits),
+            ))),
             _ => Err(ExecError::TypeMismatch {
                 op: "::bit",
                 left: Value::Bit(bits),
@@ -1476,16 +1490,16 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         SqlTypeKind::Timestamp => parse_timestamp_text(text, &DateTimeConfig::default())
             .map(Value::Timestamp)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .ok_or_else(|| ExecError::InvalidStorageValue {
+            .map_err(|err| ExecError::InvalidStorageValue {
                 column: "timestamp".into(),
-                details: format!("invalid input syntax for type timestamp: \"{text}\""),
+                details: datetime_parse_error_details("timestamp", text, err),
             }),
         SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &DateTimeConfig::default())
             .map(Value::TimestampTz)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .ok_or_else(|| ExecError::InvalidStorageValue {
+            .map_err(|err| ExecError::InvalidStorageValue {
                 column: "timestamptz".into(),
-                details: format!("invalid input syntax for type timestamp with time zone: \"{text}\""),
+                details: datetime_parse_error_details("timestamp with time zone", text, err),
             }),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(
