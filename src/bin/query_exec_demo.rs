@@ -121,6 +121,7 @@ fn main() -> Result<(), ExecError> {
         input: Box::new(Plan::Filter {
             input: Box::new(Plan::SeqScan {
                 rel: rel(),
+                relation_oid: 0,
                 desc: desc(),
             }),
             predicate: Expr::Gt(

@@ -1,4 +1,7 @@
 use crate::RelFileLocator;
+use crate::include::access::relscan::ScanDirection;
+use crate::include::access::scankey::ScanKeyData;
+use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
 use crate::include::nodes::datum::Value;
@@ -310,7 +313,17 @@ pub enum Plan {
     Result,
     SeqScan {
         rel: RelFileLocator,
+        relation_oid: u32,
         desc: RelationDesc,
+    },
+    IndexScan {
+        rel: RelFileLocator,
+        index_rel: RelFileLocator,
+        am_oid: u32,
+        desc: RelationDesc,
+        index_meta: IndexRelCacheEntry,
+        keys: Vec<ScanKeyData>,
+        direction: ScanDirection,
     },
     NestedLoopJoin {
         left: Box<Plan>,
@@ -367,6 +380,14 @@ impl Plan {
         match self {
             Plan::Result => vec![],
             Plan::SeqScan { desc, .. } => desc
+                .columns
+                .iter()
+                .map(|c| QueryColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type,
+                })
+                .collect(),
+            Plan::IndexScan { desc, .. } => desc
                 .columns
                 .iter()
                 .map(|c| QueryColumn {

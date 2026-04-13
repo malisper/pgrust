@@ -303,6 +303,7 @@ pub(super) fn bind_from_item_with_ctes(
             Ok((
                 Plan::SeqScan {
                     rel: entry.rel,
+                    relation_oid: entry.relation_oid,
                     desc: desc.clone(),
                 },
                 scope_for_relation(Some(name), &desc),

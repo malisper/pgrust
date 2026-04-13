@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
@@ -603,6 +602,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
         input: Box::new(Plan::Filter {
             input: Box::new(Plan::SeqScan {
                 rel: rel(),
+                relation_oid: 0,
                 desc: relation_desc(),
             }),
             predicate: Expr::Gt(
@@ -677,6 +677,7 @@ fn seqscan_skips_superseded_versions() {
     drop(pool);
     let plan = Plan::SeqScan {
         rel: rel(),
+        relation_oid: 0,
         desc: relation_desc(),
     };
     let rows = run_plan(&base, &txns, plan).unwrap();

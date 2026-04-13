@@ -1,3 +1,4 @@
+use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
@@ -13,8 +14,7 @@ use crate::include::catalog::{
     PgOpfamilyRow, PgTypeRow,
 };
 use crate::pgrust::database::{Database, TempNamespace};
-use crate::ClientId;
-use crate::{backend::utils::cache::catcache::normalize_catalog_name, RelFileLocator};
+use crate::{RelFileLocator, backend::utils::cache::catcache::normalize_catalog_name};
 
 pub struct LazyCatalogLookup<'a> {
     pub db: &'a Database,
@@ -298,7 +298,9 @@ pub fn lookup_any_relation(
         let namespace_oid = namespace_oid_for_name(db, client_id, txn_ctx, &schema_name)?;
         let class = ensure_class_rows(db, client_id, txn_ctx)
             .into_iter()
-            .find(|row| row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(relname))?;
+            .find(|row| {
+                row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(relname)
+            })?;
         let entry = relation_entry_by_oid(db, client_id, txn_ctx, class.oid)?;
         return Some(BoundRelation {
             rel: entry.rel,
@@ -314,7 +316,12 @@ pub fn lookup_any_relation(
         .temp_relations
         .read()
         .get(&client_id)
-        .and_then(|namespace| namespace.tables.get(&normalized).map(|entry| entry.entry.clone()))
+        .and_then(|namespace| {
+            namespace
+                .tables
+                .get(&normalized)
+                .map(|entry| entry.entry.clone())
+        })
     {
         return Some(BoundRelation {
             rel: temp.rel,
@@ -334,7 +341,8 @@ pub fn lookup_any_relation(
             .into_iter()
             .find(|row| {
                 row.relnamespace == namespace_oid && row.relname.eq_ignore_ascii_case(&normalized)
-            }) else {
+            })
+        else {
             continue;
         };
         let Some(entry) = relation_entry_by_oid(db, client_id, txn_ctx, class.oid) else {
@@ -404,8 +412,7 @@ pub fn relation_display_name(
                     })
                 })
                 .map(|position| (position, row.relnamespace))
-            })
-        ;
+        });
     if let Some((_, visible_namespace_oid)) = first_match
         && visible_namespace_oid == entry.namespace_oid
     {
@@ -454,21 +461,49 @@ pub fn constraint_rows_for_relation(
 ) -> Vec<PgConstraintRow> {
     let Some(class) = ensure_class_rows(db, client_id, txn_ctx)
         .into_iter()
-        .find(|row| row.oid == relation_oid) else {
+        .find(|row| row.oid == relation_oid)
+    else {
         return Vec::new();
     };
     let Some(entry) = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid) else {
         return Vec::new();
     };
-    derived_pg_constraint_rows(relation_oid, &class.relname, entry.namespace_oid, &entry.desc)
+    derived_pg_constraint_rows(
+        relation_oid,
+        &class.relname,
+        entry.namespace_oid,
+        &entry.desc,
+    )
 }
 
 impl CatalogLookup for LazyCatalogLookup<'_> {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
-        lookup_any_relation(self.db, self.client_id, self.txn_ctx, &self.search_path, name)
+        lookup_any_relation(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            name,
+        )
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
         ensure_type_rows(self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        index_relation_oids_for_heap(self.db, self.client_id, self.txn_ctx, relation_oid)
+            .into_iter()
+            .filter_map(|index_oid| {
+                let entry = relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
+                let index_meta = entry.index.as_ref()?.clone();
+                Some(crate::backend::parser::BoundIndexRelation {
+                    rel: entry.rel,
+                    relation_oid: entry.relation_oid,
+                    desc: entry.desc,
+                    index_meta,
+                })
+            })
+            .collect()
     }
 }

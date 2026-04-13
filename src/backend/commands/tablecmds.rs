@@ -11,7 +11,7 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
     AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement,
-    BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
+    BoundIndexRelation, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
     MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement,
     bind_create_table, build_plan,
 };
@@ -25,6 +25,7 @@ use crate::backend::executor::exec_expr::{
 };
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start};
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::execnodes::*;
 
 pub(crate) fn execute_explain(
@@ -105,6 +106,47 @@ fn validate_maintenance_targets(
     Ok(())
 }
 
+fn indexed_table_unsupported(op: &'static str) -> ExecError {
+    ExecError::Parse(ParseError::UnexpectedToken {
+        expected: "table without usable indexes",
+        actual: format!("{op} on indexed table"),
+    })
+}
+
+fn maintain_indexes_for_row(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    heap_desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
+    values: &[Value],
+    heap_tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for index in indexes
+        .iter()
+        .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+    {
+        crate::backend::access::index::indexam::index_insert_stub(
+            &crate::include::access::amapi::IndexInsertContext {
+                pool: ctx.pool.clone(),
+                client_id: ctx.client_id,
+                heap_relation: heap_rel,
+                heap_desc: heap_desc.clone(),
+                index_relation: index.rel,
+                index_desc: index.desc.clone(),
+                index_meta: index.index_meta.clone(),
+                values: values.to_vec(),
+                heap_tid,
+            },
+            index.index_meta.am_oid,
+        )
+        .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index insertion",
+            actual: format!("{err:?}"),
+        }))?;
+    }
+    Ok(())
+}
+
 pub fn execute_analyze(
     stmt: AnalyzeStatement,
     catalog: &dyn CatalogLookup,
@@ -156,18 +198,8 @@ pub fn execute_create_index(
                 actual: format!("{other:?}"),
             }),
         })?;
-    let _ = ctx.pool.with_storage_mut(|s| {
-        crate::backend::access::index::indexam::index_build_stub(
-            crate::backend::storage::smgr::RelFileLocator {
-                spc_oid: 0,
-                db_oid: 1,
-                rel_number: 0,
-            },
-            entry.rel,
-            crate::include::catalog::BTREE_AM_OID,
-            &mut s.smgr,
-        )
-    });
+    let _ = ctx;
+    let _ = entry;
     Ok(StatementResult::AffectedRows(0))
 }
 
@@ -213,6 +245,13 @@ pub fn execute_truncate_table(
         let entry = catalog
             .lookup_relation(&table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
+        if catalog
+            .index_relations_for_heap(entry.relation_oid)
+            .iter()
+            .any(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+        {
+            return Err(indexed_table_unsupported("TRUNCATE"));
+        }
         let _ = ctx.pool.invalidate_relation(entry.rel);
         ctx.pool
             .with_storage_mut(|s| s.smgr.truncate(entry.rel, ForkNumber::Main, 0))
@@ -278,13 +317,22 @@ pub fn execute_insert(
         }
     };
 
-    let inserted = execute_insert_values(stmt.rel, &stmt.desc, &values, ctx, xid, cid)?;
+    let inserted = execute_insert_values(
+        stmt.rel,
+        &stmt.desc,
+        &stmt.indexes,
+        &values,
+        ctx,
+        xid,
+        cid,
+    )?;
     Ok(StatementResult::AffectedRows(inserted))
 }
 
 pub fn execute_insert_values(
     rel: crate::backend::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
+    indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
     ctx: &mut ExecutorContext,
     xid: TransactionId,
@@ -292,7 +340,8 @@ pub fn execute_insert_values(
 ) -> Result<usize, ExecError> {
     for values in rows {
         let tuple = tuple_from_values(desc, values)?;
-        heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
+        let heap_tid = heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
+        maintain_indexes_for_row(rel, desc, indexes, values, heap_tid, ctx)?;
     }
 
     Ok(rows.len())
@@ -317,7 +366,16 @@ pub fn execute_prepared_insert_row(
         values[*column_index] = param.clone();
     }
     let tuple = tuple_from_values(&prepared.desc, &values)?;
-    heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, prepared.rel, xid, cid, &tuple)?;
+    let heap_tid =
+        heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, prepared.rel, xid, cid, &tuple)?;
+    maintain_indexes_for_row(
+        prepared.rel,
+        &prepared.desc,
+        &prepared.indexes,
+        &values,
+        heap_tid,
+        ctx,
+    )?;
     Ok(())
 }
 
@@ -337,6 +395,9 @@ pub fn execute_update_with_waiter(
     cid: CommandId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
+    if stmt.has_valid_index {
+        return Err(indexed_table_unsupported("UPDATE"));
+    }
     let mut scan =
         heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut affected_rows = 0;
@@ -479,6 +540,9 @@ pub fn execute_delete_with_waiter(
     xid: TransactionId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
+    if stmt.has_valid_index {
+        return Err(indexed_table_unsupported("DELETE"));
+    }
     let mut scan =
         heap_scan_begin_visible(&ctx.pool, ctx.client_id, stmt.rel, ctx.snapshot.clone())?;
     let mut targets = Vec::new();

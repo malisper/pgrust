@@ -1,7 +1,9 @@
 use super::{AccumState, AggGroup, ExecError, ExecutorContext};
 use crate::backend::access::heap::heapam::{
-    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
+    heap_fetch_visible, heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple,
+    heap_scan_prepare_next_page,
 };
+use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines;
 use crate::backend::executor::exec_expr::{
     compare_order_by_keys, decode_value, eval_expr, eval_json_table_function,
@@ -9,9 +11,9 @@ use crate::backend::executor::exec_expr::{
 use crate::backend::parser::SqlTypeKind;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
-    AggregateState, FilterState, GenerateSeriesState, JsonTableFunctionState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState, ResultState,
-    SeqScanState, SlotKind, TupleSlot, UnnestState, ValuesState,
+    AggregateState, FilterState, GenerateSeriesState, IndexScanState, JsonTableFunctionState,
+    LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState,
+    ResultState, SeqScanState, SlotKind, TupleSlot, UnnestState, ValuesState,
 };
 
 use std::time::Instant;
@@ -131,6 +133,114 @@ impl PlanNode for SeqScanState {
     }
     fn node_label(&self) -> String {
         format!("Seq Scan on rel {}", self.rel.rel_number)
+    }
+    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+impl PlanNode for IndexScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.scan.is_none() {
+            let begin = crate::include::access::amapi::IndexBeginScanContext {
+                pool: ctx.pool.clone(),
+                client_id: ctx.client_id,
+                snapshot: ctx.snapshot.clone(),
+                heap_relation: self.rel,
+                index_relation: self.index_rel,
+                index_desc: (*self.desc).clone(),
+                index_meta: self.index_meta.clone(),
+                key_data: self.keys.clone(),
+                direction: self.direction,
+            };
+            self.scan = Some(indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
+                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                    expected: "index access method begin scan",
+                    actual: format!("{err:?}"),
+                })
+            })?);
+        }
+
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+
+        loop {
+            let has_tuple = {
+                let scan = self.scan.as_mut().expect("index scan must exist");
+                indexam::index_getnext(scan, self.am_oid).map_err(|err| {
+                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                        expected: "index access method tuple",
+                        actual: format!("{err:?}"),
+                    })
+                })?
+            };
+            if !has_tuple {
+                if let Some(scan) = self.scan.take() {
+                    indexam::index_endscan(scan, self.am_oid).map_err(|err| {
+                        ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                            expected: "index access method end scan",
+                            actual: format!("{err:?}"),
+                        })
+                    })?;
+                }
+                if let Some(s) = start {
+                    self.stats.loops += 1;
+                    self.stats.total_time += s.elapsed();
+                }
+                return Ok(None);
+            }
+
+            let tid = self
+                .scan
+                .as_ref()
+                .and_then(|scan| scan.xs_heaptid)
+                .expect("index scan tuple must set heap tid");
+            let visible = {
+                let txns = ctx.txns.read();
+                heap_fetch_visible(&ctx.pool, ctx.client_id, self.rel, tid, &txns, &ctx.snapshot)?
+            };
+            let Some(tuple) = visible else {
+                continue;
+            };
+            self.slot.kind = SlotKind::HeapTuple {
+                desc: self.desc.clone(),
+                attr_descs: self.attr_descs.clone(),
+                tid,
+                tuple,
+            };
+            self.slot.tts_nvalid = 0;
+            self.slot.tts_values.clear();
+            self.slot.decode_offset = 0;
+
+            if let Some(s) = start {
+                self.stats.loops += 1;
+                self.stats.total_time += s.elapsed();
+                self.stats.rows += 1;
+            }
+            return Ok(Some(&mut self.slot));
+        }
+    }
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+    fn node_label(&self) -> String {
+        format!(
+            "Index Scan using rel {} on rel {}",
+            self.index_rel.rel_number, self.rel.rel_number
+        )
     }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
 }

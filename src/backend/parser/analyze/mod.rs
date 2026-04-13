@@ -10,12 +10,12 @@ mod scope;
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{
-    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, Plan, QueryColumn,
-    RelationDesc, TargetEntry, Value,
+    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, Plan,
+    QueryColumn, RelationDesc, TargetEntry, Value,
 };
 use crate::include::catalog::{
-    PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_type_rows,
+    PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 use super::parsenodes::*;
@@ -30,8 +30,20 @@ use infer::*;
 pub use scope::BoundRelation;
 use scope::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundIndexRelation {
+    pub rel: RelFileLocator,
+    pub relation_oid: u32,
+    pub desc: RelationDesc,
+    pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+}
+
 pub trait CatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
+
+    fn index_relations_for_heap(&self, _relation_oid: u32) -> Vec<BoundIndexRelation> {
+        Vec::new()
+    }
 
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
         self.lookup_any_relation(name)
@@ -60,7 +72,11 @@ pub trait CatalogLookup {
         })
     }
 
-    fn cast_by_source_target(&self, source_type_oid: u32, target_type_oid: u32) -> Option<PgCastRow> {
+    fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<PgCastRow> {
         bootstrap_pg_cast_rows()
             .into_iter()
             .find(|row| row.castsource == source_type_oid && row.casttarget == target_type_oid)
@@ -101,6 +117,22 @@ impl CatalogLookup for Catalog {
             desc: entry.desc.clone(),
         })
     }
+
+    fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        let relcache = RelCache::from_catalog(self);
+        relcache
+            .entries()
+            .filter_map(|(_, entry)| {
+                let index_meta = entry.index.as_ref()?;
+                (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                    rel: entry.rel,
+                    relation_oid: entry.relation_oid,
+                    desc: entry.desc.clone(),
+                    index_meta: index_meta.clone(),
+                })
+            })
+            .collect()
+    }
 }
 
 impl CatalogLookup for RelCache {
@@ -113,6 +145,20 @@ impl CatalogLookup for RelCache {
             relkind: entry.relkind,
             desc: entry.desc.clone(),
         })
+    }
+
+    fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        self.entries()
+            .filter_map(|(_, entry)| {
+                let index_meta = entry.index.as_ref()?;
+                (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                    rel: entry.rel,
+                    relation_oid: entry.relation_oid,
+                    desc: entry.desc.clone(),
+                    index_meta: index_meta.clone(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -722,6 +768,8 @@ fn build_plan_with_outer(
             };
         }
 
+        plan = maybe_rewrite_index_scan(plan, catalog);
+
         if stmt.limit.is_some() || stmt.offset.is_some() {
             plan = Plan::Limit {
                 input: Box::new(plan),
@@ -746,6 +794,328 @@ fn build_plan_with_outer(
             })
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct IndexableQual {
+    column: usize,
+    strategy: u16,
+    argument: Value,
+    expr: Expr,
+}
+
+fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
+    let (rel, relation_oid, desc, filter, order_items) = match plan {
+        Plan::SeqScan {
+            rel,
+            relation_oid,
+            desc,
+        } => (rel, relation_oid, desc, None, None),
+        Plan::Filter { input, predicate } => match *input {
+            Plan::SeqScan {
+                rel,
+                relation_oid,
+                desc,
+            } => (rel, relation_oid, desc, Some(predicate), None),
+            other => return Plan::Filter {
+                input: Box::new(other),
+                predicate,
+            },
+        },
+        Plan::OrderBy { input, items } => match *input {
+            Plan::SeqScan {
+                rel,
+                relation_oid,
+                desc,
+            } => (rel, relation_oid, desc, None, Some(items)),
+            Plan::Filter { input, predicate } => match *input {
+                Plan::SeqScan {
+                    rel,
+                    relation_oid,
+                    desc,
+                } => (rel, relation_oid, desc, Some(predicate), Some(items)),
+                other => {
+                    return Plan::OrderBy {
+                        input: Box::new(Plan::Filter {
+                            input: Box::new(other),
+                            predicate,
+                        }),
+                        items,
+                    };
+                }
+            },
+            other => {
+                return Plan::OrderBy {
+                    input: Box::new(other),
+                    items,
+                };
+            }
+        },
+        other => return other,
+    };
+
+    let indexes = catalog.index_relations_for_heap(relation_oid);
+    choose_index_scan(rel, relation_oid, desc, filter, order_items, indexes)
+}
+
+fn rebuild_scan_plan(
+    rel: RelFileLocator,
+    relation_oid: u32,
+    desc: RelationDesc,
+    filter: Option<Expr>,
+    order_items: Option<Vec<OrderByEntry>>,
+) -> Plan {
+    let mut plan = Plan::SeqScan {
+        rel,
+        relation_oid,
+        desc,
+    };
+    if let Some(predicate) = filter {
+        plan = Plan::Filter {
+            input: Box::new(plan),
+            predicate,
+        };
+    }
+    if let Some(items) = order_items {
+        plan = Plan::OrderBy {
+            input: Box::new(plan),
+            items,
+        };
+    }
+    plan
+}
+
+fn choose_index_scan(
+    rel: RelFileLocator,
+    relation_oid: u32,
+    desc: RelationDesc,
+    filter: Option<Expr>,
+    order_items: Option<Vec<OrderByEntry>>,
+    indexes: Vec<BoundIndexRelation>,
+) -> Plan {
+    let conjuncts = filter
+        .as_ref()
+        .map(flatten_and_conjuncts)
+        .unwrap_or_default();
+    let parsed_quals = conjuncts
+        .iter()
+        .filter_map(|expr| indexable_qual(expr))
+        .collect::<Vec<_>>();
+
+    let mut best: Option<(bool, usize, bool, Plan, Option<Expr>, bool)> = None;
+    for index in indexes.into_iter().filter(|index| {
+        index.index_meta.indisvalid
+            && index.index_meta.indisready
+            && !index.index_meta.indkey.is_empty()
+            && index.index_meta.am_oid == crate::include::catalog::BTREE_AM_OID
+    }) {
+        let mut used = vec![false; parsed_quals.len()];
+        let mut keys = Vec::new();
+        let mut equality_prefix = 0usize;
+
+        for attnum in &index.index_meta.indkey {
+            let column = attnum.saturating_sub(1) as usize;
+            if let Some((qual_idx, qual)) = parsed_quals
+                .iter()
+                .enumerate()
+                .find(|(idx, qual)| !used[*idx] && qual.column == column && qual.strategy == 3)
+            {
+                used[qual_idx] = true;
+                equality_prefix += 1;
+                keys.push(crate::include::access::scankey::ScanKeyData {
+                    attribute_number: equality_prefix as i16,
+                    strategy: qual.strategy,
+                    argument: qual.argument.clone(),
+                });
+                continue;
+            }
+            if let Some((qual_idx, qual)) = parsed_quals
+                .iter()
+                .enumerate()
+                .find(|(idx, qual)| !used[*idx] && qual.column == column)
+            {
+                used[qual_idx] = true;
+                keys.push(crate::include::access::scankey::ScanKeyData {
+                    attribute_number: (equality_prefix + 1) as i16,
+                    strategy: qual.strategy,
+                    argument: qual.argument.clone(),
+                });
+            }
+            break;
+        }
+
+        let usable_prefix = keys.len();
+        let order_match = order_items
+            .as_ref()
+            .and_then(|items| index_order_match(items, &index, equality_prefix));
+        let has_qual = usable_prefix > 0;
+        if !has_qual && order_match.is_none() {
+            continue;
+        }
+        let residual = {
+            let used_exprs = parsed_quals
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, qual)| used.get(idx).copied().unwrap_or(false).then_some(&qual.expr))
+                .collect::<Vec<_>>();
+            let residual = conjuncts
+                .iter()
+                .filter(|expr| !used_exprs.iter().any(|used_expr| *used_expr == *expr))
+                .cloned()
+                .collect::<Vec<_>>();
+            and_exprs(residual)
+        };
+
+        let mut plan = Plan::IndexScan {
+            rel,
+            index_rel: index.rel,
+            am_oid: index.index_meta.am_oid,
+            desc: desc.clone(),
+            index_meta: index.index_meta.clone(),
+            keys,
+            direction: order_match
+                .as_ref()
+                .map(|(_, direction)| *direction)
+                .unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
+        };
+        if let Some(predicate) = residual.clone() {
+            plan = Plan::Filter {
+                input: Box::new(plan),
+                predicate,
+            };
+        }
+        let removes_order = order_match.is_some();
+        if !removes_order && let Some(items) = order_items.clone() {
+            plan = Plan::OrderBy {
+                input: Box::new(plan),
+                items,
+            };
+        }
+
+        let ranking = (
+            has_qual,
+            usable_prefix,
+            removes_order,
+            plan,
+            residual,
+            removes_order,
+        );
+        match &best {
+            None => best = Some(ranking),
+            Some((best_has_qual, best_prefix, best_order, _, _, _)) => {
+                if (has_qual as u8, usable_prefix, removes_order as u8)
+                    > (*best_has_qual as u8, *best_prefix, *best_order as u8)
+                {
+                    best = Some(ranking);
+                }
+            }
+        }
+    }
+
+    best.map(|(_, _, _, plan, _, _)| plan)
+        .unwrap_or_else(|| rebuild_scan_plan(rel, relation_oid, desc, filter, order_items))
+}
+
+fn index_order_match(
+    items: &[OrderByEntry],
+    index: &BoundIndexRelation,
+    equality_prefix: usize,
+) -> Option<(usize, crate::include::access::relscan::ScanDirection)> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut direction = None;
+    let mut matched = 0usize;
+    for (idx, item) in items.iter().enumerate() {
+        let Expr::Column(column) = item.expr else {
+            break;
+        };
+        let Some(attnum) = index.index_meta.indkey.get(equality_prefix + idx) else {
+            break;
+        };
+        if *attnum as usize != column + 1 {
+            break;
+        }
+        let item_direction = if item.descending {
+            crate::include::access::relscan::ScanDirection::Backward
+        } else {
+            crate::include::access::relscan::ScanDirection::Forward
+        };
+        if let Some(existing) = direction {
+            if existing != item_direction {
+                return None;
+            }
+        } else {
+            direction = Some(item_direction);
+        }
+        matched += 1;
+    }
+    (matched == items.len()).then_some((matched, direction.unwrap_or(
+        crate::include::access::relscan::ScanDirection::Forward,
+    )))
+}
+
+fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
+    match expr {
+        Expr::And(left, right) => {
+            let mut out = flatten_and_conjuncts(left);
+            out.extend(flatten_and_conjuncts(right));
+            out
+        }
+        other => vec![other.clone()],
+    }
+}
+
+fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
+    fn mk(column: usize, strategy: u16, argument: &Value, expr: &Expr) -> Option<IndexableQual> {
+        Some(IndexableQual {
+            column,
+            strategy,
+            argument: argument.clone(),
+            expr: expr.clone(),
+        })
+    }
+
+    match expr {
+        Expr::Eq(left, right) => match (&**left, &**right) {
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 3, value, expr),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 3, value, expr),
+            _ => None,
+        },
+        Expr::Lt(left, right) => match (&**left, &**right) {
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 1, value, expr),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 5, value, expr),
+            _ => None,
+        },
+        Expr::LtEq(left, right) => match (&**left, &**right) {
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 2, value, expr),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 4, value, expr),
+            _ => None,
+        },
+        Expr::Gt(left, right) => match (&**left, &**right) {
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 5, value, expr),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 1, value, expr),
+            _ => None,
+        },
+        Expr::GtEq(left, right) => match (&**left, &**right) {
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 4, value, expr),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 2, value, expr),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn and_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {
+    if exprs.is_empty() {
+        return None;
+    }
+    let first = exprs.remove(0);
+    Some(
+        exprs
+            .into_iter()
+            .fold(first, |acc, expr| Expr::And(Box::new(acc), Box::new(expr))),
+    )
 }
 
 fn bind_order_by_items(
@@ -785,7 +1155,9 @@ fn bind_order_by_items(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundInsertStatement {
     pub rel: RelFileLocator,
+    pub relation_oid: u32,
     pub desc: RelationDesc,
+    pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<usize>,
     pub source: BoundInsertSource,
@@ -803,7 +1175,9 @@ pub enum BoundInsertSource {
 #[derive(Debug, Clone)]
 pub struct PreparedInsert {
     pub rel: RelFileLocator,
+    pub relation_oid: u32,
     pub desc: RelationDesc,
+    pub indexes: Vec<BoundIndexRelation>,
     pub column_defaults: Vec<Expr>,
     pub target_columns: Vec<usize>,
     pub num_params: usize,
@@ -871,7 +1245,9 @@ pub fn bind_insert_prepared(
 
     Ok(PreparedInsert {
         rel: entry.rel,
+        relation_oid: entry.relation_oid,
         desc: entry.desc.clone(),
+        indexes: catalog.index_relations_for_heap(entry.relation_oid),
         column_defaults,
         target_columns,
         num_params,
@@ -881,7 +1257,9 @@ pub fn bind_insert_prepared(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundUpdateStatement {
     pub rel: RelFileLocator,
+    pub relation_oid: u32,
     pub desc: RelationDesc,
+    pub has_valid_index: bool,
     pub assignments: Vec<BoundAssignment>,
     pub predicate: Option<Expr>,
 }
@@ -889,7 +1267,9 @@ pub struct BoundUpdateStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundDeleteStatement {
     pub rel: RelFileLocator,
+    pub relation_oid: u32,
     pub desc: RelationDesc,
+    pub has_valid_index: bool,
     pub predicate: Option<Expr>,
 }
 
@@ -988,7 +1368,9 @@ pub fn bind_insert(
 
     Ok(BoundInsertStatement {
         rel: entry.rel,
+        relation_oid: entry.relation_oid,
         desc: entry.desc.clone(),
+        indexes: catalog.index_relations_for_heap(entry.relation_oid),
         column_defaults,
         target_columns,
         source,
@@ -1005,7 +1387,12 @@ pub fn bind_update(
 
     Ok(BoundUpdateStatement {
         rel: entry.rel,
+        relation_oid: entry.relation_oid,
         desc: entry.desc.clone(),
+        has_valid_index: catalog
+            .index_relations_for_heap(entry.relation_oid)
+            .iter()
+            .any(|index| index.index_meta.indisvalid && index.index_meta.indisready),
         assignments: stmt
             .assignments
             .iter()
@@ -1043,7 +1430,12 @@ pub fn bind_delete(
 
     Ok(BoundDeleteStatement {
         rel: entry.rel,
+        relation_oid: entry.relation_oid,
         desc: entry.desc.clone(),
+        has_valid_index: catalog
+            .index_relations_for_heap(entry.relation_oid)
+            .iter()
+            .any(|index| index.index_meta.indisvalid && index.index_meta.indisready),
         predicate: stmt
             .where_clause
             .as_ref()

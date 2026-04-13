@@ -1,4 +1,8 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
+use crate::include::access::relscan::ScanDirection;
+use crate::include::access::relscan::IndexScanDesc;
+use crate::include::access::scankey::ScanKeyData;
+use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use std::rc::Rc;
@@ -201,6 +205,31 @@ impl std::fmt::Debug for SeqScanState {
         f.debug_struct("SeqScanState")
             .field("rel", &self.rel)
             .field("has_qual", &self.qual.is_some())
+            .finish()
+    }
+}
+
+pub struct IndexScanState {
+    pub(crate) rel: RelFileLocator,
+    pub(crate) index_rel: RelFileLocator,
+    pub(crate) am_oid: u32,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) desc: Rc<RelationDesc>,
+    pub(crate) attr_descs: Rc<[AttributeDesc]>,
+    pub(crate) index_meta: IndexRelCacheEntry,
+    pub(crate) keys: Vec<ScanKeyData>,
+    pub(crate) direction: ScanDirection,
+    pub(crate) scan: Option<IndexScanDesc>,
+    pub(crate) slot: TupleSlot,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for IndexScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexScanState")
+            .field("rel", &self.rel)
+            .field("index_rel", &self.index_rel)
+            .field("am_oid", &self.am_oid)
             .finish()
     }
 }

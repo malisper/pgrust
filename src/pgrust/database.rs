@@ -14,9 +14,7 @@ use crate::backend::catalog::namespace::{
     normalize_create_table_as_stmt_with_search_path as namespace_normalize_create_table_as_stmt_with_search_path,
     normalize_create_table_stmt_with_search_path as namespace_normalize_create_table_stmt_with_search_path,
 };
-use crate::backend::catalog::store::{
-    CatalogMutationEffect, CatalogWriteContext,
-};
+use crate::backend::catalog::store::{CatalogMutationEffect, CatalogWriteContext};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, execute_readonly_statement,
@@ -38,11 +36,14 @@ use crate::backend::utils::cache::inval::{
 };
 use crate::backend::utils::cache::lsyscache::{
     LazyCatalogLookup, access_method_name_for_relation, constraint_rows_for_relation,
-    describe_relation_by_oid, has_index_on_relation, relation_display_name, relation_namespace_name,
+    describe_relation_by_oid, has_index_on_relation, relation_display_name,
+    relation_namespace_name,
 };
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
-use crate::backend::utils::cache::syscache::{SessionCatalogState, invalidate_session_catalog_state};
+use crate::backend::utils::cache::syscache::{
+    SessionCatalogState, invalidate_session_catalog_state,
+};
 use crate::include::catalog::PgConstraintRow;
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -220,7 +221,11 @@ impl Database {
         self.temp_relations.read().get(&client_id).cloned()
     }
 
-    pub(crate) fn other_session_temp_namespace_oid(&self, client_id: ClientId, namespace_oid: u32) -> bool {
+    pub(crate) fn other_session_temp_namespace_oid(
+        &self,
+        client_id: ClientId,
+        namespace_oid: u32,
+    ) -> bool {
         namespace_oid >= TEMP_DB_OID_BASE && namespace_oid != Self::temp_namespace_oid(client_id)
     }
 
@@ -234,7 +239,9 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Vec<String> {
         namespace_effective_search_path(
-            self.owned_temp_namespace(client_id).as_ref().map(|ns| ns.name.as_str()),
+            self.owned_temp_namespace(client_id)
+                .as_ref()
+                .map(|ns| ns.name.as_str()),
             configured_search_path,
         )
     }
@@ -295,7 +302,13 @@ impl Database {
         configured_search_path: Option<&[String]>,
         relation_oid: u32,
     ) -> Option<String> {
-        relation_display_name(self, client_id, txn_ctx, configured_search_path, relation_oid)
+        relation_display_name(
+            self,
+            client_id,
+            txn_ctx,
+            configured_search_path,
+            relation_oid,
+        )
     }
 
     pub(crate) fn has_index_on_relation(
@@ -379,14 +392,17 @@ impl Database {
                 rel: RelFileLocator {
                     spc_oid: 0,
                     db_oid: 1,
-                    rel_number: crate::include::catalog::BootstrapCatalogKind::PgNamespace.relation_oid(),
+                    rel_number: crate::include::catalog::BootstrapCatalogKind::PgNamespace
+                        .relation_oid(),
                 },
                 relation_oid: namespace.oid,
                 namespace_oid: namespace.oid,
                 row_type_oid: 0,
                 relpersistence: 't',
                 relkind: 'n',
-                desc: crate::backend::executor::RelationDesc { columns: Vec::new() },
+                desc: crate::backend::executor::RelationDesc {
+                    columns: Vec::new(),
+                },
                 index: None,
             },
             on_commit: OnCommitAction::PreserveRows,
@@ -555,7 +571,13 @@ impl Database {
                 &mut catalog_effects,
                 &mut temp_effects,
             );
-            let result = self.finish_txn(client_id, xid, result.map(|_| StatementResult::AffectedRows(0)), &catalog_effects, &temp_effects);
+            let result = self.finish_txn(
+                client_id,
+                xid,
+                result.map(|_| StatementResult::AffectedRows(0)),
+                &catalog_effects,
+                &temp_effects,
+            );
             guard.disarm();
             let _ = result?;
         }
@@ -598,10 +620,10 @@ impl Database {
             client_id,
             waiter: None,
         };
-        if let Ok(effect) = self
-            .catalog
-            .write()
-            .drop_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
+        if let Ok(effect) =
+            self.catalog
+                .write()
+                .drop_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
         {
             let _ = self.finish_txn(
                 client_id,
@@ -662,7 +684,8 @@ impl Database {
                     client_id,
                     waiter: None,
                 };
-                let result = catalog_guard.create_table_mvcc(table_name.clone(), desc.clone(), &ctx);
+                let result =
+                    catalog_guard.create_table_mvcc(table_name.clone(), desc.clone(), &ctx);
                 match result {
                     Err(CatalogError::TableAlreadyExists(name)) if create_stmt.if_not_exists => {
                         Ok(StatementResult::AffectedRows(0))
@@ -717,6 +740,7 @@ impl Database {
         client_id: ClientId,
         create_stmt: &CreateIndexStatement,
         configured_search_path: Option<&[String]>,
+        maintenance_work_mem_kb: usize,
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -727,6 +751,7 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            maintenance_work_mem_kb,
             &mut catalog_effects,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
@@ -741,6 +766,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        maintenance_work_mem_kb: usize,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -814,7 +840,9 @@ impl Database {
                 .iter()
                 .find(|row| row.sql_type == bound_column.sql_type)
                 .map(|row| row.oid)
-                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(column.name.clone())))?;
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(column.name.clone()))
+                })?;
             let opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
                 self,
                 client_id,
@@ -862,19 +890,90 @@ impl Database {
             Ok((index_entry, effect)) => {
                 drop(catalog_guard);
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
-                self.pool.with_storage_mut(|storage| {
-                    crate::backend::access::index::indexam::index_build_stub(
-                        entry.rel,
-                        index_entry.rel,
-                        access_method.oid,
-                        &mut storage.smgr,
-                    )
-                }).map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+                let snapshot = self
+                    .txns
+                    .read()
+                    .snapshot_for_command(xid, cid)
+                    .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index build snapshot",
+                        actual: "snapshot creation failed".into(),
+                    }))?;
+                let index_meta = index_entry
+                    .index_meta
+                    .clone()
+                    .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index metadata",
+                        actual: "missing index metadata".into(),
+                    }))?;
+                let build_ctx = crate::include::access::amapi::IndexBuildContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    client_id,
+                    snapshot,
+                    heap_relation: entry.rel,
+                    heap_desc: entry.desc.clone(),
+                    index_relation: index_entry.rel,
+                    index_desc: index_entry.desc.clone(),
+                    index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry {
+                        indrelid: index_meta.indrelid,
+                        indnatts: index_meta.indkey.len() as i16,
+                        indnkeyatts: index_meta.indkey.len() as i16,
+                        indisunique: index_meta.indisunique,
+                        indnullsnotdistinct: false,
+                        indisprimary: false,
+                        indisexclusion: false,
+                        indimmediate: false,
+                        indisclustered: false,
+                        indisvalid: index_meta.indisvalid,
+                        indcheckxmin: false,
+                        indisready: index_meta.indisready,
+                        indislive: index_meta.indislive,
+                        indisreplident: false,
+                        am_oid: access_method.oid,
+                        am_handler_oid: Some(access_method.amhandler),
+                        indkey: index_meta.indkey.clone(),
+                        indclass: index_meta.indclass.clone(),
+                        indcollation: index_meta.indcollation.clone(),
+                        indoption: index_meta.indoption.clone(),
+                        opfamily_oids: Vec::new(),
+                        opcintype_oids: Vec::new(),
+                        indexprs: index_meta.indexprs.clone(),
+                        indpred: index_meta.indpred.clone(),
+                    },
+                    maintenance_work_mem_kb,
+                };
+                crate::backend::access::index::indexam::index_build_stub(
+                    &build_ctx,
+                    access_method.oid,
+                )
+                .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "index access method build",
                     actual: "index build failed".into(),
                 }))?;
-                catalog_effects.push(effect);
-                Ok(StatementResult::AffectedRows(0))
+                let mut catalog_guard = self.catalog.write();
+                let readiness_ctx = CatalogWriteContext {
+                    pool: &self.pool,
+                    txns: &self.txns,
+                    xid,
+                    cid: cid.saturating_add(1),
+                    client_id,
+                    waiter: None,
+                };
+                let ready_effect = catalog_guard.set_index_ready_valid_mvcc(
+                    index_entry.relation_oid,
+                    true,
+                    true,
+                    &readiness_ctx,
+                );
+                drop(catalog_guard);
+                catalog_effects.push(effect.clone());
+                catalog_effects.push(ready_effect.map_err(|_| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index catalog readiness update",
+                        actual: "index readiness update failed".into(),
+                    })
+                })?);
+                return Ok(StatementResult::AffectedRows(0));
             }
             Err(err) => Err(match err {
                 CatalogError::TableAlreadyExists(name) => {
@@ -1142,7 +1241,13 @@ impl Database {
             timed: false,
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
-            rel, &desc, &rows, &mut insert_ctx, xid, cid,
+            rel,
+            &desc,
+            &[],
+            &rows,
+            &mut insert_ctx,
+            xid,
+            cid,
         )?;
         Ok(StatementResult::AffectedRows(inserted))
     }
@@ -1218,6 +1323,7 @@ impl Database {
                     client_id,
                     create_stmt,
                     configured_search_path,
+                    65_536,
                 )
             }
             Statement::Set(_)
@@ -1468,7 +1574,8 @@ impl Database {
         use crate::backend::parser::build_plan;
 
         let (plan, rels) = {
-            let visible_catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+            let visible_catalog =
+                self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
             let plan = build_plan(select_stmt, &visible_catalog)?;
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
@@ -1607,6 +1714,9 @@ fn collect_rels_from_plan(
         Plan::SeqScan { rel, .. } => {
             rels.insert(*rel);
         }
+        Plan::IndexScan { rel, .. } => {
+            rels.insert(*rel);
+        }
         Plan::NestedLoopJoin { left, right, on } => {
             collect_rels_from_plan(left, rels);
             collect_rels_from_plan(right, rels);
@@ -1673,7 +1783,9 @@ fn collect_rels_from_plan(
 }
 
 impl Database {
-    pub(crate) fn catalog_invalidation_from_effect(effect: &CatalogMutationEffect) -> CatalogInvalidation {
+    pub(crate) fn catalog_invalidation_from_effect(
+        effect: &CatalogMutationEffect,
+    ) -> CatalogInvalidation {
         catalog_invalidation_from_effect(effect)
     }
 
@@ -1690,14 +1802,15 @@ impl Database {
         effect: &CatalogMutationEffect,
     ) -> Result<(), ExecError> {
         for rel in &effect.created_rels {
-            self.pool.with_storage_mut(|s| {
-                let _ = s.smgr.open(*rel);
-                s.smgr
-                    .create(*rel, crate::backend::storage::smgr::ForkNumber::Main, true)
-            })
-            .map_err(|e| {
-                ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(e))
-            })?;
+            self.pool
+                .with_storage_mut(|s| {
+                    let _ = s.smgr.open(*rel);
+                    s.smgr
+                        .create(*rel, crate::backend::storage::smgr::ForkNumber::Main, true)
+                })
+                .map_err(|e| {
+                    ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(e))
+                })?;
         }
         Ok(())
     }
@@ -1847,10 +1960,11 @@ impl Drop for Database {
     }
 }
 
-
 fn map_catalog_error(err: CatalogError) -> ExecError {
     match err {
-        CatalogError::TableAlreadyExists(name) => ExecError::Parse(ParseError::TableAlreadyExists(name)),
+        CatalogError::TableAlreadyExists(name) => {
+            ExecError::Parse(ParseError::TableAlreadyExists(name))
+        }
         CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
         CatalogError::UnknownColumn(name) => ExecError::Parse(ParseError::UnknownColumn(name)),
         CatalogError::UnknownType(name) => ExecError::Parse(ParseError::UnsupportedType(name)),

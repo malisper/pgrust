@@ -168,8 +168,16 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let mut writer = Session::new(1);
     let mut reader = Session::new(2);
 
-    assert!(db.lazy_catalog_lookup(1, None, None).lookup_any_relation("fanout_test").is_none());
-    assert!(db.lazy_catalog_lookup(2, None, None).lookup_any_relation("fanout_test").is_none());
+    assert!(
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
+    assert!(
+        db.lazy_catalog_lookup(2, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
 
     writer.execute(&db, "begin").unwrap();
     writer
@@ -179,14 +187,19 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     assert!(db.session_catalog_states.read().contains_key(&1));
     assert!(db.session_catalog_states.read().contains_key(&2));
     assert!(
-        reader.execute(&db, "select count(*) from fanout_test").is_err(),
+        reader
+            .execute(&db, "select count(*) from fanout_test")
+            .is_err(),
         "other sessions should keep their existing cache until commit"
     );
 
     writer.execute(&db, "commit").unwrap();
 
     assert!(db.session_catalog_states.read().contains_key(&2));
-    match reader.execute(&db, "select count(*) from fanout_test").unwrap() {
+    match reader
+        .execute(&db, "select count(*) from fanout_test")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
@@ -494,7 +507,11 @@ fn create_index_and_alter_table_set_are_noops() {
                 ],
             ];
             for expected_row in expected_subset {
-                assert!(rows.contains(&expected_row), "missing cast row: {:?}", expected_row);
+                assert!(
+                    rows.contains(&expected_row),
+                    "missing cast row: {:?}",
+                    expected_row
+                );
             }
         }
         other => panic!("expected query result, got {:?}", other),
@@ -633,8 +650,8 @@ fn create_index_and_alter_table_set_are_noops() {
         let index = described.index.unwrap();
         assert_eq!(index.am_oid, crate::include::catalog::BTREE_AM_OID);
         assert!(index.indisunique);
-        assert!(!index.indisvalid);
-        assert!(!index.indisready);
+        assert!(index.indisvalid);
+        assert!(index.indisready);
         assert_eq!(index.indkey, vec![1, 2]);
         assert_eq!(index.indclass.len(), 2);
         assert_eq!(index.opfamily_oids.len(), 2);
@@ -731,6 +748,145 @@ fn create_index_and_alter_table_set_are_noops() {
 }
 
 #[test]
+fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
+    let base = temp_dir("btree_index_scan_explain");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'a'), (2, 'b'), (3, 'c')")
+        .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    match db
+        .execute(1, "explain select name from items where id = 2")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let lines = rows
+                .into_iter()
+                .filter_map(|row| match row.first() {
+                    Some(Value::Text(text)) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                lines.iter().any(|line| line.contains("Index Scan")),
+                "expected Index Scan in EXPLAIN, got {lines:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn insert_and_copy_from_maintain_btree_index() {
+    let base = temp_dir("btree_index_insert_copy");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null, name text)")
+        .unwrap();
+    session
+        .execute(&db, "create index items_id_idx on items (id)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (1, 'alpha')")
+        .unwrap();
+    session
+        .copy_from_rows(&db, "items", &[vec!["2".into(), "beta".into()]])
+        .unwrap();
+
+    match session
+        .execute(&db, "select name from items where id = 2")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("beta".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session
+        .execute(&db, "explain select name from items where id = 2")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert!(rows.iter().any(|row| {
+                matches!(row.first(), Some(Value::Text(text)) if text.contains("Index Scan"))
+            }));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn indexed_tables_reject_update_delete_and_truncate() {
+    let base = temp_dir("indexed_table_dml_rejections");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
+    db.execute(1, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    for sql in [
+        "update items set name = 'beta' where id = 1",
+        "delete from items where id = 1",
+        "truncate items",
+    ] {
+        match db.execute(1, sql) {
+            Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. })) => {
+                assert!(
+                    actual.contains("indexed table"),
+                    "expected indexed-table rejection for {sql}, got {actual}"
+                );
+            }
+            other => panic!("expected indexed-table rejection for {sql}, got {:?}", other),
+        }
+    }
+}
+
+#[test]
+fn create_index_respects_maintenance_work_mem_budget() {
+    let base = temp_dir("btree_index_work_mem");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null, name text)")
+        .unwrap();
+    for i in 0..200 {
+        session
+            .execute(
+                &db,
+                &format!(
+                    "insert into items values ({i}, '{}')",
+                    "x".repeat(64)
+                ),
+            )
+            .unwrap();
+    }
+    session
+        .execute(&db, "set maintenance_work_mem = '1kB'")
+        .unwrap();
+
+    match session.execute(&db, "create index items_id_idx on items (id)") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. })) => {
+            assert!(
+                actual.contains("index build failed"),
+                "expected build failure, got {actual}"
+            );
+        }
+        other => panic!("expected maintenance_work_mem build failure, got {:?}", other),
+    }
+}
+
+#[test]
 fn copy_from_rows_inserts_typed_rows() {
     let base = temp_dir("copy_from_rows");
     let db = Database::open(&base, 16).unwrap();
@@ -786,13 +942,9 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
     db.execute(1, "create table items(id int4, name text)")
         .unwrap();
 
-    let btree = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
-        &db,
-        1,
-        None,
-        "btree",
-    )
-    .unwrap();
+    let btree =
+        crate::backend::utils::cache::lsyscache::access_method_row_by_name(&db, 1, None, "btree")
+            .unwrap();
     assert_eq!(btree.oid, crate::include::catalog::BTREE_AM_OID);
 
     let int4_opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
@@ -825,7 +977,10 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
 
     db.execute(1, "create index items_idx on items (id)")
         .unwrap();
-    let heap_rel = db.lazy_catalog_lookup(1, None, None).lookup_any_relation("items").unwrap();
+    let heap_rel = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("items")
+        .unwrap();
     let index_oids = crate::backend::utils::cache::lsyscache::index_relation_oids_for_heap(
         &db,
         1,
@@ -1044,7 +1199,8 @@ fn drop_table_supports_qualified_public_name_under_temp_shadowing() {
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
-    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
     db.execute(1, "insert into items (id) values (1)").unwrap();
     session
         .execute(&db, "create temp table items (id int4 not null)")
@@ -1062,7 +1218,9 @@ fn drop_table_supports_qualified_public_name_under_temp_shadowing() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    let err = session.execute(&db, "select id from public.items").unwrap_err();
+    let err = session
+        .execute(&db, "select id from public.items")
+        .unwrap_err();
     assert!(matches!(
         err,
         ExecError::Parse(ParseError::UnknownTable(name)) if name == "public.items"
@@ -1075,7 +1233,8 @@ fn drop_table_if_exists_accepts_qualified_public_name_under_temp_shadowing() {
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
-    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
     session
         .execute(&db, "create temp table items (id int4 not null)")
         .unwrap();
@@ -1193,7 +1352,10 @@ fn temp_catalog_reads_do_not_materialize_temp_catalog_relfiles() {
         !class_path.exists(),
         "temp pg_class relfile should stay absent on catalog reads"
     );
-    assert!(!proc_path.exists(), "temp pg_proc relfile should stay absent");
+    assert!(
+        !proc_path.exists(),
+        "temp pg_proc relfile should stay absent"
+    );
 }
 
 #[test]
@@ -1602,7 +1764,10 @@ fn create_table_as_is_visible_in_same_txn_before_commit() {
         )
         .unwrap();
 
-    match writer.execute(&db, "select count(*) from copied_items").unwrap() {
+    match writer
+        .execute(&db, "select count(*) from copied_items")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(2)]]);
         }
@@ -1610,13 +1775,18 @@ fn create_table_as_is_visible_in_same_txn_before_commit() {
     }
 
     assert!(
-        reader.execute(&db, "select count(*) from copied_items").is_err(),
+        reader
+            .execute(&db, "select count(*) from copied_items")
+            .is_err(),
         "other sessions must not see uncommitted CTAS catalog rows"
     );
 
     writer.execute(&db, "commit").unwrap();
 
-    match reader.execute(&db, "select count(*) from copied_items").unwrap() {
+    match reader
+        .execute(&db, "select count(*) from copied_items")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(2)]]);
         }
@@ -2602,7 +2772,9 @@ fn rollback_discards_created_table() {
     session.execute(&db, "rollback").unwrap();
 
     assert!(
-        session.execute(&db, "select count(*) from tx_rollback_only").is_err(),
+        session
+            .execute(&db, "select count(*) from tx_rollback_only")
+            .is_err(),
         "rolled-back table creation must disappear"
     );
 }
@@ -2688,7 +2860,10 @@ fn rollback_restores_dropped_table() {
     session.execute(&db, "drop table restore_me").unwrap();
     session.execute(&db, "rollback").unwrap();
 
-    match session.execute(&db, "select count(*) from restore_me").unwrap() {
+    match session
+        .execute(&db, "select count(*) from restore_me")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(1)]]);
         }
