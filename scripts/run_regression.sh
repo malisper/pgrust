@@ -363,14 +363,30 @@ for sql_file in "${TEST_FILES[@]}"; do
         psql "${PG_ARGS[@]}" -a -q < "$sql_file" > "$output_file" 2>&1 || true
     fi
 
-    # Compare output to expected
-    # Some tests have multiple expected outputs (e.g., boolean.out, boolean_1.out)
-    # Try all variants
+    # Compare output to expected.
+    # Some tests have multiple expected outputs (e.g., boolean.out, boolean_1.out).
+    # However, base tests like json/jsonpath must not match encoding-specific
+    # sibling files such as json_encoding*.out or jsonpath_encoding*.out.
     matched=false
     best_diff_lines=999999
     query_expected_file="$expected_file"
 
-    for candidate in "$EXPECTED_DIR/${test_name}.out" "$EXPECTED_DIR/${test_name}_"*.out; do
+    candidates=("$EXPECTED_DIR/${test_name}.out")
+    shopt -s nullglob
+    for candidate in "$EXPECTED_DIR/${test_name}_"*.out; do
+        candidate_base="$(basename "$candidate")"
+        case "$test_name" in
+            json|jsonpath)
+                if [[ "$candidate_base" == "${test_name}_encoding"* ]]; then
+                    continue
+                fi
+                ;;
+        esac
+        candidates+=("$candidate")
+    done
+    shopt -u nullglob
+
+    for candidate in "${candidates[@]}"; do
         [[ -f "$candidate" ]] || continue
 
         # Use diff, ignoring trailing whitespace
