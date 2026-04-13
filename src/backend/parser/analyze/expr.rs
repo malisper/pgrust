@@ -9,7 +9,7 @@ mod targets;
 pub(crate) use self::ops::bind_concat_operands;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
-    bind_shift_expr,
+    bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
 };
 pub(crate) use self::targets::{
     BoundSelectTargets, bind_select_targets, select_targets_contain_set_returning_call,
@@ -54,6 +54,34 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
         SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),
+        SqlExpr::BinaryOperator { op, left, right } => match op.as_str() {
+            "@@" => bind_overloaded_binary_expr(
+                "@@",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            "&&" => bind_overloaded_binary_expr(
+                "&&",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            _ => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "bound builtin operator",
+                    actual: format!("unsupported operator {op}"),
+                });
+            }
+        },
         SqlExpr::Add(left, right) => {
             if let Some(result) = bind_maybe_geometry_arithmetic(
                 "+",
@@ -286,6 +314,15 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?)),
+        SqlExpr::PrefixOperator { op, expr } => bind_prefix_operator_expr(
+            op.as_str(),
+            expr,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::Negate(inner) => Expr::Negate(Box::new(bind_expr_with_outer_and_ctes(
             inner,
             scope,
@@ -967,11 +1004,26 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             );
             let left_type =
                 coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
-            let array_type = if raw_array_type.is_array {
+            let target_array_type = if matches!(op, SubqueryComparisonOp::Match)
+                && matches!(left_type.kind, SqlTypeKind::TsVector)
+                && matches!(
+                    &**array,
+                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                ) {
+                SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery))
+            } else if raw_array_type.is_array {
                 coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)
             } else {
                 SqlType::array_of(left_type.element_type())
             };
+            let bound_array = bind_expr_with_outer_and_ctes(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
             if *is_all {
                 Expr::AllArray {
                     left: Box::new(coerce_bound_expr(
@@ -988,16 +1040,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     )),
                     op: *op,
                     right: Box::new(coerce_bound_expr(
-                        bind_expr_with_outer_and_ctes(
-                            array,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )?,
+                        bound_array,
                         raw_array_type,
-                        array_type,
+                        target_array_type,
                     )),
                 }
             } else {
@@ -1016,16 +1061,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     )),
                     op: *op,
                     right: Box::new(coerce_bound_expr(
-                        bind_expr_with_outer_and_ctes(
-                            array,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )?,
+                        bound_array,
                         raw_array_type,
-                        array_type,
+                        target_array_type,
                     )),
                 }
             }
@@ -1417,6 +1455,40 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?,
+        SqlExpr::FieldSelect { field, .. } => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "scalar expression",
+                actual: format!("field selection .{field} is not bound yet"),
+            });
+        }
+        SqlExpr::Subscript { expr, index } => bind_geometry_subscript(
+            expr,
+            *index,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::GeometryUnaryOp { op, expr } => {
+            bind_geometry_unary_expr(*op, expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
+        }
+        SqlExpr::GeometryBinaryOp { op, left, right } => bind_geometry_binary_expr(
+            *op,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::FieldSelect { field, .. } => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "scalar expression",
+                actual: format!("field selection .{field} is not bound yet"),
+            });
+        }
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
 }
@@ -1528,6 +1600,31 @@ fn bind_scalar_function_call(
         catalog,
     )?;
     match func {
+        BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::ToTsQuery
+        | BuiltinScalarFunction::PlainToTsQuery
+        | BuiltinScalarFunction::PhraseToTsQuery
+        | BuiltinScalarFunction::WebSearchToTsQuery
+        | BuiltinScalarFunction::TsLexize => Ok(Expr::FuncCall {
+            func_oid: 0,
+            func,
+            args: args
+                .iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    coerce_bound_expr(bound_args[idx].clone(), ty, SqlType::new(SqlTypeKind::Text))
+                })
+                .collect(),
+            func_variadic: false,
+        }),
         BuiltinScalarFunction::Left
         | BuiltinScalarFunction::Right
         | BuiltinScalarFunction::Repeat => {
@@ -1638,11 +1735,12 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(arg_type)
+            if !matches!(arg_type.kind, SqlTypeKind::TsVector)
+                && !is_bit_string_type(arg_type)
                 && !should_use_text_concat(&args[0], arg_type, &args[0], arg_type)
             {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "text or bit argument",
+                    expected: "text, bit, or tsvector argument",
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
@@ -2582,27 +2680,29 @@ fn bind_scalar_function_call(
                 func_variadic,
             })
         }
-        BuiltinScalarFunction::RegexpMatch | BuiltinScalarFunction::RegexpLike => Ok(Expr::FuncCall {
-            func_oid,
-            func,
-            args: args
-                .iter()
-                .enumerate()
-                .map(|(idx, arg)| {
-                    let ty = infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                    let target = SqlType::new(SqlTypeKind::Text);
-                    coerce_bound_expr(bound_args[idx].clone(), ty, target)
-                })
-                .collect(),
-            func_variadic,
-        }),
+        BuiltinScalarFunction::RegexpMatch | BuiltinScalarFunction::RegexpLike => {
+            Ok(Expr::FuncCall {
+                func_oid,
+                func,
+                args: args
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, arg)| {
+                        let ty = infer_sql_expr_type_with_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
+                        let target = SqlType::new(SqlTypeKind::Text);
+                        coerce_bound_expr(bound_args[idx].clone(), ty, target)
+                    })
+                    .collect(),
+                func_variadic,
+            })
+        }
         BuiltinScalarFunction::RegexpCount => Ok(Expr::FuncCall {
             func_oid,
             func,

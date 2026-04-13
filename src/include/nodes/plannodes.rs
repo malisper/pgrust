@@ -26,6 +26,8 @@ pub enum ScalarType {
     Json,
     Jsonb,
     JsonPath,
+    TsVector,
+    TsQuery,
     Text,
     Bool,
     Array(Box<ScalarType>),
@@ -324,6 +326,17 @@ pub enum BuiltinScalarFunction {
     GeoPointY,
     BoolEq,
     BoolNe,
+    TsMatch,
+    ToTsVector,
+    ToTsQuery,
+    PlainToTsQuery,
+    PhraseToTsQuery,
+    WebSearchToTsQuery,
+    TsLexize,
+    TsQueryAnd,
+    TsQueryOr,
+    TsQueryNot,
+    TsVectorConcat,
     BitcastIntegerToFloat4,
     BitcastBigintToFloat8,
     PgInputIsValid,
@@ -352,6 +365,13 @@ pub enum JsonTableFunction {
 pub enum RegexTableFunction {
     Matches,
     SplitToTable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSearchTableFunction {
+    TokenType,
+    Parse,
+    Debug,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -384,6 +404,11 @@ pub enum SetReturningCall {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    TextSearchTableFunction {
+        kind: TextSearchTableFunction,
+        args: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
 }
 
 impl SetReturningCall {
@@ -392,7 +417,8 @@ impl SetReturningCall {
             SetReturningCall::GenerateSeries { output, .. } => std::slice::from_ref(output),
             SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
-            | SetReturningCall::RegexTableFunction { output_columns, .. } => output_columns,
+            | SetReturningCall::RegexTableFunction { output_columns, .. }
+            | SetReturningCall::TextSearchTableFunction { output_columns, .. } => output_columns,
         }
     }
 }
@@ -404,6 +430,7 @@ pub enum ProjectSetTarget {
         name: String,
         call: SetReturningCall,
         sql_type: SqlType,
+        column_index: usize,
     },
 }
 

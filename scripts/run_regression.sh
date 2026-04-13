@@ -45,6 +45,7 @@ fi
 
 SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
+PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
 
 PORT=5433
 SKIP_BUILD=false
@@ -136,7 +137,8 @@ if [[ "$SKIP_SERVER" == false ]]; then
 fi
 
 export PGPASSWORD="x"
-PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres)
+export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
 
 if [[ "$USE_PGRUST_SETUP" == true ]]; then
     PGRUST_SETUP_SQL="$PGRUST_DIR/scripts/test_setup_pgrust.sql"

@@ -23,6 +23,11 @@ use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_opfamily::sort_pg_opfamily_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
+use crate::backend::catalog::pg_ts_config::sort_pg_ts_config_rows;
+use crate::backend::catalog::pg_ts_config_map::sort_pg_ts_config_map_rows;
+use crate::backend::catalog::pg_ts_dict::sort_pg_ts_dict_rows;
+use crate::backend::catalog::pg_ts_parser::sort_pg_ts_parser_rows;
+use crate::backend::catalog::pg_ts_template::sort_pg_ts_template_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
@@ -36,15 +41,20 @@ use crate::include::catalog::{
     POINT_TYPE_OID, POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTypeRow,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTsConfigMapRow,
+    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
+    TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
+    VARCHAR_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
     bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
     bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
     bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
     bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
-    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, builtin_type_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, bootstrap_pg_ts_config_map_rows,
+    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows,
+    bootstrap_pg_ts_template_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -63,6 +73,11 @@ pub struct CatCache {
     authid_rows: Vec<PgAuthIdRow>,
     auth_members_rows: Vec<PgAuthMembersRow>,
     language_rows: Vec<PgLanguageRow>,
+    ts_parser_rows: Vec<PgTsParserRow>,
+    ts_template_rows: Vec<PgTsTemplateRow>,
+    ts_dict_rows: Vec<PgTsDictRow>,
+    ts_config_rows: Vec<PgTsConfigRow>,
+    ts_config_map_rows: Vec<PgTsConfigMapRow>,
     constraint_rows: Vec<PgConstraintRow>,
     operator_rows: Vec<PgOperatorRow>,
     opclass_rows: Vec<PgOpclassRow>,
@@ -114,6 +129,20 @@ impl CatCache {
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.language_rows.extend(bootstrap_pg_language_rows());
         sort_pg_language_rows(&mut cache.language_rows);
+        cache.ts_parser_rows.extend(bootstrap_pg_ts_parser_rows());
+        sort_pg_ts_parser_rows(&mut cache.ts_parser_rows);
+        cache
+            .ts_template_rows
+            .extend(bootstrap_pg_ts_template_rows());
+        sort_pg_ts_template_rows(&mut cache.ts_template_rows);
+        cache.ts_dict_rows.extend(bootstrap_pg_ts_dict_rows());
+        sort_pg_ts_dict_rows(&mut cache.ts_dict_rows);
+        cache.ts_config_rows.extend(bootstrap_pg_ts_config_rows());
+        sort_pg_ts_config_rows(&mut cache.ts_config_rows);
+        cache
+            .ts_config_map_rows
+            .extend(bootstrap_pg_ts_config_map_rows());
+        sort_pg_ts_config_map_rows(&mut cache.ts_config_map_rows);
         cache.constraint_rows.extend(bootstrap_pg_constraint_rows());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         cache.operator_rows.extend(bootstrap_pg_operator_rows());
@@ -286,6 +315,11 @@ impl CatCache {
             rows.authids,
             rows.auth_members,
             rows.languages,
+            rows.ts_parsers,
+            rows.ts_templates,
+            rows.ts_dicts,
+            rows.ts_configs,
+            rows.ts_config_maps,
             rows.constraints,
             rows.operators,
             rows.procs,
@@ -308,6 +342,11 @@ impl CatCache {
         authid_rows: Vec<PgAuthIdRow>,
         auth_members_rows: Vec<PgAuthMembersRow>,
         language_rows: Vec<PgLanguageRow>,
+        ts_parser_rows: Vec<PgTsParserRow>,
+        ts_template_rows: Vec<PgTsTemplateRow>,
+        ts_dict_rows: Vec<PgTsDictRow>,
+        ts_config_rows: Vec<PgTsConfigRow>,
+        ts_config_map_rows: Vec<PgTsConfigMapRow>,
         constraint_rows: Vec<PgConstraintRow>,
         operator_rows: Vec<PgOperatorRow>,
         proc_rows: Vec<PgProcRow>,
@@ -363,6 +402,16 @@ impl CatCache {
         sort_pg_auth_members_rows(&mut cache.auth_members_rows);
         cache.language_rows = language_rows;
         sort_pg_language_rows(&mut cache.language_rows);
+        cache.ts_parser_rows = ts_parser_rows;
+        sort_pg_ts_parser_rows(&mut cache.ts_parser_rows);
+        cache.ts_template_rows = ts_template_rows;
+        sort_pg_ts_template_rows(&mut cache.ts_template_rows);
+        cache.ts_dict_rows = ts_dict_rows;
+        sort_pg_ts_dict_rows(&mut cache.ts_dict_rows);
+        cache.ts_config_rows = ts_config_rows;
+        sort_pg_ts_config_rows(&mut cache.ts_config_rows);
+        cache.ts_config_map_rows = ts_config_map_rows;
+        sort_pg_ts_config_map_rows(&mut cache.ts_config_map_rows);
         cache.constraint_rows = constraint_rows;
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         cache.operator_rows = operator_rows;
@@ -470,6 +519,26 @@ impl CatCache {
 
     pub fn language_rows(&self) -> Vec<PgLanguageRow> {
         self.language_rows.clone()
+    }
+
+    pub fn ts_parser_rows(&self) -> Vec<PgTsParserRow> {
+        self.ts_parser_rows.clone()
+    }
+
+    pub fn ts_template_rows(&self) -> Vec<PgTsTemplateRow> {
+        self.ts_template_rows.clone()
+    }
+
+    pub fn ts_dict_rows(&self) -> Vec<PgTsDictRow> {
+        self.ts_dict_rows.clone()
+    }
+
+    pub fn ts_config_rows(&self) -> Vec<PgTsConfigRow> {
+        self.ts_config_rows.clone()
+    }
+
+    pub fn ts_config_map_rows(&self) -> Vec<PgTsConfigMapRow> {
+        self.ts_config_map_rows.clone()
     }
 
     pub fn constraint_rows(&self) -> Vec<PgConstraintRow> {
@@ -630,6 +699,14 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Line, true) => unreachable!("geometry arrays are unsupported"),
         (SqlTypeKind::Circle, false) => CIRCLE_TYPE_OID,
         (SqlTypeKind::Circle, true) => unreachable!("geometry arrays are unsupported"),
+        (SqlTypeKind::TsVector, false) => TSVECTOR_TYPE_OID,
+        (SqlTypeKind::TsVector, true) => TSVECTOR_ARRAY_TYPE_OID,
+        (SqlTypeKind::TsQuery, false) => TSQUERY_TYPE_OID,
+        (SqlTypeKind::TsQuery, true) => TSQUERY_ARRAY_TYPE_OID,
+        (SqlTypeKind::RegConfig, false) => REGCONFIG_TYPE_OID,
+        (SqlTypeKind::RegConfig, true) => REGCONFIG_ARRAY_TYPE_OID,
+        (SqlTypeKind::RegDictionary, false) => REGDICTIONARY_TYPE_OID,
+        (SqlTypeKind::RegDictionary, true) => REGDICTIONARY_ARRAY_TYPE_OID,
         (SqlTypeKind::PgNodeTree, false) => crate::include::catalog::PG_NODE_TREE_TYPE_OID,
         (SqlTypeKind::PgNodeTree, true) => unreachable!("pg_node_tree arrays are unsupported"),
     }

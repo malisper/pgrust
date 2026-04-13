@@ -6,4 +6,5 @@ pub mod libpq;
 pub mod parser;
 pub mod storage;
 pub mod tcop;
+pub mod tsearch;
 pub mod utils;

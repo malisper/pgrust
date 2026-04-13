@@ -2,10 +2,11 @@
 //! per-tuple type dispatch, alignment computation, and branch overhead.
 
 use super::ExecError;
-use super::expr_casts::parse_text_array_literal_with_op;
 use super::exec_expr::parse_numeric_text;
+use super::expr_casts::parse_text_array_literal_with_op;
 use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
 use super::value_io::missing_column_value;
+use crate::backend::executor::{decode_tsquery_bytes, decode_tsvector_bytes};
 use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
 use crate::include::nodes::datum::{
@@ -346,6 +347,14 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
+                            ScalarType::TsVector => {
+                                values.push(Value::Null);
+                                continue;
+                            }
+                            ScalarType::TsQuery => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                             ScalarType::Bytea => {
                                 values.push(Value::Null);
                                 continue;
@@ -415,6 +424,12 @@ impl CompiledTupleDecoder {
                                     }),
                                 ));
                             }
+                            ScalarType::TsVector => {
+                                values.push(Value::TsVector(decode_tsvector_bytes(bytes_slice)?));
+                            }
+                            ScalarType::TsQuery => {
+                                values.push(Value::TsQuery(decode_tsquery_bytes(bytes_slice)?));
+                            }
                             ScalarType::BitString => {
                                 if bytes_slice.len() < 4 {
                                     return Err(ExecError::InvalidStorageValue {
@@ -449,7 +464,10 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Array(elem_ty) => {
                                 let _ = elem_ty;
-                                values.push(decode_array_value(sql_type.element_type(), bytes_slice)?);
+                                values.push(decode_array_value(
+                                    sql_type.element_type(),
+                                    bytes_slice,
+                                )?);
                             }
                             _ => values.push(Value::Null),
                         }
@@ -491,6 +509,12 @@ impl CompiledTupleDecoder {
                                         std::str::from_utf8_unchecked(bytes)
                                     }),
                                 ));
+                            }
+                            ScalarType::TsVector => {
+                                values.push(Value::TsVector(decode_tsvector_bytes(bytes)?));
+                            }
+                            ScalarType::TsQuery => {
+                                values.push(Value::TsQuery(decode_tsquery_bytes(bytes)?));
                             }
                             ScalarType::BitString => {
                                 if bytes.len() < 4 {
@@ -778,6 +802,8 @@ fn decode_scalar_array_element(
                 std::str::from_utf8_unchecked(bytes)
             }),
         )),
+        ScalarType::TsVector => Ok(Value::TsVector(decode_tsvector_bytes(bytes)?)),
+        ScalarType::TsQuery => Ok(Value::TsQuery(decode_tsquery_bytes(bytes)?)),
         ScalarType::Bool => {
             if bytes.len() != 1 {
                 return Err(ExecError::InvalidStorageValue {
@@ -832,6 +858,9 @@ fn scalar_type_for_sql_type(sql_type: crate::backend::parser::SqlType) -> Scalar
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::JsonPath => ScalarType::JsonPath,
+        SqlTypeKind::TsVector => ScalarType::TsVector,
+        SqlTypeKind::TsQuery => ScalarType::TsQuery,
+        SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
         SqlTypeKind::Timestamp | SqlTypeKind::PgNodeTree => ScalarType::Text,
     }
 }

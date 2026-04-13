@@ -1566,6 +1566,10 @@ impl Database {
             // :HACK: numeric.sql also sets parallel_workers reloptions. Accept and ignore that
             // narrow ALTER TABLE form until table reloptions are represented properly.
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::CopyFrom(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "COPY handled by session layer",
+                actual: "COPY".into(),
+            })),
             Statement::CommentOnTable(ref comment_stmt) => self
                 .execute_comment_on_table_stmt_with_search_path(
                     client_id,
@@ -2141,6 +2145,14 @@ fn collect_rels_from_plan(
                     collect_rels_from_expr(arg, rels);
                 }
             }
+            crate::include::nodes::plannodes::SetReturningCall::TextSearchTableFunction {
+                args,
+                ..
+            } => {
+                for arg in args {
+                    collect_rels_from_expr(arg, rels);
+                }
+            }
         },
         Plan::Values { rows, .. } => {
             for row in rows {
@@ -2185,6 +2197,14 @@ fn collect_rels_from_plan(
                                 }
                             }
                             crate::include::nodes::plannodes::SetReturningCall::RegexTableFunction {
+                                args,
+                                ..
+                            } => {
+                                for arg in args {
+                                    collect_rels_from_expr(arg, rels);
+                                }
+                            }
+                            crate::include::nodes::plannodes::SetReturningCall::TextSearchTableFunction {
                                 args,
                                 ..
                             } => {

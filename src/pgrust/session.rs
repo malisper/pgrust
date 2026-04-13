@@ -5,26 +5,21 @@ use std::sync::Arc;
 
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::catalog::store::CatalogMutationEffect;
-use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
     execute_analyze, execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
     execute_truncate_table, execute_update_with_waiter,
 };
-use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, Value, cast_value, execute_readonly_statement,
-    parse_bytea_text,
 };
 use crate::backend::parser::{
-    CatalogLookup, ParseError, ParseOptions, PreparedInsert, SelectStatement, Statement,
-    bind_delete,
-    bind_insert, bind_insert_prepared, bind_update,
+    CatalogLookup, CopyFromStatement, CopySource, ParseError, ParseOptions, PreparedInsert,
+    SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update,
 };
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
-use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
@@ -251,6 +246,7 @@ impl Session {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
+            Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_create_index_stmt_with_search_path(
@@ -452,6 +448,7 @@ impl Session {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
+            Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
@@ -900,74 +897,7 @@ impl Session {
                     let value = if raw == "\\N" {
                         Value::Null
                     } else {
-                        match column.ty {
-                            ScalarType::Int16 => {
-                                raw.parse::<i16>().map(Value::Int16).map_err(|_| {
-                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                })?
-                            }
-                            ScalarType::Int32 => {
-                                raw.parse::<i32>().map(Value::Int32).map_err(|_| {
-                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                })?
-                            }
-                            ScalarType::Int64 => {
-                                raw.parse::<i64>().map(Value::Int64).map_err(|_| {
-                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                })?
-                            }
-                            ScalarType::BitString => {
-                                cast_value(Value::Text(raw.clone().into()), column.sql_type)?
-                            }
-                            ScalarType::Float32 | ScalarType::Float64 => raw
-                                .parse::<f64>()
-                                .map(Value::Float64)
-                                .map_err(|_| ExecError::TypeMismatch {
-                                    op: "copy assignment",
-                                    left: Value::Null,
-                                    right: Value::Text(raw.clone().into()),
-                                })?,
-                            ScalarType::Numeric => Value::Numeric(raw.as_str().into()),
-                            ScalarType::Json => Value::Json(raw.clone().into()),
-                            ScalarType::Jsonb => Value::Jsonb(
-                                crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
-                            ),
-                            ScalarType::JsonPath => Value::JsonPath(
-                                canonicalize_jsonpath(raw)
-                                    .map_err(|_| ExecError::InvalidStorageValue {
-                                        column: "<copy>".into(),
-                                        details: format!(
-                                            "invalid input syntax for type jsonpath: \"{raw}\""
-                                        ),
-                                    })?
-                                    .into(),
-                            ),
-                            ScalarType::Point
-                            | ScalarType::Lseg
-                            | ScalarType::Path
-                            | ScalarType::Line
-                            | ScalarType::Box
-                            | ScalarType::Polygon
-                            | ScalarType::Circle => {
-                                cast_value(Value::Text(raw.clone().into()), column.sql_type)?
-                            }
-                            ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
-                            ScalarType::Text => Value::Text(raw.clone().into()),
-                            ScalarType::Bool => match raw.as_str() {
-                                "t" | "true" | "1" => Value::Bool(true),
-                                "f" | "false" | "0" => Value::Bool(false),
-                                _ => {
-                                    return Err(ExecError::TypeMismatch {
-                                        op: "copy assignment",
-                                        left: Value::Null,
-                                        right: Value::Text(raw.clone().into()),
-                                    });
-                                }
-                            },
-                            ScalarType::Array(_) => {
-                                parse_text_array_literal(raw, column.sql_type.element_type())?
-                            }
-                        }
+                        cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                     };
                     values[target_index] = value;
                 }
@@ -1001,7 +931,7 @@ impl Session {
             )
         });
 
-        if started_txn {
+        let final_result = if started_txn {
             let txn = self.active_txn.take().unwrap();
             for rel in &txn.held_table_locks {
                 db.table_locks.unlock_table(*rel, self.client_id);
@@ -1039,7 +969,35 @@ impl Session {
             }
         } else {
             result
-        }
+        };
+        final_result
+    }
+
+    fn execute_copy_from_file(
+        &mut self,
+        db: &Database,
+        stmt: &CopyFromStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let CopySource::File(path) = &stmt.source;
+        let text = std::fs::read_to_string(path).map_err(|err| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "readable COPY source file",
+                actual: format!("{path}: {err}"),
+            })
+        })?;
+        let rows = text
+            .lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .filter(|line| !line.is_empty() && *line != "\\.")
+            .map(|line| {
+                line.split('\t')
+                    .map(|part| part.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let count =
+            self.copy_from_rows_into(db, &stmt.table_name, stmt.columns.as_deref(), &rows)?;
+        Ok(StatementResult::AffectedRows(count))
     }
 }
 

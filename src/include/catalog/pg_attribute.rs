@@ -27,8 +27,10 @@ use crate::include::catalog::{
     PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TABLESPACE_RELATION_OID, PG_TYPE_RELATION_OID, POINT_TYPE_OID,
-    POLYGON_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
-    TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
+    POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
+    TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
     VARCHAR_TYPE_OID,
 };
 
@@ -238,6 +240,14 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Line, true) => unreachable!("geometry arrays are unsupported"),
         (SqlTypeKind::Circle, false) => CIRCLE_TYPE_OID,
         (SqlTypeKind::Circle, true) => unreachable!("geometry arrays are unsupported"),
+        (SqlTypeKind::TsVector, false) => TSVECTOR_TYPE_OID,
+        (SqlTypeKind::TsVector, true) => TSVECTOR_ARRAY_TYPE_OID,
+        (SqlTypeKind::TsQuery, false) => TSQUERY_TYPE_OID,
+        (SqlTypeKind::TsQuery, true) => TSQUERY_ARRAY_TYPE_OID,
+        (SqlTypeKind::RegConfig, false) => REGCONFIG_TYPE_OID,
+        (SqlTypeKind::RegConfig, true) => REGCONFIG_ARRAY_TYPE_OID,
+        (SqlTypeKind::RegDictionary, false) => REGDICTIONARY_TYPE_OID,
+        (SqlTypeKind::RegDictionary, true) => REGDICTIONARY_ARRAY_TYPE_OID,
         (SqlTypeKind::PgNodeTree, false) => PG_NODE_TREE_TYPE_OID,
         (SqlTypeKind::PgNodeTree, true) => unreachable!("pg_node_tree arrays are unsupported"),
     }

@@ -11,11 +11,10 @@ use crate::backend::libpq::pqcomm::{
     cstr_from_bytes, read_byte, read_cstr, read_i16_bytes, read_i32, read_i32_bytes,
 };
 use crate::backend::libpq::pqformat::{
-    FloatFormatOptions, format_exec_error, format_exec_error_hint, infer_command_tag,
-    send_auth_ok, send_backend_key_data, send_bind_complete, send_close_complete,
-    send_command_complete, send_copy_in_response, send_empty_query, send_error,
-    send_error_with_fields, send_error_with_hint, send_no_data, send_notice,
-    send_notice_with_severity,
+    FloatFormatOptions, format_exec_error, format_exec_error_hint, infer_command_tag, send_auth_ok,
+    send_backend_key_data, send_bind_complete, send_close_complete, send_command_complete,
+    send_copy_in_response, send_empty_query, send_error, send_error_with_fields,
+    send_error_with_hint, send_no_data, send_notice, send_notice_with_severity,
     send_parameter_description, send_parameter_status, send_parse_complete, send_query_result,
     send_ready_for_query, send_row_description, send_typed_data_row,
 };
@@ -111,7 +110,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             expected: "text or bit argument",
             actual,
         }) if actual.starts_with("Length(") => {
-            return sql.to_ascii_lowercase().find("length(").map(|index| index + 1);
+            return sql
+                .to_ascii_lowercase()
+                .find("length(")
+                .map(|index| index + 1);
         }
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { op, .. }) => {
             return sql.find(op).map(|index| index + 1);

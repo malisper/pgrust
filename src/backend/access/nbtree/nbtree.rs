@@ -63,7 +63,14 @@ fn encode_index_value(
         Value::Null => Ok(Vec::new()),
         Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
-        Value::Int64(v) if matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Oid) => {
+        Value::Int64(v)
+            if matches!(
+                sql_type.kind,
+                crate::backend::parser::SqlTypeKind::Oid
+                    | crate::backend::parser::SqlTypeKind::RegConfig
+                    | crate::backend::parser::SqlTypeKind::RegDictionary
+            ) =>
+        {
             let oid = u32::try_from(*v)
                 .map_err(|_| CatalogError::Io(format!("oid index key out of range: {v}")))?;
             Ok(oid.to_le_bytes().to_vec())
@@ -93,6 +100,8 @@ fn encode_index_value(
         Value::Json(v) => Ok(v.as_bytes().to_vec()),
         Value::Jsonb(v) => Ok(v.clone()),
         Value::JsonPath(v) => Ok(v.as_bytes().to_vec()),
+        Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v).into_bytes()),
+        Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v).into_bytes()),
         Value::InternalChar(v) => Ok(vec![*v]),
         Value::Point(_)
         | Value::Lseg(_)

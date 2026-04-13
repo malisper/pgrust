@@ -1,3 +1,4 @@
+use crate::include::nodes::tsearch::{TsQuery, TsVector};
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -290,6 +291,8 @@ pub enum Value {
     Json(CompactString),
     Jsonb(Vec<u8>),
     JsonPath(CompactString),
+    TsVector(TsVector),
+    TsQuery(TsQuery),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned.
     TextRef(*const u8, u32),
@@ -570,6 +573,8 @@ impl Value {
             Value::Json(s) => Value::Json(s.clone()),
             Value::Jsonb(bytes) => Value::Jsonb(bytes.clone()),
             Value::JsonPath(s) => Value::JsonPath(s.clone()),
+            Value::TsVector(v) => Value::TsVector(v.clone()),
+            Value::TsQuery(q) => Value::TsQuery(q.clone()),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -671,6 +676,8 @@ impl PartialEq for Value {
             (Value::Json(a), Value::Json(b)) => a == b,
             (Value::Jsonb(a), Value::Jsonb(b)) => a == b,
             (Value::JsonPath(a), Value::JsonPath(b)) => a == b,
+            (Value::TsVector(a), Value::TsVector(b)) => a == b,
+            (Value::TsQuery(a), Value::TsQuery(b)) => a == b,
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
@@ -781,6 +788,14 @@ impl std::hash::Hash for Value {
             Value::JsonPath(s) => {
                 11u8.hash(state);
                 s.as_str().hash(state);
+            }
+            Value::TsVector(v) => {
+                15u8.hash(state);
+                v.hash(state);
+            }
+            Value::TsQuery(q) => {
+                16u8.hash(state);
+                q.hash(state);
             }
             Value::Text(s) => {
                 5u8.hash(state);

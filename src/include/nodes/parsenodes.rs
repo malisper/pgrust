@@ -172,6 +172,7 @@ pub enum Statement {
     Explain(ExplainStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
+    CopyFrom(CopyFromStatement),
     Analyze(AnalyzeStatement),
     Set(SetStatement),
     Reset(ResetStatement),
@@ -229,6 +230,18 @@ pub struct ExplainStatement {
     pub buffers: bool,
     pub timing: bool,
     pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopySource {
+    File(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyFromStatement {
+    pub table_name: String,
+    pub columns: Option<Vec<String>>,
+    pub source: CopySource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,6 +514,10 @@ pub enum SqlTypeKind {
     Json,
     Jsonb,
     JsonPath,
+    TsVector,
+    TsQuery,
+    RegConfig,
+    RegDictionary,
     Text,
     Bool,
     Point,
@@ -670,6 +687,7 @@ pub enum SubqueryComparisonOp {
     LtEq,
     Gt,
     GtEq,
+    Match,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -690,6 +708,11 @@ pub enum SqlExpr {
     Div(Box<SqlExpr>, Box<SqlExpr>),
     Mod(Box<SqlExpr>, Box<SqlExpr>),
     Concat(Box<SqlExpr>, Box<SqlExpr>),
+    BinaryOperator {
+        op: String,
+        left: Box<SqlExpr>,
+        right: Box<SqlExpr>,
+    },
     UnaryPlus(Box<SqlExpr>),
     Negate(Box<SqlExpr>),
     BitNot(Box<SqlExpr>),
@@ -705,6 +728,10 @@ pub enum SqlExpr {
         op: GeometryBinaryOp,
         left: Box<SqlExpr>,
         right: Box<SqlExpr>,
+    },
+    PrefixOperator {
+        op: String,
+        expr: Box<SqlExpr>,
     },
     Cast(Box<SqlExpr>, SqlType),
     Eq(Box<SqlExpr>, Box<SqlExpr>),
@@ -781,6 +808,10 @@ pub enum SqlExpr {
         name: String,
         args: Vec<SqlFunctionArg>,
         func_variadic: bool,
+    },
+    FieldSelect {
+        expr: Box<SqlExpr>,
+        field: String,
     },
     CurrentTimestamp,
 }

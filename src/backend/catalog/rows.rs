@@ -8,7 +8,7 @@ use crate::include::catalog::{
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow,
     PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow,
-    PgTypeRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +26,11 @@ pub(crate) struct PhysicalCatalogRows {
     pub authids: Vec<PgAuthIdRow>,
     pub auth_members: Vec<PgAuthMembersRow>,
     pub languages: Vec<PgLanguageRow>,
+    pub ts_parsers: Vec<PgTsParserRow>,
+    pub ts_templates: Vec<PgTsTemplateRow>,
+    pub ts_dicts: Vec<PgTsDictRow>,
+    pub ts_configs: Vec<PgTsConfigRow>,
+    pub ts_config_maps: Vec<PgTsConfigMapRow>,
     pub constraints: Vec<PgConstraintRow>,
     pub operators: Vec<PgOperatorRow>,
     pub opclasses: Vec<PgOpclassRow>,
@@ -116,6 +121,11 @@ pub(crate) fn extend_physical_catalog_rows(
     target.authids.extend(source.authids);
     target.auth_members.extend(source.auth_members);
     target.languages.extend(source.languages);
+    target.ts_parsers.extend(source.ts_parsers);
+    target.ts_templates.extend(source.ts_templates);
+    target.ts_dicts.extend(source.ts_dicts);
+    target.ts_configs.extend(source.ts_configs);
+    target.ts_config_maps.extend(source.ts_config_maps);
     target.constraints.extend(source.constraints);
     target.operators.extend(source.operators);
     target.opclasses.extend(source.opclasses);
@@ -143,6 +153,11 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         authids: catcache.authid_rows(),
         auth_members: catcache.auth_members_rows(),
         languages: catcache.language_rows(),
+        ts_parsers: catcache.ts_parser_rows(),
+        ts_templates: catcache.ts_template_rows(),
+        ts_dicts: catcache.ts_dict_rows(),
+        ts_configs: catcache.ts_config_rows(),
+        ts_config_maps: catcache.ts_config_map_rows(),
         constraints: catcache.constraint_rows(),
         operators: catcache.operator_rows(),
         opclasses: catcache.opclass_rows(),

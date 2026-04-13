@@ -251,6 +251,10 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::Polygon
             | SqlTypeKind::Line
             | SqlTypeKind::Circle => unreachable!("geometry arrays are unsupported"),
+            SqlTypeKind::TsVector => 3643,
+            SqlTypeKind::TsQuery => 3645,
+            SqlTypeKind::RegConfig => 3735,
+            SqlTypeKind::RegDictionary => 3770,
             SqlTypeKind::InternalChar => 1002,
             SqlTypeKind::Name => 1003,
             SqlTypeKind::Text
@@ -285,6 +289,10 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Polygon => (604, -1, -1),
         SqlTypeKind::Line => (628, 24, -1),
         SqlTypeKind::Circle => (718, 24, -1),
+        SqlTypeKind::TsVector => (3614, -1, -1),
+        SqlTypeKind::TsQuery => (3615, -1, -1),
+        SqlTypeKind::RegConfig => (3734, 4, -1),
+        SqlTypeKind::RegDictionary => (3769, 4, -1),
         SqlTypeKind::InternalChar => (18, 1, -1),
         SqlTypeKind::Name => (19, 64, -1),
         SqlTypeKind::Bool => (16, 1, -1),
@@ -376,6 +384,16 @@ pub(crate) fn send_typed_data_row(
             Value::JsonPath(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
                 buf.extend_from_slice(v.as_bytes());
+            }
+            Value::TsVector(v) => {
+                let rendered = crate::backend::executor::render_tsvector_text(v);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::TsQuery(v) => {
+                let rendered = crate::backend::executor::render_tsquery_text(v);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Text(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());

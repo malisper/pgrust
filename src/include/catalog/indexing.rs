@@ -28,6 +28,15 @@ const PG_PROC_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PROC_PRONAME_ARGS_NSP_INDEX_KEYS: [i16; 3] = [2, 20, 3];
 const PG_LANGUAGE_NAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_LANGUAGE_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_TS_DICT_DICTNAME_INDEX_KEYS: [i16; 2] = [2, 3];
+const PG_TS_DICT_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_TS_PARSER_PRSNAME_INDEX_KEYS: [i16; 2] = [2, 3];
+const PG_TS_PARSER_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_TS_CONFIG_CFGNAME_INDEX_KEYS: [i16; 2] = [2, 3];
+const PG_TS_CONFIG_MAP_INDEX_KEYS: [i16; 3] = [1, 2, 3];
+const PG_TS_CONFIG_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_TS_TEMPLATE_TMPLNAME_INDEX_KEYS: [i16; 2] = [2, 3];
+const PG_TS_TEMPLATE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_OPERATOR_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_OPERATOR_OPRNAME_L_R_N_INDEX_KEYS: [i16; 4] = [2, 8, 9, 3];
 const PG_DATABASE_DATNAME_INDEX_KEYS: [i16; 1] = [2];
@@ -113,6 +122,11 @@ const OID_OID_INT4_OPCLASS_3: [u32; 3] = [
     OID_BTREE_OPCLASS_OID,
     INT4_BTREE_OPCLASS_OID,
 ];
+const OID_INT4_INT4_OPCLASS_3: [u32; 3] = [
+    OID_BTREE_OPCLASS_OID,
+    INT4_BTREE_OPCLASS_OID,
+    INT4_BTREE_OPCLASS_OID,
+];
 const OID_OID_OID_INT2_OPCLASS_4: [u32; 4] = [
     OID_BTREE_OPCLASS_OID,
     OID_BTREE_OPCLASS_OID,
@@ -120,7 +134,7 @@ const OID_OID_OID_INT2_OPCLASS_4: [u32; 4] = [
     INT2_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 52] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 61] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -239,6 +253,78 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 52] = [
         heap_kind: BootstrapCatalogKind::PgLanguage,
         unique: true,
         key_attnums: &PG_LANGUAGE_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3604,
+        relation_name: "pg_ts_dict_dictname_index",
+        heap_kind: BootstrapCatalogKind::PgTsDict,
+        unique: true,
+        key_attnums: &PG_TS_DICT_DICTNAME_INDEX_KEYS,
+        opclass_oids: &NAME_OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3605,
+        relation_name: "pg_ts_dict_oid_index",
+        heap_kind: BootstrapCatalogKind::PgTsDict,
+        unique: true,
+        key_attnums: &PG_TS_DICT_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3606,
+        relation_name: "pg_ts_parser_prsname_index",
+        heap_kind: BootstrapCatalogKind::PgTsParser,
+        unique: true,
+        key_attnums: &PG_TS_PARSER_PRSNAME_INDEX_KEYS,
+        opclass_oids: &NAME_OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3607,
+        relation_name: "pg_ts_parser_oid_index",
+        heap_kind: BootstrapCatalogKind::PgTsParser,
+        unique: true,
+        key_attnums: &PG_TS_PARSER_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3608,
+        relation_name: "pg_ts_config_cfgname_index",
+        heap_kind: BootstrapCatalogKind::PgTsConfig,
+        unique: true,
+        key_attnums: &PG_TS_CONFIG_CFGNAME_INDEX_KEYS,
+        opclass_oids: &NAME_OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3609,
+        relation_name: "pg_ts_config_map_index",
+        heap_kind: BootstrapCatalogKind::PgTsConfigMap,
+        unique: true,
+        key_attnums: &PG_TS_CONFIG_MAP_INDEX_KEYS,
+        opclass_oids: &OID_INT4_INT4_OPCLASS_3,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3712,
+        relation_name: "pg_ts_config_oid_index",
+        heap_kind: BootstrapCatalogKind::PgTsConfig,
+        unique: true,
+        key_attnums: &PG_TS_CONFIG_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3766,
+        relation_name: "pg_ts_template_tmplname_index",
+        heap_kind: BootstrapCatalogKind::PgTsTemplate,
+        unique: true,
+        key_attnums: &PG_TS_TEMPLATE_TMPLNAME_INDEX_KEYS,
+        opclass_oids: &NAME_OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3767,
+        relation_name: "pg_ts_template_oid_index",
+        heap_kind: BootstrapCatalogKind::PgTsTemplate,
+        unique: true,
+        key_attnums: &PG_TS_TEMPLATE_OID_INDEX_KEYS,
         opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {

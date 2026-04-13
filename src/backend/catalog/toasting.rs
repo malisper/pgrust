@@ -4,9 +4,9 @@ use crate::backend::catalog::catalog::{
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::page::bufpage::MAXALIGN;
-use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::access::heaptoast::TOAST_TUPLE_THRESHOLD;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
+use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 pub use crate::include::catalog::toasting::{
     PG_TOAST_NAMESPACE, toast_index_name, toast_relation_name,
 };
@@ -73,7 +73,13 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::Jsonb
         | crate::backend::parser::SqlTypeKind::JsonPath
         | crate::backend::parser::SqlTypeKind::Text
-        | crate::backend::parser::SqlTypeKind::PgNodeTree => None,
+        | crate::backend::parser::SqlTypeKind::PgNodeTree
+        | crate::backend::parser::SqlTypeKind::TsVector
+        | crate::backend::parser::SqlTypeKind::TsQuery => None,
+        crate::backend::parser::SqlTypeKind::RegConfig
+        | crate::backend::parser::SqlTypeKind::RegDictionary => {
+            Some(column.storage.attlen as usize)
+        }
     }
 }
 
@@ -151,7 +157,10 @@ pub fn new_relation_create_toast_table(
         return Ok(None);
     }
 
-    let toast_name = format!("{toast_namespace_name}.{}", toast_relation_name(relation_oid));
+    let toast_name = format!(
+        "{toast_namespace_name}.{}",
+        toast_relation_name(relation_oid)
+    );
     let toast_entry = catalog.create_table_with_relkind(
         toast_name.clone(),
         toast_relation_desc(),
@@ -175,7 +184,10 @@ pub fn new_relation_create_toast_table(
         index_name.clone(),
         toast_entry.relation_oid,
         true,
-        &[IndexColumnDef::from("chunk_id"), IndexColumnDef::from("chunk_seq")],
+        &[
+            IndexColumnDef::from("chunk_id"),
+            IndexColumnDef::from("chunk_seq"),
+        ],
         &CatalogIndexBuildOptions {
             am_oid: BTREE_AM_OID,
             indclass: vec![OID_BTREE_OPCLASS_OID, INT4_BTREE_OPCLASS_OID],
@@ -202,11 +214,13 @@ pub fn new_relation_create_toast_table(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::catalog::catalog::column_desc;
     use crate::backend::catalog::Catalog;
+    use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
-    use crate::include::catalog::{DEPENDENCY_INTERNAL, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID};
+    use crate::include::catalog::{
+        DEPENDENCY_INTERNAL, PG_CLASS_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    };
 
     #[test]
     fn unlimited_text_column_needs_toast() {
@@ -256,15 +270,19 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(changes.new_parent.reltoastrelid, changes.toast_entry.relation_oid);
+        assert_eq!(
+            changes.new_parent.reltoastrelid,
+            changes.toast_entry.relation_oid
+        );
         assert_eq!(changes.toast_entry.relkind, 't');
         assert_eq!(changes.toast_entry.namespace_oid, PG_TOAST_NAMESPACE_OID);
         assert_eq!(
-            changes
-                .index_entry
-                .index_meta
-                .as_ref()
-                .map(|meta| (meta.indkey.clone(), meta.indisunique, meta.indisready, meta.indisvalid)),
+            changes.index_entry.index_meta.as_ref().map(|meta| (
+                meta.indkey.clone(),
+                meta.indisunique,
+                meta.indisready,
+                meta.indisvalid
+            )),
             Some((vec![1, 2], true, true, true))
         );
         assert!(catalog.depend_rows().iter().any(|row| {
@@ -303,7 +321,10 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(changes.new_parent.reltoastrelid, changes.toast_entry.relation_oid);
+        assert_eq!(
+            changes.new_parent.reltoastrelid,
+            changes.toast_entry.relation_oid
+        );
         assert_eq!(changes.toast_entry.relkind, 't');
         assert_eq!(changes.toast_entry.namespace_oid, 0x7800_0001);
         assert!(changes.toast_name.starts_with("pg_toast_temp_1."));

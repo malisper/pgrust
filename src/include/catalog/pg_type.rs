@@ -17,9 +17,11 @@ use crate::include::catalog::{
     PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
     PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID,
     PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
-    TIMESTAMP_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID,
+    POINT_TYPE_OID, POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
+    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +209,46 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "jsonpath",
             JSONPATH_TYPE_OID,
             SqlType::new(SqlTypeKind::JsonPath),
+        ),
+        builtin_type_row(
+            "tsvector",
+            TSVECTOR_TYPE_OID,
+            SqlType::new(SqlTypeKind::TsVector),
+        ),
+        builtin_type_row(
+            "_tsvector",
+            TSVECTOR_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::TsVector)),
+        ),
+        builtin_type_row(
+            "tsquery",
+            TSQUERY_TYPE_OID,
+            SqlType::new(SqlTypeKind::TsQuery),
+        ),
+        builtin_type_row(
+            "_tsquery",
+            TSQUERY_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery)),
+        ),
+        builtin_type_row(
+            "regconfig",
+            REGCONFIG_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegConfig),
+        ),
+        builtin_type_row(
+            "_regconfig",
+            REGCONFIG_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegConfig)),
+        ),
+        builtin_type_row(
+            "regdictionary",
+            REGDICTIONARY_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegDictionary),
+        ),
+        builtin_type_row(
+            "_regdictionary",
+            REGDICTIONARY_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegDictionary)),
         ),
         builtin_type_row(
             "pg_node_tree",

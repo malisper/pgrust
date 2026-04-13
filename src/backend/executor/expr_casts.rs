@@ -837,7 +837,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
-                    | SqlTypeKind::JsonPath,
+                    | SqlTypeKind::JsonPath
+                    | SqlTypeKind::TsVector
+                    | SqlTypeKind::TsQuery
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -908,7 +912,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
-                    | SqlTypeKind::JsonPath,
+                    | SqlTypeKind::JsonPath
+                    | SqlTypeKind::TsVector
+                    | SqlTypeKind::TsQuery
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -951,7 +959,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
-                    | SqlTypeKind::JsonPath,
+                    | SqlTypeKind::JsonPath
+                    | SqlTypeKind::TsVector
+                    | SqlTypeKind::TsQuery
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary,
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
@@ -1009,6 +1021,54 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
         },
         Value::JsonPath(text) => cast_text_value(text.as_str(), ty, true),
         Value::Json(text) => cast_text_value(text.as_str(), ty, true),
+        Value::TsVector(vector) => match ty.kind {
+            SqlTypeKind::TsVector => Ok(Value::TsVector(vector)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+                crate::backend::executor::render_tsvector_text(&vector),
+            ))),
+            SqlTypeKind::Json => {
+                let rendered = crate::backend::executor::render_tsvector_text(&vector);
+                validate_json_text(&rendered)?;
+                Ok(Value::Json(CompactString::from_owned(rendered)))
+            }
+            SqlTypeKind::Jsonb => {
+                let rendered = crate::backend::executor::render_tsvector_text(&vector);
+                Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::tsvector",
+                left: Value::TsVector(vector),
+                right: Value::Null,
+            }),
+        },
+        Value::TsQuery(query) => match ty.kind {
+            SqlTypeKind::TsQuery => Ok(Value::TsQuery(query)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
+                crate::backend::executor::render_tsquery_text(&query),
+            ))),
+            SqlTypeKind::Json => {
+                let rendered = crate::backend::executor::render_tsquery_text(&query);
+                validate_json_text(&rendered)?;
+                Ok(Value::Json(CompactString::from_owned(rendered)))
+            }
+            SqlTypeKind::Jsonb => {
+                let rendered = crate::backend::executor::render_tsquery_text(&query);
+                Ok(Value::Jsonb(parse_jsonb_text(&rendered)?))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::tsquery",
+                left: Value::TsQuery(query),
+                right: Value::Null,
+            }),
+        },
         Value::Bytea(bytes) => match ty.kind {
             SqlTypeKind::Bytea => Ok(Value::Bytea(bytes)),
             _ => Err(ExecError::TypeMismatch {
@@ -1093,7 +1153,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
-                    | SqlTypeKind::JsonPath,
+                    | SqlTypeKind::JsonPath
+                    | SqlTypeKind::TsVector
+                    | SqlTypeKind::TsQuery
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1147,7 +1211,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Varchar
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
-                    | SqlTypeKind::JsonPath,
+                    | SqlTypeKind::JsonPath
+                    | SqlTypeKind::TsVector
+                    | SqlTypeKind::TsQuery
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1229,6 +1297,13 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
         SqlTypeKind::JsonPath => Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?)),
+        SqlTypeKind::TsVector => {
+            crate::backend::executor::parse_tsvector_text(text).map(Value::TsVector)
+        }
+        SqlTypeKind::TsQuery => {
+            crate::backend::executor::parse_tsquery_text(text).map(Value::TsQuery)
+        }
+        SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
         SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(
             CompactString::from_owned(coerce_character_string(text, ty, explicit)?),
         )),
@@ -1293,6 +1368,10 @@ pub(super) fn cast_numeric_value(
         }
         SqlTypeKind::InternalChar => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => cast_text_value(&value.render(), ty, explicit),
+        SqlTypeKind::TsVector
+        | SqlTypeKind::TsQuery
+        | SqlTypeKind::RegConfig
+        | SqlTypeKind::RegDictionary => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
             cast_text_value(&value.render(), ty, explicit)
         }

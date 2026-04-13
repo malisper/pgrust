@@ -3,9 +3,9 @@ use super::expr_bit::render_bit_text;
 use super::expr_casts::{cast_value, parse_bytea_text, render_internal_char_text};
 use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::parse_numeric_text;
+use super::node_types::Value;
 use super::value_io::format_array_text;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
-use super::node_types::Value;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
 use crate::pgrust::compact_string::CompactString;
@@ -94,7 +94,9 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
                 "f".into()
             }
         }
-        Value::Text(_) | Value::TextRef(_, _) | Value::JsonPath(_) => value.as_text().unwrap().into(),
+        Value::Text(_) | Value::TextRef(_, _) | Value::JsonPath(_) => {
+            value.as_text().unwrap().into()
+        }
         Value::Json(v) => v.as_str().into(),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes)?,
         Value::Bit(bits) => render_bit_text(bits),
@@ -111,6 +113,8 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         )
         .unwrap_or_default(),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
+        Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
+        Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::Array(values) => format_array_text(values),
         Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
     })
@@ -118,16 +122,13 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
 
 fn quote_identifier(identifier: &str) -> String {
     if !identifier.is_empty()
-        && identifier
-            .chars()
-            .enumerate()
-            .all(|(idx, ch)| {
-                if idx == 0 {
-                    ch == '_' || ch.is_ascii_lowercase()
-                } else {
-                    ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit()
-                }
-            })
+        && identifier.chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch == '_' || ch.is_ascii_lowercase()
+            } else {
+                ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit()
+            }
+        })
     {
         return identifier.into();
     }
@@ -193,7 +194,9 @@ fn format_arg_text(kind: char, value: &Value) -> Result<String, ExecError> {
 
 fn format_width_arg(values: &[Value], index: usize) -> Result<i32, ExecError> {
     let Some(value) = values.get(index) else {
-        return Err(ExecError::RaiseException("too few arguments for format()".into()));
+        return Err(ExecError::RaiseException(
+            "too few arguments for format()".into(),
+        ));
     };
     Ok(match value {
         Value::Null => 0,
@@ -228,11 +231,13 @@ pub(super) fn eval_concat_ws_function(values: &[Value]) -> Result<Value, ExecErr
     if matches!(separator_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let separator = separator_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "concat_ws",
-        left: separator_value.clone(),
-        right: Value::Text("".into()),
-    })?;
+    let separator = separator_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "concat_ws",
+            left: separator_value.clone(),
+            right: Value::Text("".into()),
+        })?;
     let mut out = String::new();
     let mut first = true;
     for value in values.iter().skip(1) {
@@ -255,11 +260,13 @@ pub(super) fn eval_format_function(values: &[Value]) -> Result<Value, ExecError>
     if matches!(format_value, Value::Null) {
         return Ok(Value::Null);
     }
-    let format = format_value.as_text().ok_or_else(|| ExecError::TypeMismatch {
-        op: "format",
-        left: format_value.clone(),
-        right: Value::Text("".into()),
-    })?;
+    let format = format_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "format",
+            left: format_value.clone(),
+            right: Value::Text("".into()),
+        })?;
     let mut out = String::new();
     let chars: Vec<char> = format.chars().collect();
     let mut idx = 0usize;
@@ -366,14 +373,12 @@ pub(super) fn eval_format_function(values: &[Value]) -> Result<Value, ExecError>
             ));
         }
         let Some(value) = values.get(arg_index) else {
-            return Err(ExecError::RaiseException("too few arguments for format()".into()));
+            return Err(ExecError::RaiseException(
+                "too few arguments for format()".into(),
+            ));
         };
         let rendered = format_arg_text(kind, value)?;
-        out.push_str(&pad_formatted(
-            rendered,
-            width.unwrap_or(0),
-            left_align,
-        ));
+        out.push_str(&pad_formatted(rendered, width.unwrap_or(0), left_align));
     }
     Ok(Value::Text(CompactString::from_owned(out)))
 }
@@ -461,6 +466,9 @@ pub(super) fn eval_length_function(values: &[Value]) -> Result<Value, ExecError>
     if matches!(value, Value::Null) {
         return Ok(Value::Null);
     }
+    if let Value::TsVector(vector) = value {
+        return Ok(Value::Int32(vector.lexemes.len() as i32));
+    }
     let text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
         op: "length",
         left: value.clone(),
@@ -537,9 +545,9 @@ pub(super) fn eval_unistr_function(values: &[Value]) -> Result<Value, ExecError>
         return Ok(Value::Null);
     }
     let text = expect_text_arg("unistr", text_value, &Value::Null)?;
-    Ok(Value::Text(CompactString::from_owned(
-        decode_unistr_text(text)?,
-    )))
+    Ok(Value::Text(CompactString::from_owned(decode_unistr_text(
+        text,
+    )?)))
 }
 
 pub(super) fn eval_initcap_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -604,8 +612,8 @@ fn decode_unistr_codepoint(
             return Err(unistr_error("invalid Unicode surrogate pair"));
         };
         let codepoint = 0x10000 + (((high as u32) - 0xD800) << 10) + ((low as u32) - 0xDC00);
-        let decoded =
-            char::from_u32(codepoint).ok_or_else(|| unistr_error("invalid Unicode code point: 2FFFFF"))?;
+        let decoded = char::from_u32(codepoint)
+            .ok_or_else(|| unistr_error("invalid Unicode code point: 2FFFFF"))?;
         Ok((decoded, consumed))
     } else if unistr_low_surrogate(code).is_some() {
         Err(unistr_error("invalid Unicode surrogate pair"))
@@ -616,7 +624,10 @@ fn decode_unistr_codepoint(
     }
 }
 
-fn parse_next_unistr_escape(chars: &[char], start: usize) -> Result<Option<(u32, usize)>, ExecError> {
+fn parse_next_unistr_escape(
+    chars: &[char],
+    start: usize,
+) -> Result<Option<(u32, usize)>, ExecError> {
     if start >= chars.len() {
         return Ok(None);
     }
@@ -1051,7 +1062,6 @@ pub(super) fn eval_like(
     };
     Ok(Value::Bool(if negated { !matched } else { matched }))
 }
-
 pub(super) fn eval_md5_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
         return Ok(Value::Null);
@@ -1633,7 +1643,6 @@ fn like_match_bytes(text: &[u8], pattern: &[u8], escape: Option<&[u8]>) -> Resul
 fn normalize_encoding_label(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
 }
-
 fn eval_pad_function(op: &'static str, values: &[Value], left: bool) -> Result<Value, ExecError> {
     let Some(text_value) = values.first() else {
         return Ok(Value::Null);

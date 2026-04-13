@@ -73,6 +73,7 @@ pub(crate) fn bind_select_targets(
                 name: output_name.clone(),
                 call,
                 sql_type,
+                column_index: 0,
             });
             final_targets.push(TargetEntry {
                 name: output_name,
@@ -244,6 +245,10 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
             visit_nested_srfs(left, info);
             visit_nested_srfs(right, info);
         }
+        SqlExpr::BinaryOperator { left, right, .. } => {
+            visit_nested_srfs(left, info);
+            visit_nested_srfs(right, info);
+        }
         SqlExpr::Like {
             expr,
             pattern,
@@ -276,6 +281,8 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::Cast(inner, _)
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::FieldSelect { expr: inner, .. } => visit_nested_srfs(inner, info),
         | SqlExpr::Subscript { expr: inner, .. } => visit_nested_srfs(inner, info),
         SqlExpr::ArraySubscript { array, subscripts } => {
             visit_nested_srfs(array, info);
