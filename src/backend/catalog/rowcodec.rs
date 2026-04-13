@@ -4,6 +4,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::format_indkey;
+use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
@@ -180,8 +181,8 @@ pub(crate) fn namespace_row_from_values(
 }
 
 pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
-    let relpersistence = expect_char(&values[8], "relpersistence")?;
-    let relkind = expect_char(&values[9], "relkind")?;
+    let relpersistence = expect_char(&values[9], "relpersistence")?;
+    let relkind = expect_char(&values[10], "relkind")?;
     Ok(PgClassRow {
         oid: expect_oid(&values[0])?,
         relname: expect_text(&values[1])?,
@@ -191,8 +192,10 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relam: expect_oid(&values[5])?,
         reltablespace: expect_oid(&values[6])?,
         relfilenode: expect_oid(&values[7])?,
+        reltoastrelid: expect_oid(&values[8])?,
         relpersistence,
         relkind,
+        relnatts: expect_int16(&values[11])?,
     })
 }
 
@@ -400,13 +403,26 @@ pub(crate) fn pg_tablespace_row_from_values(
 pub(crate) fn pg_attribute_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgAttributeRow, CatalogError> {
+    let attalign = expect_char(&values[7], "attalign")?;
+    let attstorage = expect_char(&values[8], "attstorage")?;
+    let attcompression = match &values[9] {
+        Value::Text(text) if text.is_empty() => '\0',
+        other => expect_char(other, "attcompression")?,
+    };
     Ok(PgAttributeRow {
         attrelid: expect_oid(&values[0])?,
         attname: expect_text(&values[1])?,
         atttypid: expect_oid(&values[2])?,
-        attnum: expect_int16(&values[3])?,
-        attnotnull: expect_bool(&values[4])?,
-        atttypmod: expect_int32(&values[5])?,
+        attlen: expect_int16(&values[3])?,
+        attnum: expect_int16(&values[4])?,
+        attnotnull: expect_bool(&values[5])?,
+        atttypmod: expect_int32(&values[6])?,
+        attalign: AttributeAlign::from_char(attalign)
+            .ok_or(CatalogError::Corrupt("unknown attalign"))?,
+        attstorage: AttributeStorage::from_char(attstorage)
+            .ok_or(CatalogError::Corrupt("unknown attstorage"))?,
+        attcompression: AttributeCompression::from_char(attcompression)
+            .ok_or(CatalogError::Corrupt("unknown attcompression"))?,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -531,8 +547,10 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.relam as i32),
         Value::Int32(row.reltablespace as i32),
         Value::Int32(row.relfilenode as i32),
+        Value::Int32(row.reltoastrelid as i32),
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
+        Value::Int16(row.relnatts),
     ]
 }
 
@@ -728,9 +746,13 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::Int32(row.attrelid as i32),
         Value::Text(row.attname.into()),
         Value::Int32(row.atttypid as i32),
+        Value::Int16(row.attlen),
         Value::Int16(row.attnum),
         Value::Bool(row.attnotnull),
         Value::Int32(row.atttypmod),
+        Value::InternalChar(row.attalign.as_char() as u8),
+        Value::InternalChar(row.attstorage.as_char() as u8),
+        Value::InternalChar(row.attcompression.as_char() as u8),
     ]
 }
 
@@ -926,6 +948,9 @@ fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError>
                 "confdeltype" => "empty confdeltype",
                 "confmatchtype" => "empty confmatchtype",
                 "deptype" => "empty deptype",
+                "attalign" => "empty attalign",
+                "attstorage" => "empty attstorage",
+                "attcompression" => "empty attcompression",
                 _ => "empty char value",
             })),
         Value::InternalChar(byte) => Ok(char::from(*byte)),
@@ -945,6 +970,9 @@ fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError>
             "confdeltype" => "expected confdeltype text",
             "confmatchtype" => "expected confmatchtype text",
             "deptype" => "expected deptype text",
+            "attalign" => "expected attalign text",
+            "attstorage" => "expected attstorage text",
+            "attcompression" => "expected attcompression text",
             _ => "expected text char value",
         })),
     }

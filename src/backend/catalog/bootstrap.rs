@@ -19,6 +19,7 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         relation_oid: kind.relation_oid(),
         namespace_oid: bootstrap_namespace_oid(),
         row_type_oid: kind.row_type_oid(),
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
         desc: bootstrap_relation_desc(kind),
@@ -49,11 +50,15 @@ mod tests {
     fn pg_class_bootstrap_desc_contains_relkind() {
         let desc = bootstrap_relation_desc(BootstrapCatalogKind::PgClass);
         assert_eq!(
-            desc.columns.last().map(|col| col.name.as_str()),
+            desc.columns
+                .iter()
+                .rev()
+                .nth(1)
+                .map(|col| col.name.as_str()),
             Some("relkind")
         );
         assert_eq!(
-            desc.columns.last().map(|col| col.sql_type),
+            desc.columns.iter().rev().nth(1).map(|col| col.sql_type),
             Some(SqlType::new(SqlTypeKind::InternalChar))
         );
     }

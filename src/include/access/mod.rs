@@ -1,9 +1,14 @@
 pub mod amapi;
+pub mod detoast;
 pub mod genam;
+pub mod heaptoast;
 pub mod htup;
 pub mod itemptr;
 pub mod itup;
 pub mod nbtree;
 pub mod relscan;
 pub mod scankey;
+pub mod toast_compression;
+pub mod toast_helper;
+pub mod toast_internals;
 pub mod tupdesc;

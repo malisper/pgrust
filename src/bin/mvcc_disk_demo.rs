@@ -25,7 +25,9 @@ use pgrust::backend::storage::page::bufpage::{
 use pgrust::backend::storage::smgr::{
     ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
 };
-use pgrust::include::access::htup::{AttributeAlign, AttributeDesc, HeapTuple, TupleValue};
+use pgrust::include::access::htup::{
+    AttributeAlign, AttributeCompression, AttributeDesc, AttributeStorage, HeapTuple, TupleValue,
+};
 use pgrust::{BufferPool, SmgrStorageBackend};
 use std::collections::BTreeSet;
 use std::fs;
@@ -47,18 +49,24 @@ fn tuple_desc() -> Vec<AttributeDesc> {
             name: "id".into(),
             attlen: 4,
             attalign: AttributeAlign::Int,
+            attstorage: AttributeStorage::Plain,
+            attcompression: AttributeCompression::Default,
             nullable: false,
         },
         AttributeDesc {
             name: "name".into(),
             attlen: -1,
             attalign: AttributeAlign::Int,
+            attstorage: AttributeStorage::Extended,
+            attcompression: AttributeCompression::Default,
             nullable: false,
         },
         AttributeDesc {
             name: "status".into(),
             attlen: -1,
             attalign: AttributeAlign::Int,
+            attstorage: AttributeStorage::Extended,
+            attcompression: AttributeCompression::Default,
             nullable: true,
         },
     ]

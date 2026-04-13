@@ -1246,6 +1246,8 @@ mod tests {
             name: "payload".into(),
             attlen: -1,
             attalign: AttributeAlign::Int,
+            attstorage: crate::include::access::htup::AttributeStorage::Extended,
+            attcompression: crate::include::access::htup::AttributeCompression::Default,
             nullable: false,
         }];
         let tuple =

@@ -97,6 +97,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel.rel_number),
         namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
         rel,
@@ -2005,8 +2006,10 @@ fn pg_attribute_exposes_bootstrap_columns() {
             vec![Value::Text("relam".into())],
             vec![Value::Text("reltablespace".into())],
             vec![Value::Text("relfilenode".into())],
+            vec![Value::Text("reltoastrelid".into())],
             vec![Value::Text("relpersistence".into())],
             vec![Value::Text("relkind".into())],
+            vec![Value::Text("relnatts".into())],
         ],
     );
 }

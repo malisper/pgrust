@@ -3,7 +3,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, BootstrapCatalogKind, HEAP_TABLE_AM_OID,
-    PG_CATALOG_NAMESPACE_OID,
+    PG_CATALOG_NAMESPACE_OID, bootstrap_relation_desc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,8 +16,10 @@ pub struct PgClassRow {
     pub relam: u32,
     pub reltablespace: u32,
     pub relfilenode: u32,
+    pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
+    pub relnatts: i16,
 }
 
 pub fn pg_class_desc() -> RelationDesc {
@@ -31,12 +33,14 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("relam", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("reltablespace", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("relfilenode", SqlType::new(SqlTypeKind::Oid), false),
+            column_desc("reltoastrelid", SqlType::new(SqlTypeKind::Oid), false),
             column_desc(
                 "relpersistence",
                 SqlType::new(SqlTypeKind::InternalChar),
                 false,
             ),
             column_desc("relkind", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc("relnatts", SqlType::new(SqlTypeKind::Int2), false),
         ],
     }
 }
@@ -81,7 +85,9 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relam: relam_for_relkind('r'),
         reltablespace: 0,
         relfilenode: kind.relation_oid(),
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relnatts: bootstrap_relation_desc(kind).columns.len() as i16,
     }
 }

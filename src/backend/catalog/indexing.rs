@@ -4,7 +4,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::BufferPool;
-use crate::backend::access::index::indexam::{index_beginscan, index_build_stub, index_endscan, index_getnext};
+use crate::backend::access::index::indexam::{
+    index_beginscan, index_build_stub, index_endscan, index_getnext,
+};
 use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, CatalogIndexMeta};
 use crate::backend::catalog::store::CatalogWriteContext;
@@ -46,6 +48,7 @@ pub fn system_catalog_index_entry(
         relation_oid: descriptor.relation_oid,
         namespace_oid: PG_CATALOG_NAMESPACE_OID,
         row_type_oid: 0,
+        reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'i',
         desc: system_catalog_index_desc(descriptor),
@@ -65,7 +68,9 @@ pub fn system_catalog_index_desc(
                 .columns
                 .get(attnum.saturating_sub(1) as usize)
                 .cloned()
-                .ok_or(CatalogError::Corrupt("system catalog index key out of range"))
+                .ok_or(CatalogError::Corrupt(
+                    "system catalog index key out of range",
+                ))
         })
         .collect::<Result<Vec<_>, _>>()
         .expect("valid system catalog index descriptors");
@@ -133,9 +138,8 @@ pub fn rebuild_system_catalog_indexes(base_dir: &Path) -> Result<(), CatalogErro
         smgr.open(rel)
             .map_err(|e| CatalogError::Io(format!("open system index relfile failed: {e}")))?;
         smgr.unlink(rel, Some(ForkNumber::Main), false);
-        smgr.create(rel, ForkNumber::Main, false).map_err(|e| {
-            CatalogError::Io(format!("create system index relfile failed: {e}"))
-        })?;
+        smgr.create(rel, ForkNumber::Main, false)
+            .map_err(|e| CatalogError::Io(format!("create system index relfile failed: {e}")))?;
     }
 
     let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 64));
@@ -273,9 +277,9 @@ pub fn probe_system_catalog_rows_visible(
         else {
             continue;
         };
-        rows.push(crate::backend::catalog::rowcodec::decode_catalog_tuple_values(
-            &heap_desc, &tuple,
-        )?);
+        rows.push(
+            crate::backend::catalog::rowcodec::decode_catalog_tuple_values(&heap_desc, &tuple)?,
+        );
     }
     index_endscan(scan, BTREE_AM_OID)?;
     Ok(rows)

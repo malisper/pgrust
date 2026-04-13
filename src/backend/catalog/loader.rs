@@ -23,10 +23,10 @@ use crate::backend::catalog::rowcodec::{
     pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
     pg_tablespace_row_from_values, pg_type_row_from_values,
 };
-use crate::backend::executor::value_io::missing_column_value;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
+use crate::backend::executor::value_io::missing_column_value;
 use crate::backend::parser::SqlType;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
@@ -166,6 +166,10 @@ pub(crate) fn catalog_from_physical_rows(
                     },
                     !attr.attnotnull,
                 );
+                desc.storage.attlen = attr.attlen;
+                desc.storage.attalign = attr.attalign;
+                desc.storage.attstorage = attr.attstorage;
+                desc.storage.attcompression = attr.attcompression;
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
                     desc.default_expr = Some(attrdef.adbin.clone());
@@ -211,6 +215,7 @@ pub(crate) fn catalog_from_physical_rows(
                 relation_oid: row.oid,
                 namespace_oid: row.relnamespace,
                 row_type_oid: row.reltype,
+                reltoastrelid: row.reltoastrelid,
                 relpersistence: row.relpersistence,
                 relkind: row.relkind,
                 desc: RelationDesc { columns },
