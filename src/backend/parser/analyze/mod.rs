@@ -665,7 +665,7 @@ fn build_plan_with_outer(
     };
 
     if needs_agg {
-        let mut aggs: Vec<(AggFunc, Vec<SqlExpr>, bool)> = Vec::new();
+        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool)> = Vec::new();
         for target in &stmt.targets {
             collect_aggs(&target.expr, &mut aggs);
         }
@@ -691,8 +691,15 @@ fn build_plan_with_outer(
         let accumulators: Vec<AggAccum> = aggs
             .iter()
             .map(|(func, args, distinct)| {
-                validate_aggregate_arity(*func, args)?;
-                let arg_type = args.first().map(|e| {
+                if aggregate_args_are_named(args) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "aggregate arguments without names",
+                        actual: func.name().into(),
+                    });
+                }
+                let arg_values: Vec<SqlExpr> = args.iter().map(|arg| arg.value.clone()).collect();
+                validate_aggregate_arity(*func, &arg_values)?;
+                let arg_type = arg_values.first().map(|e| {
                     infer_sql_expr_type_with_ctes(
                         e,
                         &scope,
@@ -704,7 +711,7 @@ fn build_plan_with_outer(
                 });
                 Ok(AggAccum {
                     func: *func,
-                    args: args
+                    args: arg_values
                         .iter()
                         .map(|e| {
                             bind_expr_with_outer_and_ctes(
@@ -745,7 +752,7 @@ fn build_plan_with_outer(
                     *func,
                     args.first().map(|e| {
                         infer_sql_expr_type_with_ctes(
-                            e,
+                            &e.value,
                             &scope,
                             catalog,
                             outer_scopes,

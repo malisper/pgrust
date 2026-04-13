@@ -533,15 +533,23 @@ fn parse_position_in_syntax_as_builtin_call() {
 
 #[test]
 fn parse_multiline_position_convert_from_expression() {
-    let stmt = parse_select(
-            "select position(\n convert_from('\\\\xbcf6c7d0', 'EUC_KR') in\n convert_from('\\\\xb0fac7d02c20bcf6c7d02c20b1e2bcfa2c20bbee', 'EUC_KR'))",
-        )
+    std::thread::Builder::new()
+        .name("parse_multiline_position_convert_from_expression".into())
+        .stack_size(128 * 1024 * 1024)
+        .spawn(|| {
+            let stmt = parse_select(
+                    "select position(\n convert_from('\\\\xbcf6c7d0', 'EUC_KR') in\n convert_from('\\\\xb0fac7d02c20bcf6c7d02c20b1e2bcfa2c20bbee', 'EUC_KR'))",
+                )
+                .unwrap();
+            assert!(matches!(
+                stmt.targets[0].expr,
+                SqlExpr::FuncCall { ref name, ref args }
+                    if name == "position" && args.len() == 2
+            ));
+        })
+        .unwrap()
+        .join()
         .unwrap();
-    assert!(matches!(
-        stmt.targets[0].expr,
-        SqlExpr::FuncCall { ref name, ref args }
-            if name == "position" && args.len() == 2
-    ));
 }
 
 #[test]
@@ -1811,6 +1819,43 @@ fn parse_generate_series_with_step() {
 }
 
 #[test]
+fn parse_named_function_args_in_select() {
+    let stmt = parse_select(
+        "select jsonb_path_exists(target => '{}'::jsonb, path := '$', silent => true)",
+    )
+    .unwrap();
+    let SqlExpr::FuncCall { name, args } = &stmt.targets[0].expr else {
+        panic!("expected function call");
+    };
+    assert_eq!(name, "jsonb_path_exists");
+    assert_eq!(args.len(), 3);
+    assert_eq!(args[0].name.as_deref(), Some("target"));
+    assert_eq!(args[1].name.as_deref(), Some("path"));
+    assert_eq!(args[2].name.as_deref(), Some("silent"));
+}
+
+#[test]
+fn parse_named_function_args_in_from() {
+    let stmt = parse_select("select * from generate_series(start => 1, stop := 3)").unwrap();
+    let Some(FromItem::FunctionCall { name, args }) = stmt.from else {
+        panic!("expected function call in from");
+    };
+    assert_eq!(name, "generate_series");
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0].name.as_deref(), Some("start"));
+    assert_eq!(args[1].name.as_deref(), Some("stop"));
+}
+
+#[test]
+fn build_plan_rejects_positional_after_named_function_arg() {
+    let stmt = parse_select("select jsonb_path_exists(path => '$', '{}'::jsonb)").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::UnexpectedToken { .. })
+    ));
+}
+
+#[test]
 fn build_plan_for_unnest_uses_array_element_types() {
     let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[], ARRAY[1, 2])").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
@@ -2339,13 +2384,21 @@ fn build_plan_allows_correlated_exists_in_where() {
 
 #[test]
 fn build_plan_allows_nested_outer_correlation() {
-    let mut catalog = catalog();
-    catalog.insert("pets", pets_entry());
-    let stmt = parse_select(
-            "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id))",
-        )
+    std::thread::Builder::new()
+        .name("build_plan_allows_nested_outer_correlation".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let mut catalog = catalog();
+            catalog.insert("pets", pets_entry());
+            let stmt = parse_select(
+                "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id))",
+            )
+            .unwrap();
+            assert!(build_plan(&stmt, &catalog).is_ok());
+        })
+        .unwrap()
+        .join()
         .unwrap();
-    assert!(build_plan(&stmt, &catalog).is_ok());
 }
 
 #[test]

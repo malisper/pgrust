@@ -77,7 +77,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => false,
         SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
-            args.iter().any(expr_references_input_scope)
+            args.iter().any(|arg| expr_references_input_scope(&arg.value))
         }
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_references_input_scope),
         SqlExpr::ScalarSubquery(_)
@@ -133,7 +133,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
     }
 }
 
-pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>, bool)>) {
+pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlFunctionArg>, bool)>) {
     match expr {
         SqlExpr::AggCall {
             func,
@@ -158,7 +158,7 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlExpr>
         | SqlExpr::CurrentTimestamp => {}
         SqlExpr::FuncCall { args, .. } => {
             for arg in args {
-                collect_aggs(arg, aggs);
+                collect_aggs(&arg.value, aggs);
             }
         }
         SqlExpr::ArrayLiteral(elements) => {

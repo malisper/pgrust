@@ -8,7 +8,7 @@ pub(super) fn bind_agg_output_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlExpr>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     bind_agg_output_expr_in_clause(
@@ -32,7 +32,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlExpr>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {

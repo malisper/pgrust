@@ -819,6 +819,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         ),
         SqlExpr::FuncCall { name, args } => {
             if let Some(target_type) = resolve_function_cast_type(catalog, name) {
+                if args.iter().any(|arg| arg.name.is_some()) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "positional cast argument",
+                        actual: format!("{name} with named arguments"),
+                    });
+                }
                 if args.len() != 1 {
                     return Err(ParseError::UnexpectedToken {
                         expected: "single-argument cast function",
@@ -826,7 +832,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     });
                 }
                 let arg_type = infer_sql_expr_type_with_ctes(
-                    &args[0],
+                    &args[0].value,
                     scope,
                     catalog,
                     outer_scopes,
@@ -834,7 +840,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
                 let bound_arg = bind_expr_with_outer_and_ctes(
-                    &args[0],
+                    &args[0].value,
                     scope,
                     catalog,
                     outer_scopes,
@@ -856,10 +862,11 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     expected: "supported builtin function",
                     actual: name.clone(),
                 })?;
-            validate_scalar_function_arity(func, args)?;
+            let lowered_args = lower_named_scalar_function_args(func, args)?;
+            validate_scalar_function_arity(func, &lowered_args)?;
             bind_scalar_function_call(
                 func,
-                args,
+                &lowered_args,
                 scope,
                 catalog,
                 outer_scopes,
