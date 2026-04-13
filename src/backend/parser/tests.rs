@@ -47,7 +47,45 @@ fn catalog() -> Catalog {
     catalog
 }
 
-fn visible_catalog_without_text_input_cast(target_oid: u32) -> crate::backend::utils::cache::visible_catalog::VisibleCatalog {
+fn catalog_with_people_id_index() -> Catalog {
+    let mut catalog = catalog();
+    catalog.insert(
+        "people_id_idx",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15010,
+            },
+            relation_oid: 50010,
+            namespace_oid: 11,
+            row_type_oid: 60010,
+            relpersistence: 'p',
+            relkind: 'i',
+            desc: RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: 65000,
+                indisunique: false,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![1],
+                indclass: vec![],
+                indcollation: vec![],
+                indoption: vec![],
+                indexprs: None,
+                indpred: None,
+            }),
+        },
+    );
+    catalog
+}
+
+fn visible_catalog_without_text_input_cast(
+    target_oid: u32,
+) -> crate::backend::utils::cache::visible_catalog::VisibleCatalog {
     let catalog = catalog();
     let relcache = crate::backend::utils::cache::relcache::RelCache::from_catalog(&catalog);
     let base = crate::backend::utils::cache::catcache::CatCache::from_catalog(&catalog);
@@ -1097,14 +1135,16 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(build_plan(
-        &parse_select(
-            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+    assert!(
+        build_plan(
+            &parse_select(
+                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
+            )
+            .unwrap(),
+            &catalog(),
         )
-        .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1121,14 +1161,14 @@ fn build_plan_accepts_same_type_array_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(build_plan(
-        &parse_select(
-            "select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])"
+    assert!(
+        build_plan(
+            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+                .unwrap(),
+            &catalog(),
         )
-        .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1430,6 +1470,37 @@ fn parse_insert_update_delete() {
     assert!(
         matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, .. }) if table_name == "people")
     );
+}
+
+#[test]
+fn bind_update_prefers_index_row_source_for_equality_predicate() {
+    let catalog = catalog_with_people_id_index();
+    let stmt = match parse_statement("update people set name = 'x' where id = 1").unwrap() {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    let bound = bind_update(&stmt, &catalog).unwrap();
+    match bound.row_source {
+        BoundModifyRowSource::Index { index, keys } => {
+            assert_eq!(index.relation_oid, 50010);
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].attribute_number, 1);
+            assert_eq!(keys[0].strategy, 3);
+            assert_eq!(keys[0].argument, Value::Int32(1));
+        }
+        other => panic!("expected index row source, got {other:?}"),
+    }
+}
+
+#[test]
+fn bind_delete_falls_back_to_heap_for_or_predicate() {
+    let catalog = catalog_with_people_id_index();
+    let stmt = match parse_statement("delete from people where id = 1 or id = 2").unwrap() {
+        Statement::Delete(stmt) => stmt,
+        other => panic!("expected delete statement, got {other:?}"),
+    };
+    let bound = bind_delete(&stmt, &catalog).unwrap();
+    assert!(matches!(bound.row_source, BoundModifyRowSource::Heap));
 }
 
 #[test]

@@ -46,6 +46,12 @@ pub struct IndexInsertContext {
 }
 
 #[derive(Clone)]
+pub struct IndexBuildEmptyContext {
+    pub pool: Arc<BufferPool<SmgrStorageBackend>>,
+    pub index_relation: RelFileLocator,
+}
+
+#[derive(Clone)]
 pub struct IndexBeginScanContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub client_id: ClientId,
@@ -59,7 +65,7 @@ pub struct IndexBeginScanContext {
 }
 
 pub type AmBuildFn = fn(&IndexBuildContext) -> Result<IndexBuildResult, CatalogError>;
-pub type AmBuildEmptyFn = fn(RelFileLocator) -> Result<(), CatalogError>;
+pub type AmBuildEmptyFn = fn(&IndexBuildEmptyContext) -> Result<(), CatalogError>;
 pub type AmInsertFn = fn(&IndexInsertContext) -> Result<bool, CatalogError>;
 pub type AmBeginScanFn = fn(&IndexBeginScanContext) -> Result<IndexScanDesc, CatalogError>;
 pub type AmRescanFn =

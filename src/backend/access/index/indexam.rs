@@ -1,5 +1,8 @@
 use crate::backend::catalog::CatalogError;
-use crate::include::access::amapi::{IndexBeginScanContext, IndexBuildContext, IndexBuildResult, IndexInsertContext};
+use crate::include::access::amapi::{
+    IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext, IndexBuildResult,
+    IndexInsertContext,
+};
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 
 pub fn index_build_stub(
@@ -22,6 +25,18 @@ pub fn index_insert_stub(ctx: &IndexInsertContext, am_oid: u32) -> Result<bool, 
         .aminsert
         .ok_or(CatalogError::Corrupt("missing index insert callback"))?;
     aminsert(ctx)
+}
+
+pub fn index_build_empty_stub(
+    ctx: &IndexBuildEmptyContext,
+    am_oid: u32,
+) -> Result<(), CatalogError> {
+    let routine = crate::backend::access::index::amapi::index_am_handler(am_oid)
+        .ok_or(CatalogError::Corrupt("unknown index access method"))?;
+    let ambuildempty = routine
+        .ambuildempty
+        .ok_or(CatalogError::Corrupt("missing index buildempty callback"))?;
+    ambuildempty(ctx)
 }
 
 pub fn index_beginscan(

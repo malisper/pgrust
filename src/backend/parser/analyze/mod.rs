@@ -38,6 +38,15 @@ pub struct BoundIndexRelation {
     pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundModifyRowSource {
+    Heap,
+    Index {
+        index: BoundIndexRelation,
+        keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    },
+}
+
 pub trait CatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
 
@@ -804,6 +813,17 @@ struct IndexableQual {
     expr: Expr,
 }
 
+#[derive(Debug, Clone)]
+struct ChosenIndexPath {
+    index: BoundIndexRelation,
+    keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    residual: Option<Expr>,
+    direction: crate::include::access::relscan::ScanDirection,
+    has_qual: bool,
+    usable_prefix: usize,
+    removes_order: bool,
+}
+
 fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
     let (rel, relation_oid, desc, filter, order_items) = match plan {
         Plan::SeqScan {
@@ -893,17 +913,48 @@ fn choose_index_scan(
     order_items: Option<Vec<OrderByEntry>>,
     indexes: Vec<BoundIndexRelation>,
 ) -> Plan {
-    let conjuncts = filter
-        .as_ref()
-        .map(flatten_and_conjuncts)
-        .unwrap_or_default();
+    let Some(chosen) = choose_index_path(filter.as_ref(), order_items.as_deref(), &indexes) else {
+        return rebuild_scan_plan(rel, relation_oid, desc, filter, order_items);
+    };
+
+    let mut plan = Plan::IndexScan {
+        rel,
+        index_rel: chosen.index.rel,
+        am_oid: chosen.index.index_meta.am_oid,
+        desc: desc.clone(),
+        index_meta: chosen.index.index_meta.clone(),
+        keys: chosen.keys,
+        direction: chosen.direction,
+    };
+    if let Some(predicate) = chosen.residual {
+        plan = Plan::Filter {
+            input: Box::new(plan),
+            predicate,
+        };
+    }
+    if !chosen.removes_order && let Some(items) = order_items {
+        plan = Plan::OrderBy {
+            input: Box::new(plan),
+            items,
+        };
+    }
+
+    plan
+}
+
+fn choose_index_path(
+    filter: Option<&Expr>,
+    order_items: Option<&[OrderByEntry]>,
+    indexes: &[BoundIndexRelation],
+) -> Option<ChosenIndexPath> {
+    let conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
     let parsed_quals = conjuncts
         .iter()
-        .filter_map(|expr| indexable_qual(expr))
+        .filter_map(indexable_qual)
         .collect::<Vec<_>>();
 
-    let mut best: Option<(bool, usize, bool, Plan, Option<Expr>, bool)> = None;
-    for index in indexes.into_iter().filter(|index| {
+    let mut best: Option<ChosenIndexPath> = None;
+    for index in indexes.iter().filter(|index| {
         index.index_meta.indisvalid
             && index.index_meta.indisready
             && !index.index_meta.indkey.is_empty()
@@ -945,9 +996,7 @@ fn choose_index_scan(
         }
 
         let usable_prefix = keys.len();
-        let order_match = order_items
-            .as_ref()
-            .and_then(|items| index_order_match(items, &index, equality_prefix));
+        let order_match = order_items.and_then(|items| index_order_match(items, index, equality_prefix));
         let has_qual = usable_prefix > 0;
         if !has_qual && order_match.is_none() {
             continue;
@@ -966,54 +1015,51 @@ fn choose_index_scan(
             and_exprs(residual)
         };
 
-        let mut plan = Plan::IndexScan {
-            rel,
-            index_rel: index.rel,
-            am_oid: index.index_meta.am_oid,
-            desc: desc.clone(),
-            index_meta: index.index_meta.clone(),
+        let chosen = ChosenIndexPath {
+            index: index.clone(),
             keys,
+            residual,
             direction: order_match
                 .as_ref()
                 .map(|(_, direction)| *direction)
                 .unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
-        };
-        if let Some(predicate) = residual.clone() {
-            plan = Plan::Filter {
-                input: Box::new(plan),
-                predicate,
-            };
-        }
-        let removes_order = order_match.is_some();
-        if !removes_order && let Some(items) = order_items.clone() {
-            plan = Plan::OrderBy {
-                input: Box::new(plan),
-                items,
-            };
-        }
-
-        let ranking = (
             has_qual,
             usable_prefix,
-            removes_order,
-            plan,
-            residual,
-            removes_order,
-        );
+            removes_order: order_match.is_some(),
+        };
+
         match &best {
-            None => best = Some(ranking),
-            Some((best_has_qual, best_prefix, best_order, _, _, _)) => {
-                if (has_qual as u8, usable_prefix, removes_order as u8)
-                    > (*best_has_qual as u8, *best_prefix, *best_order as u8)
+            None => best = Some(chosen),
+            Some(existing) => {
+                if (chosen.has_qual as u8, chosen.usable_prefix, chosen.removes_order as u8)
+                    > (
+                        existing.has_qual as u8,
+                        existing.usable_prefix,
+                        existing.removes_order as u8,
+                    )
                 {
-                    best = Some(ranking);
+                    best = Some(chosen);
                 }
             }
         }
     }
 
-    best.map(|(_, _, _, plan, _, _)| plan)
-        .unwrap_or_else(|| rebuild_scan_plan(rel, relation_oid, desc, filter, order_items))
+    best
+}
+
+fn choose_modify_row_source(
+    predicate: Option<&Expr>,
+    indexes: &[BoundIndexRelation],
+) -> BoundModifyRowSource {
+    if let Some(chosen) = choose_index_path(predicate, None, indexes).filter(|chosen| chosen.has_qual)
+    {
+        BoundModifyRowSource::Index {
+            index: chosen.index,
+            keys: chosen.keys,
+        }
+    } else {
+        BoundModifyRowSource::Heap
+    }
 }
 
 fn index_order_match(
@@ -1259,7 +1305,8 @@ pub struct BoundUpdateStatement {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub desc: RelationDesc,
-    pub has_valid_index: bool,
+    pub row_source: BoundModifyRowSource,
+    pub indexes: Vec<BoundIndexRelation>,
     pub assignments: Vec<BoundAssignment>,
     pub predicate: Option<Expr>,
 }
@@ -1269,7 +1316,7 @@ pub struct BoundDeleteStatement {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
     pub desc: RelationDesc,
-    pub has_valid_index: bool,
+    pub row_source: BoundModifyRowSource,
     pub predicate: Option<Expr>,
 }
 
@@ -1384,15 +1431,21 @@ pub fn bind_update(
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    let indexes = catalog.index_relations_for_heap(entry.relation_oid);
+    let predicate = stmt
+        .where_clause
+        .as_ref()
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
+        })
+        .transpose()?;
 
     Ok(BoundUpdateStatement {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
         desc: entry.desc.clone(),
-        has_valid_index: catalog
-            .index_relations_for_heap(entry.relation_oid)
-            .iter()
-            .any(|index| index.index_meta.indisvalid && index.index_meta.indisready),
+        row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
+        indexes,
         assignments: stmt
             .assignments
             .iter()
@@ -1410,13 +1463,7 @@ pub fn bind_update(
                 })
             })
             .collect::<Result<Vec<_>, ParseError>>()?,
-        predicate: stmt
-            .where_clause
-            .as_ref()
-            .map(|expr| {
-                bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
-            })
-            .transpose()?,
+        predicate,
     })
 }
 
@@ -1427,21 +1474,20 @@ pub fn bind_delete(
     let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    let predicate = stmt
+        .where_clause
+        .as_ref()
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
+        })
+        .transpose()?;
+    let indexes = catalog.index_relations_for_heap(entry.relation_oid);
 
     Ok(BoundDeleteStatement {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
         desc: entry.desc.clone(),
-        has_valid_index: catalog
-            .index_relations_for_heap(entry.relation_oid)
-            .iter()
-            .any(|index| index.index_meta.indisvalid && index.index_meta.indisready),
-        predicate: stmt
-            .where_clause
-            .as_ref()
-            .map(|expr| {
-                bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
-            })
-            .transpose()?,
+        row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
+        predicate,
     })
 }

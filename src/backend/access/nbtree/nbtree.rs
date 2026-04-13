@@ -12,7 +12,8 @@ use crate::backend::executor::value_io::decode_value;
 use crate::backend::storage::page::bufpage::page_header;
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::include::access::amapi::{
-    IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildResult, IndexInsertContext,
+    IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
+    IndexBuildResult, IndexInsertContext,
 };
 use crate::include::access::itup::IndexTupleData;
 use crate::include::access::nbtree::{
@@ -659,11 +660,18 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
     Ok(true)
 }
 
-fn btbuildempty(index_relation: RelFileLocator) -> Result<(), CatalogError> {
-    let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
-    bt_init_meta_page(&mut page, 1, 0, false)
+fn btbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
+    ensure_relation_exists(&ctx.pool, ctx.index_relation)?;
+
+    let mut metapage = [0u8; crate::backend::storage::smgr::BLCKSZ];
+    bt_init_meta_page(&mut metapage, 1, 0, false)
         .map_err(|err| CatalogError::Io(format!("btree metapage init failed: {err:?}")))?;
-    let _ = index_relation;
+    extend_page(&ctx.pool, ctx.index_relation, BTREE_METAPAGE, &metapage)?;
+
+    let mut root = [0u8; crate::backend::storage::smgr::BLCKSZ];
+    bt_page_init(&mut root, BTP_LEAF | BTP_ROOT, 0)
+        .map_err(|err| CatalogError::Io(format!("btree root init failed: {err:?}")))?;
+    extend_page(&ctx.pool, ctx.index_relation, 1, &root)?;
     Ok(())
 }
 
