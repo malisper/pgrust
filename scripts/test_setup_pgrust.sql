@@ -31,13 +31,18 @@ INSERT INTO INT8_TBL (q1, q2) VALUES
   (4567890123456789::int8, 4567890123456789::int8),
   (4567890123456789::int8, (-4567890123456789)::int8);
 
-CREATE TABLE POINT_TBL (f1 text);
+CREATE TABLE POINT_TBL (f1 point);
 INSERT INTO POINT_TBL (f1) VALUES
   ('(0.0,0.0)'),
   ('(-10.0,0.0)'),
   ('(-3.0,4.0)'),
-  ('(5.1,34.5)'),
-  ('(-5.0,-12.0)');
+  ('(5.1, 34.5)'),
+  ('(-5.0,-12.0)'),
+  ('(1e-300,-1e-300)'),
+  ('(1e+300,Inf)'),
+  ('(Inf,1e+300)'),
+  (' ( Nan , NaN ) '),
+  ('10.0,10.0');
 
 CREATE TABLE TEXT_TBL (f1 text);
 INSERT INTO TEXT_TBL (f1) VALUES ('doh!'), ('hi de ho neighbor');
@@ -261,27 +266,3 @@ CREATE TABLE stud_emp (
 );
 INSERT INTO stud_emp (name, age, location, salary, manager, gpa, percent) VALUES
   ('heidi', 22::int4, '(7,7)', 20000::int4, 'dave', 3.5::float8, 50::int4);
-
-CREATE TABLE road (
-  name text,
-  thepath text
-);
-INSERT INTO road (name, thepath) VALUES
-  ('I-80', '[(0,0),(1,1)]'),
-  ('State Hwy 1', '[(1,0),(2,1)]'),
-  ('Main St', '[(0,1),(1,2)]');
-
-CREATE TABLE ihighway (
-  name text,
-  thepath text
-);
-INSERT INTO ihighway (name, thepath) VALUES
-  ('I-80', '[(0,0),(1,1)]');
-
-CREATE TABLE shighway (
-  name text,
-  thepath text,
-  surface text
-);
-INSERT INTO shighway (name, thepath, surface) VALUES
-  ('State Hwy 1', '[(1,0),(2,1)]', 'asphalt');

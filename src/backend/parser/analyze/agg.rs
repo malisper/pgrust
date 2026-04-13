@@ -86,7 +86,12 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
-        | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => expr_contains_agg(inner),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            expr_contains_agg(left) || expr_contains_agg(right)
+        }
     }
 }
 
@@ -187,7 +192,12 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
-        | SqlExpr::IsNotNull(inner) => expr_references_input_scope(inner),
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => expr_references_input_scope(inner),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            expr_references_input_scope(left) || expr_references_input_scope(right)
+        }
     }
 }
 
@@ -312,7 +322,13 @@ pub(super) fn collect_aggs(
         | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
-        | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => collect_aggs(inner, aggs),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            collect_aggs(left, aggs);
+            collect_aggs(right, aggs);
+        }
     }
 }
 

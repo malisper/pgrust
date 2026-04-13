@@ -99,6 +99,17 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes)?,
         Value::Bit(bits) => render_bit_text(bits),
         Value::Bytea(bytes) => format_bytea_text(bytes, ByteaOutputFormat::Hex),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => crate::backend::executor::render_geometry_text(
+            value,
+            Default::default(),
+        )
+        .unwrap_or_default(),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Array(values) => format_array_text(values),
         Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),

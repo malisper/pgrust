@@ -171,6 +171,16 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::InternalChar(v) => {
             JsonbValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => JsonbValue::String(
+            crate::backend::executor::render_geometry_text(value, Default::default())
+                .unwrap_or_default(),
+        ),
         Value::Json(text) => {
             JsonbValue::from_serde(serde_json::from_str(text.as_str()).map_err(|_| {
                 ExecError::InvalidStorageValue {
@@ -406,6 +416,17 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::JsonPath(text) => Ok(text.to_string()),
         Value::Json(text) => Ok(text.to_string()),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => Ok(crate::backend::executor::render_geometry_text(
+            value,
+            Default::default(),
+        )
+        .unwrap_or_default()),
         Value::Array(items) => Ok(format_array_text(items)),
         Value::PgArray(array) => Ok(crate::backend::executor::value_io::format_array_value_text(array)),
     }

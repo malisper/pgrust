@@ -56,11 +56,18 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::Int4
         | crate::backend::parser::SqlTypeKind::Int8
         | crate::backend::parser::SqlTypeKind::Oid
+        | crate::backend::parser::SqlTypeKind::Point
+        | crate::backend::parser::SqlTypeKind::Lseg
+        | crate::backend::parser::SqlTypeKind::Line
+        | crate::backend::parser::SqlTypeKind::Box
+        | crate::backend::parser::SqlTypeKind::Circle
         | crate::backend::parser::SqlTypeKind::Float4
         | crate::backend::parser::SqlTypeKind::Float8 => Some(column.storage.attlen as usize),
         crate::backend::parser::SqlTypeKind::Int2Vector
         | crate::backend::parser::SqlTypeKind::OidVector
         | crate::backend::parser::SqlTypeKind::Bytea
+        | crate::backend::parser::SqlTypeKind::Path
+        | crate::backend::parser::SqlTypeKind::Polygon
         | crate::backend::parser::SqlTypeKind::Numeric
         | crate::backend::parser::SqlTypeKind::Json
         | crate::backend::parser::SqlTypeKind::Jsonb

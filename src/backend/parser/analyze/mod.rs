@@ -4,6 +4,7 @@ mod agg_output_special;
 mod coerce;
 mod expr;
 mod functions;
+mod geometry;
 mod infer;
 mod scope;
 
@@ -27,6 +28,7 @@ use agg_output::*;
 use coerce::*;
 use expr::*;
 use functions::*;
+use geometry::*;
 use infer::*;
 pub use scope::BoundRelation;
 use scope::*;
@@ -1393,6 +1395,16 @@ fn bind_order_by_items(
                                 actual: value.clone(),
                             });
                         }
+                    } else {
+                        bind_expr(&item.expr)?
+                    }
+                }
+                SqlExpr::Column(name) => {
+                    if let Some(target) = targets
+                        .iter()
+                        .find(|target| target.name.eq_ignore_ascii_case(name))
+                    {
+                        target.expr.clone()
                     } else {
                         bind_expr(&item.expr)?
                     }

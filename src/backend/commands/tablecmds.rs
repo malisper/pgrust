@@ -17,10 +17,9 @@ use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
     AnalyzeStatement, BoundDeleteStatement, BoundIndexRelation, BoundInsertSource,
-    BoundModifyRowSource, BoundUpdateStatement, BoundAssignmentTarget,
-    BoundInsertStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
-    MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement, SqlType,
-    bind_create_table, build_plan,
+    BoundAssignmentTarget, BoundInsertStatement, BoundModifyRowSource, BoundUpdateStatement,
+    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError,
+    SqlType, Statement, TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;

@@ -19,6 +19,17 @@ pub(super) fn infer_sql_expr_type_with_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> SqlType {
+    if let Some(sql_type) = infer_geometry_special_expr_type_with_ctes(
+        expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    ) {
+        return sql_type;
+    }
+
     match expr {
         SqlExpr::Column(name) => {
             match resolve_column_with_outer(scope, outer_scopes, name, grouped_outer) {
@@ -41,6 +52,13 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Json(_)) => SqlType::new(SqlTypeKind::Json),
         SqlExpr::Const(Value::Jsonb(_)) => SqlType::new(SqlTypeKind::Jsonb),
         SqlExpr::Const(Value::JsonPath(_)) => SqlType::new(SqlTypeKind::JsonPath),
+        SqlExpr::Const(Value::Point(_)) => SqlType::new(SqlTypeKind::Point),
+        SqlExpr::Const(Value::Lseg(_)) => SqlType::new(SqlTypeKind::Lseg),
+        SqlExpr::Const(Value::Path(_)) => SqlType::new(SqlTypeKind::Path),
+        SqlExpr::Const(Value::Line(_)) => SqlType::new(SqlTypeKind::Line),
+        SqlExpr::Const(Value::Box(_)) => SqlType::new(SqlTypeKind::Box),
+        SqlExpr::Const(Value::Polygon(_)) => SqlType::new(SqlTypeKind::Polygon),
+        SqlExpr::Const(Value::Circle(_)) => SqlType::new(SqlTypeKind::Circle),
         SqlExpr::Const(Value::InternalChar(_)) => SqlType::new(SqlTypeKind::InternalChar),
         SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _))
@@ -191,6 +209,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             let resolved = resolve_scalar_function(name);
             if let Some(func) = resolved
                 && let Some(sql_type) = fixed_scalar_return_type(func)
+            {
+                return sql_type;
+            }
+            if let Some(func) = resolved
+                && let Some(sql_type) = infer_geometry_function_return_type_with_ctes(
+                    func,
+                    args,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
             {
                 return sql_type;
             }
@@ -550,8 +581,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 None => resolve_function_cast_type(catalog, name)
                     .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                Some(_) => SqlType::new(SqlTypeKind::Text),
             }
         }
+        SqlExpr::Subscript { .. }
+        | SqlExpr::GeometryUnaryOp { .. }
+        | SqlExpr::GeometryBinaryOp { .. } => unreachable!("handled before match"),
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
     }
 }

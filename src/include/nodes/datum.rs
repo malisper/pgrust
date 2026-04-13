@@ -190,6 +190,48 @@ fn build_nested_values(array: &ArrayValue, depth: usize, offset: &mut usize) -> 
     out
 }
 
+#[derive(Debug, Clone)]
+pub struct GeoPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoLseg {
+    pub p: [GeoPoint; 2],
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoPath {
+    pub closed: bool,
+    pub points: Vec<GeoPoint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoLine {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoBox {
+    pub high: GeoPoint,
+    pub low: GeoPoint,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoPolygon {
+    pub bound_box: GeoBox,
+    pub points: Vec<GeoPoint>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeoCircle {
+    pub center: GeoPoint,
+    pub radius: f64,
+}
+
 impl BitString {
     pub fn new(bit_len: i32, mut bytes: Vec<u8>) -> Self {
         let required = Self::byte_len(bit_len);
@@ -228,6 +270,13 @@ pub enum Value {
     Int64(i64),
     Bit(BitString),
     Bytea(Vec<u8>),
+    Point(GeoPoint),
+    Lseg(GeoLseg),
+    Path(GeoPath),
+    Line(GeoLine),
+    Box(GeoBox),
+    Polygon(GeoPolygon),
+    Circle(GeoCircle),
     Float64(f64),
     Numeric(NumericValue),
     Json(CompactString),
@@ -501,6 +550,13 @@ impl Value {
             Value::Int64(v) => Value::Int64(*v),
             Value::Bit(v) => Value::Bit(v.clone()),
             Value::Bytea(v) => Value::Bytea(v.clone()),
+            Value::Point(v) => Value::Point(v.clone()),
+            Value::Lseg(v) => Value::Lseg(v.clone()),
+            Value::Path(v) => Value::Path(v.clone()),
+            Value::Line(v) => Value::Line(v.clone()),
+            Value::Box(v) => Value::Box(v.clone()),
+            Value::Polygon(v) => Value::Polygon(v.clone()),
+            Value::Circle(v) => Value::Circle(v.clone()),
             Value::Float64(v) => Value::Float64(*v),
             Value::Numeric(v) => Value::Numeric(v.clone()),
             Value::Json(s) => Value::Json(s.clone()),
@@ -551,6 +607,50 @@ impl PartialEq for Value {
             (Value::Int64(a), Value::Int64(b)) => a == b,
             (Value::Bit(a), Value::Bit(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
+            (Value::Point(a), Value::Point(b)) => {
+                a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
+            }
+            (Value::Lseg(a), Value::Lseg(b)) => {
+                a.p[0].x.to_bits() == b.p[0].x.to_bits()
+                    && a.p[0].y.to_bits() == b.p[0].y.to_bits()
+                    && a.p[1].x.to_bits() == b.p[1].x.to_bits()
+                    && a.p[1].y.to_bits() == b.p[1].y.to_bits()
+            }
+            (Value::Path(a), Value::Path(b)) => {
+                a.closed == b.closed
+                    && a.points.len() == b.points.len()
+                    && a.points.iter().zip(&b.points).all(|(left, right)| {
+                        left.x.to_bits() == right.x.to_bits()
+                            && left.y.to_bits() == right.y.to_bits()
+                    })
+            }
+            (Value::Line(a), Value::Line(b)) => {
+                a.a.to_bits() == b.a.to_bits()
+                    && a.b.to_bits() == b.b.to_bits()
+                    && a.c.to_bits() == b.c.to_bits()
+            }
+            (Value::Box(a), Value::Box(b)) => {
+                a.high.x.to_bits() == b.high.x.to_bits()
+                    && a.high.y.to_bits() == b.high.y.to_bits()
+                    && a.low.x.to_bits() == b.low.x.to_bits()
+                    && a.low.y.to_bits() == b.low.y.to_bits()
+            }
+            (Value::Polygon(a), Value::Polygon(b)) => {
+                a.bound_box.high.x.to_bits() == b.bound_box.high.x.to_bits()
+                    && a.bound_box.high.y.to_bits() == b.bound_box.high.y.to_bits()
+                    && a.bound_box.low.x.to_bits() == b.bound_box.low.x.to_bits()
+                    && a.bound_box.low.y.to_bits() == b.bound_box.low.y.to_bits()
+                    && a.points.len() == b.points.len()
+                    && a.points.iter().zip(&b.points).all(|(left, right)| {
+                        left.x.to_bits() == right.x.to_bits()
+                            && left.y.to_bits() == right.y.to_bits()
+                    })
+            }
+            (Value::Circle(a), Value::Circle(b)) => {
+                a.center.x.to_bits() == b.center.x.to_bits()
+                    && a.center.y.to_bits() == b.center.y.to_bits()
+                    && a.radius.to_bits() == b.radius.to_bits()
+            }
             (Value::Float64(a), Value::Float64(b)) => a.to_bits() == b.to_bits(),
             (Value::Numeric(a), Value::Numeric(b)) => a == b,
             (Value::Json(a), Value::Json(b)) => a == b,
@@ -593,6 +693,56 @@ impl std::hash::Hash for Value {
             Value::Bytea(v) => {
                 13u8.hash(state);
                 v.hash(state);
+            }
+            Value::Point(v) => {
+                15u8.hash(state);
+                v.x.to_bits().hash(state);
+                v.y.to_bits().hash(state);
+            }
+            Value::Lseg(v) => {
+                16u8.hash(state);
+                v.p[0].x.to_bits().hash(state);
+                v.p[0].y.to_bits().hash(state);
+                v.p[1].x.to_bits().hash(state);
+                v.p[1].y.to_bits().hash(state);
+            }
+            Value::Path(v) => {
+                17u8.hash(state);
+                v.closed.hash(state);
+                for point in &v.points {
+                    point.x.to_bits().hash(state);
+                    point.y.to_bits().hash(state);
+                }
+            }
+            Value::Line(v) => {
+                18u8.hash(state);
+                v.a.to_bits().hash(state);
+                v.b.to_bits().hash(state);
+                v.c.to_bits().hash(state);
+            }
+            Value::Box(v) => {
+                19u8.hash(state);
+                v.high.x.to_bits().hash(state);
+                v.high.y.to_bits().hash(state);
+                v.low.x.to_bits().hash(state);
+                v.low.y.to_bits().hash(state);
+            }
+            Value::Polygon(v) => {
+                20u8.hash(state);
+                v.bound_box.high.x.to_bits().hash(state);
+                v.bound_box.high.y.to_bits().hash(state);
+                v.bound_box.low.x.to_bits().hash(state);
+                v.bound_box.low.y.to_bits().hash(state);
+                for point in &v.points {
+                    point.x.to_bits().hash(state);
+                    point.y.to_bits().hash(state);
+                }
+            }
+            Value::Circle(v) => {
+                21u8.hash(state);
+                v.center.x.to_bits().hash(state);
+                v.center.y.to_bits().hash(state);
+                v.radius.to_bits().hash(state);
             }
             Value::Float64(v) => {
                 3u8.hash(state);
