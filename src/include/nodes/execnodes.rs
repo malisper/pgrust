@@ -1,9 +1,9 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
-use crate::include::access::relscan::ScanDirection;
-use crate::include::access::relscan::IndexScanDesc;
-use crate::include::access::scankey::ScanKeyData;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
+use crate::include::access::relscan::IndexScanDesc;
+use crate::include::access::relscan::ScanDirection;
+use crate::include::access::scankey::ScanKeyData;
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use std::rc::Rc;
 use std::time::Duration;

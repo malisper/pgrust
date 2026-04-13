@@ -2,7 +2,7 @@ use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState, ProjectSetState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, ValuesState,
 };
 
@@ -176,7 +176,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             })
         }
         Plan::FunctionScan { call } => Box::new(FunctionScanState {
-            output_columns: call.output_columns().iter().map(|c| c.name.clone()).collect(),
+            output_columns: call
+                .output_columns()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
             call,
             rows: None,
             next_index: 0,

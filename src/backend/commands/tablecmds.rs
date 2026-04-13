@@ -1,5 +1,5 @@
-use std::rc::Rc;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use parking_lot::RwLock;
 
@@ -12,10 +12,10 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
-    AnalyzeStatement, BoundDeleteStatement, BoundInsertSource, BoundInsertStatement,
-    BoundIndexRelation, BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
-    MaintenanceTarget, ParseError, Statement, TruncateTableStatement, VacuumStatement,
-    bind_create_table, build_plan,
+    AnalyzeStatement, BoundDeleteStatement, BoundIndexRelation, BoundInsertSource,
+    BoundInsertStatement, BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup,
+    DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
+    TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -26,7 +26,7 @@ use crate::backend::executor::exec_expr::{
     compile_predicate_with_decoder, eval_expr, tuple_from_values,
 };
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
-use crate::backend::executor::{ExecError, ExecutorContext, StatementResult, executor_start, Expr};
+use crate::backend::executor::{ExecError, ExecutorContext, Expr, StatementResult, executor_start};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::execnodes::*;
 
@@ -174,10 +174,12 @@ fn reinitialize_index_relation(
         },
         index.index_meta.am_oid,
     )
-    .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
-        expected: "index reinitialization",
-        actual: format!("{err:?}"),
-    }))?;
+    .map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index reinitialization",
+            actual: format!("{err:?}"),
+        })
+    })?;
     Ok(())
 }
 
@@ -277,18 +279,17 @@ fn collect_matching_rows_index(
     let mut rows = Vec::new();
 
     loop {
-        let has_tuple = indexam::index_getnext(&mut scan, index.index_meta.am_oid).map_err(|err| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "index access method tuple",
-                actual: format!("{err:?}"),
-            })
-        })?;
+        let has_tuple =
+            indexam::index_getnext(&mut scan, index.index_meta.am_oid).map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index access method tuple",
+                    actual: format!("{err:?}"),
+                })
+            })?;
         if !has_tuple {
             break;
         }
-        let tid = scan
-            .xs_heaptid
-            .expect("index scan tuple must set heap tid");
+        let tid = scan.xs_heaptid.expect("index scan tuple must set heap tid");
         if !seen.insert(tid) {
             continue;
         }
@@ -299,12 +300,8 @@ fn collect_matching_rows_index(
         let Some(tuple) = visible else {
             continue;
         };
-        let mut slot = TupleSlot::from_heap_tuple(
-            Rc::clone(&desc),
-            Rc::clone(&attr_descs),
-            tid,
-            tuple,
-        );
+        let mut slot =
+            TupleSlot::from_heap_tuple(Rc::clone(&desc), Rc::clone(&attr_descs), tid, tuple);
         if let Some(q) = &qual {
             if !q(&mut slot, ctx)? {
                 continue;
@@ -493,15 +490,8 @@ pub fn execute_insert(
         }
     };
 
-    let inserted = execute_insert_values(
-        stmt.rel,
-        &stmt.desc,
-        &stmt.indexes,
-        &values,
-        ctx,
-        xid,
-        cid,
-    )?;
+    let inserted =
+        execute_insert_values(stmt.rel, &stmt.desc, &stmt.indexes, &values, ctx, xid, cid)?;
     Ok(StatementResult::AffectedRows(inserted))
 }
 

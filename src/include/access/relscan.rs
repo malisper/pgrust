@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use crate::backend::access::transam::xact::Snapshot;
+use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::OwnedBufferPin;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::backend::executor::RelationDesc;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTuple;
 use crate::include::access::scankey::ScanKeyData;

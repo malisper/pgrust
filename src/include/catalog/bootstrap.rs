@@ -63,6 +63,13 @@ pub const VARCHAR_ARRAY_TYPE_OID: u32 = 1015;
 pub const INT8_ARRAY_TYPE_OID: u32 = 1016;
 pub const FLOAT4_TYPE_OID: u32 = 700;
 pub const FLOAT8_TYPE_OID: u32 = 701;
+pub const POINT_TYPE_OID: u32 = 600;
+pub const LSEG_TYPE_OID: u32 = 601;
+pub const PATH_TYPE_OID: u32 = 602;
+pub const BOX_TYPE_OID: u32 = 603;
+pub const POLYGON_TYPE_OID: u32 = 604;
+pub const LINE_TYPE_OID: u32 = 628;
+pub const CIRCLE_TYPE_OID: u32 = 718;
 pub const FLOAT4_ARRAY_TYPE_OID: u32 = 1021;
 pub const FLOAT8_ARRAY_TYPE_OID: u32 = 1022;
 pub const VARCHAR_TYPE_OID: u32 = 1043;
@@ -388,7 +395,10 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[18].oid, PG_CAST_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[19].oid, PG_CONSTRAINT_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_DEPEND_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_DESCRIPTION_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[21].oid,
+            PG_DESCRIPTION_RELATION_OID
+        );
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_INDEX_RELATION_OID);
     }
 

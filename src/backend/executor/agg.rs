@@ -384,6 +384,16 @@ fn json_object_agg_key(key: &Value) -> String {
             }
         }
         Value::JsonPath(v) => v.to_string(),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => {
+            crate::backend::executor::render_geometry_text(key, Default::default())
+                .unwrap_or_default()
+        }
         Value::Array(_) => value_to_json_text(key),
     }
 }
@@ -416,6 +426,17 @@ fn value_to_json_text(value: &Value) -> String {
         Value::InternalChar(v) => {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => serde_json::to_string(
+            &crate::backend::executor::render_geometry_text(value, Default::default())
+                .unwrap_or_default(),
+        )
+        .unwrap(),
         Value::Array(items) => render_json_array(items),
     }
 }

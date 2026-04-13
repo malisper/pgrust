@@ -10,7 +10,9 @@ use crate::backend::access::transam::xact::{
     CommandId, Snapshot, TransactionId, TransactionManager,
 };
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions};
+use crate::backend::catalog::catalog::{
+    Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions,
+};
 use crate::backend::catalog::indexing::{
     insert_bootstrap_system_indexes, probe_system_catalog_rows_visible,
     rebuild_system_catalog_indexes,
@@ -550,8 +552,16 @@ impl CatalogStore {
         let (_name, old_entry, new_entry) = catalog.alter_table_add_column(relation_oid, column)?;
         self.persist_control_state(&catalog)?;
 
-        let mut kinds = vec![BootstrapCatalogKind::PgAttribute, BootstrapCatalogKind::PgDepend];
-        if new_entry.desc.columns.iter().any(|column| column.attrdef_oid.is_some()) {
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgAttribute,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        if new_entry
+            .desc
+            .columns
+            .iter()
+            .any(|column| column.attrdef_oid.is_some())
+        {
             kinds.push(BootstrapCatalogKind::PgAttrdef);
         }
         let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &_name, &old_entry);

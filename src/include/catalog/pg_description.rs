@@ -20,4 +20,3 @@ pub fn pg_description_desc() -> RelationDesc {
         ],
     }
 }
-

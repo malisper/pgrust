@@ -66,6 +66,13 @@ fn render_value(value: &Value) -> String {
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => format!("{value:?}"),
         Value::Bit(v) => v.render(),
         Value::Bytea(v) => pgrust::backend::libpq::pqformat::format_bytea_text(
             v,

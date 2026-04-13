@@ -53,28 +53,58 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
         SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),
-        SqlExpr::Add(left, right) => bind_arithmetic_expr(
-            "+",
-            Expr::Add,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::Sub(left, right) => bind_arithmetic_expr(
-            "-",
-            Expr::Sub,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
+        SqlExpr::Add(left, right) => {
+            if let Some(result) = bind_maybe_geometry_arithmetic(
+                "+",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_arithmetic_expr(
+                    "+",
+                    Expr::Add,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::Sub(left, right) => {
+            if let Some(result) = bind_maybe_geometry_arithmetic(
+                "-",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_arithmetic_expr(
+                    "-",
+                    Expr::Sub,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
         SqlExpr::BitAnd(left, right) => bind_bitwise_expr(
             "&",
             Expr::BitAnd,
@@ -97,61 +127,136 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?,
-        SqlExpr::BitXor(left, right) => bind_bitwise_expr(
-            "#",
-            Expr::BitXor,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::Shl(left, right) => bind_shift_expr(
-            "<<",
-            Expr::Shl,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::Shr(left, right) => bind_shift_expr(
-            ">>",
-            Expr::Shr,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::Mul(left, right) => bind_arithmetic_expr(
-            "*",
-            Expr::Mul,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::Div(left, right) => bind_arithmetic_expr(
-            "/",
-            Expr::Div,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
+        SqlExpr::BitXor(left, right) => {
+            if let Some(result) = bind_maybe_geometry_arithmetic(
+                "#",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_bitwise_expr(
+                    "#",
+                    Expr::BitXor,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::Shl(left, right) => {
+            if let Some(result) = bind_maybe_geometry_shift(
+                "<<",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_shift_expr(
+                    "<<",
+                    Expr::Shl,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::Shr(left, right) => {
+            if let Some(result) = bind_maybe_geometry_shift(
+                ">>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_shift_expr(
+                    ">>",
+                    Expr::Shr,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::Mul(left, right) => {
+            if let Some(result) = bind_maybe_geometry_arithmetic(
+                "*",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_arithmetic_expr(
+                    "*",
+                    Expr::Mul,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::Div(left, right) => {
+            if let Some(result) = bind_maybe_geometry_arithmetic(
+                "/",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_arithmetic_expr(
+                    "/",
+                    Expr::Div,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
         SqlExpr::Mod(left, right) => bind_arithmetic_expr(
             "%",
             Expr::Mod,
@@ -252,72 +357,162 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             validate_catalog_backed_explicit_cast(source_type, *ty, catalog)?;
             Expr::Cast(Box::new(bound_inner), *ty)
         }
-        SqlExpr::Eq(left, right) => bind_comparison_expr(
-            "=",
-            Expr::Eq,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::NotEq(left, right) => bind_comparison_expr(
-            "<>",
-            Expr::NotEq,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::Lt(left, right) => bind_comparison_expr(
-            "<",
-            Expr::Lt,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::LtEq(left, right) => bind_comparison_expr(
-            "<=",
-            Expr::LtEq,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::Gt(left, right) => bind_comparison_expr(
-            ">",
-            Expr::Gt,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::GtEq(left, right) => bind_comparison_expr(
-            ">=",
-            Expr::GtEq,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
+        SqlExpr::Eq(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_comparison_expr(
+                    "=",
+                    Expr::Eq,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::NotEq(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "<>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_comparison_expr(
+                    "<>",
+                    Expr::NotEq,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::Lt(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "<",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_comparison_expr(
+                    "<",
+                    Expr::Lt,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::LtEq(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "<=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_comparison_expr(
+                    "<=",
+                    Expr::LtEq,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::Gt(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                ">",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_comparison_expr(
+                    ">",
+                    Expr::Gt,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::GtEq(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                ">=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_comparison_expr(
+                    ">=",
+                    Expr::GtEq,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
         SqlExpr::RegexMatch(left, right) => Expr::RegexMatch(
             Box::new(bind_expr_with_outer_and_ctes(
                 left,
@@ -531,24 +726,39 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 actual: "ARRAY[]".into(),
             })?,
         },
-        SqlExpr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-            Box::new(bind_expr_with_outer_and_ctes(
+        SqlExpr::ArrayOverlap(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "&&",
                 left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-        ),
+            ) {
+                result?
+            } else {
+                Expr::ArrayOverlap(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
         SqlExpr::AggCall { .. } => {
             return Err(ParseError::UnexpectedToken {
                 expected: "non-aggregate expression",
@@ -763,42 +973,72 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ctes,
             )?),
         ),
-        SqlExpr::JsonbContains(left, right) => Expr::JsonbContains(
-            Box::new(bind_expr_with_outer_and_ctes(
+        SqlExpr::JsonbContains(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "@>",
                 left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-        ),
-        SqlExpr::JsonbContained(left, right) => Expr::JsonbContained(
-            Box::new(bind_expr_with_outer_and_ctes(
+            ) {
+                result?
+            } else {
+                Expr::JsonbContains(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
+        SqlExpr::JsonbContained(left, right) => {
+            if let Some(result) = bind_maybe_geometry_comparison(
+                "<@",
                 left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-        ),
+            ) {
+                result?
+            } else {
+                Expr::JsonbContained(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
         SqlExpr::JsonbExists(left, right) => Expr::JsonbExists(
             Box::new(bind_expr_with_outer_and_ctes(
                 left,
@@ -890,7 +1130,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             )?),
         ),
         SqlExpr::FuncCall { name, args } => {
-            if let Some(target_type) = resolve_function_cast_type(catalog, name) {
+            if let Some(func) = resolve_scalar_function(name) {
+                let lowered_args = lower_named_scalar_function_args(func, args)?;
+                validate_scalar_function_arity(func, &lowered_args)?;
+                bind_scalar_function_call(
+                    func,
+                    &lowered_args,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(target_type) = resolve_function_cast_type(catalog, name) {
                 if args.iter().any(|arg| arg.name.is_some()) {
                     return Err(ParseError::UnexpectedToken {
                         expected: "positional cast argument",
@@ -928,24 +1180,35 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         target_type
                     },
                 ));
-            }
-            let func =
-                resolve_scalar_function(name).ok_or_else(|| ParseError::UnexpectedToken {
+            } else {
+                return Err(ParseError::UnexpectedToken {
                     expected: "supported builtin function",
                     actual: name.clone(),
-                })?;
-            let lowered_args = lower_named_scalar_function_args(func, args)?;
-            validate_scalar_function_arity(func, &lowered_args)?;
-            bind_scalar_function_call(
-                func,
-                &lowered_args,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?
+                });
+            }
         }
+        SqlExpr::Subscript { expr, index } => bind_geometry_subscript(
+            expr,
+            *index,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::GeometryUnaryOp { op, expr } => {
+            bind_geometry_unary_expr(*op, expr, scope, catalog, outer_scopes, grouped_outer, ctes)?
+        }
+        SqlExpr::GeometryBinaryOp { op, left, right } => bind_geometry_binary_expr(
+            *op,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::CurrentTimestamp => Expr::CurrentTimestamp,
     })
 }
@@ -1782,11 +2045,7 @@ fn bind_scalar_function_call(
                         grouped_outer,
                         ctes,
                     );
-                    coerce_bound_expr(
-                        bound_args[idx].clone(),
-                        ty,
-                        SqlType::new(SqlTypeKind::Text),
-                    )
+                    coerce_bound_expr(bound_args[idx].clone(), ty, SqlType::new(SqlTypeKind::Text))
                 })
                 .collect(),
         }),
@@ -2836,14 +3095,8 @@ fn bind_regex_count_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2868,14 +3121,8 @@ fn bind_regex_instr_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2899,14 +3146,8 @@ fn bind_regex_substr_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2943,14 +3184,8 @@ fn bind_regex_replace_args(
         false
     };
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,
@@ -2976,14 +3211,8 @@ fn bind_regex_split_to_array_args(
 ) -> Vec<Expr> {
     let mut out = Vec::with_capacity(args.len());
     for (idx, arg) in args.iter().enumerate() {
-        let ty = infer_sql_expr_type_with_ctes(
-            arg,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+        let ty =
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
         out.push(coerce_bound_expr(
             bound_args[idx].clone(),
             ty,

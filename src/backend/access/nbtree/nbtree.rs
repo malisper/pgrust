@@ -6,13 +6,13 @@ use crate::backend::access::heap::heapam::{
     heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
 };
 use crate::backend::access::index::indexam;
-use crate::backend::access::transam::xact::{
-    INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
-};
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
+use crate::backend::access::transam::xact::{
+    INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
+};
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::storage::page::bufpage::page_header;
@@ -24,9 +24,9 @@ use crate::include::access::amapi::{
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::access::nbtree::{
-    BTP_LEAF, BTP_ROOT, BTREE_DEFAULT_FILLFACTOR, BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR,
-    P_NONE, bt_init_meta_page, bt_page_append_tuple, bt_page_get_meta, bt_page_get_opaque,
-    bt_page_init, bt_page_items, bt_page_set_opaque,
+    BTP_LEAF, BTP_ROOT, BTREE_DEFAULT_FILLFACTOR, BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR, P_NONE,
+    bt_init_meta_page, bt_page_append_tuple, bt_page_get_meta, bt_page_get_opaque, bt_page_init,
+    bt_page_items, bt_page_set_opaque,
 };
 use crate::include::access::relscan::{
     BtIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
@@ -94,6 +94,16 @@ fn encode_index_value(
         Value::Jsonb(v) => Ok(v.clone()),
         Value::JsonPath(v) => Ok(v.as_bytes().to_vec()),
         Value::InternalChar(v) => Ok(vec![*v]),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => Err(CatalogError::Io(format!(
+            "unsupported index key type {:?}",
+            sql_type.kind
+        ))),
         Value::Array(_) => Err(CatalogError::Io(format!(
             "unsupported index key type {:?}",
             sql_type.kind
@@ -212,7 +222,10 @@ fn tuple_matches_scan_keys(
             std::slice::from_ref(&key.argument),
             &tuple.t_tid,
         );
-        if indoption.get(attno).is_some_and(|opt| opt & BT_DESC_FLAG != 0) {
+        if indoption
+            .get(attno)
+            .is_some_and(|opt| opt & BT_DESC_FLAG != 0)
+        {
             ord = ord.reverse();
         }
         let ok = match key.strategy {
@@ -519,7 +532,11 @@ fn build_internal_level(
         .ok_or(CatalogError::Corrupt("missing child level"))?;
     let mut tuples = Vec::with_capacity(children.len());
     for child in &children {
-        tuples.push(pivot_tuple(&ctx.index_desc, child.block, &child.lower_bound)?);
+        tuples.push(pivot_tuple(
+            &ctx.index_desc,
+            child.block,
+            &child.lower_bound,
+        )?);
     }
     let pages = group_sorted_tuples_into_pages(tuples, 0, level, BTREE_NONLEAF_FILLFACTOR)?;
 
@@ -786,8 +803,13 @@ fn read_page_items(
     pool: &crate::BufferPool<crate::SmgrStorageBackend>,
     rel: RelFileLocator,
     block: u32,
-) -> Result<(Vec<IndexTupleData>, crate::include::access::nbtree::BTPageOpaqueData), CatalogError>
-{
+) -> Result<
+    (
+        Vec<IndexTupleData>,
+        crate::include::access::nbtree::BTPageOpaqueData,
+    ),
+    CatalogError,
+> {
     let page = read_page(pool, rel, block)?;
     let opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
@@ -1020,7 +1042,9 @@ fn btgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
                     }
                 }
                 ScanDirection::Backward => {
-                    if state.current_items.is_empty() || state.next_offset >= state.current_items.len() {
+                    if state.current_items.is_empty()
+                        || state.next_offset >= state.current_items.len()
+                    {
                         state.current_items.clear();
                         state.current_pin = None;
                         state.current_block = state.page_prev;
@@ -1047,7 +1071,9 @@ fn btgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
             None
         };
         let Some(tuple) = next else {
-            if let IndexScanOpaque::Btree(state) = &scan.opaque && state.current_block.is_none() {
+            if let IndexScanOpaque::Btree(state) = &scan.opaque
+                && state.current_block.is_none()
+            {
                 return Ok(false);
             }
             continue;
@@ -1158,10 +1184,7 @@ fn write_split_pages(
     })
 }
 
-fn clear_incomplete_split(
-    ctx: &IndexInsertContext,
-    block: u32,
-) -> Result<(), CatalogError> {
+fn clear_incomplete_split(ctx: &IndexInsertContext, block: u32) -> Result<(), CatalogError> {
     let mut page = read_page(&ctx.pool, ctx.index_relation, block)?;
     let mut opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
@@ -1247,7 +1270,8 @@ fn create_new_root(
     child_level: u32,
     right_lower_bound: &[Value],
 ) -> Result<(), CatalogError> {
-    let left_lower_bound = page_lower_bound(&ctx.index_desc, &ctx.pool, ctx.index_relation, left_block)?;
+    let left_lower_bound =
+        page_lower_bound(&ctx.index_desc, &ctx.pool, ctx.index_relation, left_block)?;
     let root_block = next_block_number(&ctx.pool, ctx.index_relation)?;
     let mut root = [0u8; crate::backend::storage::smgr::BLCKSZ];
     bt_page_init(&mut root, BTP_ROOT, child_level + 1)
@@ -1404,7 +1428,11 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
 
     let mut split = insert_tuple_into_page(ctx, leaf_block, new_tuple, &key_values, true)?;
     while let Some(result) = split {
-        let right_pivot = pivot_tuple(&ctx.index_desc, result.right_block, &result.right_lower_bound)?;
+        let right_pivot = pivot_tuple(
+            &ctx.index_desc,
+            result.right_block,
+            &result.right_lower_bound,
+        )?;
         let Some(parent_block) = ancestors.pop() else {
             create_new_root(
                 ctx,

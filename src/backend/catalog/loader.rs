@@ -23,10 +23,10 @@ use crate::backend::catalog::rowcodec::{
     pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
     pg_tablespace_row_from_values, pg_type_row_from_values,
 };
-use crate::backend::executor::value_io::missing_column_value;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
 use crate::backend::executor::value_io::decode_value;
+use crate::backend::executor::value_io::missing_column_value;
 use crate::backend::parser::SqlType;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};

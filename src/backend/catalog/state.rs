@@ -438,10 +438,9 @@ impl Catalog {
             .tables
             .get_mut(&name)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let index_meta = entry
-            .index_meta
-            .as_mut()
-            .ok_or(CatalogError::Corrupt("index relation missing index metadata"))?;
+        let index_meta = entry.index_meta.as_mut().ok_or(CatalogError::Corrupt(
+            "index relation missing index metadata",
+        ))?;
         index_meta.indisready = indisready;
         index_meta.indisvalid = indisvalid;
         let new_entry = entry.clone();
