@@ -5828,6 +5828,37 @@ fn jsonpath_cast_and_silent_behavior_work() {
 }
 
 #[test]
+fn jsonpath_arithmetic_recursive_and_subscripts_work() {
+    let base = temp_dir("jsonpath_extended");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '$.a.**{2}.b'::jsonpath, '$ ? ((@ == 1) is unknown)'::jsonpath, '$[last]'::jsonpath, '$[0.5]'::jsonpath, '{\"a\":{\"b\":1}}'::jsonb @? 'lax $.**{2}', '{\"a\":12}'::jsonb @? '$.a + 2', '[1]'::jsonb @? '$[0.5]'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::JsonPath("$.\"a\".**{2}.\"b\"".into()),
+                    Value::JsonPath("$ ? ((@ == 1) is unknown)".into()),
+                    Value::JsonPath("$[last]".into()),
+                    Value::JsonPath("$[0.5]".into()),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn getdatabaseencoding_and_jsonpath_unicode_work() {
     let base = temp_dir("jsonpath_unicode");
     let txns = TransactionManager::new_durable(&base).unwrap();
