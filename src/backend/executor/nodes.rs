@@ -433,7 +433,8 @@ impl PlanNode for NestedLoopJoinState {
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.right.exec_proc_node(ctx)? {
-                let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                Value::materialize_all(&mut values);
                 rows.push(TupleSlot::virtual_row(values));
             }
             self.right_matched = Some(vec![false; rows.len()]);
@@ -444,7 +445,8 @@ impl PlanNode for NestedLoopJoinState {
             if self.current_left.is_none() {
                 match self.left.exec_proc_node(ctx)? {
                     Some(slot) => {
-                        let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                        let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                        Value::materialize_all(&mut values);
                         self.current_left = Some(TupleSlot::virtual_row(values));
                         self.current_left_matched = false;
                         self.right_index = 0;
@@ -545,7 +547,8 @@ fn exec_cross_join<'a>(
     if state.left_rows.is_none() {
         let mut rows = Vec::new();
         while let Some(slot) = state.left.exec_proc_node(ctx)? {
-            let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut values);
             rows.push(TupleSlot::virtual_row(values));
         }
         state.left_rows = Some(rows);
@@ -555,7 +558,8 @@ fn exec_cross_join<'a>(
         if state.current_right.is_none() {
             match state.right.exec_proc_node(ctx)? {
                 Some(slot) => {
-                    let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                    let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                    Value::materialize_all(&mut values);
                     state.current_right = Some(TupleSlot::virtual_row(values));
                     state.left_index = 0;
                 }
@@ -597,7 +601,8 @@ impl PlanNode for OrderByState {
         if self.rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
-                let values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                Value::materialize_all(&mut values);
                 rows.push(TupleSlot::virtual_row(values));
             }
 
