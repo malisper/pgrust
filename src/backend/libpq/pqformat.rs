@@ -5,6 +5,7 @@ use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::{
     ExecError, QueryColumn, Value, geometry_input_error_message, render_geometry_text,
+    render_datetime_value_text,
     render_internal_char_text,
 };
 use crate::backend::parser::SqlTypeKind;
@@ -244,6 +245,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Json => 199,
             SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::JsonPath => 4073,
+            SqlTypeKind::Date => 1182,
+            SqlTypeKind::Time => 1183,
+            SqlTypeKind::TimeTz => 1270,
             SqlTypeKind::Point
             | SqlTypeKind::Lseg
             | SqlTypeKind::Path
@@ -261,6 +265,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::Int2Vector
             | SqlTypeKind::OidVector
             | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
             | SqlTypeKind::Char
             | SqlTypeKind::PgNodeTree => 1009,
             SqlTypeKind::Bool => 1000,
@@ -282,6 +287,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
+        SqlTypeKind::Date => (1082, 4, -1),
+        SqlTypeKind::Time => (1083, 8, col.sql_type.typmod),
+        SqlTypeKind::TimeTz => (1266, 12, col.sql_type.typmod),
         SqlTypeKind::Point => (600, 16, -1),
         SqlTypeKind::Lseg => (601, 32, -1),
         SqlTypeKind::Path => (602, -1, -1),
@@ -300,9 +308,10 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
-        | SqlTypeKind::Timestamp
         | SqlTypeKind::Char
         | SqlTypeKind::PgNodeTree => (25, -1, col.sql_type.typmod),
+        SqlTypeKind::Timestamp => (1114, 8, col.sql_type.typmod),
+        SqlTypeKind::TimestampTz => (1184, 8, col.sql_type.typmod),
     }
 }
 
@@ -348,6 +357,15 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Bytea(v) => {
                 let rendered = format_bytea_text(v, float_format.bytea_output);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::Date(_)
+            | Value::Time(_)
+            | Value::TimeTz(_)
+            | Value::Timestamp(_)
+            | Value::TimestampTz(_) => {
+                let rendered = render_datetime_value_text(val).expect("datetime values render");
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

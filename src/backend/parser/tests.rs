@@ -839,6 +839,34 @@ fn parse_standalone_type_names() {
         parse_type_name("pg_node_tree").unwrap(),
         SqlType::new(SqlTypeKind::PgNodeTree)
     );
+    assert_eq!(
+        parse_type_name("date").unwrap(),
+        SqlType::new(SqlTypeKind::Date)
+    );
+    assert_eq!(
+        parse_type_name("time(2)").unwrap(),
+        SqlType::with_time_precision(SqlTypeKind::Time, 2)
+    );
+    assert_eq!(
+        parse_type_name("time(2) with time zone").unwrap(),
+        SqlType::with_time_precision(SqlTypeKind::TimeTz, 2)
+    );
+    assert_eq!(
+        parse_type_name("timestamp(3) without time zone").unwrap(),
+        SqlType::with_time_precision(SqlTypeKind::Timestamp, 3)
+    );
+    assert_eq!(
+        parse_type_name("timestamp(4) with time zone").unwrap(),
+        SqlType::with_time_precision(SqlTypeKind::TimestampTz, 4)
+    );
+    assert_eq!(
+        parse_type_name("timetz").unwrap(),
+        SqlType::new(SqlTypeKind::TimeTz)
+    );
+    assert_eq!(
+        parse_type_name("timestamptz").unwrap(),
+        SqlType::new(SqlTypeKind::TimestampTz)
+    );
 }
 
 #[test]
@@ -929,8 +957,11 @@ fn parse_oid_cast_type() {
 
 #[test]
 fn parse_typed_string_literal_expression() {
-    let stmt = parse_select("select int2 '7', int4 '9', varchar(3) 'abc'").unwrap();
-    assert_eq!(stmt.targets.len(), 3);
+    let stmt = parse_select(
+        "select int2 '7', int4 '9', varchar(3) 'abc', date '2024-01-02', timestamp with time zone '2024-01-02 03:04:05+00'",
+    )
+    .unwrap();
+    assert_eq!(stmt.targets.len(), 5);
     assert_eq!(stmt.targets[0].output_name, "int2");
     assert_eq!(stmt.targets[1].output_name, "int4");
     assert_eq!(stmt.targets[2].output_name, "varchar");
@@ -961,6 +992,14 @@ fn parse_typed_string_literal_expression() {
         }
         other => panic!("expected typed string literal cast, got {other:?}"),
     }
+    assert!(matches!(
+        stmt.targets[3].expr,
+        SqlExpr::Cast(_, ty) if ty == SqlType::new(SqlTypeKind::Date)
+    ));
+    assert!(matches!(
+        stmt.targets[4].expr,
+        SqlExpr::Cast(_, ty) if ty == SqlType::new(SqlTypeKind::TimestampTz)
+    ));
 }
 
 #[test]
@@ -1751,6 +1790,45 @@ fn parse_create_table_with_varchar_types() {
 #[test]
 fn parse_rejects_show_tables() {
     assert!(parse_statement("show tables").is_err());
+}
+
+#[test]
+fn parse_show_timezone() {
+    assert!(matches!(
+        parse_statement("show timezone").unwrap(),
+        Statement::Show(ShowStatement { name }) if name == "timezone"
+    ));
+}
+
+#[test]
+fn parse_current_datetime_forms() {
+    let stmt = parse_select(
+        "select current_date, current_time(2), current_timestamp(3), localtime, localtimestamp(4)",
+    )
+    .unwrap();
+    assert!(matches!(stmt.targets[0].expr, SqlExpr::CurrentDate));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::CurrentTime {
+            precision: Some(2)
+        }
+    ));
+    assert!(matches!(
+        stmt.targets[2].expr,
+        SqlExpr::CurrentTimestamp {
+            precision: Some(3)
+        }
+    ));
+    assert!(matches!(
+        stmt.targets[3].expr,
+        SqlExpr::LocalTime { precision: None }
+    ));
+    assert!(matches!(
+        stmt.targets[4].expr,
+        SqlExpr::LocalTimestamp {
+            precision: Some(4)
+        }
+    ));
 }
 
 #[test]
@@ -2757,7 +2835,10 @@ fn parse_current_timestamp() {
             source: InsertSource::Values(values),
             ..
         }) => {
-            assert!(matches!(values[0][0], SqlExpr::CurrentTimestamp));
+            assert!(matches!(
+                values[0][0],
+                SqlExpr::CurrentTimestamp { precision: None }
+            ));
         }
         other => panic!("expected insert, got {:?}", other),
     }

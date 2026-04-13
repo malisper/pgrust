@@ -5,12 +5,15 @@ use std::sync::Arc;
 
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::catalog::store::CatalogMutationEffect;
+use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
     execute_analyze, execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
     execute_truncate_table, execute_update_with_waiter,
 };
+use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, Value, cast_value, execute_readonly_statement,
+    parse_bytea_text,
 };
 use crate::backend::parser::{
     CatalogLookup, CopyFromStatement, CopySource, ParseError, ParseOptions, PreparedInsert,
@@ -20,6 +23,11 @@ use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_rela
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
+use crate::backend::utils::misc::guc_datetime::{
+    DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
+    parse_timezone,
+};
+use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
@@ -55,6 +63,7 @@ pub struct Session {
     pub client_id: ClientId,
     active_txn: Option<ActiveTransaction>,
     gucs: HashMap<String, String>,
+    datetime_config: DateTimeConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +80,7 @@ impl Session {
             client_id,
             active_txn: None,
             gucs: HashMap::new(),
+            datetime_config: DateTimeConfig::default(),
         }
     }
 
@@ -244,6 +254,7 @@ impl Session {
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
+            Statement::Show(ref show_stmt) => self.apply_show(show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
@@ -446,6 +457,7 @@ impl Session {
 
         let result = match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
+            Statement::Show(ref show_stmt) => self.apply_show(show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(reset_stmt),
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
@@ -729,6 +741,26 @@ impl Session {
                 name,
             )));
         }
+        match name.as_str() {
+            "datestyle" => {
+                let Some((date_style_format, date_order)) = parse_datestyle(&stmt.value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        stmt.value.clone(),
+                    )));
+                };
+                self.datetime_config.date_style_format = date_style_format;
+                self.datetime_config.date_order = date_order;
+            }
+            "timezone" => {
+                let Some(time_zone) = parse_timezone(&stmt.value) else {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        stmt.value.clone(),
+                    )));
+                };
+                self.datetime_config.time_zone = time_zone;
+            }
+            _ => {}
+        }
         self.gucs.insert(name, stmt.value.clone());
         Ok(StatementResult::AffectedRows(0))
     }
@@ -744,11 +776,68 @@ impl Session {
                     normalized,
                 )));
             }
+            match normalized.as_str() {
+                "datestyle" => self.guc_reset_datestyle(),
+                "timezone" => self.guc_reset_timezone(),
+                _ => {}
+            }
             self.gucs.remove(&normalized);
         } else {
             self.gucs.clear();
+            self.guc_reset_datestyle();
+            self.guc_reset_timezone();
         }
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn apply_show(
+        &mut self,
+        stmt: &crate::backend::parser::ShowStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let name = normalize_guc_name(&stmt.name);
+        if name == "tables" {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "configuration parameter",
+                actual: stmt.name.clone(),
+            }));
+        }
+        if !is_postgres_guc(&name) {
+            return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                name,
+            )));
+        }
+
+        let (column_name, value) = match name.as_str() {
+            "datestyle" => ("DateStyle".to_string(), format_datestyle(&self.datetime_config)),
+            "timezone" => ("TimeZone".to_string(), self.datetime_config.time_zone.clone()),
+            _ => (
+                stmt.name.clone(),
+                self.gucs.get(&name).cloned().unwrap_or_else(|| match name.as_str() {
+                    "datestyle" => default_datestyle().to_string(),
+                    "timezone" => default_timezone().to_string(),
+                    _ => "default".to_string(),
+                }),
+            ),
+        };
+
+        Ok(StatementResult::Query {
+            columns: vec![crate::backend::executor::QueryColumn::text(
+                column_name.clone(),
+            )],
+            column_names: vec![column_name],
+            rows: vec![vec![Value::Text(value.into())]],
+        })
+    }
+
+    fn guc_reset_datestyle(&mut self) {
+        let (date_style_format, date_order) =
+            parse_datestyle(default_datestyle()).expect("default DateStyle must parse");
+        self.datetime_config.date_style_format = date_style_format;
+        self.datetime_config.date_order = date_order;
+    }
+
+    fn guc_reset_timezone(&mut self) {
+        self.datetime_config.time_zone = default_timezone().to_string();
     }
 
     pub fn prepare_insert(
@@ -897,7 +986,81 @@ impl Session {
                     let value = if raw == "\\N" {
                         Value::Null
                     } else {
-                        cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                        match column.ty {
+                            ScalarType::Int16 => {
+                                raw.parse::<i16>().map(Value::Int16).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })?
+                            }
+                            ScalarType::Int32 => {
+                                raw.parse::<i32>().map(Value::Int32).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })?
+                            }
+                            ScalarType::Int64 => {
+                                raw.parse::<i64>().map(Value::Int64).map_err(|_| {
+                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                })?
+                            }
+                            ScalarType::Date
+                            | ScalarType::Time
+                            | ScalarType::TimeTz
+                            | ScalarType::Timestamp
+                            | ScalarType::TimestampTz
+                            | ScalarType::Point
+                            | ScalarType::Lseg
+                            | ScalarType::Path
+                            | ScalarType::Line
+                            | ScalarType::Box
+                            | ScalarType::Polygon
+                            | ScalarType::Circle
+                            | ScalarType::TsVector
+                            | ScalarType::TsQuery => {
+                                cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                            }
+                            ScalarType::BitString => {
+                                cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                            }
+                            ScalarType::Float32 | ScalarType::Float64 => raw
+                                .parse::<f64>()
+                                .map(Value::Float64)
+                                .map_err(|_| ExecError::TypeMismatch {
+                                    op: "copy assignment",
+                                    left: Value::Null,
+                                    right: Value::Text(raw.clone().into()),
+                                })?,
+                            ScalarType::Numeric => Value::Numeric(raw.as_str().into()),
+                            ScalarType::Json => Value::Json(raw.clone().into()),
+                            ScalarType::Jsonb => Value::Jsonb(
+                                crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
+                            ),
+                            ScalarType::JsonPath => Value::JsonPath(
+                                canonicalize_jsonpath(raw)
+                                    .map_err(|_| ExecError::InvalidStorageValue {
+                                        column: "<copy>".into(),
+                                        details: format!(
+                                            "invalid input syntax for type jsonpath: \"{raw}\""
+                                        ),
+                                    })?
+                                    .into(),
+                            ),
+                            ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
+                            ScalarType::Text => Value::Text(raw.clone().into()),
+                            ScalarType::Bool => match raw.as_str() {
+                                "t" | "true" | "1" => Value::Bool(true),
+                                "f" | "false" | "0" => Value::Bool(false),
+                                _ => {
+                                    return Err(ExecError::TypeMismatch {
+                                        op: "copy assignment",
+                                        left: Value::Null,
+                                        right: Value::Text(raw.clone().into()),
+                                    });
+                                }
+                            },
+                            ScalarType::Array(_) => {
+                                parse_text_array_literal(raw, column.sql_type.element_type())?
+                            }
+                        }
                     };
                     values[target_index] = value;
                 }

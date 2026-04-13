@@ -7,6 +7,7 @@ use serde_json::{Map, Value as SerdeJsonValue};
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::render_bit_text;
+use crate::backend::executor::render_datetime_value_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::include::nodes::execnodes::{NumericValue, Value};
 use crate::pgrust::compact_string::CompactString;
@@ -170,6 +171,13 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::Bytea(bytes) => JsonbValue::String(format_bytea_text(bytes, ByteaOutputFormat::Hex)),
         Value::InternalChar(v) => {
             JsonbValue::String(crate::backend::executor::render_internal_char_text(*v))
+        }
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            JsonbValue::String(render_datetime_value_text(value).expect("datetime values render"))
         }
         Value::Point(_)
         | Value::Lseg(_)
@@ -418,6 +426,13 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::JsonPath(text) => Ok(text.to_string()),
         Value::Json(text) => Ok(text.to_string()),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            Ok(render_datetime_value_text(value).expect("datetime values render"))
+        }
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

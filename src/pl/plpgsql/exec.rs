@@ -178,6 +178,12 @@ fn render_raise_value(value: &Value) -> String {
         Value::InternalChar(v) => char::from(*v).to_string(),
         Value::Json(text) | Value::JsonPath(text) => text.to_string(),
         Value::Jsonb(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => crate::backend::executor::render_datetime_value_text(value)
+            .expect("datetime values render"),
         Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
         Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::Bytea(bytes) => {

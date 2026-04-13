@@ -11,6 +11,11 @@ pub enum ScalarType {
     Int16,
     Int32,
     Int64,
+    Date,
+    Time,
+    TimeTz,
+    Timestamp,
+    TimestampTz,
     BitString,
     Bytea,
     Point,
@@ -224,6 +229,11 @@ pub enum BuiltinScalarFunction {
     Crc32c,
     ToChar,
     ToNumber,
+    Now,
+    TransactionTimestamp,
+    StatementTimestamp,
+    ClockTimestamp,
+    TimeOfDay,
     Abs,
     Log,
     Log10,
@@ -553,7 +563,19 @@ pub enum Expr {
         args: Vec<Expr>,
         func_variadic: bool,
     },
-    CurrentTimestamp,
+    CurrentDate,
+    CurrentTime {
+        precision: Option<i32>,
+    },
+    CurrentTimestamp {
+        precision: Option<i32>,
+    },
+    LocalTime {
+        precision: Option<i32>,
+    },
+    LocalTimestamp {
+        precision: Option<i32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

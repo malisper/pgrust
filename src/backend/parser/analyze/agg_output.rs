@@ -1274,7 +1274,6 @@ pub(super) fn bind_agg_output_expr_in_clause(
             ],
             func_variadic: false,
         }),
-        SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
         SqlExpr::PrefixOperator { op, .. } => Err(ParseError::UnexpectedToken {
             expected: "grouped expression",
             actual: format!("unsupported operator {op}"),
@@ -1282,6 +1281,19 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::FieldSelect { field, .. } => Err(ParseError::UnexpectedToken {
             expected: "grouped expression",
             actual: format!("unsupported field selection .{field}"),
+        }),
+        SqlExpr::CurrentDate => Ok(Expr::CurrentDate),
+        SqlExpr::CurrentTime { precision } => Ok(Expr::CurrentTime {
+            precision: *precision,
+        }),
+        SqlExpr::CurrentTimestamp { precision } => Ok(Expr::CurrentTimestamp {
+            precision: *precision,
+        }),
+        SqlExpr::LocalTime { precision } => Ok(Expr::LocalTime {
+            precision: *precision,
+        }),
+        SqlExpr::LocalTimestamp { precision } => Ok(Expr::LocalTimestamp {
+            precision: *precision,
         }),
     }
 }

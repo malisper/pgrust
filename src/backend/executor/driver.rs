@@ -49,7 +49,8 @@ pub fn execute_statement(
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
         Statement::Values(stmt) => execute_plan(build_values_plan(&stmt, catalog)?, ctx),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
-        Statement::Set(_)
+        Statement::Show(_)
+        | Statement::Set(_)
         | Statement::Reset(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
@@ -100,7 +101,8 @@ pub fn execute_readonly_statement(
         Statement::Select(stmt) => execute_plan(build_plan(&stmt, catalog)?, ctx),
         Statement::Values(stmt) => execute_plan(build_values_plan(&stmt, catalog)?, ctx),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
-        Statement::Set(_)
+        Statement::Show(_)
+        | Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),

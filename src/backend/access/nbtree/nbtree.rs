@@ -14,6 +14,7 @@ use crate::backend::access::transam::xact::{
     INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
 };
 use crate::backend::catalog::CatalogError;
+use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::storage::page::bufpage::page_header;
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
@@ -103,6 +104,13 @@ fn encode_index_value(
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v).into_bytes()),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v).into_bytes()),
         Value::InternalChar(v) => Ok(vec![*v]),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => Ok(render_datetime_value_text(value)
+            .expect("datetime values must render")
+            .into_bytes()),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

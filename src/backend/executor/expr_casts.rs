@@ -6,10 +6,14 @@ use super::expr_bool::parse_pg_bool_text;
 use super::expr_geometry::{
     cast_geometry_value, geometry_input_error_message, parse_geometry_text,
 };
+use super::expr_datetime::{apply_time_precision, render_datetime_value_text};
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::date::{parse_date_text, parse_time_text, parse_timetz_text};
+use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
@@ -665,6 +669,14 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::StringDataRightTruncation { ty } => {
             format!("value too long for type {ty}")
         }
+        ExecError::InvalidStorageValue { column, details }
+            if matches!(
+                column.as_str(),
+                "date" | "time" | "timetz" | "timestamp" | "timestamptz"
+            ) =>
+        {
+            details.clone()
+        }
         other => format!("{other:?}"),
     }
 }
@@ -678,6 +690,14 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::InvalidGeometryInput { .. }
         | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. } => "22P02",
+        ExecError::InvalidStorageValue { column, .. }
+            if matches!(
+                column.as_str(),
+                "date" | "time" | "timetz" | "timestamp" | "timestamptz"
+            ) =>
+        {
+            "22007"
+        }
         ExecError::BitStringLengthMismatch { .. } => "22026",
         ExecError::BitStringTooLong { .. } => "22001",
         ExecError::IntegerOutOfRange { .. }
@@ -821,6 +841,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
                     | SqlTypeKind::Lseg
                     | SqlTypeKind::Path
@@ -829,6 +852,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -896,6 +920,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
                     | SqlTypeKind::Lseg
                     | SqlTypeKind::Path
@@ -904,6 +931,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -943,6 +971,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
                     | SqlTypeKind::Lseg
                     | SqlTypeKind::Path
@@ -951,6 +982,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -983,6 +1015,119 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 right: Value::Int32(0),
             }),
         },
+        Value::Date(v) => match ty.kind {
+            SqlTypeKind::Date => Ok(Value::Date(v)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz => cast_text_value(
+                &render_datetime_value_text(&Value::Date(v)).expect("datetime values render"),
+                ty,
+                true,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::date",
+                left: Value::Date(v),
+                right: Value::Null,
+            }),
+        },
+        Value::Time(v) => match ty.kind {
+            SqlTypeKind::Time => Ok(Value::Time(v)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz => cast_text_value(
+                &render_datetime_value_text(&Value::Time(v)).expect("datetime values render"),
+                ty,
+                true,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::time",
+                left: Value::Time(v),
+                right: Value::Null,
+            }),
+        },
+        Value::TimeTz(v) => match ty.kind {
+            SqlTypeKind::TimeTz => Ok(Value::TimeTz(v)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Time => cast_text_value(
+                &render_datetime_value_text(&Value::TimeTz(v)).expect("datetime values render"),
+                ty,
+                true,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::timetz",
+                left: Value::TimeTz(v),
+                right: Value::Null,
+            }),
+        },
+        Value::Timestamp(v) => match ty.kind {
+            SqlTypeKind::Timestamp => Ok(Value::Timestamp(v)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::Date
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz => cast_text_value(
+                &render_datetime_value_text(&Value::Timestamp(v))
+                    .expect("datetime values render"),
+                ty,
+                true,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::timestamp",
+                left: Value::Timestamp(v),
+                right: Value::Null,
+            }),
+        },
+        Value::TimestampTz(v) => match ty.kind {
+            SqlTypeKind::TimestampTz => Ok(Value::TimestampTz(v)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::Date
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz => cast_text_value(
+                &render_datetime_value_text(&Value::TimestampTz(v))
+                    .expect("datetime values render"),
+                ty,
+                true,
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::timestamptz",
+                left: Value::TimestampTz(v),
+                right: Value::Null,
+            }),
+        },
         Value::Text(text) => cast_text_value(text.as_str(), ty, true),
         Value::TextRef(ptr, len) => {
             let text = unsafe {
@@ -992,7 +1137,14 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
         }
         Value::InternalChar(byte) => match ty.kind {
             SqlTypeKind::InternalChar => Ok(Value::InternalChar(byte)),
-            SqlTypeKind::Text | SqlTypeKind::Timestamp | SqlTypeKind::Bit | SqlTypeKind::VarBit => {
+            SqlTypeKind::Text
+            | SqlTypeKind::Date
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::Bit
+            | SqlTypeKind::VarBit => {
                 Ok(Value::Text(CompactString::from_owned(
                     render_internal_char_text(byte),
                 )))
@@ -1087,7 +1239,11 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 Ok(Value::JsonPath(canonicalize_jsonpath_text(&rendered)?))
             }
             SqlTypeKind::Text
+            | SqlTypeKind::Date
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
             | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
             | SqlTypeKind::Char
             | SqlTypeKind::Varchar => cast_text_value(&render_jsonb_bytes(&bytes)?, ty, true),
             _ => Err(ExecError::TypeMismatch {
@@ -1137,6 +1293,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
                     | SqlTypeKind::Lseg
                     | SqlTypeKind::Path
@@ -1145,6 +1304,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1195,6 +1355,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
                     | SqlTypeKind::Point
                     | SqlTypeKind::Lseg
                     | SqlTypeKind::Path
@@ -1203,6 +1366,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Line
                     | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
                     | SqlTypeKind::Bit
@@ -1256,7 +1420,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             SqlTypeKind::Bit | SqlTypeKind::VarBit => {
                 Ok(Value::Bit(coerce_bit_string(bits, ty, true)?))
             }
-            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Timestamp => Ok(Value::Text(
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Date
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz => Ok(Value::Text(
                 CompactString::from_owned(render_bit_text(&bits)),
             )),
             _ => Err(ExecError::TypeMismatch {
@@ -1282,8 +1452,41 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
-        | SqlTypeKind::Timestamp
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
+        SqlTypeKind::Date => parse_date_text(text, &DateTimeConfig::default())
+            .map(Value::Date)
+            .ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "date".into(),
+                details: format!("invalid input syntax for type date: \"{text}\""),
+            }),
+        SqlTypeKind::Time => parse_time_text(text)
+            .map(Value::Time)
+            .map(|value| apply_time_precision(value, ty.time_precision()))
+            .ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "time".into(),
+                details: format!("invalid input syntax for type time: \"{text}\""),
+            }),
+        SqlTypeKind::TimeTz => parse_timetz_text(text, &DateTimeConfig::default())
+            .map(Value::TimeTz)
+            .map(|value| apply_time_precision(value, ty.time_precision()))
+            .ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "timetz".into(),
+                details: format!("invalid input syntax for type time with time zone: \"{text}\""),
+            }),
+        SqlTypeKind::Timestamp => parse_timestamp_text(text, &DateTimeConfig::default())
+            .map(Value::Timestamp)
+            .map(|value| apply_time_precision(value, ty.time_precision()))
+            .ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "timestamp".into(),
+                details: format!("invalid input syntax for type timestamp: \"{text}\""),
+            }),
+        SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &DateTimeConfig::default())
+            .map(Value::TimestampTz)
+            .map(|value| apply_time_precision(value, ty.time_precision()))
+            .ok_or_else(|| ExecError::InvalidStorageValue {
+                column: "timestamptz".into(),
+                details: format!("invalid input syntax for type timestamp with time zone: \"{text}\""),
+            }),
         SqlTypeKind::InternalChar => Ok(Value::InternalChar(parse_internal_char_text(text))),
         SqlTypeKind::Bit | SqlTypeKind::VarBit => Ok(Value::Bit(coerce_bit_string(
             parse_bit_text(text)?,
@@ -1351,8 +1554,12 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::Polygon
         | SqlTypeKind::Line
         | SqlTypeKind::Circle
-        | SqlTypeKind::Timestamp
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
+        SqlTypeKind::Date
+        | SqlTypeKind::Time
+        | SqlTypeKind::TimeTz
+        | SqlTypeKind::Timestamp
+        | SqlTypeKind::TimestampTz => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Json => {
             let rendered = value.render();
             validate_json_text(&rendered)?;

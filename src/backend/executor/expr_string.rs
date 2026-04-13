@@ -1,6 +1,7 @@
 use super::ExecError;
 use super::expr_bit::render_bit_text;
 use super::expr_casts::{cast_value, parse_bytea_text, render_internal_char_text};
+use super::expr_datetime::render_datetime_value_text;
 use super::expr_format::{to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::parse_numeric_text;
 use super::node_types::Value;
@@ -113,6 +114,13 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         )
         .unwrap_or_default(),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => {
+            render_datetime_value_text(value).expect("datetime values render")
+        }
         Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
         Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::Array(values) => format_array_text(values),

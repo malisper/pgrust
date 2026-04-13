@@ -244,6 +244,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::values_stmt => Ok(Statement::Values(build_values_statement(inner)?)),
         Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
+        Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
@@ -424,6 +425,23 @@ fn build_set(pair: Pair<'_, Rule>) -> Result<SetStatement, ParseError> {
         value: value.ok_or(ParseError::UnexpectedEof)?,
         is_local,
     })
+}
+
+fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
+    let mut name = None;
+    for part in pair.into_inner() {
+        if part.as_rule() == Rule::identifier {
+            name = Some(build_identifier(part));
+        }
+    }
+    let name = name.ok_or(ParseError::UnexpectedEof)?;
+    if name.eq_ignore_ascii_case("tables") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "configuration parameter",
+            actual: name,
+        });
+    }
+    Ok(ShowStatement { name })
 }
 
 fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
@@ -1510,6 +1528,9 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Date => "date",
+        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::TimeTz => "time with time zone",
         SqlTypeKind::TsVector => "tsvector",
         SqlTypeKind::TsQuery => "tsquery",
         SqlTypeKind::RegConfig => "regconfig",
@@ -1524,7 +1545,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Polygon => "polygon",
         SqlTypeKind::Line => "line",
         SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Timestamp => "timestamp",
+        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::TimestampTz => "timestamp with time zone",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "char",
         SqlTypeKind::Char => "bpchar",
@@ -1742,6 +1764,51 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_regconfig => SqlType::new(SqlTypeKind::RegConfig),
         Rule::kw_regdictionary => SqlType::new(SqlTypeKind::RegDictionary),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
+        Rule::date_type | Rule::kw_date => SqlType::new(SqlTypeKind::Date),
+        Rule::time_type => {
+            let precision = pair
+                .clone()
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("time precision");
+            let kind = if pair.as_str().eq_ignore_ascii_case("timetz")
+                || pair
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .contains("with time zone")
+            {
+                SqlTypeKind::TimeTz
+            } else {
+                SqlTypeKind::Time
+            };
+            precision
+                .map(|precision| SqlType::with_time_precision(kind, precision))
+                .unwrap_or_else(|| SqlType::new(kind))
+        }
+        Rule::timestamp_type | Rule::kw_timestamp => {
+            let precision = pair
+                .clone()
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("timestamp precision");
+            let kind = if pair.as_str().eq_ignore_ascii_case("timestamptz")
+                || pair
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .contains("with time zone")
+            {
+                SqlTypeKind::TimestampTz
+            } else {
+                SqlTypeKind::Timestamp
+            };
+            precision
+                .map(|precision| SqlType::with_time_precision(kind, precision))
+                .unwrap_or_else(|| SqlType::new(kind))
+        }
         Rule::kw_point => SqlType::new(SqlTypeKind::Point),
         Rule::kw_lseg => SqlType::new(SqlTypeKind::Lseg),
         Rule::kw_path => SqlType::new(SqlTypeKind::Path),
@@ -1749,7 +1816,6 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_polygon => SqlType::new(SqlTypeKind::Polygon),
         Rule::kw_line => SqlType::new(SqlTypeKind::Line),
         Rule::kw_circle => SqlType::new(SqlTypeKind::Circle),
-        Rule::kw_timestamp => SqlType::new(SqlTypeKind::Timestamp),
         Rule::internal_char_type => SqlType::new(SqlTypeKind::InternalChar),
         Rule::char_type => {
             let len = pair
@@ -2397,7 +2463,35 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_null => Ok(SqlExpr::Const(Value::Null)),
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
-        Rule::kw_current_timestamp => Ok(SqlExpr::CurrentTimestamp),
+        Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
+        Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
+            precision: pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()?,
+        }),
+        Rule::kw_current_timestamp => Ok(SqlExpr::CurrentTimestamp {
+            precision: pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()?,
+        }),
+        Rule::kw_localtime => Ok(SqlExpr::LocalTime {
+            precision: pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()?,
+        }),
+        Rule::kw_localtimestamp => Ok(SqlExpr::LocalTimestamp {
+            precision: pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()?,
+        }),
         _ => Err(ParseError::UnexpectedToken {
             expected: "expression",
             actual: pair.as_str().into(),

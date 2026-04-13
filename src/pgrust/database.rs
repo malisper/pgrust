@@ -924,6 +924,7 @@ impl Database {
                             namespace_oid: created.entry.namespace_oid,
                             relpersistence: created.entry.relpersistence,
                             relkind: created.entry.relkind,
+                            toast: None,
                             desc: created.entry.desc.clone(),
                         };
                         for (index, action) in lowered.constraint_actions.iter().enumerate() {
@@ -1730,7 +1731,8 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
-            Statement::Set(_)
+            Statement::Show(_)
+            | Statement::Set(_)
             | Statement::Reset(_)
             // :HACK: numeric.sql also sets parallel_workers reloptions. Accept and ignore that
             // narrow ALTER TABLE form until table reloptions are represented properly.
@@ -2120,7 +2122,11 @@ fn collect_rels_from_expr(
         | Expr::OuterColumn { .. }
         | Expr::Const(_)
         | Expr::Random
-        | Expr::CurrentTimestamp => {}
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
         Expr::UnaryPlus(inner)
         | Expr::Negate(inner)
         | Expr::BitNot(inner)

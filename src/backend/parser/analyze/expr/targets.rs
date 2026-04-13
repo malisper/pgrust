@@ -325,7 +325,11 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
         | SqlExpr::ScalarSubquery(_)
         | SqlExpr::Exists(_)
         | SqlExpr::Random
-        | SqlExpr::CurrentTimestamp => {}
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => {}
     }
 }
 
