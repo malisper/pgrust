@@ -1,14 +1,18 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::catalog::bootstrap::{bootstrap_catalog_entry, bootstrap_catalog_kinds};
 use crate::backend::catalog::catalog::allocate_relation_object_oids;
 use crate::backend::catalog::indexing::insert_bootstrap_system_indexes;
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
-use crate::backend::catalog::pg_depend::{derived_pg_depend_rows, sort_pg_depend_rows};
+use crate::backend::catalog::pg_depend::{
+    derived_pg_depend_rows, index_backed_constraint_depend_rows, sort_pg_depend_rows,
+};
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::RelationDesc;
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::include::catalog::{PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow};
+use crate::include::catalog::{
+    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow,
+};
 
 const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
@@ -18,6 +22,7 @@ pub struct CatalogIndexMeta {
     pub indrelid: u32,
     pub indkey: Vec<i16>,
     pub indisunique: bool,
+    pub indisprimary: bool,
     pub indisvalid: bool,
     pub indisready: bool,
     pub indislive: bool,
@@ -239,11 +244,23 @@ impl Catalog {
         unique: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
+        self.create_index_for_relation_with_flags(index_name, relation_oid, unique, false, columns)
+    }
+
+    pub fn create_index_for_relation_with_flags(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        primary: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    ) -> Result<CatalogEntry, CatalogError> {
         let options = self.default_index_build_options(relation_oid, columns)?;
-        self.create_index_for_relation_with_options(
+        self.create_index_for_relation_with_options_and_flags(
             index_name,
             relation_oid,
             unique,
+            primary,
             columns,
             &options,
         )
@@ -254,6 +271,25 @@ impl Catalog {
         index_name: impl Into<String>,
         relation_oid: u32,
         unique: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+        options: &CatalogIndexBuildOptions,
+    ) -> Result<CatalogEntry, CatalogError> {
+        self.create_index_for_relation_with_options_and_flags(
+            index_name,
+            relation_oid,
+            unique,
+            false,
+            columns,
+            options,
+        )
+    }
+
+    pub fn create_index_for_relation_with_options_and_flags(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        primary: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         options: &CatalogIndexBuildOptions,
     ) -> Result<CatalogEntry, CatalogError> {
@@ -312,6 +348,7 @@ impl Catalog {
                 indrelid: table.relation_oid,
                 indkey,
                 indisunique: unique,
+                indisprimary: primary,
                 indisvalid: false,
                 indisready: false,
                 indislive: true,
@@ -327,6 +364,69 @@ impl Catalog {
         self.replace_depend_rows_for_entry(&entry);
         self.tables.insert(index_name, entry.clone());
         Ok(entry)
+    }
+
+    pub fn create_index_backed_constraint(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+    ) -> Result<PgConstraintRow, CatalogError> {
+        let table = self
+            .get_by_oid(relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if table.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let index = self
+            .get_by_oid(index_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
+        if index.relkind != 'i' {
+            return Err(CatalogError::UnknownTable(index_oid.to_string()));
+        }
+
+        let conname = conname.into();
+        if self.constraints.iter().any(|row| {
+            row.conrelid == relation_oid
+                && row.contype == contype
+                && row.conname.eq_ignore_ascii_case(&conname)
+        }) {
+            return Err(CatalogError::TableAlreadyExists(conname));
+        }
+
+        let row = PgConstraintRow {
+            oid: self.next_oid,
+            conname,
+            connamespace: table.namespace_oid,
+            contype,
+            condeferrable: false,
+            condeferred: false,
+            conenforced: true,
+            convalidated: true,
+            conrelid: relation_oid,
+            contypid: 0,
+            conindid: index_oid,
+            conparentid: 0,
+            confrelid: 0,
+            confupdtype: ' ',
+            confdeltype: ' ',
+            confmatchtype: ' ',
+            conislocal: true,
+            coninhcount: 0,
+            connoinherit: false,
+            conperiod: false,
+        };
+        self.next_oid = self.next_oid.saturating_add(1);
+        self.constraints.push(row.clone());
+        sort_pg_constraint_rows(&mut self.constraints);
+        self.depends.extend(index_backed_constraint_depend_rows(
+            row.oid,
+            relation_oid,
+            index_oid,
+        ));
+        sort_pg_depend_rows(&mut self.depends);
+        Ok(row)
     }
 
     fn default_index_build_options(
@@ -515,7 +615,7 @@ impl Catalog {
 
     fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {
         self.constraints
-            .retain(|row| row.conrelid != entry.relation_oid);
+            .retain(|row| !(row.conrelid == entry.relation_oid && row.contype == CONSTRAINT_NOTNULL));
         if entry.relkind != 'r' {
             return;
         }
@@ -530,12 +630,29 @@ impl Catalog {
     }
 
     fn replace_depend_rows_for_entry(&mut self, entry: &CatalogEntry) {
+        let entry_object_oids = entry_owned_object_oids(entry);
         self.depends
-            .retain(|row| row.objid != entry.relation_oid && row.refobjid != entry.relation_oid);
+            .retain(|row| !entry_object_oids.contains(&row.objid));
         if entry.relation_oid < DEFAULT_FIRST_USER_OID {
             return;
         }
         self.depends.extend(derived_pg_depend_rows(entry));
         sort_pg_depend_rows(&mut self.depends);
     }
+}
+
+fn entry_owned_object_oids(entry: &CatalogEntry) -> BTreeSet<u32> {
+    let mut oids = BTreeSet::from([entry.relation_oid]);
+    if entry.row_type_oid != 0 {
+        oids.insert(entry.row_type_oid);
+    }
+    for column in &entry.desc.columns {
+        if let Some(oid) = column.attrdef_oid {
+            oids.insert(oid);
+        }
+        if let Some(oid) = column.not_null_constraint_oid {
+            oids.insert(oid);
+        }
+    }
+    oids
 }

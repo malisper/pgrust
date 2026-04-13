@@ -1020,7 +1020,7 @@ fn psql_describe_constraints_query(
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let oid = extract_constraint_relid(sql)?;
     let txn_ctx = session.catalog_txn_ctx();
-    db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
+    let relation = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
     let relname = db
         .relation_display_name(
             session.client_id,
@@ -1033,15 +1033,32 @@ fn psql_describe_constraints_query(
         .constraint_rows_for_relation(session.client_id, txn_ctx, oid)
         .into_iter()
         .filter_map(|row| {
-            (row.contype == crate::include::catalog::CONSTRAINT_NOTNULL).then(|| {
-                vec![
-                    Value::Text(row.conname.into()),
-                    Value::Text(relname.clone().into()),
-                    Value::Text("NOT NULL".into()),
-                ]
-            })
+            let condef = match row.contype {
+                crate::include::catalog::CONSTRAINT_NOTNULL => Some("NOT NULL".to_string()),
+                crate::include::catalog::CONSTRAINT_PRIMARY
+                | crate::include::catalog::CONSTRAINT_UNIQUE => {
+                    index_backed_constraint_def(
+                        db,
+                        session.client_id,
+                        txn_ctx,
+                        &relation,
+                        &row,
+                    )
+                }
+                _ => None,
+            }?;
+            Some(vec![
+                Value::Text(row.conname.into()),
+                Value::Text(relname.clone().into()),
+                Value::Text(condef.into()),
+            ])
         })
         .collect::<Vec<_>>();
+    let mut rows = rows;
+    rows.sort_by(|left, right| match (left.first(), right.first()) {
+        (Some(Value::Text(left)), Some(Value::Text(right))) => left.cmp(right),
+        _ => std::cmp::Ordering::Equal,
+    });
     Some((
         vec![
             QueryColumn::text("conname"),
@@ -1050,6 +1067,32 @@ fn psql_describe_constraints_query(
         ],
         rows,
     ))
+}
+
+fn index_backed_constraint_def(
+    db: &Database,
+    client_id: u32,
+    txn_ctx: Option<(u32, u32)>,
+    relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let index = db.describe_relation_by_oid(client_id, txn_ctx, row.conindid)?.index?;
+    let columns = index
+        .indkey
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| relation.desc.columns.get((*attnum as usize).saturating_sub(1)))
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let prefix = if row.contype == crate::include::catalog::CONSTRAINT_PRIMARY {
+        "PRIMARY KEY"
+    } else {
+        "UNIQUE"
+    };
+    Some(format!("{prefix} ({})", columns.join(", ")))
 }
 
 fn extract_psql_pattern_name(sql: &str) -> Option<&str> {
@@ -1672,6 +1715,47 @@ mod tests {
                 Value::Text("widgets".into()),
                 Value::Text("NOT NULL".into()),
             ]]
+        );
+    }
+
+    #[test]
+    fn psql_describe_constraint_query_returns_primary_key_and_unique_rows() {
+        let db = Database::open(temp_dir("describe_constraints_keys"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4 primary key, code int4 unique)")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
+
+        let sql = format!(
+            "select conname, conrelid::pg_catalog.regclass as ontable, \
+                 pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}'",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    Value::Text("widgets_code_key".into()),
+                    Value::Text("widgets".into()),
+                    Value::Text("UNIQUE (code)".into()),
+                ],
+                vec![
+                    Value::Text("widgets_id_not_null".into()),
+                    Value::Text("widgets".into()),
+                    Value::Text("NOT NULL".into()),
+                ],
+                vec![
+                    Value::Text("widgets_pkey".into()),
+                    Value::Text("widgets".into()),
+                    Value::Text("PRIMARY KEY (id)".into()),
+                ],
+            ]
         );
     }
 

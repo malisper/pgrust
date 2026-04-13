@@ -261,9 +261,33 @@ impl CatalogStore {
         unique: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
+        self.create_index_with_flags(index_name, table_name, unique, false, columns)
+    }
+
+    pub fn create_index_with_flags(
+        &mut self,
+        index_name: impl Into<String>,
+        table_name: &str,
+        unique: bool,
+        primary: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
-        let entry = catalog.create_index(index_name.clone(), table_name, unique, columns)?;
+        let entry = if primary {
+            let table = catalog
+                .get(table_name)
+                .ok_or_else(|| CatalogError::UnknownTable(table_name.to_string()))?;
+            catalog.create_index_for_relation_with_flags(
+                index_name.clone(),
+                table.relation_oid,
+                unique,
+                true,
+                columns,
+            )?
+        } else {
+            catalog.create_index(index_name.clone(), table_name, unique, columns)?
+        };
         let kinds = create_index_sync_kinds();
         self.persist_control_state(&catalog)?;
         append_catalog_entry_rows(&self.base_dir, &catalog, &index_name, &entry, &kinds)?;
@@ -277,6 +301,17 @@ impl CatalogStore {
         unique: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     ) -> Result<CatalogEntry, CatalogError> {
+        self.create_index_for_relation_with_flags(index_name, relation_oid, unique, false, columns)
+    }
+
+    pub fn create_index_for_relation_with_flags(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        primary: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    ) -> Result<CatalogEntry, CatalogError> {
         let options = CatalogIndexBuildOptions {
             am_oid: crate::include::catalog::BTREE_AM_OID,
             indclass: Vec::new(),
@@ -287,6 +322,7 @@ impl CatalogStore {
             index_name,
             relation_oid,
             unique,
+            primary,
             columns,
             &options,
         )
@@ -297,6 +333,7 @@ impl CatalogStore {
         index_name: impl Into<String>,
         relation_oid: u32,
         unique: bool,
+        primary: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         options: &CatalogIndexBuildOptions,
     ) -> Result<CatalogEntry, CatalogError> {
@@ -306,12 +343,19 @@ impl CatalogStore {
             && options.indcollation.is_empty()
             && options.indoption.is_empty()
         {
-            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?
-        } else {
-            catalog.create_index_for_relation_with_options(
+            catalog.create_index_for_relation_with_flags(
                 index_name.clone(),
                 relation_oid,
                 unique,
+                primary,
+                columns,
+            )?
+        } else {
+            catalog.create_index_for_relation_with_options_and_flags(
+                index_name.clone(),
+                relation_oid,
+                unique,
+                primary,
                 columns,
                 options,
             )?
@@ -480,6 +524,25 @@ impl CatalogStore {
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        self.create_index_for_relation_mvcc_with_flags(
+            index_name,
+            relation_oid,
+            unique,
+            false,
+            columns,
+            ctx,
+        )
+    }
+
+    pub fn create_index_for_relation_mvcc_with_flags(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        primary: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let options = CatalogIndexBuildOptions {
             am_oid: crate::include::catalog::BTREE_AM_OID,
             indclass: Vec::new(),
@@ -490,6 +553,7 @@ impl CatalogStore {
             index_name,
             relation_oid,
             unique,
+            primary,
             columns,
             &options,
             ctx,
@@ -501,6 +565,7 @@ impl CatalogStore {
         index_name: impl Into<String>,
         relation_oid: u32,
         unique: bool,
+        primary: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         options: &CatalogIndexBuildOptions,
         ctx: &CatalogWriteContext,
@@ -511,12 +576,19 @@ impl CatalogStore {
             && options.indcollation.is_empty()
             && options.indoption.is_empty()
         {
-            catalog.create_index_for_relation(index_name.clone(), relation_oid, unique, columns)?
-        } else {
-            catalog.create_index_for_relation_with_options(
+            catalog.create_index_for_relation_with_flags(
                 index_name.clone(),
                 relation_oid,
                 unique,
+                primary,
+                columns,
+            )?
+        } else {
+            catalog.create_index_for_relation_with_options_and_flags(
+                index_name.clone(),
+                relation_oid,
+                unique,
+                primary,
                 columns,
                 options,
             )?
@@ -534,6 +606,43 @@ impl CatalogStore {
         effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         Ok((entry, effect))
+    }
+
+    pub fn create_index_backed_constraint_mvcc(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let constraint = catalog.create_index_backed_constraint(
+            relation_oid,
+            index_oid,
+            conname.into(),
+            contype,
+        )?;
+        self.persist_control_state(&catalog)?;
+
+        let rows = PhysicalCatalogRows {
+            constraints: vec![constraint.clone()],
+            depends: catalog
+                .depend_rows()
+                .iter()
+                .filter(|row| row.objid == constraint.oid)
+                .cloned()
+                .collect(),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = vec![BootstrapCatalogKind::PgConstraint, BootstrapCatalogKind::PgDepend];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, index_oid);
+        Ok(effect)
     }
 
     pub fn drop_relation_by_oid_mvcc(

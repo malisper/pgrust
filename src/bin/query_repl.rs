@@ -580,7 +580,7 @@ fn run_statement(
         Statement::CreateTable(stmt) => {
             let (table_name, _) = normalize_create_table_name(&stmt)?;
             let entry = catalog_store
-                .create_table(table_name, create_relation_desc(&stmt))
+                .create_table(table_name, create_relation_desc(&stmt)?)
                 .map_err(|err| {
                     ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "catalog table creation",

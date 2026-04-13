@@ -2,6 +2,7 @@ mod agg;
 mod agg_output;
 mod agg_output_special;
 mod coerce;
+mod create_table;
 mod expr;
 mod functions;
 mod geometry;
@@ -26,6 +27,7 @@ use crate::backend::utils::cache::relcache::RelCache;
 use agg::*;
 use agg_output::*;
 use coerce::*;
+pub use create_table::*;
 use expr::*;
 use functions::*;
 use geometry::*;
@@ -207,25 +209,6 @@ fn first_toast_index(
         .into_iter()
         .next()
 }
-
-pub fn create_relation_desc(stmt: &CreateTableStatement) -> RelationDesc {
-    RelationDesc {
-        columns: stmt
-            .columns
-            .iter()
-            .map(|column| {
-                let mut desc = column_desc(column.name.clone(), column.ty, column.nullable);
-                desc.default_expr = column.default_expr.clone();
-                desc.missing_default_value = column
-                    .default_expr
-                    .as_deref()
-                    .and_then(|sql| derive_literal_default_value(sql, column.ty).ok());
-                desc
-            })
-            .collect(),
-    }
-}
-
 #[derive(Default)]
 struct LiteralDefaultCatalog;
 
@@ -498,7 +481,7 @@ pub fn bind_create_table(
 ) -> Result<CatalogEntry, ParseError> {
     let (table_name, _) = normalize_create_table_name(stmt)?;
     catalog
-        .create_table(table_name, create_relation_desc(stmt))
+        .create_table(table_name, create_relation_desc(stmt)?)
         .map_err(|err| match err {
             crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name) => {
                 ParseError::TableAlreadyExists(name)

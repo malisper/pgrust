@@ -34,8 +34,8 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgClassRow, PgCollationRow, PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow,
-    bootstrap_catalog_kinds, bootstrap_relation_desc,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow,
+    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
 
@@ -232,6 +232,7 @@ pub(crate) fn catalog_from_physical_rows(
                         indrelid: index.indrelid,
                         indkey: index.indkey.clone(),
                         indisunique: index.indisunique,
+                        indisprimary: index.indisprimary,
                         indisvalid: index.indisvalid,
                         indisready: index.indisready,
                         indislive: index.indislive,
@@ -1382,6 +1383,26 @@ pub(crate) fn load_visible_index_rows(
     )?
     .into_iter()
     .map(pg_index_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_constraint_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<PgConstraintRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgConstraint,
+    )?
+    .into_iter()
+    .map(pg_constraint_row_from_values)
     .collect()
 }
 

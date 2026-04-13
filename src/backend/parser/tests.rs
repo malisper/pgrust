@@ -70,6 +70,7 @@ fn catalog_with_people_id_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65000,
                 indisunique: false,
+                indisprimary: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -321,6 +322,8 @@ fn parse_alter_table_add_column_statement() {
                 ty: SqlType::new(SqlTypeKind::Text),
                 default_expr: Some("'hello'".into()),
                 nullable: true,
+                primary_key: false,
+                unique: false,
             },
         })
     );
@@ -1089,18 +1092,19 @@ fn parse_create_table_with_numeric_types() {
     .unwrap();
     match stmt {
         Statement::CreateTable(create) => {
-            assert_eq!(create.columns[0].ty, SqlType::new(SqlTypeKind::Numeric));
-            assert_eq!(create.columns[1].ty, SqlType::new(SqlTypeKind::Numeric));
+            let columns = create.columns().collect::<Vec<_>>();
+            assert_eq!(columns[0].ty, SqlType::new(SqlTypeKind::Numeric));
+            assert_eq!(columns[1].ty, SqlType::new(SqlTypeKind::Numeric));
             assert_eq!(
-                create.columns[2].ty,
+                columns[2].ty,
                 SqlType::with_numeric_precision_scale(10, 0)
             );
             assert_eq!(
-                create.columns[3].ty,
+                columns[3].ty,
                 SqlType::with_numeric_precision_scale(12, 4)
             );
             assert_eq!(
-                create.columns[4].ty,
+                columns[4].ty,
                 SqlType::array_of(SqlType::new(SqlTypeKind::Numeric))
             );
         }
@@ -1620,22 +1624,22 @@ fn parse_insert_update_delete() {
             if table_name == "people" && values.len() == 2
     ));
     assert!(
-        matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns, .. }) if table_name == "widgets" && columns.len() == 2)
+        matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(ct) if ct.table_name == "widgets" && ct.columns().count() == 2)
     );
     assert!(
-        matches!(parse_statement("create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns, .. }) if table_name == "pgbench_history" && columns.len() == 6)
+        matches!(parse_statement("create table pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))").unwrap(), Statement::CreateTable(ct) if ct.table_name == "pgbench_history" && ct.columns().count() == 6)
     );
     assert!(
-        matches!(parse_statement("create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)").unwrap(), Statement::CreateTable(CreateTableStatement { table_name, columns, .. }) if table_name == "pgbench_tellers" && columns.len() == 4)
+        matches!(parse_statement("create table pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84)) with (fillfactor=100)").unwrap(), Statement::CreateTable(ct) if ct.table_name == "pgbench_tellers" && ct.columns().count() == 4)
     );
     assert!(
-        matches!(parse_statement("create temp table tempy ()").unwrap(), Statement::CreateTable(CreateTableStatement { persistence: TablePersistence::Temporary, table_name, columns, .. }) if table_name == "tempy" && columns.is_empty())
+        matches!(parse_statement("create temp table tempy ()").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "tempy" && ct.columns().count() == 0)
     );
     assert!(
-        matches!(parse_statement("create temp table withoutoid() without oids").unwrap(), Statement::CreateTable(CreateTableStatement { persistence: TablePersistence::Temporary, table_name, columns, .. }) if table_name == "withoutoid" && columns.is_empty())
+        matches!(parse_statement("create temp table withoutoid() without oids").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
     );
     assert!(
-        matches!(parse_statement("create temp table withoutoid() with (oids = false)").unwrap(), Statement::CreateTable(CreateTableStatement { persistence: TablePersistence::Temporary, table_name, columns, .. }) if table_name == "withoutoid" && columns.is_empty())
+        matches!(parse_statement("create temp table withoutoid() with (oids = false)").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
     );
     assert!(matches!(
         parse_statement("create table withoid() with (oids)"),
@@ -1732,7 +1736,8 @@ fn parse_create_table_with_varchar_types() {
         )
         .unwrap()
         {
-            Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+            Statement::CreateTable(ct) => {
+                let columns = ct.columns().collect::<Vec<_>>();
                 assert_eq!(columns.len(), 4);
                 assert_eq!(columns[0].ty, SqlType::new(SqlTypeKind::Varchar));
                 assert_eq!(columns[1].ty, SqlType::with_char_len(SqlTypeKind::Varchar, 5));
@@ -1756,7 +1761,7 @@ fn create_table_temp_name_validation() {
             table_name: "t".into(),
             persistence: TablePersistence::Permanent,
             on_commit: OnCommitAction::PreserveRows,
-            columns: vec![],
+            elements: vec![],
             if_not_exists: false,
         })
         .unwrap();
@@ -1768,7 +1773,7 @@ fn create_table_temp_name_validation() {
         table_name: "t".into(),
         persistence: TablePersistence::Temporary,
         on_commit: OnCommitAction::PreserveRows,
-        columns: vec![],
+        elements: vec![],
         if_not_exists: false,
     })
     .unwrap_err();
@@ -1779,7 +1784,7 @@ fn create_table_temp_name_validation() {
         table_name: "t".into(),
         persistence: TablePersistence::Permanent,
         on_commit: OnCommitAction::DeleteRows,
-        columns: vec![],
+        elements: vec![],
         if_not_exists: false,
     })
     .unwrap_err();
@@ -1806,11 +1811,99 @@ fn parse_create_table_if_not_exists() {
 }
 
 #[test]
+fn parse_create_table_primary_key_and_unique_constraints() {
+    let stmt =
+        parse_statement("create table items (id int4 primary key, note text unique)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(columns.len(), 2);
+    assert!(columns[0].primary_key);
+    assert!(columns[1].unique);
+    assert_eq!(ct.constraints().count(), 0);
+
+    let stmt = parse_statement(
+        "create table items (id int4, note text, primary key (id, note), unique (note, id))",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(ct.columns().count(), 2);
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![
+            TableConstraint::PrimaryKey {
+                columns: vec!["id".into(), "note".into()],
+            },
+            TableConstraint::Unique {
+                columns: vec!["note".into(), "id".into()],
+            },
+        ]
+    );
+}
+
+#[test]
+fn lower_create_table_rejects_invalid_key_constraints() {
+    let stmt =
+        parse_statement("create table items (id int4 primary key, note text, primary key (note))")
+            .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct),
+        Err(ParseError::UnexpectedToken { expected, .. }) if expected == "at most one PRIMARY KEY"
+    ));
+
+    let stmt =
+        parse_statement("create table items (id int4, note text, unique (id, id))").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct),
+        Err(ParseError::UnexpectedToken { expected, actual })
+            if expected == "unique column names in table constraint"
+                && actual == "duplicate column in constraint: id"
+    ));
+
+    let stmt =
+        parse_statement("create table items (id int4, note text, unique (missing))").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct),
+        Err(ParseError::UnknownColumn(name)) if name == "missing"
+    ));
+
+    let stmt =
+        parse_statement("create table items (id int4 primary key, unique (id))").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert!(matches!(
+        lower_create_table(&ct),
+        Err(ParseError::UnexpectedToken { expected, actual })
+            if expected == "distinct PRIMARY KEY/UNIQUE definitions"
+                && actual == "duplicate key definition on (id)"
+    ));
+
+    assert!(parse_statement(
+        "create table items (id int4, constraint named_pk primary key (id))"
+    )
+    .is_err());
+}
+
+#[test]
 fn parse_create_table_with_array_types() {
     match parse_statement("create table widgets (a varchar[], b varchar(5)[], c int4[], d text[])")
         .unwrap()
     {
-        Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+        Statement::CreateTable(ct) => {
+            let columns = ct.columns().collect::<Vec<_>>();
             assert_eq!(
                 columns[0].ty,
                 SqlType::array_of(SqlType::new(SqlTypeKind::Varchar))
@@ -2706,9 +2799,10 @@ fn parse_create_table_column_defaults() {
         "create table bit_defaults (b1 bit(4) default '1001', b2 bit varying(5) default B'0101')",
     )
     .unwrap();
-    let Statement::CreateTable(CreateTableStatement { columns, .. }) = stmt else {
+    let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
+    let columns = ct.columns().collect::<Vec<_>>();
     assert_eq!(columns[0].default_expr.as_deref(), Some("'1001'"));
     assert_eq!(columns[1].default_expr.as_deref(), Some("B'0101'"));
 }

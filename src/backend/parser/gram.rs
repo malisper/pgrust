@@ -959,7 +959,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut relation_name = None;
     let mut persistence = TablePersistence::Permanent;
     let mut on_commit = OnCommitAction::PreserveRows;
-    let mut columns = Vec::new();
+    let mut elements = Vec::new();
     let mut ctas_columns = Vec::new();
     let mut query = None;
     let mut is_ctas = false;
@@ -979,7 +979,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Rule::create_table_column_form => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::column_def => columns.push(build_column_def(inner)?),
+                        Rule::create_table_element => elements.push(build_create_table_element(inner)?),
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
                         _ => {}
                     }
@@ -1023,9 +1023,45 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             table_name,
             persistence,
             on_commit,
-            columns,
+            elements,
             if_not_exists,
         }))
+    }
+}
+
+fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::column_def => Ok(CreateTableElement::Column(build_column_def(inner)?)),
+        Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(inner)?)),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "column definition or table constraint",
+            actual: inner.as_str().to_string(),
+        }),
+    }
+}
+
+fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::primary_key_table_constraint => Ok(TableConstraint::PrimaryKey {
+            columns: inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::ident_list)
+                .map(|part| part.into_inner().map(build_identifier).collect())
+                .unwrap_or_default(),
+        }),
+        Rule::unique_table_constraint => Ok(TableConstraint::Unique {
+            columns: inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::ident_list)
+                .map(|part| part.into_inner().map(build_identifier).collect())
+                .unwrap_or_default(),
+        }),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "PRIMARY KEY or UNIQUE table constraint",
+            actual: inner.as_str().to_string(),
+        }),
     }
 }
 
@@ -1560,25 +1596,42 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let mut default_expr = None;
-    let nullable = match inner.next() {
-        Some(flag) if flag.as_rule() == Rule::column_default => {
-            default_expr = flag
-                .into_inner()
-                .find(|part| part.as_rule() == Rule::expr)
-                .map(|expr| expr.as_str().to_string());
-            match inner.next() {
-                Some(flag) => flag.as_rule() == Rule::nullable,
-                None => true,
+    let mut nullable = true;
+    let mut primary_key = false;
+    let mut unique = false;
+    for flag in inner {
+        let Some(flag) = (match flag.as_rule() {
+            Rule::column_modifier => flag.into_inner().next(),
+            _ => Some(flag),
+        }) else {
+            continue;
+        };
+        match flag.as_rule() {
+            Rule::column_default => {
+                default_expr = flag
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::expr)
+                    .map(|expr| expr.as_str().to_string());
             }
+            Rule::nullability => {
+                nullable = flag
+                    .into_inner()
+                    .next()
+                    .map(|inner| inner.as_rule() == Rule::nullable)
+                    .unwrap_or(true);
+            }
+            Rule::primary_key_column_constraint => primary_key = true,
+            Rule::unique_column_constraint => unique = true,
+            _ => {}
         }
-        Some(flag) => flag.as_rule() == Rule::nullable,
-        None => true,
-    };
+    }
     Ok(ColumnDef {
         name,
         ty,
         default_expr,
         nullable,
+        primary_key,
+        unique,
     })
 }
 
