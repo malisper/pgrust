@@ -29,6 +29,7 @@ use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices}
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
         ExecError::Regex(err) => err.sqlstate,
+        ExecError::DetailedError { sqlstate, .. } => sqlstate,
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
         | ExecError::InvalidIntegerInput { .. }
@@ -75,6 +76,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
 fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Regex(err) => err.detail.as_deref(),
+        ExecError::DetailedError { detail, .. } => detail.as_deref(),
         ExecError::ArrayInput { detail, .. } => detail.as_deref(),
         _ => None,
     }
@@ -83,6 +85,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
 fn exec_error_hint(e: &ExecError) -> Option<&str> {
     match e {
         ExecError::Regex(err) => err.hint.as_deref(),
+        ExecError::DetailedError { hint, .. } => hint.as_deref(),
         _ => None,
     }
 }

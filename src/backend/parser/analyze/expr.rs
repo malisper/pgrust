@@ -30,6 +30,59 @@ pub(crate) fn bind_expr_with_outer(
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
+fn bind_maybe_jsonb_delete(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Option<Result<Expr, ParseError>> {
+    let right_is_string_literal = matches!(
+        right,
+        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+    );
+    let left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    if left_type != SqlType::new(SqlTypeKind::Jsonb) {
+        return None;
+    }
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let right_type = if right_is_string_literal {
+        SqlType::new(SqlTypeKind::Text)
+    } else if raw_right_type.is_array {
+        SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+    } else if is_integer_family(raw_right_type) {
+        SqlType::new(SqlTypeKind::Int4)
+    } else {
+        return None;
+    };
+    Some(
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)
+            .and_then(|left_bound| {
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )
+                .map(|right_bound| Expr::FuncCall {
+                    func_oid: 0,
+                    func: BuiltinScalarFunction::JsonbDelete,
+                    args: vec![
+                        coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::Jsonb)),
+                        coerce_bound_expr(right_bound, raw_right_type, right_type),
+                    ],
+                    func_variadic: false,
+                })
+            }),
+    )
+}
+
 pub(crate) fn bind_expr_with_outer_and_ctes(
     expr: &SqlExpr,
     scope: &BoundScope,
@@ -109,7 +162,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Sub(left, right) => {
-            if let Some(result) = bind_maybe_geometry_arithmetic(
+            if let Some(result) = bind_maybe_jsonb_delete(
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_geometry_arithmetic(
                 "-",
                 left,
                 right,
@@ -855,35 +918,53 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     grouped_outer,
                     ctes,
                 );
-                let left_type =
+                let left_bound = bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let right_bound = bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let mut left_type =
                     coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
-                let right_type =
+                let mut right_type =
                     coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+                let left_expr = if matches!(
+                    &**left,
+                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                ) && !left_type.is_array
+                {
+                    if let Expr::ArrayLiteral { array_type, .. } = &right_bound {
+                        left_type = *array_type;
+                    }
+                    coerce_bound_expr(left_bound, raw_left_type, left_type)
+                } else {
+                    coerce_bound_expr(left_bound, raw_left_type, left_type)
+                };
+                let right_expr = if matches!(
+                    &**right,
+                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                ) && !right_type.is_array
+                {
+                    if let Expr::ArrayLiteral { array_type, .. } = &left_expr {
+                        right_type = *array_type;
+                    }
+                    coerce_bound_expr(right_bound, raw_right_type, right_type)
+                } else {
+                    coerce_bound_expr(right_bound, raw_right_type, right_type)
+                };
                 Expr::ArrayOverlap(
-                    Box::new(coerce_bound_expr(
-                        bind_expr_with_outer_and_ctes(
-                            left,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )?,
-                        raw_left_type,
-                        left_type,
-                    )),
-                    Box::new(coerce_bound_expr(
-                        bind_expr_with_outer_and_ctes(
-                            right,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )?,
-                        raw_right_type,
-                        right_type,
-                    )),
+                    Box::new(left_expr),
+                    Box::new(right_expr),
                 )
             }
         }
@@ -1410,6 +1491,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     resolved.func_variadic,
                     resolved.nvargs,
                     resolved.vatype_oid,
+                    &resolved.declared_arg_types,
                     &lowered_args,
                     scope,
                     catalog,
@@ -1425,6 +1507,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 false,
                 0,
                 0,
+                &actual_types,
                 &lowered_args,
                 scope,
                 catalog,
@@ -1556,6 +1639,7 @@ fn bind_scalar_function_call(
     func_variadic: bool,
     nvargs: usize,
     vatype_oid: u32,
+    _declared_arg_types: &[SqlType],
     args: &[SqlExpr],
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
@@ -3605,6 +3689,35 @@ fn bind_scalar_function_call(
                     coerce_bound_expr(bound_args[0].clone(), left_type, text_type),
                     coerce_bound_expr(bound_args[1].clone(), right_type, text_type),
                 ],
+                func_variadic,
+            })
+        }
+        BuiltinScalarFunction::JsonbDeletePath
+        | BuiltinScalarFunction::JsonbSet
+        | BuiltinScalarFunction::JsonbSetLax
+        | BuiltinScalarFunction::JsonbInsert => {
+            let path_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let target_path_type = if matches!(
+                &args[1],
+                SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+            ) {
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            } else {
+                path_type
+            };
+            let mut rewritten = rewritten_bound_args;
+            rewritten[1] = coerce_bound_expr(rewritten[1].clone(), path_type, target_path_type);
+            Ok(Expr::FuncCall {
+                func_oid,
+                func,
+                args: rewritten,
                 func_variadic,
             })
         }

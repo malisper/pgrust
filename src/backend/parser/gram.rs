@@ -35,7 +35,21 @@ pub fn parse_statement_with_options(
     sql: &str,
     options: ParseOptions,
 ) -> Result<Statement, ParseError> {
-    let sql = normalize_string_continuation_preserving_layout(sql);
+    // :HACK: Some parser paths currently recurse deeply enough to overflow the
+    // default Rust test-thread stack on modest statements (for example certain
+    // `unnest(...)` forms). Run parsing on a dedicated larger stack until the
+    // underlying recursion is flattened.
+    run_with_parser_stack({
+        let sql = sql.to_string();
+        move || parse_statement_with_options_inner(sql, options)
+    })
+}
+
+fn parse_statement_with_options_inner(
+    sql: String,
+    options: ParseOptions,
+) -> Result<Statement, ParseError> {
+    let sql = normalize_string_continuation_preserving_layout(&sql);
     let sql = strip_sql_comments_preserving_layout(&sql);
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
@@ -82,6 +96,20 @@ pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
             }
             Ok(build_type(pair))
         })
+}
+
+fn run_with_parser_stack<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("pgrust-parser".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn parser thread")
+        .join()
+        .expect("parser thread panicked")
 }
 
 #[cfg(test)]
@@ -2209,6 +2237,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "@>" => SqlExpr::JsonbContains(Box::new(left), Box::new(right)),
                         "<@" => SqlExpr::JsonbContained(Box::new(left), Box::new(right)),
                         "@?" => SqlExpr::JsonbPathExists(Box::new(left), Box::new(right)),
+                        "@@" if expr_is_jsonb_syntax(&left) && expr_is_jsonpath_syntax(&right) => {
+                            SqlExpr::JsonbPathMatch(Box::new(left), Box::new(right))
+                        }
                         "@@" => SqlExpr::BinaryOperator {
                             op: "@@".into(),
                             left: Box::new(left),
@@ -2217,6 +2248,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         "?" => SqlExpr::JsonbExists(Box::new(left), Box::new(right)),
                         "?|" => SqlExpr::JsonbExistsAny(Box::new(left), Box::new(right)),
                         "?&" => SqlExpr::JsonbExistsAll(Box::new(left), Box::new(right)),
+                        "&&" if expr_is_array_syntax(&left) && expr_is_array_syntax(&right) => {
+                            SqlExpr::ArrayOverlap(Box::new(left), Box::new(right))
+                        }
                         "&&" => SqlExpr::BinaryOperator {
                             op: "&&".into(),
                             left: Box::new(left),
@@ -2882,6 +2916,33 @@ fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
         expected: "string literal",
         actual: raw.into(),
     })
+}
+
+fn expr_is_array_syntax(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::ArrayLiteral(_) => true,
+        SqlExpr::Cast(_, ty) => ty.is_array,
+        SqlExpr::Const(Value::Array(_) | Value::PgArray(_)) => true,
+        _ => false,
+    }
+}
+
+fn expr_is_jsonb_syntax(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::Cast(_, ty) => !ty.is_array && matches!(ty.kind, SqlTypeKind::Jsonb),
+        SqlExpr::Const(Value::Jsonb(_)) => true,
+        _ => false,
+    }
+}
+
+fn expr_is_jsonpath_syntax(expr: &SqlExpr) -> bool {
+    match expr {
+        SqlExpr::Cast(_, ty) => !ty.is_array && matches!(ty.kind, SqlTypeKind::JsonPath),
+        SqlExpr::Const(Value::JsonPath(_))
+        | SqlExpr::Const(Value::Text(_))
+        | SqlExpr::Const(Value::TextRef(_, _)) => true,
+        _ => false,
+    }
 }
 
 fn decode_string_literal_pair(pair: Pair<'_, Rule>) -> Result<String, ParseError> {

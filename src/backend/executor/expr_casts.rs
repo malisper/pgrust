@@ -19,6 +19,7 @@ use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_typ
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
 use num_traits::Signed;
+use serde_json::Value as SerdeJsonValue;
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
@@ -620,7 +621,11 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
     match err {
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::InvalidIntegerInput { ty, .. } => {
-            format!("invalid input syntax for type {ty}: \"{text}\"")
+            let value = match err {
+                ExecError::InvalidIntegerInput { value, .. } => value.as_str(),
+                _ => text,
+            };
+            format!("invalid input syntax for type {ty}: \"{value}\"")
         }
         ExecError::ArrayInput { message, .. } => message.clone(),
         ExecError::IntegerOutOfRange { ty, value } => {
@@ -637,13 +642,17 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         }
         ExecError::OidOutOfRange => format!("value \"{text}\" is out of range for type oid"),
         ExecError::InvalidNumericInput(_) => {
-            format!("invalid input syntax for type numeric: \"{text}\"")
+            let value = match err {
+                ExecError::InvalidNumericInput(value) => value.as_str(),
+                _ => text,
+            };
+            format!("invalid input syntax for type numeric: \"{value}\"")
         }
-        ExecError::InvalidByteaInput { .. } => {
-            format!("invalid input syntax for type bytea: \"{text}\"")
+        ExecError::InvalidByteaInput { value } => {
+            format!("invalid input syntax for type bytea: \"{value}\"")
         }
-        ExecError::InvalidGeometryInput { ty, .. } => geometry_input_error_message(ty, text)
-            .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{text}\"")),
+        ExecError::InvalidGeometryInput { ty, value } => geometry_input_error_message(ty, value)
+            .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{value}\"")),
         ExecError::InvalidBitInput { digit, is_hex } => {
             if *is_hex {
                 format!("\"{digit}\" is not a valid hexadecimal digit")
@@ -657,11 +666,11 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::BitStringTooLong { limit, .. } => {
             format!("bit string too long for type bit varying({limit})")
         }
-        ExecError::InvalidBooleanInput { .. } => {
-            format!("invalid input syntax for type boolean: \"{text}\"")
+        ExecError::InvalidBooleanInput { value } => {
+            format!("invalid input syntax for type boolean: \"{value}\"")
         }
-        ExecError::InvalidFloatInput { ty, .. } => {
-            format!("invalid input syntax for type {ty}: \"{text}\"")
+        ExecError::InvalidFloatInput { ty, value } => {
+            format!("invalid input syntax for type {ty}: \"{value}\"")
         }
         ExecError::FloatOutOfRange { ty, value } => {
             format!("\"{value}\" is out of range for type {ty}")
@@ -693,7 +702,9 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::InvalidGeometryInput { .. }
         | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. }
-        | ExecError::DetailedError { sqlstate: "22P02", .. } => "22P02",
+        | ExecError::DetailedError {
+            sqlstate: "22P02", ..
+        } => "22P02",
         ExecError::InvalidStorageValue { column, details }
             if matches!(
                 column.as_str(),
@@ -717,7 +728,9 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::FloatOverflow
         | ExecError::FloatUnderflow
         | ExecError::NumericFieldOverflow
-        | ExecError::DetailedError { sqlstate: "22003", .. } => "22003",
+        | ExecError::DetailedError {
+            sqlstate: "22003", ..
+        } => "22003",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::InvalidFloatInput { .. } => "22P02",
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
@@ -740,6 +753,17 @@ fn datetime_parse_error_details(ty: &'static str, text: &str, err: DateTimeParse
 fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
     match err {
         ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => InputErrorInfo {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        ExecError::ArrayInput {
             message,
             detail,
             sqlstate,
@@ -782,6 +806,32 @@ pub(crate) fn soft_input_error_info(
         column: type_name.to_string(),
         details: format!("unsupported type: {type_name}"),
     })?;
+    if !ty.is_array && matches!(ty.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb) {
+        match serde_json::from_str::<SerdeJsonValue>(text) {
+            Ok(_) => {
+                if matches!(ty.kind, SqlTypeKind::Jsonb) {
+                    match parse_jsonb_text(text) {
+                        Ok(_) => return Ok(None),
+                        Err(err) => return Ok(Some(input_error_info(err, text))),
+                    }
+                }
+                return Ok(None);
+            }
+            Err(err) => {
+                return Ok(Some(InputErrorInfo {
+                    message: "invalid input syntax for type json".into(),
+                    detail: match err.classify() {
+                        serde_json::error::Category::Eof => {
+                            Some("The input string ended unexpectedly.".into())
+                        }
+                        _ => None,
+                    },
+                    hint: None,
+                    sqlstate: "22P02",
+                }));
+            }
+        }
+    }
     let parsed = match ty.kind {
         // PostgreSQL's pg_input_* helpers use the type input function semantics,
         // not explicit-cast padding/truncation semantics for bit and typmod-
