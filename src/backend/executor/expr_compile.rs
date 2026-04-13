@@ -1,5 +1,6 @@
 use super::exec_expr::eval_expr;
 use super::node_types::*;
+use super::pg_regex::{compile_pg_regex_predicate, pg_regex_is_match};
 use super::{ExecError, ExecutorContext};
 
 pub(crate) type CompiledPredicate =
@@ -231,12 +232,12 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
                 (left.as_ref(), right.as_ref())
             {
                 let col = *col;
-                if let Ok(re) = regex::Regex::new(pat.as_str()) {
-                    let re = std::sync::Arc::new(re);
+                if let Ok(regex) = compile_pg_regex_predicate(pat.as_str()) {
+                    let regex = std::sync::Arc::new(regex);
                     return Box::new(move |slot, _ctx| {
                         let val = slot.get_attr(col)?;
                         if let Some(s) = val.as_text() {
-                            Ok(re.is_match(s))
+                            pg_regex_is_match(&regex, s)
                         } else if matches!(val, Value::Null) {
                             Ok(false)
                         } else {

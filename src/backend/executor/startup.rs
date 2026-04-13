@@ -1,8 +1,9 @@
 use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
+use crate::include::catalog::bootstrap_catalog_kinds;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectionState, ProjectSetState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, ValuesState,
 };
 
@@ -15,7 +16,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot: TupleSlot::empty(0),
             stats: NodeExecStats::default(),
         }),
-        Plan::SeqScan { rel, desc, .. } => {
+        Plan::SeqScan {
+            rel,
+            relation_oid,
+            desc,
+        } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let attr_descs = desc.attribute_descs();
             let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
@@ -27,10 +32,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(SeqScanState {
                 rel,
+                relation_name: explain_relation_name(relation_oid, rel.rel_number),
                 column_names,
                 scan: None,
                 slot,
                 qual: None,
+                qual_expr: None,
                 stats: NodeExecStats::default(),
             })
         }
@@ -88,7 +95,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
             })
         }
         Plan::Filter { input, predicate } if matches!(&*input, Plan::SeqScan { .. }) => {
-            let Plan::SeqScan { rel, desc, .. } = *input else {
+            let Plan::SeqScan {
+                rel,
+                relation_oid,
+                desc,
+            } = *input
+            else {
                 unreachable!()
             };
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -103,10 +115,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(SeqScanState {
                 rel,
+                relation_name: explain_relation_name(relation_oid, rel.rel_number),
                 column_names,
                 scan: None,
                 slot,
                 qual: Some(qual),
+                qual_expr: Some(predicate),
                 stats: NodeExecStats::default(),
             })
         }
@@ -176,7 +190,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             })
         }
         Plan::FunctionScan { call } => Box::new(FunctionScanState {
-            output_columns: call.output_columns().iter().map(|c| c.name.clone()).collect(),
+            output_columns: call
+                .output_columns()
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
             call,
             rows: None,
             next_index: 0,
@@ -217,4 +235,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
             })
         }
     }
+}
+
+fn explain_relation_name(relation_oid: u32, relfilenode: u32) -> String {
+    bootstrap_catalog_kinds()
+        .into_iter()
+        .find(|kind| kind.relation_oid() == relation_oid)
+        .map(|kind| kind.relation_name().to_string())
+        .unwrap_or_else(|| format!("rel {relfilenode}"))
 }

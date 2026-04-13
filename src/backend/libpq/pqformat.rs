@@ -28,6 +28,7 @@ impl Default for FloatFormatOptions {
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
         ExecError::Parse(p) => p.to_string(),
+        ExecError::Regex(err) => err.message.clone(),
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),
         ExecError::UniqueViolation { constraint } => {
@@ -455,6 +456,8 @@ pub(crate) fn send_error(
     w: &mut impl Write,
     sqlstate: &str,
     message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
     position: Option<usize>,
 ) -> io::Result<()> {
     let mut body = Vec::new();
@@ -468,6 +471,16 @@ pub(crate) fn send_error(
     body.push(b'M');
     body.extend_from_slice(message.as_bytes());
     body.push(0);
+    if let Some(detail) = detail {
+        body.push(b'D');
+        body.extend_from_slice(detail.as_bytes());
+        body.push(0);
+    }
+    if let Some(hint) = hint {
+        body.push(b'H');
+        body.extend_from_slice(hint.as_bytes());
+        body.push(0);
+    }
     if let Some(position) = position {
         body.push(b'P');
         body.extend_from_slice(position.to_string().as_bytes());

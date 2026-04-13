@@ -1,9 +1,9 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
-use crate::include::access::relscan::ScanDirection;
-use crate::include::access::relscan::IndexScanDesc;
-use crate::include::access::scankey::ScanKeyData;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
+use crate::include::access::relscan::IndexScanDesc;
+use crate::include::access::relscan::ScanDirection;
+use crate::include::access::scankey::ScanKeyData;
 use crate::{OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use std::rc::Rc;
 use std::time::Duration;
@@ -187,6 +187,7 @@ pub struct ResultState {
 
 pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
+    pub(crate) relation_name: String,
     pub(crate) column_names: Vec<String>,
     pub(crate) scan: Option<VisibleHeapScan>,
     /// Reusable slot, like PG's ss_ScanTupleSlot. Holds BufferHeapTuple
@@ -197,6 +198,7 @@ pub struct SeqScanState {
     /// evaluates the predicate inline and only returns qualifying tuples.
     /// Avoids a separate FilterState and its per-tuple vtable dispatch.
     pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
+    pub(crate) qual_expr: Option<Expr>,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -204,6 +206,7 @@ impl std::fmt::Debug for SeqScanState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeqScanState")
             .field("rel", &self.rel)
+            .field("relation_name", &self.relation_name)
             .field("has_qual", &self.qual.is_some())
             .finish()
     }

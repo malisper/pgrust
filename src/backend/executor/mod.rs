@@ -15,6 +15,7 @@ mod expr_string;
 pub(crate) mod jsonb;
 pub(crate) mod jsonpath;
 mod nodes;
+mod pg_regex;
 mod srf;
 mod startup;
 pub(crate) mod value_io;
@@ -49,8 +50,8 @@ use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager,
 };
-use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::catalog::Catalog;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,
@@ -72,6 +73,14 @@ pub struct ExecutorContext {
     pub outer_rows: Vec<Vec<Value>>,
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegexError {
+    pub sqlstate: &'static str,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
 }
 
 #[derive(Debug)]
@@ -107,6 +116,7 @@ pub enum ExecError {
         index: usize,
     },
     MissingRequiredColumn(String),
+    Regex(RegexError),
     InvalidRegex(String),
     RaiseException(String),
     DivisionByZero(&'static str),
