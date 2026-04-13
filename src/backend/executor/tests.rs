@@ -6664,6 +6664,85 @@ fn jsonb_set_insert_and_set_lax_functions_work() {
 }
 
 #[test]
+fn jsonb_set_and_delete_path_validate_path_elements() {
+    let base = temp_dir("jsonb_set_path_validation");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_set('{\"d\":{\"1\":[2,3]}}'::jsonb, '{d,NULL,0}', '[1,2,3]')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. }
+            if details == "path element at position 2 is null"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_set('{\"a\":{\"b\":[1,2,3]}}'::jsonb, '{a,b,non_integer}', '\"new_value\"')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. }
+            if details == "path element at position 3 is not an integer: \"non_integer\""
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_delete_path('{\"a\":[1,2,3]}'::jsonb, '{a,NULL}')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. }
+            if details == "path element at position 2 is null"
+    ));
+}
+
+#[test]
+fn jsonb_delete_and_set_lax_report_postgres_style_errors() {
+    let base = temp_dir("jsonb_delete_set_lax_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '\"a\"'::jsonb - 'a'")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. } if details == "cannot delete from scalar"
+    ));
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '{}'::jsonb - 1").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. }
+            if details == "cannot delete from object using integer index"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_set_lax('{\"a\":1,\"b\":2}', '{b}', null, true, null)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. }
+            if details
+                == "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\""
+    ));
+}
+
+#[test]
 fn jsonpath_operators_and_functions_work() {
     let base = temp_dir("jsonpath_ops");
     let txns = TransactionManager::new_durable(&base).unwrap();
