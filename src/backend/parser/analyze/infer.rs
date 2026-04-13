@@ -224,8 +224,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::Sha224)
                 | Some(BuiltinScalarFunction::Sha256)
                 | Some(BuiltinScalarFunction::Sha384)
-                | Some(BuiltinScalarFunction::Sha512)
-                | Some(BuiltinScalarFunction::Reverse) => SqlType::new(SqlTypeKind::Bytea),
+                | Some(BuiltinScalarFunction::Sha512) => SqlType::new(SqlTypeKind::Bytea),
                 Some(BuiltinScalarFunction::Length)
                 | Some(BuiltinScalarFunction::Ascii)
                 | Some(BuiltinScalarFunction::RegexpCount)
@@ -249,6 +248,18 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     BuiltinScalarFunction::Substring
                     | BuiltinScalarFunction::Overlay,
                 ) => {
+                    function_arg_values(args).next().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
+                        infer_sql_expr_type_with_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                }
+                Some(BuiltinScalarFunction::Reverse) => {
                     function_arg_values(args).next().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
                         infer_sql_expr_type_with_ctes(
                             arg,
