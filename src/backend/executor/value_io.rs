@@ -367,6 +367,12 @@ fn encode_array_bytes(element_type: SqlType, items: &[Value]) -> Result<Vec<u8>,
     for item in items {
         match item {
             Value::Null => bytes.extend_from_slice(&(-1_i32).to_le_bytes()),
+            Value::Array(nested) => {
+                let payload = encode_array_bytes(element_type, nested)?;
+                bytes.extend_from_slice(&(-2_i32).to_le_bytes());
+                bytes.extend_from_slice(&(payload.len() as i32).to_le_bytes());
+                bytes.extend_from_slice(&payload);
+            }
             _ => {
                 let payload = encode_array_element(element_type, item)?;
                 bytes.extend_from_slice(&(payload.len() as i32).to_le_bytes());
@@ -429,6 +435,35 @@ fn decode_array_bytes(element_type: SqlType, bytes: &[u8]) -> Result<Value, Exec
         offset += 4;
         if len == -1 {
             items.push(Value::Null);
+            continue;
+        }
+        if len == -2 {
+            if offset + 4 > bytes.len() {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "nested array length header truncated".into(),
+                });
+            }
+            let nested_len = i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            offset += 4;
+            if nested_len < 0 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "nested array payload has invalid length".into(),
+                });
+            }
+            let nested_len = nested_len as usize;
+            if offset + nested_len > bytes.len() {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "nested array payload truncated".into(),
+                });
+            }
+            items.push(decode_array_bytes(
+                element_type,
+                &bytes[offset..offset + nested_len],
+            )?);
+            offset += nested_len;
             continue;
         }
         let len = len as usize;

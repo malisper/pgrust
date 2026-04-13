@@ -1660,6 +1660,23 @@ fn parse_create_table_with_array_types() {
 }
 
 #[test]
+fn parse_create_table_with_multidimensional_array_types() {
+    match parse_statement("create table widgets (a int4[][][], b text[][])").unwrap() {
+        Statement::CreateTable(CreateTableStatement { columns, .. }) => {
+            assert_eq!(
+                columns[0].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            );
+            assert_eq!(
+                columns[1].ty,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+            );
+        }
+        other => panic!("expected create table, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_array_and_unnest_expressions() {
     let stmt =
         parse_select("select * from unnest(ARRAY['a', 'b']::varchar[], ARRAY[1, 2])").unwrap();

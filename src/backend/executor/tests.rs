@@ -139,6 +139,30 @@ fn catalog_with_pets() -> Catalog {
     catalog
 }
 
+fn multidimensional_array_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "t",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14002,
+            },
+            RelationDesc {
+                columns: vec![crate::backend::catalog::catalog::column_desc(
+                    "a",
+                    crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
+                        crate::backend::parser::SqlTypeKind::Int4,
+                    )),
+                    true,
+                )],
+            },
+        ),
+    );
+    catalog
+}
+
 fn varchar_catalog(name: &str, len: i32) -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert(
@@ -2114,6 +2138,70 @@ fn select_array_literal_round_trips() {
                     Value::Text("a".into()),
                     Value::Text("b".into())
                 ])]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn multidimensional_array_text_input_round_trips() {
+    let base = temp_dir("multidim_array_round_trip");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '{{1,2},{3,4}}'::int4[]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Array(vec![
+                    Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
+                    Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
+                ])]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn multidimensional_array_columns_round_trip_through_storage() {
+    let base = temp_dir("multidim_array_storage_roundtrip");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let insert_xid = txns.begin();
+    assert_eq!(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            insert_xid,
+            "insert into t values ('{{{1,2},{3,4}}}'::int4[])",
+            multidimensional_array_catalog(),
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    txns.commit(insert_xid).unwrap();
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select a from t",
+        multidimensional_array_catalog(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Array(vec![Value::Array(vec![
+                    Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
+                    Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
+                ])])]]
             );
         }
         other => panic!("expected query result, got {:?}", other),

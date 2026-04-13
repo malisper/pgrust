@@ -268,65 +268,167 @@ pub(crate) fn parse_text_array_literal_with_op(
     element_type: SqlType,
     op: &'static str,
 ) -> Result<Value, ExecError> {
-    if raw == "{}" {
+    let input = strip_array_bounds_prefix(raw).unwrap_or(raw);
+    if input == "{}" {
         return Ok(Value::Array(Vec::new()));
     }
-    if !raw.starts_with('{') || !raw.ends_with('}') {
+    if !input.starts_with('{') || !input.ends_with('}') {
         return Err(ExecError::TypeMismatch {
             op,
             left: Value::Null,
             right: Value::Text(raw.into()),
         });
     }
+    let mut parser = ArrayTextParser::new(input, element_type, op);
+    let value = parser.parse_array()?;
+    parser.skip_ws();
+    if !parser.is_eof() {
+        return Err(ExecError::TypeMismatch {
+            op,
+            left: Value::Null,
+            right: Value::Text(raw.into()),
+        });
+    }
+    Ok(value)
+}
 
-    let mut chars = raw[1..raw.len() - 1].chars().peekable();
-    let mut items = Vec::new();
-    while chars.peek().is_some() {
-        let mut quoted = false;
-        let value = if chars.peek() == Some(&'"') {
-            quoted = true;
-            chars.next();
-            let mut text = String::new();
-            while let Some(ch) = chars.next() {
-                match ch {
-                    '"' => break,
-                    '\\' => {
-                        let escaped = chars.next().ok_or_else(|| ExecError::TypeMismatch {
-                            op,
-                            left: Value::Null,
-                            right: Value::Text(raw.into()),
-                        })?;
-                        text.push(escaped);
-                    }
-                    other => text.push(other),
-                }
-            }
-            text
-        } else {
-            let mut text = String::new();
-            while let Some(&ch) = chars.peek() {
-                if ch == ',' {
-                    break;
-                }
-                text.push(ch);
-                chars.next();
-            }
-            text
-        };
+fn strip_array_bounds_prefix(raw: &str) -> Option<&str> {
+    if !raw.starts_with('[') {
+        return None;
+    }
+    let equals = raw.find('=')?;
+    Some(&raw[equals + 1..])
+}
 
-        let value = if !quoted && value == "NULL" {
-            Value::Null
-        } else {
-            cast_text_value(&value, element_type, true)?
-        };
-        items.push(value);
+struct ArrayTextParser<'a> {
+    input: &'a str,
+    offset: usize,
+    element_type: SqlType,
+    op: &'static str,
+}
 
-        if chars.peek() == Some(&',') {
-            chars.next();
+impl<'a> ArrayTextParser<'a> {
+    fn new(input: &'a str, element_type: SqlType, op: &'static str) -> Self {
+        Self {
+            input,
+            offset: 0,
+            element_type,
+            op,
         }
     }
 
-    Ok(Value::Array(items))
+    fn parse_array(&mut self) -> Result<Value, ExecError> {
+        self.skip_ws();
+        self.expect('{')?;
+        let mut items = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.peek_char() == Some('}') {
+                self.bump_char();
+                break;
+            }
+            items.push(self.parse_item()?);
+            self.skip_ws();
+            match self.peek_char() {
+                Some(',') => {
+                    self.bump_char();
+                }
+                Some('}') => {
+                    self.bump_char();
+                    break;
+                }
+                _ => return self.type_mismatch(),
+            }
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn parse_item(&mut self) -> Result<Value, ExecError> {
+        self.skip_ws();
+        match self.peek_char() {
+            Some('{') => self.parse_array(),
+            Some('"') => {
+                let text = self.parse_quoted_string()?;
+                cast_text_value(&text, self.element_type, true)
+            }
+            Some(_) => {
+                let text = self.parse_unquoted_token();
+                if text.eq_ignore_ascii_case("NULL") {
+                    Ok(Value::Null)
+                } else {
+                    cast_text_value(text.trim_end(), self.element_type, true)
+                }
+            }
+            None => self.type_mismatch(),
+        }
+    }
+
+    fn parse_quoted_string(&mut self) -> Result<String, ExecError> {
+        self.expect('"')?;
+        let mut text = String::new();
+        while let Some(ch) = self.bump_char() {
+            match ch {
+                '"' => return Ok(text),
+                '\\' => {
+                    let escaped = self.bump_char().ok_or_else(|| ExecError::TypeMismatch {
+                        op: self.op,
+                        left: Value::Null,
+                        right: Value::Text(self.input.into()),
+                    })?;
+                    text.push(escaped);
+                }
+                other => text.push(other),
+            }
+        }
+        self.type_mismatch()
+    }
+
+    fn parse_unquoted_token(&mut self) -> &'a str {
+        let start = self.offset;
+        while let Some(ch) = self.peek_char() {
+            if matches!(ch, ',' | '}') {
+                break;
+            }
+            self.bump_char();
+        }
+        &self.input[start..self.offset]
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek_char(), Some(ch) if ch.is_ascii_whitespace()) {
+            self.bump_char();
+        }
+    }
+
+    fn expect(&mut self, expected: char) -> Result<(), ExecError> {
+        if self.bump_char() == Some(expected) {
+            Ok(())
+        } else {
+            self.type_mismatch()
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.input[self.offset..].chars().next()
+    }
+
+    fn bump_char(&mut self) -> Option<char> {
+        let ch = self.peek_char()?;
+        self.offset += ch.len_utf8();
+        Some(ch)
+    }
+
+    fn is_eof(&self) -> bool {
+        self.offset >= self.input.len()
+    }
+
+    fn type_mismatch<T>(&self) -> Result<T, ExecError> {
+        Err(ExecError::TypeMismatch {
+            op: self.op,
+            left: Value::Null,
+            right: Value::Text(self.input.into()),
+        })
+    }
 }
 
 fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
