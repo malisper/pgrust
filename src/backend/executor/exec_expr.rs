@@ -1917,13 +1917,15 @@ fn eval_scalar_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
+    let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
+    Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
     let result = (|| {
         let mut state = executor_start(plan.clone());
         let mut first_value = None;
         while let Some(inner_slot) = exec_next(&mut state, ctx)? {
-            let values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
+            let mut values = inner_slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut values);
             if values.len() != 1 {
                 return Err(ExecError::CardinalityViolation(
                     "subquery must return only one column".into(),
@@ -1947,7 +1949,8 @@ fn eval_exists_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
+    let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
+    Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
     let result = (|| {
         let mut state = executor_start(plan.clone());
@@ -1965,7 +1968,8 @@ fn eval_quantified_subquery(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
+    let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
+    Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
     let result = (|| {
         let mut state = executor_start(plan.clone());

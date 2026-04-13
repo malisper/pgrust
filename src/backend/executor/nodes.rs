@@ -943,7 +943,9 @@ impl PlanNode for ProjectSetState {
                 let Some(input_slot) = self.input.exec_proc_node(ctx)? else {
                     return Ok(None);
                 };
-                let mut materialized = TupleSlot::virtual_row(input_slot.values()?.to_vec());
+                let mut values = input_slot.values()?.to_vec();
+                Value::materialize_all(&mut values);
+                let mut materialized = TupleSlot::virtual_row(values);
                 let mut srf_rows = Vec::new();
                 let mut max_rows = 0usize;
                 for target in &self.targets {

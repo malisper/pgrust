@@ -40,7 +40,10 @@ pub(crate) fn eval_scalar_set_returning_call(
     }
     Ok(eval_set_returning_call(call, slot, ctx)?
         .into_iter()
-        .map(|row| row.tts_values.into_iter().next().unwrap_or(Value::Null))
+        .map(|mut row| {
+            Value::materialize_all(&mut row.tts_values);
+            row.tts_values.into_iter().next().unwrap_or(Value::Null)
+        })
         .collect())
 }
 
