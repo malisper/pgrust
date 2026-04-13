@@ -383,23 +383,15 @@ for sql_file in "${TEST_FILES[@]}"; do
 
     # Compare output to expected.
     # Some tests have multiple expected outputs (e.g., boolean.out, boolean_1.out).
-    # However, base tests like json/jsonpath must not match encoding-specific
-    # sibling files such as json_encoding*.out or jsonpath_encoding*.out.
+    # Restrict alternates to numbered variants for the same test so we do not
+    # accidentally match unrelated siblings like psql_crosstab.out for psql.out.
     matched=false
     best_diff_lines=999999
     query_expected_file="$expected_file"
 
     candidates=("$EXPECTED_DIR/${test_name}.out")
     shopt -s nullglob
-    for candidate in "$EXPECTED_DIR/${test_name}_"*.out; do
-        candidate_base="$(basename "$candidate")"
-        case "$test_name" in
-            json|jsonpath)
-                if [[ "$candidate_base" == "${test_name}_encoding"* ]]; then
-                    continue
-                fi
-                ;;
-        esac
+    for candidate in "$EXPECTED_DIR/${test_name}_"[0-9]*.out; do
         candidates+=("$candidate")
     done
     shopt -u nullglob
