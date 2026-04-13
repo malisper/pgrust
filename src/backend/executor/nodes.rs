@@ -13,9 +13,10 @@ use crate::backend::executor::value_io::missing_column_value;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState,
-    ProjectSetState, ResultState, SeqScanState, SlotKind, TupleSlot, ValuesState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState, ProjectionState,
+    ResultState, SeqScanState, SlotKind, TupleSlot, ValuesState,
 };
+use crate::include::nodes::plannodes::Expr;
 
 use std::time::Instant;
 
@@ -133,9 +134,17 @@ impl PlanNode for SeqScanState {
         &mut self.stats
     }
     fn node_label(&self) -> String {
-        format!("Seq Scan on rel {}", self.rel.rel_number)
+        format!("Seq Scan on {}", self.relation_name)
     }
-    fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+    fn explain_children(&self, indent: usize, _analyze: bool, lines: &mut Vec<String>) {
+        if let Some(qual_expr) = &self.qual_expr {
+            let prefix = "  ".repeat(indent + 1);
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(qual_expr, &self.column_names)
+            ));
+        }
+    }
 }
 
 impl PlanNode for IndexScanState {
@@ -155,12 +164,14 @@ impl PlanNode for IndexScanState {
                 key_data: self.keys.clone(),
                 direction: self.direction,
             };
-            self.scan = Some(indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
-                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                    expected: "index access method begin scan",
-                    actual: format!("{err:?}"),
-                })
-            })?);
+            self.scan = Some(
+                indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
+                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                        expected: "index access method begin scan",
+                        actual: format!("{err:?}"),
+                    })
+                })?,
+            );
         }
 
         let start = if ctx.timed {
@@ -202,7 +213,14 @@ impl PlanNode for IndexScanState {
                 .expect("index scan tuple must set heap tid");
             let visible = {
                 let txns = ctx.txns.read();
-                heap_fetch_visible(&ctx.pool, ctx.client_id, self.rel, tid, &txns, &ctx.snapshot)?
+                heap_fetch_visible(
+                    &ctx.pool,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &txns,
+                    &ctx.snapshot,
+                )?
             };
             let Some(tuple) = visible else {
                 continue;
@@ -244,6 +262,89 @@ impl PlanNode for IndexScanState {
         )
     }
     fn explain_children(&self, _indent: usize, _analyze: bool, _lines: &mut Vec<String>) {}
+}
+
+fn render_explain_expr(expr: &Expr, column_names: &[String]) -> String {
+    format!("({})", render_explain_expr_inner(expr, column_names))
+}
+
+fn render_explain_expr_inner(expr: &Expr, column_names: &[String]) -> String {
+    match expr {
+        Expr::Column(index) => column_names
+            .get(*index)
+            .cloned()
+            .unwrap_or_else(|| format!("column{}", index + 1)),
+        Expr::Const(value) => render_explain_const(value),
+        Expr::RegexMatch(left, right) => format!(
+            "{} ~ {}",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::Eq(left, right) => format!(
+            "{} = {}",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::NotEq(left, right) => format!(
+            "{} <> {}",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::Lt(left, right) => format!(
+            "{} < {}",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::LtEq(left, right) => format!(
+            "{} <= {}",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::Gt(left, right) => format!(
+            "{} > {}",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::GtEq(left, right) => format!(
+            "{} >= {}",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::And(left, right) => format!(
+            "({} AND {})",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::Or(left, right) => format!(
+            "({} OR {})",
+            render_explain_expr_inner(left, column_names),
+            render_explain_expr_inner(right, column_names)
+        ),
+        Expr::IsNull(inner) => {
+            format!("{} IS NULL", render_explain_expr_inner(inner, column_names))
+        }
+        Expr::IsNotNull(inner) => {
+            format!(
+                "{} IS NOT NULL",
+                render_explain_expr_inner(inner, column_names)
+            )
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_const(value: &Value) -> String {
+    match value {
+        Value::Text(_) | Value::TextRef(_, _) => {
+            format!("'{}'::text", value.as_text().unwrap().replace('\'', "''"))
+        }
+        Value::Int16(v) => format!("{v}::smallint"),
+        Value::Int32(v) => format!("{v}::integer"),
+        Value::Int64(v) => format!("{v}::bigint"),
+        Value::Bool(v) => format!("{}::boolean", if *v { "true" } else { "false" }),
+        Value::Null => "NULL".to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 impl PlanNode for FilterState {

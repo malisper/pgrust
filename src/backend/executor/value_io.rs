@@ -354,10 +354,9 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
         .missing_default_value
         .clone()
         .or_else(|| {
-            column
-                .default_expr
-                .as_deref()
-                .and_then(|sql| crate::backend::parser::derive_literal_default_value(sql, column.sql_type).ok())
+            column.default_expr.as_deref().and_then(|sql| {
+                crate::backend::parser::derive_literal_default_value(sql, column.sql_type).ok()
+            })
         })
         .unwrap_or(Value::Null)
 }
@@ -622,35 +621,41 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
             }
             Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
             Value::Text(_) | Value::TextRef(_, _) => {
-                out.push('"');
-                for ch in item.as_text().unwrap().chars() {
-                    match ch {
-                        '"' | '\\' => {
-                            out.push('\\');
-                            out.push(ch);
-                        }
-                        _ => out.push(ch),
-                    }
-                }
-                out.push('"');
+                push_array_text_element(&mut out, item.as_text().unwrap());
             }
             Value::InternalChar(byte) => {
                 let rendered = super::expr_casts::render_internal_char_text(*byte);
-                out.push('"');
-                for ch in rendered.chars() {
-                    match ch {
-                        '"' | '\\' => {
-                            out.push('\\');
-                            out.push(ch);
-                        }
-                        _ => out.push(ch),
-                    }
-                }
-                out.push('"');
+                push_array_text_element(&mut out, &rendered);
             }
             Value::Array(nested) => out.push_str(&format_array_text(nested)),
         }
     }
     out.push('}');
     out
+}
+
+fn push_array_text_element(out: &mut String, text: &str) {
+    if array_text_needs_quotes(text) {
+        out.push('"');
+        for ch in text.chars() {
+            match ch {
+                '"' | '\\' => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            }
+        }
+        out.push('"');
+    } else {
+        out.push_str(text);
+    }
+}
+
+fn array_text_needs_quotes(text: &str) -> bool {
+    text.is_empty()
+        || text.eq_ignore_ascii_case("null")
+        || text.chars().any(|ch| {
+            ch.is_whitespace() || matches!(ch, '"' | '\\' | '{' | '}' | ',' | '\n' | '\r' | '\t')
+        })
 }
