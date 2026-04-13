@@ -618,8 +618,9 @@ fn explicit_text_input_target_oids() -> &'static BTreeSet<u32> {
 
 fn input_error_message(err: &ExecError, text: &str) -> String {
     match err {
-        ExecError::InvalidIntegerInput { ty, value } => {
-            format!("invalid input syntax for type {ty}: \"{value}\"")
+        ExecError::DetailedError { message, .. } => message.clone(),
+        ExecError::InvalidIntegerInput { ty, .. } => {
+            format!("invalid input syntax for type {ty}: \"{text}\"")
         }
         ExecError::ArrayInput { message, .. } => message.clone(),
         ExecError::IntegerOutOfRange { ty, value } => {
@@ -667,6 +668,7 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         }
         ExecError::FloatOverflow => "value out of range: overflow".to_string(),
         ExecError::FloatUnderflow => "value out of range: underflow".to_string(),
+        ExecError::NumericFieldOverflow => "value overflows numeric format".to_string(),
         ExecError::StringDataRightTruncation { ty } => {
             format!("value too long for type {ty}")
         }
@@ -690,7 +692,8 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::InvalidByteaInput { .. }
         | ExecError::InvalidGeometryInput { .. }
         | ExecError::InvalidBitInput { .. }
-        | ExecError::InvalidBooleanInput { .. } => "22P02",
+        | ExecError::InvalidBooleanInput { .. }
+        | ExecError::DetailedError { sqlstate: "22P02", .. } => "22P02",
         ExecError::InvalidStorageValue { column, details }
             if matches!(
                 column.as_str(),
@@ -712,9 +715,12 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::OidOutOfRange
         | ExecError::FloatOutOfRange { .. }
         | ExecError::FloatOverflow
-        | ExecError::FloatUnderflow => "22003",
+        | ExecError::FloatUnderflow
+        | ExecError::NumericFieldOverflow
+        | ExecError::DetailedError { sqlstate: "22003", .. } => "22003",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::InvalidFloatInput { .. } => "22P02",
+        ExecError::DetailedError { sqlstate, .. } => sqlstate,
         _ => "XX000",
     }
 }
@@ -731,6 +737,28 @@ fn datetime_parse_error_details(ty: &'static str, text: &str, err: DateTimeParse
     }
 }
 
+fn input_error_info(err: ExecError, text: &str) -> InputErrorInfo {
+    match err {
+        ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        } => InputErrorInfo {
+            message,
+            detail,
+            hint: None,
+            sqlstate,
+        },
+        other => InputErrorInfo {
+            message: input_error_message(&other, text),
+            detail: None,
+            hint: None,
+            sqlstate: input_error_sqlstate(&other),
+        },
+    }
+}
+
 pub(crate) fn soft_input_error_info(
     text: &str,
     type_name: &str,
@@ -740,12 +768,7 @@ pub(crate) fn soft_input_error_info(
             match cast_text_to_int2(item) {
                 Ok(_) => {}
                 Err(err) => {
-                    return Ok(Some(InputErrorInfo {
-                        message: input_error_message(&err, item),
-                        detail: None,
-                        hint: None,
-                        sqlstate: input_error_sqlstate(&err),
-                    }));
+                    return Ok(Some(input_error_info(err, item)));
                 }
             }
         }
@@ -772,12 +795,7 @@ pub(crate) fn soft_input_error_info(
     };
     match parsed {
         Ok(_) => Ok(None),
-        Err(err) => Ok(Some(InputErrorInfo {
-            message: input_error_message(&err, text),
-            detail: None,
-            hint: None,
-            sqlstate: input_error_sqlstate(&err),
-        })),
+        Err(err) => Ok(Some(input_error_info(err, text))),
     }
 }
 
