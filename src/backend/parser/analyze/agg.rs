@@ -359,6 +359,15 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
             Some(kind) => SqlType::new(kind),
             None => SqlType::new(Numeric),
         },
+        AggFunc::ArrayAgg => arg_type
+            .map(|ty| {
+                if ty.is_array {
+                    ty
+                } else {
+                    SqlType::array_of(ty)
+                }
+            })
+            .unwrap_or(SqlType::array_of(SqlType::new(Text))),
         AggFunc::Min | AggFunc::Max => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::Count
         | AggFunc::JsonAgg

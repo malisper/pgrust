@@ -2,7 +2,7 @@ use super::render_bit_text;
 use super::{compare_order_values, parse_numeric_text};
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::nodes::datum::{NumericValue, Value};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
 use crate::include::nodes::plannodes::AggFunc;
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -46,6 +46,9 @@ pub(crate) enum AccumState {
     JsonAgg {
         values: Vec<Value>,
         jsonb: bool,
+    },
+    ArrayAgg {
+        values: Vec<Value>,
     },
     JsonObjectAgg {
         pairs: Vec<(Value, Value)>,
@@ -93,6 +96,7 @@ impl AccumState {
                 values: Vec::new(),
                 jsonb: false,
             },
+            (AggFunc::ArrayAgg, _) => AccumState::ArrayAgg { values: Vec::new() },
             (AggFunc::JsonbAgg, _) => AccumState::JsonAgg {
                 values: Vec::new(),
                 jsonb: true,
@@ -172,6 +176,12 @@ impl AccumState {
             },
             (AggFunc::JsonAgg | AggFunc::JsonbAgg, _, _) => |state, arg_values| {
                 if let AccumState::JsonAgg { values, .. } = state {
+                    let value = arg_values.first().unwrap_or(&Value::Null);
+                    values.push(value.to_owned_value());
+                }
+            },
+            (AggFunc::ArrayAgg, _, _) => |state, arg_values| {
+                if let AccumState::ArrayAgg { values } = state {
                     let value = arg_values.first().unwrap_or(&Value::Null);
                     values.push(value.to_owned_value());
                 }
@@ -309,6 +319,7 @@ impl AccumState {
                     ))
                 }
             }
+            AccumState::ArrayAgg { values } => finalize_array_agg(values),
             AccumState::JsonObjectAgg { pairs, jsonb } => {
                 if *jsonb {
                     let built = JsonbValue::Object(
@@ -332,6 +343,55 @@ impl AccumState {
             AccumState::Min { min } => min.clone().unwrap_or(Value::Null),
             AccumState::Max { max } => max.clone().unwrap_or(Value::Null),
         }
+    }
+}
+
+fn finalize_array_agg(values: &[Value]) -> Value {
+    if values.is_empty() {
+        return Value::Null;
+    }
+    let first_non_null = values.iter().find(|value| !matches!(value, Value::Null));
+    let Some(first_non_null) = first_non_null else {
+        return Value::PgArray(ArrayValue::from_1d(values.to_vec()));
+    };
+    if let Some(first_array) = normalize_array_value(first_non_null) {
+        let mut elements = Vec::new();
+        let mut inner_dims: Option<Vec<ArrayDimension>> = None;
+        for value in values {
+            let Some(array) = normalize_array_value(value) else {
+                return Value::Null;
+            };
+            if array.dimensions.is_empty() {
+                return Value::Null;
+            }
+            match &inner_dims {
+                None => inner_dims = Some(array.dimensions.clone()),
+                Some(existing) if *existing != array.dimensions => return Value::Null,
+                Some(_) => {}
+            }
+            elements.extend(array.elements.clone());
+        }
+        let mut dimensions = vec![ArrayDimension {
+            lower_bound: 1,
+            length: values.len(),
+        }];
+        dimensions.extend(first_array.dimensions);
+        return Value::PgArray(ArrayValue::from_dimensions(dimensions, elements));
+    }
+    Value::PgArray(ArrayValue::from_dimensions(
+        vec![ArrayDimension {
+            lower_bound: 1,
+            length: values.len(),
+        }],
+        values.to_vec(),
+    ))
+}
+
+fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
+    match value {
+        Value::PgArray(array) => Some(array.clone()),
+        Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
+        _ => None,
     }
 }
 

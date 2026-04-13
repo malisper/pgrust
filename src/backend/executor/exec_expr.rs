@@ -49,18 +49,22 @@ use super::expr_string::{
     eval_to_number_function, eval_translate_function, eval_trim_function,
     eval_unistr_function,
 };
+use super::expr_ops::compare_order_values;
 use super::node_types::*;
 use super::pg_regex::{
     eval_regex_match_operator, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
     eval_regexp_match, eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr,
     eval_similar, eval_similar_substring, eval_sql_regex_substring,
 };
-pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
+pub(crate) use super::value_io::{
+    decode_value, format_array_text, format_array_value_text, tuple_from_values,
+};
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::pgrust::compact_string::CompactString;
 
 extern crate rand;
@@ -739,10 +743,26 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
         BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
+        BuiltinScalarFunction::ArrayFill => eval_array_fill_function(&values),
+        BuiltinScalarFunction::StringToArray => eval_string_to_array_function(&values),
+        BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
+        BuiltinScalarFunction::ArrayLength => eval_array_length_function(&values),
+        BuiltinScalarFunction::Cardinality => eval_cardinality_function(&values),
+        BuiltinScalarFunction::ArrayPosition => eval_array_position_function(&values),
+        BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
+        BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
+        BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::PgLsn => eval_pg_lsn_function(&values),
         BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
         BuiltinScalarFunction::Round => eval_round_function(&values),
-        BuiltinScalarFunction::WidthBucket => eval_width_bucket_function(&values),
+        BuiltinScalarFunction::WidthBucket => {
+            if values.len() == 2 {
+                eval_width_bucket_thresholds(&values)
+            } else {
+                eval_width_bucket_function(&values)
+            }
+        }
         BuiltinScalarFunction::Ceil | BuiltinScalarFunction::Ceiling => eval_ceil_function(&values),
         BuiltinScalarFunction::Floor => eval_floor_function(&values),
         BuiltinScalarFunction::Sign => eval_sign_function(&values),
@@ -1242,6 +1262,498 @@ fn eval_array_dims_function(values: &[Value]) -> Result<Value, ExecError> {
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "array_dims(array)",
             actual: format!("ArrayDims({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_array_fill_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [fill, dims] => build_filled_array(fill, dims, None),
+        [fill, dims, lbs] => build_filled_array(fill, dims, Some(lbs)),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_fill(value, dimensions [, lower_bounds])",
+            actual: format!("ArrayFill({} args)", values.len()),
+        })),
+    }
+}
+
+fn build_filled_array(
+    fill: &Value,
+    dims: &Value,
+    lower_bounds: Option<&Value>,
+) -> Result<Value, ExecError> {
+    if matches!(dims, Value::Null) || lower_bounds.is_some_and(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    let dims = parse_int_array_argument("array_fill", dims)?;
+    let lower_bounds = lower_bounds
+        .map(|value| parse_int_array_argument("array_fill", value))
+        .transpose()?;
+    if let Some(lbs) = &lower_bounds {
+        if lbs.len() != dims.len() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "matching dimension and lower-bound array lengths",
+                actual: "array_fill".into(),
+            }));
+        }
+    }
+    if dims.iter().any(|dim| dim.is_none()) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "dimension values cannot be null",
+            actual: "array_fill".into(),
+        }));
+    }
+    let dims = dims.into_iter().map(|dim| dim.unwrap()).collect::<Vec<_>>();
+    if lower_bounds
+        .as_ref()
+        .is_some_and(|lbs| lbs.iter().any(|lb| lb.is_none()))
+    {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "low bound values cannot be null",
+            actual: "array_fill".into(),
+        }));
+    }
+    if dims.is_empty() || dims.iter().any(|dim| *dim == 0) {
+        return Ok(Value::PgArray(ArrayValue::empty()));
+    }
+    let dimensions = dims
+        .iter()
+        .enumerate()
+        .map(|(idx, dim)| ArrayDimension {
+            lower_bound: lower_bounds
+                .as_ref()
+                .and_then(|lbs| lbs.get(idx).and_then(|lb| *lb))
+                .unwrap_or(1),
+            length: *dim as usize,
+        })
+        .collect::<Vec<_>>();
+    let total = dimensions
+        .iter()
+        .fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        dimensions,
+        std::iter::repeat_with(|| fill.to_owned_value())
+            .take(total)
+            .collect(),
+    )))
+}
+
+fn eval_string_to_array_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] | [Value::Null, _, _] | [_, Value::Null, _] => {
+            Ok(Value::Null)
+        }
+        [input, delimiter] => string_to_array_values(input, delimiter, None),
+        [input, delimiter, null_text] => {
+            if matches!(input, Value::Null) || matches!(delimiter, Value::Null) {
+                return Ok(Value::Null);
+            }
+            string_to_array_values(input, delimiter, Some(null_text))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "string_to_array(text, delimiter [, null_string])",
+            actual: format!("StringToArray({} args)", values.len()),
+        })),
+    }
+}
+
+fn string_to_array_values(
+    input: &Value,
+    delimiter: &Value,
+    null_text: Option<&Value>,
+) -> Result<Value, ExecError> {
+    let input = input.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "string_to_array",
+        left: input.clone(),
+        right: delimiter.clone(),
+    })?;
+    let delimiter = delimiter.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "string_to_array",
+        left: delimiter.clone(),
+        right: Value::Text(input.into()),
+    })?;
+    let null_text = null_text.and_then(Value::as_text);
+    let parts: Vec<String> = if delimiter.is_empty() {
+        input.chars().map(|ch| ch.to_string()).collect()
+    } else if input.is_empty() {
+        Vec::new()
+    } else {
+        input.split(delimiter).map(|part| part.to_string()).collect()
+    };
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        vec![ArrayDimension {
+            lower_bound: 1,
+            length: parts.len(),
+        }],
+        parts
+            .into_iter()
+            .map(|part| match null_text {
+                Some(null_marker) if part == null_marker => Value::Null,
+                _ => Value::Text(part.into()),
+            })
+            .collect(),
+    )))
+}
+
+fn eval_array_to_string_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [Value::Null, _, _] => Ok(Value::Null),
+        [_, Value::Null] | [_, Value::Null, _] => Ok(Value::Null),
+        [array, delimiter] => array_to_string_value(array, delimiter, None),
+        [array, delimiter, null_text] => array_to_string_value(array, delimiter, Some(null_text)),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_to_string(array, delimiter [, null_string])",
+            actual: format!("ArrayToString({} args)", values.len()),
+        })),
+    }
+}
+
+fn array_to_string_value(
+    array: &Value,
+    delimiter: &Value,
+    null_text: Option<&Value>,
+) -> Result<Value, ExecError> {
+    let array = normalize_array_value(array).ok_or_else(|| ExecError::TypeMismatch {
+        op: "array_to_string",
+        left: array.clone(),
+        right: delimiter.clone(),
+    })?;
+    let delimiter = delimiter.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "array_to_string",
+        left: delimiter.clone(),
+        right: Value::Null,
+    })?;
+    let null_text = null_text.and_then(Value::as_text);
+    let mut out = String::new();
+    let mut first = true;
+    for item in &array.elements {
+        if matches!(item, Value::Null) && null_text.is_none() {
+            continue;
+        }
+        if !first {
+            out.push_str(delimiter);
+        }
+        first = false;
+        if matches!(item, Value::Null) {
+            out.push_str(null_text.unwrap_or_default());
+        } else {
+            out.push_str(&render_scalar_text(item)?);
+        }
+    }
+    Ok(Value::Text(out.into()))
+}
+
+fn eval_array_length_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [array, dim] => {
+            let Some(array) = normalize_array_value(array) else {
+                return Ok(Value::Null);
+            };
+            let dim = array_subscript_index(Some(dim))?.unwrap_or(0);
+            if dim < 1 {
+                return Ok(Value::Null);
+            }
+            Ok(array
+                .axis_len((dim - 1) as usize)
+                .map(|len| Value::Int32(len as i32))
+                .unwrap_or(Value::Null))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_length(array, dimension)",
+            actual: format!("ArrayLength({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_cardinality_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [array] => Ok(normalize_array_value(array)
+            .map(|array| Value::Int32(array.elements.len() as i32))
+            .unwrap_or(Value::Null)),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "cardinality(array)",
+            actual: format!("Cardinality({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_array_position_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [Value::Null, _, _] => Ok(Value::Null),
+        [array, needle] => array_position_value(array, needle, None, false),
+        [array, needle, start] => {
+            let start = array_subscript_index(Some(start))?;
+            array_position_value(array, needle, start, false)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_position(array, value [, start])",
+            actual: format!("ArrayPosition({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_array_positions_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] => Ok(Value::Null),
+        [array, needle] => array_position_value(array, needle, None, true),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_positions(array, value)",
+            actual: format!("ArrayPositions({} args)", values.len()),
+        })),
+    }
+}
+
+fn array_position_value(
+    array: &Value,
+    needle: &Value,
+    start: Option<i32>,
+    all: bool,
+) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(array) else {
+        return Ok(Value::Null);
+    };
+    if array.ndim() > 1 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "one-dimensional array",
+            actual: if all { "array_positions" } else { "array_position" }.into(),
+        }));
+    }
+    let lower_bound = array.lower_bound(0).unwrap_or(1);
+    let start = start.unwrap_or(lower_bound);
+    let mut matches = Vec::new();
+    for (idx, item) in array.elements.iter().enumerate() {
+        let position = lower_bound + idx as i32;
+        if position < start {
+            continue;
+        }
+        let is_match = if matches!(needle, Value::Null) {
+            matches!(item, Value::Null)
+        } else if matches!(item, Value::Null) {
+            false
+        } else {
+            matches!(
+                compare_values("=", item.clone(), needle.clone())?,
+                Value::Bool(true)
+            )
+        };
+        if is_match {
+            if !all {
+                return Ok(Value::Int32(position));
+            }
+            matches.push(Value::Int32(position));
+        }
+    }
+    if all {
+        Ok(Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 1,
+                length: matches.len(),
+            }],
+            matches,
+        )))
+    } else {
+        Ok(Value::Null)
+    }
+}
+
+fn eval_array_remove_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] => Ok(Value::Null),
+        [array, target] => array_replace_like(array, target, None, true),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_remove(array, value)",
+            actual: format!("ArrayRemove({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_array_replace_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] => Ok(Value::Null),
+        [array, search, replace] => array_replace_like(array, search, Some(replace), false),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_replace(array, search, replace)",
+            actual: format!("ArrayReplace({} args)", values.len()),
+        })),
+    }
+}
+
+fn array_replace_like(
+    array: &Value,
+    search: &Value,
+    replace: Option<&Value>,
+    remove: bool,
+) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(array) else {
+        return Ok(Value::Null);
+    };
+    if array.ndim() > 1 {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "one-dimensional array",
+            actual: if remove { "array_remove" } else { "array_replace" }.into(),
+        }));
+    }
+    let mut items = Vec::new();
+    for item in &array.elements {
+        let matched = if matches!(search, Value::Null) {
+            matches!(item, Value::Null)
+        } else if matches!(item, Value::Null) {
+            false
+        } else {
+            matches!(
+                compare_values("=", item.clone(), search.clone())?,
+                Value::Bool(true)
+            )
+        };
+        if matched {
+            if remove {
+                continue;
+            }
+            items.push(replace.unwrap_or(&Value::Null).to_owned_value());
+        } else {
+            items.push(item.to_owned_value());
+        }
+    }
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        vec![ArrayDimension {
+            lower_bound: array.lower_bound(0).unwrap_or(1),
+            length: items.len(),
+        }],
+        items,
+    )))
+}
+
+fn eval_array_sort_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] | [Value::Null, ..] => Ok(Value::Null),
+        [array] => array_sort_value(array, false, false),
+        [array, Value::Bool(desc)] => array_sort_value(array, *desc, false),
+        [array, Value::Bool(desc), Value::Bool(nulls_first)] => {
+            array_sort_value(array, *desc, *nulls_first)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_sort(array [, descending [, nulls_first]])",
+            actual: format!("ArraySort({} args)", values.len()),
+        })),
+    }
+}
+
+fn array_sort_value(array: &Value, descending: bool, nulls_first: bool) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(array) else {
+        return Ok(Value::Null);
+    };
+    if array.dimensions.is_empty() {
+        return Ok(Value::PgArray(array));
+    }
+    if array.ndim() == 1 {
+        let mut items = array.elements.clone();
+        items.sort_by(|left, right| compare_order_values(left, right, Some(nulls_first), descending));
+        return Ok(Value::PgArray(ArrayValue::from_dimensions(array.dimensions, items)));
+    }
+    let slice_dims = array.dimensions[1..].to_vec();
+    let slice_len = slice_dims.iter().fold(1usize, |acc, dim| acc.saturating_mul(dim.length));
+    let mut slices = array
+        .elements
+        .chunks(slice_len)
+        .map(|chunk| {
+            Value::PgArray(ArrayValue::from_dimensions(
+                slice_dims.clone(),
+                chunk.to_vec(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    slices.sort_by(|left, right| compare_order_values(left, right, Some(nulls_first), descending));
+    let mut elements = Vec::with_capacity(array.elements.len());
+    for slice in slices {
+        if let Value::PgArray(slice_array) = slice {
+            elements.extend(slice_array.elements);
+        }
+    }
+    Ok(Value::PgArray(ArrayValue::from_dimensions(
+        array.dimensions,
+        elements,
+    )))
+}
+
+fn parse_int_array_argument(op: &'static str, value: &Value) -> Result<Vec<Option<i32>>, ExecError> {
+    let Some(array) = normalize_array_value(value) else {
+        return Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Null,
+        });
+    };
+    if array.ndim() > 1 {
+        return Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Null,
+        });
+    }
+    array.elements
+        .iter()
+        .map(|item| array_subscript_index(Some(item)))
+        .collect()
+}
+
+fn render_scalar_text(value: &Value) -> Result<String, ExecError> {
+    match value {
+        Value::PgArray(array) => Ok(format_array_value_text(array)),
+        Value::Array(items) => Ok(format_array_text(items)),
+        _ => cast_value(value.to_owned_value(), SqlType::new(SqlTypeKind::Text))?
+            .as_text()
+            .map(|text| text.to_string())
+            .ok_or_else(|| ExecError::TypeMismatch {
+                op: "::text",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            }),
+    }
+}
+
+fn eval_width_bucket_thresholds(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [operand, thresholds] => {
+            let Some(thresholds) = normalize_array_value(thresholds) else {
+                return Err(ExecError::TypeMismatch {
+                    op: "width_bucket",
+                    left: operand.clone(),
+                    right: thresholds.clone(),
+                });
+            };
+            if thresholds.ndim() != 1 {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "one-dimensional thresholds array",
+                    actual: "width_bucket".into(),
+                }));
+            }
+            if thresholds.elements.iter().any(|value| matches!(value, Value::Null)) {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "thresholds array without NULLs",
+                    actual: "width_bucket".into(),
+                }));
+            }
+            if thresholds.elements.is_empty() {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "non-empty thresholds array",
+                    actual: "width_bucket".into(),
+                }));
+            }
+            let mut bucket = 0i32;
+            for threshold in &thresholds.elements {
+                if matches!(order_values("<", operand.clone(), threshold.clone())?, Value::Bool(true)) {
+                    break;
+                }
+                bucket = bucket.checked_add(1).ok_or(ExecError::Int4OutOfRange)?;
+            }
+            Ok(Value::Int32(bucket))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "width_bucket(operand, thresholds)",
+            actual: format!("WidthBucket({} args)", values.len()),
         })),
     }
 }
