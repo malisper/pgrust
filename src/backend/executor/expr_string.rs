@@ -101,6 +101,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         Value::Bytea(bytes) => format_bytea_text(bytes, ByteaOutputFormat::Hex),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Array(values) => format_array_text(values),
+        Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
     })
 }
 

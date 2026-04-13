@@ -532,24 +532,114 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 actual: "ARRAY[]".into(),
             })?,
         },
-        SqlExpr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-            Box::new(bind_expr_with_outer_and_ctes(
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            let array_type = infer_sql_expr_type_with_ctes(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if !array_type.is_array {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "array expression",
+                    actual: sql_type_name(array_type).into(),
+                });
+            }
+            Expr::ArraySubscript {
+                array: Box::new(bind_expr_with_outer_and_ctes(
+                    array,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?),
+                subscripts: subscripts
+                    .iter()
+                    .map(|subscript| {
+                        Ok(crate::include::nodes::plannodes::ExprArraySubscript {
+                            is_slice: subscript.is_slice,
+                            lower: subscript
+                                .lower
+                                .as_deref()
+                                .map(|expr| {
+                                    bind_expr_with_outer_and_ctes(
+                                        expr,
+                                        scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer,
+                                        ctes,
+                                    )
+                                })
+                                .transpose()?,
+                            upper: subscript
+                                .upper
+                                .as_deref()
+                                .map(|expr| {
+                                    bind_expr_with_outer_and_ctes(
+                                        expr,
+                                        scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer,
+                                        ctes,
+                                    )
+                                })
+                                .transpose()?,
+                        })
+                    })
+                    .collect::<Result<_, ParseError>>()?,
+            }
+        }
+        SqlExpr::ArrayOverlap(left, right) => {
+            let raw_left_type = infer_sql_expr_type_with_ctes(
                 left,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
+            );
+            let raw_right_type = infer_sql_expr_type_with_ctes(
                 right,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            )?),
-        ),
+            );
+            let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+            let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+            Expr::ArrayOverlap(
+                Box::new(coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_left_type,
+                    left_type,
+                )),
+                Box::new(coerce_bound_expr(
+                    bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?,
+                    raw_right_type,
+                    right_type,
+                )),
+            )
+        }
         SqlExpr::AggCall { .. } => {
             return Err(ParseError::UnexpectedToken {
                 expected: "non-aggregate expression",
@@ -649,45 +739,84 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             is_all,
             array,
         } => {
+            let raw_left_type = infer_sql_expr_type_with_ctes(
+                left,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let raw_array_type = infer_sql_expr_type_with_ctes(
+                array,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let left_type =
+                coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
+            let array_type = if raw_array_type.is_array {
+                coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)
+            } else {
+                SqlType::array_of(left_type.element_type())
+            };
             if *is_all {
                 Expr::AllArray {
-                    left: Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    left: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            left,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_left_type,
+                        left_type,
+                    )),
                     op: *op,
-                    right: Box::new(bind_expr_with_outer_and_ctes(
-                        array,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    right: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            array,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_array_type,
+                        array_type,
+                    )),
                 }
             } else {
                 Expr::AnyArray {
-                    left: Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    left: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            left,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_left_type,
+                        left_type,
+                    )),
                     op: *op,
-                    right: Box::new(bind_expr_with_outer_and_ctes(
-                        array,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
+                    right: Box::new(coerce_bound_expr(
+                        bind_expr_with_outer_and_ctes(
+                            array,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )?,
+                        raw_array_type,
+                        array_type,
+                    )),
                 }
             }
         }
@@ -1060,6 +1189,9 @@ fn validate_catalog_backed_explicit_cast(
         return Ok(());
     }
     if source_type.is_array || !is_text_like_type(source_type) {
+        return Ok(());
+    }
+    if target_type.is_array {
         return Ok(());
     }
     if explicit_text_input_cast_exists(catalog, target_type) {
@@ -2667,6 +2799,14 @@ fn bind_scalar_function_call(
             })
         }
         BuiltinScalarFunction::WidthBucket => {
+            if args.len() == 2 {
+                return Ok(Expr::FuncCall {
+                    func_oid,
+                    func,
+                    args: bound_args,
+                    func_variadic,
+                });
+            }
             let raw_operand_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,
@@ -3093,6 +3233,31 @@ fn bind_scalar_function_call(
                 args: vec![
                     coerce_bound_expr(bound_args[0].clone(), left_type, text_type),
                     coerce_bound_expr(bound_args[1].clone(), right_type, text_type),
+                ],
+                func_variadic,
+            })
+        }
+        BuiltinScalarFunction::ArrayNdims | BuiltinScalarFunction::ArrayDims => Ok(Expr::FuncCall {
+            func_oid,
+            func,
+            args: vec![bound_args[0].clone()],
+            func_variadic,
+        }),
+        BuiltinScalarFunction::ArrayLower => {
+            let dim_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            Ok(Expr::FuncCall {
+                func_oid,
+                func,
+                args: vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(bound_args[1].clone(), dim_type, SqlType::new(SqlTypeKind::Int4)),
                 ],
                 func_variadic,
             })

@@ -260,7 +260,7 @@ pub(crate) fn parse_text_array_literal(
     raw: &str,
     element_type: SqlType,
 ) -> Result<Value, ExecError> {
-    parse_text_array_literal_with_op(raw, element_type, "::array")
+    parse_text_array_literal_with_options(raw, element_type, "::array", true)
 }
 
 pub(crate) fn parse_text_array_literal_with_op(
@@ -268,94 +268,308 @@ pub(crate) fn parse_text_array_literal_with_op(
     element_type: SqlType,
     op: &'static str,
 ) -> Result<Value, ExecError> {
-    fn array_parse_error(raw: &str, op: &'static str) -> ExecError {
-        ExecError::TypeMismatch {
-            op,
-            left: Value::Null,
-            right: Value::Text(raw.into()),
+    parse_text_array_literal_with_options(raw, element_type, op, true)
+}
+
+pub(crate) fn parse_text_array_literal_with_options(
+    raw: &str,
+    element_type: SqlType,
+    op: &'static str,
+    explicit: bool,
+) -> Result<Value, ExecError> {
+    let (bounds, input) = parse_array_bounds_prefix(raw)?;
+    if input == "{}" {
+        return Ok(Value::PgArray(ArrayValue::empty()));
+    }
+    if !input.starts_with('{') || !input.ends_with('}') {
+        return Err(invalid_array_literal(
+            raw,
+            Some("Array value must start with \"{\" or dimension information.".into()),
+        ));
+    }
+    let mut parser = ArrayTextParser::new(input, element_type, explicit);
+    let value = parser.parse_array()?;
+    parser.skip_ws();
+    if !parser.is_eof() {
+        return Err(invalid_array_literal(
+            raw,
+            Some("Junk after closing right brace.".into()),
+        ));
+    }
+    let nested = match value {
+        Value::Array(values) => values,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op,
+                left: other,
+                right: Value::Null,
+            });
+        }
+    };
+    let array = ArrayValue::from_nested_values(nested, bounds.lower_bounds.clone()).map_err(|_| {
+        invalid_array_literal(
+            raw,
+            Some("Multidimensional arrays must have sub-arrays with matching dimensions.".into()),
+        )
+    })?;
+    if let Some(expected_lengths) = &bounds.lengths
+        && (expected_lengths.len() != array.dimensions.len()
+            || expected_lengths
+                .iter()
+                .zip(array.dimensions.iter())
+                .any(|(expected, actual)| *expected != actual.length))
+    {
+        return Err(invalid_array_literal(
+            raw,
+            Some("Specified array dimensions do not match array contents.".into()),
+        ));
+    }
+    Ok(Value::PgArray(array))
+}
+
+#[derive(Default)]
+struct ParsedArrayBounds {
+    lower_bounds: Vec<i32>,
+    lengths: Option<Vec<usize>>,
+}
+
+fn parse_array_bounds_prefix(raw: &str) -> Result<(ParsedArrayBounds, &str), ExecError> {
+    if !raw.starts_with('[') {
+        return Ok((ParsedArrayBounds::default(), raw));
+    }
+    let Some(equals) = raw.find('=') else {
+        return Ok((ParsedArrayBounds::default(), raw));
+    };
+    let bounds = &raw[..equals];
+    let mut lower_bounds = Vec::new();
+    let mut lengths = Vec::new();
+    let mut remaining = bounds;
+    while let Some(rest) = remaining.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return Err(invalid_array_literal(raw, None));
+        };
+        let part = &rest[..end];
+        let Some((lower, upper)) = part.split_once(':') else {
+            return Err(invalid_array_literal(
+                raw,
+                Some("Specified array dimensions do not match array contents.".into()),
+            ));
+        };
+        if lower.trim().is_empty() {
+            return Err(invalid_array_literal(
+                raw,
+                Some("\"[\" must introduce explicitly-specified array dimensions.".into()),
+            ));
+        };
+        if upper.trim().is_empty() {
+            return Err(invalid_array_literal(
+                raw,
+                Some("Missing array dimension value.".into()),
+            ));
+        }
+        let lower = parse_array_bound(lower.trim(), raw)?;
+        let upper = parse_array_bound(upper.trim(), raw)?;
+        if upper < lower {
+            return Err(ExecError::ArrayInput {
+                message: "upper bound cannot be less than lower bound".into(),
+                value: raw.into(),
+                detail: None,
+                sqlstate: "2202E",
+            });
+        }
+        if upper >= i32::MAX as i64 {
+            return Err(ExecError::ArrayInput {
+                message: format!("array upper bound is too large: {upper}"),
+                value: raw.into(),
+                detail: None,
+                sqlstate: "54000",
+            });
+        }
+        lower_bounds.push(lower as i32);
+        lengths.push((upper - lower + 1) as usize);
+        remaining = &rest[end + 1..];
+    }
+    Ok((
+        ParsedArrayBounds {
+            lower_bounds,
+            lengths: Some(lengths),
+        },
+        &raw[equals + 1..],
+    ))
+}
+
+fn parse_array_bound(text: &str, raw: &str) -> Result<i64, ExecError> {
+    text.parse::<i64>().map_err(|_| ExecError::ArrayInput {
+        message: "array bound is out of integer range".into(),
+        value: raw.into(),
+        detail: None,
+        sqlstate: "22003",
+    })
+}
+
+fn invalid_array_literal(raw: &str, detail: Option<String>) -> ExecError {
+    ExecError::ArrayInput {
+        message: format!("malformed array literal: \"{raw}\""),
+        value: raw.into(),
+        detail,
+        sqlstate: "22P02",
+    }
+}
+
+struct ArrayTextParser<'a> {
+    input: &'a str,
+    offset: usize,
+    element_type: SqlType,
+    explicit: bool,
+}
+
+impl<'a> ArrayTextParser<'a> {
+    fn new(input: &'a str, element_type: SqlType, explicit: bool) -> Self {
+        Self {
+            input,
+            offset: 0,
+            element_type,
+            explicit,
         }
     }
 
-    fn parse_array_items(
-        chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-        element_type: SqlType,
-        raw: &str,
-        op: &'static str,
-    ) -> Result<Vec<Value>, ExecError> {
+    fn parse_array(&mut self) -> Result<Value, ExecError> {
+        self.skip_ws();
+        self.expect('{')?;
         let mut items = Vec::new();
         loop {
-            match chars.peek() {
-                Some('}') => break,
-                Some(_) => {}
-                None => return Err(array_parse_error(raw, op)),
+            self.skip_ws();
+            if self.peek_char() == Some('}') {
+                self.bump_char();
+                break;
             }
-
-            let value = match chars.peek() {
-                Some('{') => {
-                    chars.next();
-                    let nested = parse_array_items(chars, element_type, raw, op)?;
-                    if chars.next() != Some('}') {
-                        return Err(array_parse_error(raw, op));
-                    }
-                    Value::Array(nested)
-                }
-                Some('"') => {
-                    chars.next();
-                    let mut text = String::new();
-                    loop {
-                        match chars.next() {
-                            Some('"') => break,
-                            Some('\\') => {
-                                let escaped =
-                                    chars.next().ok_or_else(|| array_parse_error(raw, op))?;
-                                text.push(escaped);
-                            }
-                            Some(ch) => text.push(ch),
-                            None => return Err(array_parse_error(raw, op)),
-                        }
-                    }
-                    cast_text_value(&text, element_type, true)?
-                }
-                Some(_) => {
-                    let mut text = String::new();
-                    while let Some(&ch) = chars.peek() {
-                        if ch == ',' || ch == '}' {
-                            break;
-                        }
-                        text.push(ch);
-                        chars.next();
-                    }
-                    if text == "NULL" {
-                        Value::Null
-                    } else {
-                        cast_text_value(&text, element_type, true)?
-                    }
-                }
-                None => return Err(array_parse_error(raw, op)),
-            };
-            items.push(value);
-
-            match chars.peek() {
+            items.push(self.parse_item()?);
+            self.skip_ws();
+            match self.peek_char() {
                 Some(',') => {
-                    chars.next();
+                    self.bump_char();
+                    self.skip_ws();
+                    if self.peek_char() == Some('}') {
+                        return Err(invalid_array_literal(
+                            self.input,
+                            Some("Unexpected \"}\" character.".into()),
+                        ));
+                    }
                 }
-                Some('}') => break,
-                None => return Err(array_parse_error(raw, op)),
-                _ => return Err(array_parse_error(raw, op)),
+                Some('}') => {
+                    self.bump_char();
+                    break;
+                }
+                _ => return self.type_mismatch(),
             }
         }
-        Ok(items)
+        Ok(Value::Array(items))
     }
 
-    let mut chars = raw.chars().peekable();
-    if chars.next() != Some('{') {
-        return Err(array_parse_error(raw, op));
+    fn parse_item(&mut self) -> Result<Value, ExecError> {
+        self.skip_ws();
+        match self.peek_char() {
+            Some('{') => self.parse_array(),
+            Some('"') => {
+                let text = self.parse_quoted_string()?;
+                self.skip_ws();
+                if matches!(self.peek_char(), Some(ch) if !matches!(ch, ',' | '}')) {
+                    return Err(invalid_array_literal(
+                        self.input,
+                        Some("Incorrectly quoted array element.".into()),
+                    ));
+                }
+                cast_text_value(&text, self.element_type, self.explicit)
+            }
+            Some(_) => {
+                let text = self.parse_unquoted_token();
+                if text.is_empty() {
+                    let detail = match self.peek_char() {
+                        Some(',') => "Unexpected \",\" character.",
+                        Some('}') => "Unexpected \"}\" character.",
+                        _ => "Unexpected array element.",
+                    };
+                    return Err(invalid_array_literal(self.input, Some(detail.into())));
+                }
+                if text.contains('{') {
+                    return Err(invalid_array_literal(
+                        self.input,
+                        Some("Unexpected \"{\" character.".into()),
+                    ));
+                }
+                if text.eq_ignore_ascii_case("NULL") {
+                    Ok(Value::Null)
+                } else {
+                    cast_text_value(text.trim_end(), self.element_type, self.explicit)
+                }
+            }
+            None => self.type_mismatch(),
+        }
     }
-    let items = parse_array_items(&mut chars, element_type, raw, op)?;
-    if chars.next() != Some('}') || chars.peek().is_some() {
-        return Err(array_parse_error(raw, op));
+
+    fn parse_quoted_string(&mut self) -> Result<String, ExecError> {
+        self.expect('"')?;
+        let mut text = String::new();
+        while let Some(ch) = self.bump_char() {
+            match ch {
+                '"' => return Ok(text),
+                '\\' => {
+                    let escaped = self
+                        .bump_char()
+                        .ok_or_else(|| invalid_array_literal(self.input, None))?;
+                    text.push(escaped);
+                }
+                other => text.push(other),
+            }
+        }
+        self.type_mismatch()
     }
-    Ok(Value::Array(items))
+
+    fn parse_unquoted_token(&mut self) -> &'a str {
+        let start = self.offset;
+        while let Some(ch) = self.peek_char() {
+            if matches!(ch, ',' | '}') {
+                break;
+            }
+            self.bump_char();
+        }
+        &self.input[start..self.offset]
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek_char(), Some(ch) if ch.is_ascii_whitespace()) {
+            self.bump_char();
+        }
+    }
+
+    fn expect(&mut self, expected: char) -> Result<(), ExecError> {
+        if self.bump_char() == Some(expected) {
+            Ok(())
+        } else {
+            self.type_mismatch()
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.input[self.offset..].chars().next()
+    }
+
+    fn bump_char(&mut self) -> Option<char> {
+        let ch = self.peek_char()?;
+        self.offset += ch.len_utf8();
+        Some(ch)
+    }
+
+    fn is_eof(&self) -> bool {
+        self.offset >= self.input.len()
+    }
+
+    fn type_mismatch<T>(&self) -> Result<T, ExecError> {
+        Err(invalid_array_literal(
+            self.input,
+            Some("Unexpected array element.".into()),
+        ))
+    }
 }
 
 fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> {
@@ -396,11 +610,12 @@ fn explicit_text_input_target_oids() -> &'static BTreeSet<u32> {
 
 fn input_error_message(err: &ExecError, text: &str) -> String {
     match err {
-        ExecError::InvalidIntegerInput { ty, .. } => {
-            format!("invalid input syntax for type {ty}: \"{text}\"")
+        ExecError::InvalidIntegerInput { ty, value } => {
+            format!("invalid input syntax for type {ty}: \"{value}\"")
         }
-        ExecError::IntegerOutOfRange { ty, .. } => {
-            format!("value \"{text}\" is out of range for type {ty}")
+        ExecError::ArrayInput { message, .. } => message.clone(),
+        ExecError::IntegerOutOfRange { ty, value } => {
+            format!("value \"{value}\" is out of range for type {ty}")
         }
         ExecError::Int2OutOfRange => {
             format!("value \"{text}\" is out of range for type smallint")
@@ -452,6 +667,7 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
 fn input_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
         ExecError::InvalidIntegerInput { .. }
+        | ExecError::ArrayInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
         | ExecError::InvalidBitInput { .. }
@@ -533,6 +749,17 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     casted.push(cast_value(item, element_type)?);
                 }
                 Ok(Value::Array(casted))
+            }
+            Value::PgArray(array) => {
+                let element_type = ty.element_type();
+                let mut casted = Vec::with_capacity(array.elements.len());
+                for item in array.elements {
+                    casted.push(cast_value(item, element_type)?);
+                }
+                Ok(Value::PgArray(ArrayValue::from_dimensions(
+                    array.dimensions,
+                    casted,
+                )))
             }
             other => match other.as_text() {
                 Some(text) => parse_text_array_literal(text, ty.element_type()),
@@ -926,6 +1153,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             }),
         },
         Value::Array(items) => Ok(Value::Array(items)),
+        Value::PgArray(array) => Ok(Value::PgArray(array)),
     }
 }
 

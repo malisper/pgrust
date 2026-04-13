@@ -158,26 +158,57 @@ pub(super) fn bind_grouped_quantified_array(
     agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
-    let left = Box::new(bind_agg_output_expr(
+    let raw_left_type = infer_sql_expr_type_with_ctes(
         left,
-        group_by_exprs,
         input_scope,
         catalog,
         outer_scopes,
         grouped_outer,
-        agg_list,
-        n_keys,
-    )?);
-    let right = Box::new(bind_agg_output_expr(
+        &[],
+    );
+    let raw_array_type = infer_sql_expr_type_with_ctes(
         array,
-        group_by_exprs,
         input_scope,
         catalog,
         outer_scopes,
         grouped_outer,
-        agg_list,
-        n_keys,
-    )?);
+        &[],
+    );
+    let left_type =
+        coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
+    let array_type = if raw_array_type.is_array {
+        coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)
+    } else {
+        SqlType::array_of(left_type.element_type())
+    };
+    let left = Box::new(coerce_bound_expr(
+        bind_agg_output_expr(
+            left,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )?,
+        raw_left_type,
+        left_type,
+    ));
+    let right = Box::new(coerce_bound_expr(
+        bind_agg_output_expr(
+            array,
+            group_by_exprs,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            agg_list,
+            n_keys,
+        )?,
+        raw_array_type,
+        array_type,
+    ));
     if is_all {
         Ok(Expr::AllArray { left, op, right })
     } else {

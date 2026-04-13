@@ -2041,6 +2041,17 @@ fn collect_rels_from_expr(
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
         }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_rels_from_expr(array, rels);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_rels_from_expr(lower, rels);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_rels_from_expr(upper, rels);
+                }
+            }
+        }
     }
 }
 

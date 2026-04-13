@@ -932,9 +932,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         match part.as_rule() {
             Rule::cte_clause => with = build_cte_clause(part)?,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
-            Rule::ident_list => {
-                columns = Some(part.into_inner().map(build_identifier).collect::<Vec<_>>())
-            }
+            Rule::assignment_target_list => columns = Some(build_assignment_target_list(part)?),
             Rule::insert_values_source => {
                 source = Some(InsertSource::Values(
                     part.into_inner()
@@ -1498,8 +1496,50 @@ fn build_values_row(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, ParseError> {
 fn build_assignment(pair: Pair<'_, Rule>) -> Result<Assignment, ParseError> {
     let mut inner = pair.into_inner();
     Ok(Assignment {
-        column: build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?),
+        target: build_assignment_target(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
         expr: build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?,
+    })
+}
+
+fn build_assignment_target_list(pair: Pair<'_, Rule>) -> Result<Vec<AssignmentTarget>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::assignment_target)
+        .map(build_assignment_target)
+        .collect()
+}
+
+fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, ParseError> {
+    let mut inner = pair.into_inner();
+    let column = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let mut subscripts = Vec::new();
+    for part in inner {
+        if part.as_rule() == Rule::subscript_suffix {
+            subscripts.push(build_array_subscript(part)?);
+        }
+    }
+    Ok(AssignmentTarget { column, subscripts })
+}
+
+fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseError> {
+    let raw = pair.as_str().to_string();
+    let mut bounds = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::subscript_bound)
+        .map(|bound| {
+            let expr = bound.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_expr(expr).map(Box::new)
+        });
+    let has_slice = raw.contains(':');
+    let lower = bounds.next().transpose()?;
+    let upper = if has_slice {
+        bounds.next().transpose()?
+    } else {
+        None
+    };
+    Ok(ArraySubscript {
+        is_slice: has_slice,
+        lower,
+        upper,
     })
 }
 
@@ -1562,9 +1602,30 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
             ty
         }
         Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
+        Rule::array_type_alias => {
+            let base = match pair.as_str().trim_start_matches('_').to_ascii_lowercase().as_str() {
+                "int2" | "smallint" => SqlType::new(SqlTypeKind::Int2),
+                "int4" | "int" | "integer" => SqlType::new(SqlTypeKind::Int4),
+                "int8" | "bigint" => SqlType::new(SqlTypeKind::Int8),
+                "oid" => SqlType::new(SqlTypeKind::Oid),
+                "name" => SqlType::new(SqlTypeKind::Name),
+                "text" => SqlType::new(SqlTypeKind::Text),
+                "bool" | "boolean" => SqlType::new(SqlTypeKind::Bool),
+                "bytea" => SqlType::new(SqlTypeKind::Bytea),
+                "float4" | "real" => SqlType::new(SqlTypeKind::Float4),
+                "float8" => SqlType::new(SqlTypeKind::Float8),
+                "timestamp" => SqlType::new(SqlTypeKind::Timestamp),
+                "json" => SqlType::new(SqlTypeKind::Json),
+                "jsonb" => SqlType::new(SqlTypeKind::Jsonb),
+                "jsonpath" => SqlType::new(SqlTypeKind::JsonPath),
+                other => panic!("unsupported array type alias: {other}"),
+            };
+            SqlType::array_of(base)
+        }
         Rule::kw_int2 | Rule::kw_smallint => SqlType::new(SqlTypeKind::Int2),
         Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
         Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
+        Rule::kw_name => SqlType::new(SqlTypeKind::Name),
         Rule::kw_oid => SqlType::new(SqlTypeKind::Oid),
         Rule::bit_type => {
             let len = pair
@@ -1690,14 +1751,30 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             let mut inner = pair.into_inner();
             let mut expr = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             for suffix in inner {
-                if suffix.as_rule() == Rule::cast_suffix {
-                    let ty = build_type(
-                        suffix
-                            .into_inner()
-                            .find(|part| part.as_rule() == Rule::type_name)
-                            .ok_or(ParseError::UnexpectedEof)?,
-                    );
-                    expr = SqlExpr::Cast(Box::new(expr), ty);
+                match suffix.as_rule() {
+                    Rule::cast_suffix => {
+                        let ty = build_type(
+                            suffix
+                                .into_inner()
+                                .find(|part| part.as_rule() == Rule::type_name)
+                                .ok_or(ParseError::UnexpectedEof)?,
+                        );
+                        expr = SqlExpr::Cast(Box::new(expr), ty);
+                    }
+                    Rule::subscript_suffix => {
+                        let subscript = build_array_subscript(suffix)?;
+                        expr = match expr {
+                            SqlExpr::ArraySubscript { array, mut subscripts } => {
+                                subscripts.push(subscript);
+                                SqlExpr::ArraySubscript { array, subscripts }
+                            }
+                            other => SqlExpr::ArraySubscript {
+                                array: Box::new(other),
+                                subscripts: vec![subscript],
+                            },
+                        };
+                    }
+                    _ => {}
                 }
             }
             Ok(expr)
@@ -2129,6 +2206,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::kw_stddev => AggFunc::Stddev,
                     Rule::kw_min => AggFunc::Min,
                     Rule::kw_max => AggFunc::Max,
+                    Rule::kw_array_agg => AggFunc::ArrayAgg,
                     Rule::kw_json_agg => AggFunc::JsonAgg,
                     Rule::kw_jsonb_agg => AggFunc::JsonbAgg,
                     Rule::kw_json_object_agg => AggFunc::JsonObjectAgg,
