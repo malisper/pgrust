@@ -1861,10 +1861,7 @@ fn build_plan_for_unnest_uses_array_element_types() {
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::FunctionScan {
-            call: crate::include::nodes::plannodes::SetReturningCall::Unnest {
-                output_columns,
-                ..
-            },
+            call: crate::include::nodes::plannodes::SetReturningCall::Unnest { output_columns, .. },
         } => {
             assert_eq!(output_columns.len(), 2);
             assert_eq!(
@@ -2513,8 +2510,7 @@ fn parse_trim_without_explicit_trim_chars() {
 
 #[test]
 fn parse_similar_to_syntax() {
-    let stmt =
-        parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
+    let stmt = parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
     match stmt {
         Statement::Select(stmt) => {
             assert!(matches!(

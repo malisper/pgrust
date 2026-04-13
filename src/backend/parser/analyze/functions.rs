@@ -176,7 +176,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Replace
             | BuiltinScalarFunction::Translate
             | BuiltinScalarFunction::SplitPart => args.len() == 3,
-            BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => {
+                matches!(args.len(), 2 | 3)
+            }
             BuiltinScalarFunction::RegexpReplace => matches!(args.len(), 3..=6),
             BuiltinScalarFunction::RegexpCount => matches!(args.len(), 2..=4),
             BuiltinScalarFunction::RegexpInstr => matches!(args.len(), 2..=7),
@@ -215,6 +217,61 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
             | BuiltinScalarFunction::JsonbPathQueryFirst => matches!(args.len(), 2..=4),
+            BuiltinScalarFunction::GeoPoint => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::GeoBox => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::GeoLine => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::GeoLseg => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::GeoPath => args.len() == 1,
+            BuiltinScalarFunction::GeoPolygon => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::GeoCircle => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::GeoArea
+            | BuiltinScalarFunction::GeoCenter
+            | BuiltinScalarFunction::GeoPolyCenter
+            | BuiltinScalarFunction::GeoDiagonal
+            | BuiltinScalarFunction::GeoLength
+            | BuiltinScalarFunction::GeoRadius
+            | BuiltinScalarFunction::GeoDiameter
+            | BuiltinScalarFunction::GeoNpoints
+            | BuiltinScalarFunction::GeoPclose
+            | BuiltinScalarFunction::GeoPopen
+            | BuiltinScalarFunction::GeoIsOpen
+            | BuiltinScalarFunction::GeoIsClosed
+            | BuiltinScalarFunction::GeoHeight
+            | BuiltinScalarFunction::GeoWidth
+            | BuiltinScalarFunction::GeoPointX
+            | BuiltinScalarFunction::GeoPointY => args.len() == 1,
+            BuiltinScalarFunction::GeoBoundBox
+            | BuiltinScalarFunction::GeoSlope
+            | BuiltinScalarFunction::GeoEq
+            | BuiltinScalarFunction::GeoNe
+            | BuiltinScalarFunction::GeoLt
+            | BuiltinScalarFunction::GeoLe
+            | BuiltinScalarFunction::GeoGt
+            | BuiltinScalarFunction::GeoGe
+            | BuiltinScalarFunction::GeoSame
+            | BuiltinScalarFunction::GeoDistance
+            | BuiltinScalarFunction::GeoClosestPoint
+            | BuiltinScalarFunction::GeoIntersection
+            | BuiltinScalarFunction::GeoIntersects
+            | BuiltinScalarFunction::GeoParallel
+            | BuiltinScalarFunction::GeoPerpendicular
+            | BuiltinScalarFunction::GeoContains
+            | BuiltinScalarFunction::GeoContainedBy
+            | BuiltinScalarFunction::GeoOverlap
+            | BuiltinScalarFunction::GeoLeft
+            | BuiltinScalarFunction::GeoOverLeft
+            | BuiltinScalarFunction::GeoRight
+            | BuiltinScalarFunction::GeoOverRight
+            | BuiltinScalarFunction::GeoBelow
+            | BuiltinScalarFunction::GeoOverBelow
+            | BuiltinScalarFunction::GeoAbove
+            | BuiltinScalarFunction::GeoOverAbove
+            | BuiltinScalarFunction::GeoAdd
+            | BuiltinScalarFunction::GeoSub
+            | BuiltinScalarFunction::GeoMul
+            | BuiltinScalarFunction::GeoDiv
+            | BuiltinScalarFunction::GeoIsVertical
+            | BuiltinScalarFunction::GeoIsHorizontal => matches!(args.len(), 1 | 2),
         });
 
     if valid {
@@ -415,10 +472,7 @@ fn lower_named_function_args(
         });
     }
 
-    Ok(lowered
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>())
+    Ok(lowered.into_iter().flatten().collect::<Vec<_>>())
 }
 
 fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
@@ -667,6 +721,30 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),
         ("lgamma", BuiltinScalarFunction::Lgamma),
+        ("point", BuiltinScalarFunction::GeoPoint),
+        ("box", BuiltinScalarFunction::GeoBox),
+        ("line", BuiltinScalarFunction::GeoLine),
+        ("lseg", BuiltinScalarFunction::GeoLseg),
+        ("path", BuiltinScalarFunction::GeoPath),
+        ("polygon", BuiltinScalarFunction::GeoPolygon),
+        ("circle", BuiltinScalarFunction::GeoCircle),
+        ("area", BuiltinScalarFunction::GeoArea),
+        ("center", BuiltinScalarFunction::GeoCenter),
+        ("poly_center", BuiltinScalarFunction::GeoPolyCenter),
+        ("bound_box", BuiltinScalarFunction::GeoBoundBox),
+        ("diagonal", BuiltinScalarFunction::GeoDiagonal),
+        ("radius", BuiltinScalarFunction::GeoRadius),
+        ("diameter", BuiltinScalarFunction::GeoDiameter),
+        ("npoints", BuiltinScalarFunction::GeoNpoints),
+        ("pclose", BuiltinScalarFunction::GeoPclose),
+        ("popen", BuiltinScalarFunction::GeoPopen),
+        ("isopen", BuiltinScalarFunction::GeoIsOpen),
+        ("isclosed", BuiltinScalarFunction::GeoIsClosed),
+        ("slope", BuiltinScalarFunction::GeoSlope),
+        ("isvertical", BuiltinScalarFunction::GeoIsVertical),
+        ("ishorizontal", BuiltinScalarFunction::GeoIsHorizontal),
+        ("height", BuiltinScalarFunction::GeoHeight),
+        ("width", BuiltinScalarFunction::GeoWidth),
         ("booleq", BuiltinScalarFunction::BoolEq),
         ("boolne", BuiltinScalarFunction::BoolNe),
         (

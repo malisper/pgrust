@@ -1085,6 +1085,96 @@ pub(super) fn bind_agg_output_expr_in_clause(
             agg_list,
             n_keys,
         ),
+        SqlExpr::Subscript { expr, index } => {
+            let expr_type =
+                infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer);
+            if expr_type.element_type().kind != SqlTypeKind::Point
+                || expr_type.is_array
+                || !(0..=1).contains(index)
+            {
+                return Err(ParseError::UndefinedOperator {
+                    op: "[]",
+                    left_type: sql_type_name(expr_type),
+                    right_type: "integer".into(),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func: if *index == 0 {
+                    BuiltinScalarFunction::GeoPointX
+                } else {
+                    BuiltinScalarFunction::GeoPointY
+                },
+                args: vec![bind_agg_output_expr(
+                    expr,
+                    group_by_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )?],
+            })
+        }
+        SqlExpr::GeometryUnaryOp { op, expr } => Ok(Expr::FuncCall {
+            func: match op {
+                GeometryUnaryOp::Center => BuiltinScalarFunction::GeoCenter,
+                GeometryUnaryOp::Length => BuiltinScalarFunction::GeoLength,
+                GeometryUnaryOp::Npoints => BuiltinScalarFunction::GeoNpoints,
+                GeometryUnaryOp::IsVertical => BuiltinScalarFunction::GeoIsVertical,
+                GeometryUnaryOp::IsHorizontal => BuiltinScalarFunction::GeoIsHorizontal,
+            },
+            args: vec![bind_agg_output_expr(
+                expr,
+                group_by_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?],
+        }),
+        SqlExpr::GeometryBinaryOp { op, left, right } => Ok(Expr::FuncCall {
+            func: match op {
+                GeometryBinaryOp::Same => BuiltinScalarFunction::GeoSame,
+                GeometryBinaryOp::Distance => BuiltinScalarFunction::GeoDistance,
+                GeometryBinaryOp::ClosestPoint => BuiltinScalarFunction::GeoClosestPoint,
+                GeometryBinaryOp::Intersects => BuiltinScalarFunction::GeoIntersects,
+                GeometryBinaryOp::Parallel => BuiltinScalarFunction::GeoParallel,
+                GeometryBinaryOp::Perpendicular => BuiltinScalarFunction::GeoPerpendicular,
+                GeometryBinaryOp::IsVertical => BuiltinScalarFunction::GeoIsVertical,
+                GeometryBinaryOp::IsHorizontal => BuiltinScalarFunction::GeoIsHorizontal,
+                GeometryBinaryOp::OverLeft => BuiltinScalarFunction::GeoOverLeft,
+                GeometryBinaryOp::OverRight => BuiltinScalarFunction::GeoOverRight,
+                GeometryBinaryOp::Below => BuiltinScalarFunction::GeoBelow,
+                GeometryBinaryOp::Above => BuiltinScalarFunction::GeoAbove,
+                GeometryBinaryOp::OverBelow => BuiltinScalarFunction::GeoOverBelow,
+                GeometryBinaryOp::OverAbove => BuiltinScalarFunction::GeoOverAbove,
+            },
+            args: vec![
+                bind_agg_output_expr(
+                    left,
+                    group_by_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )?,
+                bind_agg_output_expr(
+                    right,
+                    group_by_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )?,
+            ],
+        }),
         SqlExpr::CurrentTimestamp => Ok(Expr::CurrentTimestamp),
     }
 }

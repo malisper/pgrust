@@ -7,6 +7,7 @@ mod expr_bool;
 mod expr_casts;
 mod expr_compile;
 mod expr_format;
+mod expr_geometry;
 mod expr_json;
 mod expr_math;
 mod expr_numeric;
@@ -43,14 +44,16 @@ pub(crate) use expr_casts::cast_value;
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
+pub(crate) use expr_geometry::geometry_input_error_message;
+pub(crate) use expr_geometry::render_geometry_text;
 pub use startup::executor_start;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager,
 };
-use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::catalog::Catalog;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,
@@ -122,6 +125,10 @@ pub enum ExecError {
     },
     InvalidNumericInput(String),
     InvalidByteaInput {
+        value: String,
+    },
+    InvalidGeometryInput {
+        ty: &'static str,
         value: String,
     },
     InvalidBitInput {

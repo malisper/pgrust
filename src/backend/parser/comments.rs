@@ -176,7 +176,11 @@ pub(crate) fn normalize_string_continuation_preserving_layout(sql: &str) -> Stri
             while j < bytes.len() && !matches_dollar_end(bytes, j, &tag) {
                 j += sql[j..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
             }
-            let end = if j < bytes.len() { j + tag.len() + 2 } else { bytes.len() };
+            let end = if j < bytes.len() {
+                j + tag.len() + 2
+            } else {
+                bytes.len()
+            };
             out.push_str(&sql[i..end]);
             i = end;
         } else {

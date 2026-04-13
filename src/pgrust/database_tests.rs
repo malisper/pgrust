@@ -152,9 +152,12 @@ fn read_relation_block(
     let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
     db.pool
         .with_storage_mut(|storage| {
-            storage
-                .smgr
-                .read_block(rel, crate::backend::storage::smgr::ForkNumber::Main, block, &mut page)
+            storage.smgr.read_block(
+                rel,
+                crate::backend::storage::smgr::ForkNumber::Main,
+                block,
+                &mut page,
+            )
         })
         .unwrap();
     page
@@ -164,7 +167,9 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
     assert!(
-        lines.iter().any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
         "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
 }
@@ -173,7 +178,9 @@ fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_na
     let relfilenode = relfilenode_for(db, client_id, heap_name);
     let lines = explain_lines(db, client_id, sql);
     assert!(
-        lines.iter().any(|line| line.contains(&format!("Seq Scan on rel {relfilenode}"))),
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Seq Scan on rel {relfilenode}"))),
         "expected EXPLAIN to use seq scan on {heap_name} (relfilenode {relfilenode}), got {lines:?}"
     );
     assert!(
@@ -201,10 +208,12 @@ fn setup_index_matrix_db(label: &str) -> Database {
          (3, 30, 100, 'c1')",
     )
     .unwrap();
-    db.execute(1, "create index items_a_idx on items (a)").unwrap();
+    db.execute(1, "create index items_a_idx on items (a)")
+        .unwrap();
     db.execute(1, "create index items_ab_idx on items (a, b)")
         .unwrap();
-    db.execute(1, "create index items_b_idx on items (b)").unwrap();
+    db.execute(1, "create index items_b_idx on items (b)")
+        .unwrap();
     db.execute(1, "create index items_ba_idx on items (b, a)")
         .unwrap();
     db
@@ -842,7 +851,8 @@ fn comment_on_table_upserts_and_clears_pg_description() {
     let base = temp_dir("comment_on_table");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
     db.execute(1, "comment on table items is 'hello world'")
         .unwrap();
 
@@ -944,7 +954,8 @@ fn comment_on_temp_table_is_unsupported() {
         .unwrap();
     match db.execute(1, "comment on table items is 'nope'") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
-            if expected == "permanent table for COMMENT ON TABLE" && actual == "temporary table" => {}
+            if expected == "permanent table for COMMENT ON TABLE"
+                && actual == "temporary table" => {}
         other => panic!("expected temp-table comment rejection, got {:?}", other),
     }
 }
@@ -954,9 +965,11 @@ fn alter_table_add_column_reads_old_rows_with_null_or_default() {
     let base = temp_dir("alter_table_add_column_reads_old_rows");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
     db.execute(1, "insert into items values (1), (2)").unwrap();
-    db.execute(1, "alter table items add column note text").unwrap();
+    db.execute(1, "alter table items add column note text")
+        .unwrap();
 
     assert_eq!(
         query_rows(&db, 1, "select id, note from items order by id"),
@@ -1016,7 +1029,8 @@ fn alter_table_add_column_rejects_unsupported_forms() {
     let base = temp_dir("alter_table_add_column_rejects_unsupported");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4 not null)").unwrap();
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
 
     match db.execute(1, "alter table items add column xmin int4") {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
@@ -1072,11 +1086,8 @@ fn create_index_builds_multilevel_btree_root() {
     db.execute(1, "create table items (id int4 not null, note text)")
         .unwrap();
     for i in 0..1500 {
-        db.execute(
-            1,
-            &format!("insert into items values ({i}, 'row{i}')"),
-        )
-        .unwrap();
+        db.execute(1, &format!("insert into items values ({i}, 'row{i}')"))
+            .unwrap();
     }
     db.execute(1, "create index items_id_idx on items (id)")
         .unwrap();
@@ -1085,14 +1096,25 @@ fn create_index_builds_multilevel_btree_root() {
     let meta_page = read_relation_block(&db, rel, 0);
     let meta = crate::include::access::nbtree::bt_page_get_meta(&meta_page).unwrap();
     assert!(meta.btm_level > 0, "expected multilevel root, got {meta:?}");
-    assert!(meta.btm_root > 1, "expected root above leaf block 1, got {meta:?}");
+    assert!(
+        meta.btm_root > 1,
+        "expected root above leaf block 1, got {meta:?}"
+    );
 
     let root_page = read_relation_block(&db, rel, meta.btm_root);
     let root_opaque = crate::include::access::nbtree::bt_page_get_opaque(&root_page).unwrap();
     assert!(root_opaque.is_root());
-    assert!(!root_opaque.is_leaf(), "expected internal root, got {root_opaque:?}");
+    assert!(
+        !root_opaque.is_leaf(),
+        "expected internal root, got {root_opaque:?}"
+    );
 
-    assert_explain_uses_index(&db, 1, "select note from items where id = 1499", "items_id_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where id = 1499",
+        "items_id_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select note from items where id = 1499"),
         vec![vec![Value::Text("row1499".into())]]
@@ -1104,7 +1126,8 @@ fn create_unique_index_rejects_duplicate_live_keys() {
     let base = temp_dir("create_unique_index_rejects_duplicates");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
     db.execute(1, "insert into items values (1, 'a'), (1, 'b')")
         .unwrap();
 
@@ -1121,7 +1144,8 @@ fn create_unique_index_allows_multiple_nulls() {
     let base = temp_dir("create_unique_index_allows_nulls");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
     db.execute(1, "insert into items values (null, 'a'), (null, 'b')")
         .unwrap();
     db.execute(1, "create unique index items_id_key on items (id)")
@@ -1189,7 +1213,12 @@ fn indexed_update_maintains_indexes() {
     db.execute(1, "update items set id = 2, name = 'beta' where id = 1")
         .unwrap();
 
-    assert_explain_uses_index(&db, 1, "select name from items where id = 2", "items_id_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select name from items where id = 2",
+        "items_id_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select name from items where id = 1"),
         Vec::<Vec<Value>>::new()
@@ -1205,20 +1234,20 @@ fn unique_index_insert_rejects_duplicate_key() {
     let base = temp_dir("unique_index_insert_rejects_duplicate_key");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
     db.execute(1, "create unique index items_id_key on items (id)")
         .unwrap();
-    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
 
     match db.execute(1, "insert into items values (1, 'beta')") {
         Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "items_id_key");
             assert_eq!(
-                crate::backend::libpq::pqformat::format_exec_error(
-                    &ExecError::UniqueViolation {
-                        constraint: constraint.clone()
-                    }
-                ),
+                crate::backend::libpq::pqformat::format_exec_error(&ExecError::UniqueViolation {
+                    constraint: constraint.clone()
+                }),
                 "duplicate key value violates unique constraint \"items_id_key\""
             );
         }
@@ -1231,7 +1260,8 @@ fn unique_index_update_rejects_duplicate_key() {
     let base = temp_dir("unique_index_update_rejects_duplicate_key");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
     db.execute(1, "insert into items values (1, 'alpha'), (2, 'beta')")
         .unwrap();
     db.execute(1, "create unique index items_id_key on items (id)")
@@ -1255,8 +1285,10 @@ fn unique_index_update_same_key_succeeds_without_self_conflict() {
     let base = temp_dir("unique_index_update_same_key_succeeds");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4, note text)").unwrap();
-    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
     db.execute(1, "create unique index items_id_key on items (id)")
         .unwrap();
     db.execute(1, "update items set note = 'beta' where id = 1")
@@ -1273,12 +1305,15 @@ fn unique_index_delete_then_reinsert_same_key_succeeds() {
     let base = temp_dir("unique_index_delete_then_reinsert_same_key");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4, note text)").unwrap();
-    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
     db.execute(1, "create unique index items_id_key on items (id)")
         .unwrap();
     db.execute(1, "delete from items where id = 1").unwrap();
-    db.execute(1, "insert into items values (1, 'beta')").unwrap();
+    db.execute(1, "insert into items values (1, 'beta')")
+        .unwrap();
 
     assert_eq!(
         query_rows(&db, 1, "select note from items where id = 1"),
@@ -1303,7 +1338,12 @@ fn indexed_delete_keeps_index_scans_correct() {
 
     db.execute(1, "delete from items where id = 2").unwrap();
 
-    assert_explain_uses_index(&db, 1, "select name from items where id = 2", "items_id_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select name from items where id = 2",
+        "items_id_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select name from items where id = 2"),
         Vec::<Vec<Value>>::new()
@@ -1319,8 +1359,11 @@ fn indexed_update_and_delete_apply_residual_predicates() {
     let base = temp_dir("indexed_dml_residual_predicates");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4 not null, tag text, name text)")
-        .unwrap();
+    db.execute(
+        1,
+        "create table items (id int4 not null, tag text, name text)",
+    )
+    .unwrap();
     db.execute(
         1,
         "insert into items values (1, 'keep', 'alpha'), (1, 'skip', 'beta'), (2, 'keep', 'gamma')",
@@ -1329,8 +1372,11 @@ fn indexed_update_and_delete_apply_residual_predicates() {
     db.execute(1, "create index items_id_idx on items (id)")
         .unwrap();
 
-    db.execute(1, "update items set name = 'updated' where id = 1 and tag = 'keep'")
-        .unwrap();
+    db.execute(
+        1,
+        "update items set name = 'updated' where id = 1 and tag = 'keep'",
+    )
+    .unwrap();
     db.execute(1, "delete from items where id = 1 and tag = 'skip'")
         .unwrap();
 
@@ -1365,13 +1411,19 @@ fn indexed_truncate_reinitializes_indexes() {
 
     db.execute(1, "truncate items").unwrap();
 
-    assert_explain_uses_index(&db, 1, "select name from items where id = 1", "items_id_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select name from items where id = 1",
+        "items_id_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items"),
         vec![vec![Value::Int64(0)]]
     );
 
-    db.execute(1, "insert into items values (3, 'gamma')").unwrap();
+    db.execute(1, "insert into items values (3, 'gamma')")
+        .unwrap();
     assert_eq!(
         query_rows(&db, 1, "select name from items where id = 3"),
         vec![vec![Value::Text("gamma".into())]]
@@ -1399,7 +1451,8 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
                         &format!("insert into items values ({id}, 'w{worker}-{i}')"),
                     )
                     .unwrap();
-                    let rows = query_rows(&db, 1, &format!("select note from items where id = {id}"));
+                    let rows =
+                        query_rows(&db, 1, &format!("select note from items where id = {id}"));
                     assert_eq!(rows.len(), 1, "expected one row for id {id}, got {rows:?}");
                 }
             })
@@ -1429,7 +1482,12 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
         query_rows(&db, 1, "select count(*) from items"),
         vec![vec![Value::Int64(300)]]
     );
-    assert_explain_uses_index(&db, 1, "select note from items where id = 1005", "items_id_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where id = 1005",
+        "items_id_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select note from items where id = 1005"),
         vec![vec![Value::Text("w1-5".into())]]
@@ -1512,7 +1570,8 @@ fn concurrent_unique_index_inserts_only_allow_one_live_key() {
     let base = temp_dir("concurrent_unique_index_inserts_only_allow_one_live_key");
     let db = Database::open(&base, 64).unwrap();
 
-    db.execute(1, "create table items (id int4, note text)").unwrap();
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
     db.execute(1, "create unique index items_id_key on items (id)")
         .unwrap();
 
@@ -1547,7 +1606,12 @@ fn concurrent_unique_index_inserts_only_allow_one_live_key() {
         query_rows(&db, 1, "select count(*) from items where id = 1"),
         vec![vec![Value::Int64(1)]]
     );
-    assert_explain_uses_index(&db, 1, "select note from items where id = 1", "items_id_key");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where id = 1",
+        "items_id_key",
+    );
 }
 
 #[test]
@@ -1618,8 +1682,18 @@ fn concurrent_indexed_updates_and_deletes_keep_index_results_correct() {
         query_rows(&db, 1, "select note from items where id = 74"),
         Vec::<Vec<Value>>::new()
     );
-    assert_explain_uses_index(&db, 1, "select note from items where id = 1005", "items_id_idx");
-    assert_explain_uses_index(&db, 1, "select note from items where id = 74", "items_id_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where id = 1005",
+        "items_id_idx",
+    );
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where id = 74",
+        "items_id_idx",
+    );
 }
 
 #[test]
@@ -1639,7 +1713,12 @@ fn reopening_database_replays_btree_wal() {
             db.execute(1, &format!("insert into items values ({i}, 'after{i}')"))
                 .unwrap();
         }
-        assert_explain_uses_index(&db, 1, "select note from items where id = 777", "items_id_idx");
+        assert_explain_uses_index(
+            &db,
+            1,
+            "select note from items where id = 777",
+            "items_id_idx",
+        );
     }
 
     let reopened = Database::open_with_options(&base, 256, true).unwrap();
@@ -1672,10 +1751,7 @@ fn create_index_respects_maintenance_work_mem_budget() {
         session
             .execute(
                 &db,
-                &format!(
-                    "insert into items values ({i}, '{}')",
-                    "x".repeat(64)
-                ),
+                &format!("insert into items values ({i}, '{}')", "x".repeat(64)),
             )
             .unwrap();
     }
@@ -1690,7 +1766,10 @@ fn create_index_respects_maintenance_work_mem_budget() {
                 "expected build failure, got {actual}"
             );
         }
-        other => panic!("expected maintenance_work_mem build failure, got {:?}", other),
+        other => panic!(
+            "expected maintenance_work_mem build failure, got {:?}",
+            other
+        ),
     }
 }
 
@@ -1718,7 +1797,11 @@ fn index_matrix_equality_plus_range_uses_multicol_index() {
         "items_ab_idx",
     );
     assert_eq!(
-        query_rows(&db, 1, "select note from items where a = 2 and b >= 25 order by b"),
+        query_rows(
+            &db,
+            1,
+            "select note from items where a = 2 and b >= 25 order by b"
+        ),
         vec![
             vec![Value::Text("b2".into())],
             vec![Value::Text("b3".into())],
@@ -1888,7 +1971,12 @@ fn index_matrix_second_column_equality_plus_range_uses_ba_index() {
 #[test]
 fn index_matrix_range_only_on_first_column_uses_index() {
     let db = setup_index_matrix_db("index_matrix_range_only_first");
-    assert_explain_uses_index(&db, 1, "select a, b from items where a >= 2 order by a", "items_a_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select a, b from items where a >= 2 order by a",
+        "items_a_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select a, b from items where a >= 2 order by a, b"),
         vec![
@@ -1903,7 +1991,12 @@ fn index_matrix_range_only_on_first_column_uses_index() {
 #[test]
 fn index_matrix_order_by_two_columns_uses_matching_multicolumn_index() {
     let db = setup_index_matrix_db("index_matrix_order_two_cols");
-    assert_explain_uses_index(&db, 1, "select a, b from items order by a, b", "items_ab_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select a, b from items order by a, b",
+        "items_ab_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select a, b from items order by a, b"),
         vec![
@@ -1920,7 +2013,12 @@ fn index_matrix_order_by_two_columns_uses_matching_multicolumn_index() {
 #[test]
 fn index_matrix_order_by_two_columns_uses_matching_ba_index() {
     let db = setup_index_matrix_db("index_matrix_order_two_cols_ba");
-    assert_explain_uses_index(&db, 1, "select a, b from items order by b, a", "items_ba_idx");
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select a, b from items order by b, a",
+        "items_ba_idx",
+    );
     assert_eq!(
         query_rows(&db, 1, "select a, b from items order by b, a"),
         vec![

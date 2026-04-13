@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::storage_backend::{SmgrStorageBackend, StorageBackend};
-use crate::backend::access::transam::xlog::{RM_BTREE_ID, RM_HEAP_ID};
 use crate::backend::access::transam::xlog::{INVALID_LSN, Lsn, WalWriter};
+use crate::backend::access::transam::xlog::{RM_BTREE_ID, RM_HEAP_ID};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::include::storage::buf_internals::*;
 
@@ -982,11 +982,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 }
 
 impl BufferPool<SmgrStorageBackend> {
-    pub fn ensure_relation_fork(
-        &self,
-        rel: RelFileLocator,
-        fork: ForkNumber,
-    ) -> Result<(), Error> {
+    pub fn ensure_relation_fork(&self, rel: RelFileLocator, fork: ForkNumber) -> Result<(), Error> {
         self.with_storage_mut(|storage| {
             let _ = storage.smgr.open(rel);
             storage.smgr.create(rel, fork, true)

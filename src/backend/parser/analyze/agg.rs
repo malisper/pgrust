@@ -79,7 +79,12 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
-        | SqlExpr::IsNotNull(inner) => expr_contains_agg(inner),
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => expr_contains_agg(inner),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            expr_contains_agg(left) || expr_contains_agg(right)
+        }
     }
 }
 
@@ -96,9 +101,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentTimestamp => false,
-        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
-            args.iter().any(|arg| expr_references_input_scope(&arg.value))
-        }
+        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_input_scope(&arg.value)),
         SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_references_input_scope),
         SqlExpr::ScalarSubquery(_)
         | SqlExpr::Exists(_)
@@ -151,7 +156,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         } => {
             expr_references_input_scope(expr)
                 || expr_references_input_scope(pattern)
-                || escape.as_ref().is_some_and(|e| expr_references_input_scope(e))
+                || escape
+                    .as_ref()
+                    .is_some_and(|e| expr_references_input_scope(e))
         }
         SqlExpr::Similar {
             expr,
@@ -161,7 +168,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         } => {
             expr_references_input_scope(expr)
                 || expr_references_input_scope(pattern)
-                || escape.as_ref().is_some_and(|e| expr_references_input_scope(e))
+                || escape
+                    .as_ref()
+                    .is_some_and(|e| expr_references_input_scope(e))
         }
         SqlExpr::Cast(inner, _)
         | SqlExpr::UnaryPlus(inner)
@@ -169,7 +178,12 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
-        | SqlExpr::IsNotNull(inner) => expr_references_input_scope(inner),
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => expr_references_input_scope(inner),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            expr_references_input_scope(left) || expr_references_input_scope(right)
+        }
     }
 }
 
@@ -279,7 +293,13 @@ pub(super) fn collect_aggs(expr: &SqlExpr, aggs: &mut Vec<(AggFunc, Vec<SqlFunct
         | SqlExpr::BitNot(inner)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)
-        | SqlExpr::IsNotNull(inner) => collect_aggs(inner, aggs),
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. } => collect_aggs(inner, aggs),
+        SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            collect_aggs(left, aggs);
+            collect_aggs(right, aggs);
+        }
     }
 }
 

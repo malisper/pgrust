@@ -3,6 +3,9 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, parse_bit_text, render_bit_text};
 use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
+use super::expr_geometry::{
+    cast_geometry_value, geometry_input_error_message, parse_geometry_text,
+};
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
@@ -389,6 +392,8 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::InvalidByteaInput { .. } => {
             format!("invalid input syntax for type bytea: \"{text}\"")
         }
+        ExecError::InvalidGeometryInput { ty, .. } => geometry_input_error_message(ty, text)
+            .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{text}\"")),
         ExecError::InvalidBitInput { digit, is_hex } => {
             if *is_hex {
                 format!("\"{digit}\" is not a valid hexadecimal digit")
@@ -408,8 +413,8 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
         ExecError::InvalidFloatInput { ty, .. } => {
             format!("invalid input syntax for type {ty}: \"{text}\"")
         }
-        ExecError::FloatOutOfRange { ty, .. } => {
-            format!("\"{text}\" is out of range for type {ty}")
+        ExecError::FloatOutOfRange { ty, value } => {
+            format!("\"{value}\" is out of range for type {ty}")
         }
         ExecError::FloatOverflow => "value out of range: overflow".to_string(),
         ExecError::FloatUnderflow => "value out of range: underflow".to_string(),
@@ -425,6 +430,7 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         ExecError::InvalidIntegerInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidGeometryInput { .. }
         | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. } => "22P02",
         ExecError::BitStringLengthMismatch { .. } => "22026",
@@ -479,9 +485,7 @@ pub(crate) fn soft_input_error_info(
         | SqlTypeKind::VarBit
         | SqlTypeKind::Name
         | SqlTypeKind::Char
-        | SqlTypeKind::Varchar => {
-            cast_text_value(text, ty, false)
-        }
+        | SqlTypeKind::Varchar => cast_text_value(text, ty, false),
         _ => cast_value(Value::Text(text.into()), ty),
     };
     match parsed {
@@ -516,6 +520,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 }),
             },
         };
+    }
+
+    if let Some(result) = cast_geometry_value(value.clone(), ty) {
+        return result;
     }
 
     match value {
@@ -557,6 +565,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Point
+                    | SqlTypeKind::Lseg
+                    | SqlTypeKind::Path
+                    | SqlTypeKind::Box
+                    | SqlTypeKind::Polygon
+                    | SqlTypeKind::Line
+                    | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -621,6 +636,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Point
+                    | SqlTypeKind::Lseg
+                    | SqlTypeKind::Path
+                    | SqlTypeKind::Box
+                    | SqlTypeKind::Polygon
+                    | SqlTypeKind::Line
+                    | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -657,6 +679,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Point
+                    | SqlTypeKind::Lseg
+                    | SqlTypeKind::Path
+                    | SqlTypeKind::Box
+                    | SqlTypeKind::Polygon
+                    | SqlTypeKind::Line
+                    | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -792,6 +821,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Point
+                    | SqlTypeKind::Lseg
+                    | SqlTypeKind::Path
+                    | SqlTypeKind::Box
+                    | SqlTypeKind::Polygon
+                    | SqlTypeKind::Line
+                    | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -839,6 +875,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Name
                     | SqlTypeKind::Int2Vector
                     | SqlTypeKind::OidVector
+                    | SqlTypeKind::Point
+                    | SqlTypeKind::Lseg
+                    | SqlTypeKind::Path
+                    | SqlTypeKind::Box
+                    | SqlTypeKind::Polygon
+                    | SqlTypeKind::Line
+                    | SqlTypeKind::Circle
                     | SqlTypeKind::Timestamp
                     | SqlTypeKind::PgNodeTree
                     | SqlTypeKind::InternalChar
@@ -898,6 +941,13 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 right: Value::Null,
             }),
         },
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => unreachable!("geometry casts handled before scalar match"),
         Value::Array(items) => Ok(Value::Array(items)),
     }
 }
@@ -922,9 +972,9 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         }
         SqlTypeKind::Jsonb => Ok(Value::Jsonb(parse_jsonb_text(text)?)),
         SqlTypeKind::JsonPath => Ok(Value::JsonPath(canonicalize_jsonpath_text(text)?)),
-        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
-            coerce_character_string(text, ty, explicit)?,
-        ))),
+        SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(Value::Text(
+            CompactString::from_owned(coerce_character_string(text, ty, explicit)?),
+        )),
         SqlTypeKind::Int2 => cast_text_to_int2(text),
         SqlTypeKind::Int4 => cast_text_to_int4(text),
         SqlTypeKind::Int8 => cast_text_to_int8(text),
@@ -942,6 +992,13 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
             ty,
         )?)),
         SqlTypeKind::Bool => parse_pg_bool_text(text).map(Value::Bool),
+        SqlTypeKind::Point
+        | SqlTypeKind::Lseg
+        | SqlTypeKind::Path
+        | SqlTypeKind::Box
+        | SqlTypeKind::Polygon
+        | SqlTypeKind::Line
+        | SqlTypeKind::Circle => parse_geometry_text(text, ty.kind),
     }
 }
 
@@ -955,6 +1012,13 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
+        | SqlTypeKind::Point
+        | SqlTypeKind::Lseg
+        | SqlTypeKind::Path
+        | SqlTypeKind::Box
+        | SqlTypeKind::Polygon
+        | SqlTypeKind::Line
+        | SqlTypeKind::Circle
         | SqlTypeKind::Timestamp
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::from_owned(value.render()))),
         SqlTypeKind::Json => {
@@ -1191,7 +1255,7 @@ fn pow10_bigint(exp: u32) -> num_bigint::BigInt {
     value
 }
 
-fn parse_pg_float(text: &str, kind: SqlTypeKind) -> Result<f64, ExecError> {
+pub(crate) fn parse_pg_float(text: &str, kind: SqlTypeKind) -> Result<f64, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     let ty = float_sql_type_name(kind);
     if trimmed.is_empty() {

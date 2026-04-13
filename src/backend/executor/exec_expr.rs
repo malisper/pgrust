@@ -10,6 +10,7 @@ use super::expr_casts::{cast_value, soft_input_error_info};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
+use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
 };
@@ -34,20 +35,18 @@ use super::expr_ops::{
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_string::{
-    eval_ascii_function, eval_bpchar_to_text_function, eval_bytea_overlay,
+    eval_ascii_function, eval_bit_count_bytes, eval_bpchar_to_text_function, eval_bytea_overlay,
     eval_bytea_position_function, eval_bytea_substring, eval_chr_function,
-    eval_convert_from_function, eval_crc32_function, eval_crc32c_function,
-    eval_decode_function, eval_encode_function, eval_get_bit_bytes, eval_get_byte,
-    eval_initcap_function, eval_left_function, eval_length_function, eval_like,
-    eval_lower_function, eval_lpad_function, eval_md5_function, eval_position_function,
-    eval_rpad_function, eval_regexp_count, eval_regexp_instr, eval_regexp_like,
-    eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr,
-    eval_repeat_function, eval_replace_function, eval_reverse_function,
+    eval_convert_from_function, eval_crc32_function, eval_crc32c_function, eval_decode_function,
+    eval_encode_function, eval_get_bit_bytes, eval_get_byte, eval_initcap_function,
+    eval_left_function, eval_length_function, eval_like, eval_lower_function, eval_lpad_function,
+    eval_md5_function, eval_position_function, eval_regexp_count, eval_regexp_instr,
+    eval_regexp_like, eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr,
+    eval_repeat_function, eval_replace_function, eval_reverse_function, eval_rpad_function,
     eval_set_bit_bytes, eval_set_byte, eval_sha224_function, eval_sha256_function,
     eval_sha384_function, eval_sha512_function, eval_similar, eval_similar_substring,
     eval_split_part_function, eval_sql_regex_substring, eval_strpos_function, eval_text_substring,
-    eval_to_char_function, eval_to_number_function, eval_translate_function,
-    eval_trim_function, eval_bit_count_bytes,
+    eval_to_char_function, eval_to_number_function, eval_translate_function, eval_trim_function,
 };
 use super::node_types::*;
 pub(crate) use super::value_io::{decode_value, format_array_text, tuple_from_values};
@@ -484,6 +483,9 @@ fn eval_plpgsql_builtin_function(
         .iter()
         .map(|arg| eval_plpgsql_expr(arg, slot))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(result) = eval_geometry_function(func, &values) {
+        return result;
+    }
     match func {
         BuiltinScalarFunction::Length => match values.first() {
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
@@ -519,9 +521,8 @@ fn eval_plpgsql_builtin_function(
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
-            [Value::Bytea(_), Value::Int32(_)] | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
-                eval_bytea_substring(&values)
-            }
+            [Value::Bytea(_), Value::Int32(_)]
+            | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_bytea_substring(&values),
             [Value::Text(_), Value::Text(_)] => eval_sql_regex_substring(&values),
             _ => eval_text_substring(&values),
         },
@@ -542,9 +543,12 @@ fn eval_plpgsql_builtin_function(
                 Some(*len),
             )?)),
             [Value::Bytea(_), Value::Bytea(_), Value::Int32(_)]
-            | [Value::Bytea(_), Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
-                eval_bytea_overlay(&values)
-            }
+            | [
+                Value::Bytea(_),
+                Value::Bytea(_),
+                Value::Int32(_),
+                Value::Int32(_),
+            ] => eval_bytea_overlay(&values),
             _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "plpgsql builtin function supported by the standalone evaluator",
                 actual: format!("{func:?}"),
@@ -679,6 +683,9 @@ fn eval_builtin_function(
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(result) = eval_geometry_function(func, &values) {
+        return result;
+    }
     if let Some(result) = eval_json_builtin_function(func, &values) {
         return result;
     }
@@ -824,9 +831,8 @@ fn eval_builtin_function(
             [Value::Bit(bits), Value::Int32(start), Value::Int32(len)] => {
                 Ok(Value::Bit(eval_bit_substring(bits, *start, Some(*len))?))
             }
-            [Value::Bytea(_), Value::Int32(_)] | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
-                eval_bytea_substring(&values)
-            }
+            [Value::Bytea(_), Value::Int32(_)]
+            | [Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => eval_bytea_substring(&values),
             [Value::Text(_), Value::Text(_)] => eval_sql_regex_substring(&values),
             _ => eval_text_substring(&values),
         },
@@ -847,9 +853,12 @@ fn eval_builtin_function(
                 Some(*len),
             )?)),
             [Value::Bytea(_), Value::Bytea(_), Value::Int32(_)]
-            | [Value::Bytea(_), Value::Bytea(_), Value::Int32(_), Value::Int32(_)] => {
-                eval_bytea_overlay(&values)
-            }
+            | [
+                Value::Bytea(_),
+                Value::Bytea(_),
+                Value::Int32(_),
+                Value::Int32(_),
+            ] => eval_bytea_overlay(&values),
             _ => unreachable!("validated bit overlay arguments"),
         },
         BuiltinScalarFunction::GetBit => match values.as_slice() {

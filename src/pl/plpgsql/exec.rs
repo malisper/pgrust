@@ -186,6 +186,16 @@ fn render_raise_value(value: &Value) -> String {
             }
             rendered
         }
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => {
+            crate::backend::executor::render_geometry_text(value, Default::default())
+                .unwrap_or_default()
+        }
         Value::Array(values) => {
             let elems = values.iter().map(render_raise_value).collect::<Vec<_>>();
             format!("{{{}}}", elems.join(","))

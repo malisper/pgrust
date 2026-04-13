@@ -3,7 +3,10 @@ use std::str::FromStr;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::exec_expr::format_array_text;
-use crate::backend::executor::{ExecError, QueryColumn, Value, render_internal_char_text};
+use crate::backend::executor::{
+    ExecError, QueryColumn, Value, geometry_input_error_message, render_geometry_text,
+    render_internal_char_text,
+};
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::TupleError;
 use crate::pgrust::session::ByteaOutputFormat;
@@ -46,6 +49,8 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::InvalidByteaInput { value } => {
             format!("invalid input syntax for type bytea: \"{value}\"")
         }
+        ExecError::InvalidGeometryInput { ty, value } => geometry_input_error_message(ty, value)
+            .unwrap_or_else(|| format!("invalid input syntax for type {ty}: \"{value}\"")),
         ExecError::InvalidBitInput { digit, is_hex } => {
             if *is_hex {
                 format!("\"{digit}\" is not a valid hexadecimal digit")
@@ -209,6 +214,13 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Json => 199,
             SqlTypeKind::Jsonb => 3807,
             SqlTypeKind::JsonPath => 4073,
+            SqlTypeKind::Point
+            | SqlTypeKind::Lseg
+            | SqlTypeKind::Path
+            | SqlTypeKind::Box
+            | SqlTypeKind::Polygon
+            | SqlTypeKind::Line
+            | SqlTypeKind::Circle => unreachable!("geometry arrays are unsupported"),
             SqlTypeKind::InternalChar => 1002,
             SqlTypeKind::Name => 1003,
             SqlTypeKind::Text
@@ -236,6 +248,13 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
         SqlTypeKind::JsonPath => (4072, -1, -1),
+        SqlTypeKind::Point => (600, 16, -1),
+        SqlTypeKind::Lseg => (601, 32, -1),
+        SqlTypeKind::Path => (602, -1, -1),
+        SqlTypeKind::Box => (603, 32, -1),
+        SqlTypeKind::Polygon => (604, -1, -1),
+        SqlTypeKind::Line => (628, 24, -1),
+        SqlTypeKind::Circle => (718, 24, -1),
         SqlTypeKind::InternalChar => (18, 1, -1),
         SqlTypeKind::Name => (19, 64, -1),
         SqlTypeKind::Bool => (16, 1, -1),
@@ -349,6 +368,17 @@ pub(crate) fn send_typed_data_row(
             Value::Bool(false) => {
                 buf.extend_from_slice(&1_i32.to_be_bytes());
                 buf.push(b'f');
+            }
+            Value::Point(_)
+            | Value::Lseg(_)
+            | Value::Path(_)
+            | Value::Line(_)
+            | Value::Box(_)
+            | Value::Polygon(_)
+            | Value::Circle(_) => {
+                let rendered = render_geometry_text(val, float_format).unwrap_or_default();
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Array(items) => {
                 let rendered = format_array_text(items);
@@ -529,7 +559,7 @@ pub(crate) fn send_notice_with_severity(
     Ok(())
 }
 
-fn format_float8_text(value: f64, options: FloatFormatOptions) -> String {
+pub(crate) fn format_float8_text(value: f64, options: FloatFormatOptions) -> String {
     if value.is_nan() {
         return "NaN".to_string();
     }
@@ -547,7 +577,7 @@ fn format_float8_text(value: f64, options: FloatFormatOptions) -> String {
     format_float_shortest(value, false)
 }
 
-fn format_float4_text(value: f64, options: FloatFormatOptions) -> String {
+pub(crate) fn format_float4_text(value: f64, options: FloatFormatOptions) -> String {
     let value = value as f32;
     if value.is_nan() {
         return "NaN".to_string();

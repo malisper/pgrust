@@ -13,8 +13,8 @@ use crate::backend::executor::value_io::missing_column_value;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectionState,
-    ProjectSetState, ResultState, SeqScanState, SlotKind, TupleSlot, ValuesState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState, ProjectionState,
+    ResultState, SeqScanState, SlotKind, TupleSlot, ValuesState,
 };
 
 use std::time::Instant;
@@ -155,12 +155,14 @@ impl PlanNode for IndexScanState {
                 key_data: self.keys.clone(),
                 direction: self.direction,
             };
-            self.scan = Some(indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
-                ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
-                    expected: "index access method begin scan",
-                    actual: format!("{err:?}"),
-                })
-            })?);
+            self.scan = Some(
+                indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
+                    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+                        expected: "index access method begin scan",
+                        actual: format!("{err:?}"),
+                    })
+                })?,
+            );
         }
 
         let start = if ctx.timed {
@@ -202,7 +204,14 @@ impl PlanNode for IndexScanState {
                 .expect("index scan tuple must set heap tid");
             let visible = {
                 let txns = ctx.txns.read();
-                heap_fetch_visible(&ctx.pool, ctx.client_id, self.rel, tid, &txns, &ctx.snapshot)?
+                heap_fetch_visible(
+                    &ctx.pool,
+                    ctx.client_id,
+                    self.rel,
+                    tid,
+                    &txns,
+                    &ctx.snapshot,
+                )?
             };
             let Some(tuple) = visible else {
                 continue;

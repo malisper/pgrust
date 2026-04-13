@@ -4,6 +4,7 @@ mod agg_output_special;
 mod coerce;
 mod expr;
 mod functions;
+mod geometry;
 mod infer;
 mod scope;
 
@@ -26,6 +27,7 @@ use agg_output::*;
 use coerce::*;
 use expr::*;
 use functions::*;
+use geometry::*;
 use infer::*;
 pub use scope::BoundRelation;
 use scope::*;
@@ -259,11 +261,7 @@ pub fn derive_literal_default_value(sql: &str, target: SqlType) -> Result<Value,
                     });
                 }
             },
-            if from_type == target {
-                target
-            } else {
-                target
-            },
+            if from_type == target { target } else { target },
         ) {
             Ok(value) => value,
             Err(_) => {
@@ -989,10 +987,12 @@ fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                 relation_oid,
                 desc,
             } => (rel, relation_oid, desc, Some(predicate), None),
-            other => return Plan::Filter {
-                input: Box::new(other),
-                predicate,
-            },
+            other => {
+                return Plan::Filter {
+                    input: Box::new(other),
+                    predicate,
+                };
+            }
         },
         Plan::OrderBy { input, items } => match *input {
             Plan::SeqScan {
@@ -1084,7 +1084,9 @@ fn choose_index_scan(
             predicate,
         };
     }
-    if !chosen.removes_order && let Some(items) = order_items {
+    if !chosen.removes_order
+        && let Some(items) = order_items
+    {
         plan = Plan::OrderBy {
             input: Box::new(plan),
             items,
@@ -1148,7 +1150,8 @@ fn choose_index_path(
         }
 
         let usable_prefix = keys.len();
-        let order_match = order_items.and_then(|items| index_order_match(items, index, equality_prefix));
+        let order_match =
+            order_items.and_then(|items| index_order_match(items, index, equality_prefix));
         let has_qual = usable_prefix > 0;
         if !has_qual && order_match.is_none() {
             continue;
@@ -1157,7 +1160,12 @@ fn choose_index_path(
             let used_exprs = parsed_quals
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, qual)| used.get(idx).copied().unwrap_or(false).then_some(&qual.expr))
+                .filter_map(|(idx, qual)| {
+                    used.get(idx)
+                        .copied()
+                        .unwrap_or(false)
+                        .then_some(&qual.expr)
+                })
                 .collect::<Vec<_>>();
             let residual = conjuncts
                 .iter()
@@ -1183,13 +1191,15 @@ fn choose_index_path(
         match &best {
             None => best = Some(chosen),
             Some(existing) => {
-                if (chosen.has_qual as u8, chosen.usable_prefix, chosen.removes_order as u8)
-                    > (
-                        existing.has_qual as u8,
-                        existing.usable_prefix,
-                        existing.removes_order as u8,
-                    )
-                {
+                if (
+                    chosen.has_qual as u8,
+                    chosen.usable_prefix,
+                    chosen.removes_order as u8,
+                ) > (
+                    existing.has_qual as u8,
+                    existing.usable_prefix,
+                    existing.removes_order as u8,
+                ) {
                     best = Some(chosen);
                 }
             }
@@ -1203,7 +1213,8 @@ fn choose_modify_row_source(
     predicate: Option<&Expr>,
     indexes: &[BoundIndexRelation],
 ) -> BoundModifyRowSource {
-    if let Some(chosen) = choose_index_path(predicate, None, indexes).filter(|chosen| chosen.has_qual)
+    if let Some(chosen) =
+        choose_index_path(predicate, None, indexes).filter(|chosen| chosen.has_qual)
     {
         BoundModifyRowSource::Index {
             index: chosen.index,
@@ -1248,9 +1259,10 @@ fn index_order_match(
         }
         matched += 1;
     }
-    (matched == items.len()).then_some((matched, direction.unwrap_or(
-        crate::include::access::relscan::ScanDirection::Forward,
-    )))
+    (matched == items.len()).then_some((
+        matched,
+        direction.unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
+    ))
 }
 
 fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
@@ -1335,6 +1347,16 @@ fn bind_order_by_items(
                                 actual: value.clone(),
                             });
                         }
+                    } else {
+                        bind_expr(&item.expr)?
+                    }
+                }
+                SqlExpr::Column(name) => {
+                    if let Some(target) = targets
+                        .iter()
+                        .find(|target| target.name.eq_ignore_ascii_case(name))
+                    {
+                        target.expr.clone()
                     } else {
                         bind_expr(&item.expr)?
                     }
@@ -1587,9 +1609,7 @@ pub fn bind_update(
     let predicate = stmt
         .where_clause
         .as_ref()
-        .map(|expr| {
-            bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
-        })
+        .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
         .transpose()?;
 
     Ok(BoundUpdateStatement {
@@ -1629,9 +1649,7 @@ pub fn bind_delete(
     let predicate = stmt
         .where_clause
         .as_ref()
-        .map(|expr| {
-            bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
-        })
+        .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
         .transpose()?;
     let indexes = catalog.index_relations_for_heap(entry.relation_oid);
 

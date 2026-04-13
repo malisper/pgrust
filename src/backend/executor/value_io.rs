@@ -4,6 +4,10 @@ use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
     cast_numeric_value, cast_text_value, cast_value, render_internal_char_text,
 };
+use super::expr_geometry::{
+    decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
+    render_geometry_text,
+};
 use super::node_types::*;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
@@ -55,6 +59,46 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec()))
         }
         (ScalarType::Float64, Value::Float64(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Point, Value::Point(point)) => {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&point.x.to_le_bytes());
+            bytes.extend_from_slice(&point.y.to_le_bytes());
+            Ok(TupleValue::Bytes(bytes))
+        }
+        (ScalarType::Line, Value::Line(line)) => {
+            let mut bytes = Vec::with_capacity(24);
+            bytes.extend_from_slice(&line.a.to_le_bytes());
+            bytes.extend_from_slice(&line.b.to_le_bytes());
+            bytes.extend_from_slice(&line.c.to_le_bytes());
+            Ok(TupleValue::Bytes(bytes))
+        }
+        (ScalarType::Lseg, Value::Lseg(lseg)) => {
+            let mut bytes = Vec::with_capacity(32);
+            for point in &lseg.p {
+                bytes.extend_from_slice(&point.x.to_le_bytes());
+                bytes.extend_from_slice(&point.y.to_le_bytes());
+            }
+            Ok(TupleValue::Bytes(bytes))
+        }
+        (ScalarType::Box, Value::Box(geo_box)) => {
+            let mut bytes = Vec::with_capacity(32);
+            bytes.extend_from_slice(&geo_box.high.x.to_le_bytes());
+            bytes.extend_from_slice(&geo_box.high.y.to_le_bytes());
+            bytes.extend_from_slice(&geo_box.low.x.to_le_bytes());
+            bytes.extend_from_slice(&geo_box.low.y.to_le_bytes());
+            Ok(TupleValue::Bytes(bytes))
+        }
+        (ScalarType::Circle, Value::Circle(circle)) => {
+            let mut bytes = Vec::with_capacity(24);
+            bytes.extend_from_slice(&circle.center.x.to_le_bytes());
+            bytes.extend_from_slice(&circle.center.y.to_le_bytes());
+            bytes.extend_from_slice(&circle.radius.to_le_bytes());
+            Ok(TupleValue::Bytes(bytes))
+        }
+        (ScalarType::Path, Value::Path(path)) => Ok(TupleValue::Bytes(encode_path_bytes(&path))),
+        (ScalarType::Polygon, Value::Polygon(poly)) => {
+            Ok(TupleValue::Bytes(encode_polygon_bytes(&poly)))
+        }
         (ScalarType::Numeric, Value::Numeric(numeric)) => {
             Ok(TupleValue::Bytes(numeric.render().into_bytes()))
         }
@@ -132,6 +176,13 @@ fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<Value, Exec
         Value::Text(text) => cast_text_value(text.as_str(), target, false),
         Value::TextRef(_, _) => cast_text_value(value.as_text().unwrap(), target, false),
         Value::InternalChar(byte) => cast_value(Value::InternalChar(*byte), target),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => cast_value(value.clone(), target),
         Value::Array(items) => Ok(Value::Array(items.clone())),
     }
 }
@@ -256,6 +307,89 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                     })?,
             )))
         }
+        ScalarType::Point => {
+            if column.storage.attlen != 16 || bytes.len() != 16 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Point(GeoPoint {
+                x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            }))
+        }
+        ScalarType::Line => {
+            if column.storage.attlen != 24 || bytes.len() != 24 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Line(GeoLine {
+                a: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                b: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                c: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            }))
+        }
+        ScalarType::Lseg => {
+            if column.storage.attlen != 32 || bytes.len() != 32 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Lseg(GeoLseg {
+                p: [
+                    GeoPoint {
+                        x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                        y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                    },
+                    GeoPoint {
+                        x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                        y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                    },
+                ],
+            }))
+        }
+        ScalarType::Box => {
+            if column.storage.attlen != 32 || bytes.len() != 32 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Box(GeoBox {
+                high: GeoPoint {
+                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                },
+                low: GeoPoint {
+                    x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                },
+            }))
+        }
+        ScalarType::Circle => {
+            if column.storage.attlen != 24 || bytes.len() != 24 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Circle(GeoCircle {
+                center: GeoPoint {
+                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                },
+                radius: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            }))
+        }
         ScalarType::Numeric => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(ExecError::UnsupportedStorageType {
@@ -319,6 +453,26 @@ pub(crate) fn decode_value(column: &ColumnDesc, bytes: Option<&[u8]>) -> Result<
                 std::str::from_utf8_unchecked(bytes)
             })))
         }
+        ScalarType::Path => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Path(decode_path_bytes(bytes)?))
+        }
+        ScalarType::Polygon => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Polygon(decode_polygon_bytes(bytes)?))
+        }
         ScalarType::Bool => {
             if column.storage.attlen != 1 || bytes.len() != 1 {
                 return Err(ExecError::UnsupportedStorageType {
@@ -354,10 +508,9 @@ pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
         .missing_default_value
         .clone()
         .or_else(|| {
-            column
-                .default_expr
-                .as_deref()
-                .and_then(|sql| crate::backend::parser::derive_literal_default_value(sql, column.sql_type).ok())
+            column.default_expr.as_deref().and_then(|sql| {
+                crate::backend::parser::derive_literal_default_value(sql, column.sql_type).ok()
+            })
         })
         .unwrap_or(Value::Null)
 }
@@ -400,6 +553,44 @@ fn encode_array_element(element_type: SqlType, value: &Value) -> Result<Vec<u8>,
         Value::InternalChar(v) => Ok(vec![v]),
         Value::Float64(v) => Ok(v.to_string().into_bytes()),
         Value::JsonPath(text) => Ok(text.as_bytes().to_vec()),
+        Value::Point(point) => {
+            let mut bytes = Vec::with_capacity(16);
+            bytes.extend_from_slice(&point.x.to_le_bytes());
+            bytes.extend_from_slice(&point.y.to_le_bytes());
+            Ok(bytes)
+        }
+        Value::Line(line) => {
+            let mut bytes = Vec::with_capacity(24);
+            bytes.extend_from_slice(&line.a.to_le_bytes());
+            bytes.extend_from_slice(&line.b.to_le_bytes());
+            bytes.extend_from_slice(&line.c.to_le_bytes());
+            Ok(bytes)
+        }
+        Value::Lseg(lseg) => {
+            let mut bytes = Vec::with_capacity(32);
+            for point in &lseg.p {
+                bytes.extend_from_slice(&point.x.to_le_bytes());
+                bytes.extend_from_slice(&point.y.to_le_bytes());
+            }
+            Ok(bytes)
+        }
+        Value::Box(geo_box) => {
+            let mut bytes = Vec::with_capacity(32);
+            bytes.extend_from_slice(&geo_box.high.x.to_le_bytes());
+            bytes.extend_from_slice(&geo_box.high.y.to_le_bytes());
+            bytes.extend_from_slice(&geo_box.low.x.to_le_bytes());
+            bytes.extend_from_slice(&geo_box.low.y.to_le_bytes());
+            Ok(bytes)
+        }
+        Value::Circle(circle) => {
+            let mut bytes = Vec::with_capacity(24);
+            bytes.extend_from_slice(&circle.center.x.to_le_bytes());
+            bytes.extend_from_slice(&circle.center.y.to_le_bytes());
+            bytes.extend_from_slice(&circle.radius.to_le_bytes());
+            Ok(bytes)
+        }
+        Value::Path(path) => Ok(encode_path_bytes(&path)),
+        Value::Polygon(poly) => Ok(encode_polygon_bytes(&poly)),
         Value::Array(_) => Err(ExecError::TypeMismatch {
             op: "array element",
             left: coerced,
@@ -521,6 +712,86 @@ fn decode_array_element(element_type: SqlType, bytes: &[u8]) -> Result<Value, Ex
             )))
         }
         SqlTypeKind::Bytea => Ok(Value::Bytea(bytes.to_vec())),
+        SqlTypeKind::Point => {
+            if bytes.len() != 16 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "point array element must be 16 bytes".into(),
+                });
+            }
+            Ok(Value::Point(GeoPoint {
+                x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            }))
+        }
+        SqlTypeKind::Line => {
+            if bytes.len() != 24 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "line array element must be 24 bytes".into(),
+                });
+            }
+            Ok(Value::Line(GeoLine {
+                a: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                b: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                c: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            }))
+        }
+        SqlTypeKind::Lseg => {
+            if bytes.len() != 32 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "lseg array element must be 32 bytes".into(),
+                });
+            }
+            Ok(Value::Lseg(GeoLseg {
+                p: [
+                    GeoPoint {
+                        x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                        y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                    },
+                    GeoPoint {
+                        x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                        y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                    },
+                ],
+            }))
+        }
+        SqlTypeKind::Box => {
+            if bytes.len() != 32 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "box array element must be 32 bytes".into(),
+                });
+            }
+            Ok(Value::Box(GeoBox {
+                high: GeoPoint {
+                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                },
+                low: GeoPoint {
+                    x: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+                },
+            }))
+        }
+        SqlTypeKind::Circle => {
+            if bytes.len() != 24 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<array>".into(),
+                    details: "circle array element must be 24 bytes".into(),
+                });
+            }
+            Ok(Value::Circle(GeoCircle {
+                center: GeoPoint {
+                    x: f64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+                    y: f64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+                },
+                radius: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            }))
+        }
+        SqlTypeKind::Path => Ok(Value::Path(decode_path_bytes(bytes)?)),
+        SqlTypeKind::Polygon => Ok(Value::Polygon(decode_polygon_bytes(bytes)?)),
         SqlTypeKind::Json => {
             let text = unsafe { std::str::from_utf8_unchecked(bytes) };
             validate_json_text(text)?;
@@ -621,6 +892,26 @@ pub(crate) fn format_array_text(items: &[Value]) -> String {
                 out.push('"');
             }
             Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+            Value::Point(_)
+            | Value::Lseg(_)
+            | Value::Path(_)
+            | Value::Line(_)
+            | Value::Box(_)
+            | Value::Polygon(_)
+            | Value::Circle(_) => {
+                let rendered = render_geometry_text(item, Default::default()).unwrap_or_default();
+                out.push('"');
+                for ch in rendered.chars() {
+                    match ch {
+                        '"' | '\\' => {
+                            out.push('\\');
+                            out.push(ch);
+                        }
+                        _ => out.push(ch),
+                    }
+                }
+                out.push('"');
+            }
             Value::Text(_) | Value::TextRef(_, _) => {
                 out.push('"');
                 for ch in item.as_text().unwrap().chars() {

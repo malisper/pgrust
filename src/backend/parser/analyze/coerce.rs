@@ -78,6 +78,13 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Point => "point",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
+        SqlTypeKind::Box => "box",
+        SqlTypeKind::Polygon => "polygon",
+        SqlTypeKind::Line => "line",
+        SqlTypeKind::Circle => "circle",
         SqlTypeKind::Timestamp => "timestamp",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
         SqlTypeKind::InternalChar => "\"char\"",
@@ -115,6 +122,20 @@ pub(super) fn is_bit_string_type(ty: SqlType) -> bool {
     !ty.is_array && matches!(ty.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
 }
 
+pub(super) fn is_geometry_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::Point
+                | SqlTypeKind::Lseg
+                | SqlTypeKind::Path
+                | SqlTypeKind::Box
+                | SqlTypeKind::Polygon
+                | SqlTypeKind::Line
+                | SqlTypeKind::Circle
+        )
+}
+
 pub(super) fn is_text_like_type(ty: SqlType) -> bool {
     matches!(
         ty.element_type().kind,
@@ -140,6 +161,9 @@ pub(super) fn coerce_unknown_string_literal_type(
         }
         if is_bit_string_type(peer_type) {
             return SqlType::new(SqlTypeKind::VarBit);
+        }
+        if is_geometry_type(peer_type) {
+            return peer_type.element_type();
         }
     }
     expr_type
