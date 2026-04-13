@@ -49,12 +49,14 @@ use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager,
 };
 use crate::backend::catalog::catalog::Catalog;
+use crate::backend::catalog::CatalogError;
 use crate::backend::commands::tablecmds::*;
 use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, build_plan, build_values_plan,
     parse_statement,
 };
 use crate::include::access::htup::TupleError;
+use crate::pgrust::database::TransactionWaiter;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
 use expr_ops::{compare_order_values, parse_numeric_text};
@@ -62,6 +64,7 @@ use expr_ops::{compare_order_values, parse_numeric_text};
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
+    pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,
@@ -75,6 +78,9 @@ pub enum ExecError {
     Heap(HeapError),
     Tuple(TupleError),
     Parse(ParseError),
+    UniqueViolation {
+        constraint: String,
+    },
     InvalidColumn(usize),
     TypeMismatch {
         op: &'static str,
@@ -173,6 +179,18 @@ impl From<TupleError> for ExecError {
 impl From<ParseError> for ExecError {
     fn from(value: ParseError) -> Self {
         Self::Parse(value)
+    }
+}
+
+impl From<CatalogError> for ExecError {
+    fn from(value: CatalogError) -> Self {
+        match value {
+            CatalogError::UniqueViolation(constraint) => Self::UniqueViolation { constraint },
+            other => Self::Parse(ParseError::UnexpectedToken {
+                expected: "catalog operation",
+                actual: format!("{other:?}"),
+            }),
+        }
     }
 }
 

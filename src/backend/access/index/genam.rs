@@ -23,6 +23,9 @@ pub fn index_beginscan_stub(
         xs_heaptid: None,
         opaque: IndexScanOpaque::Btree(BtIndexScanOpaque {
             current_block: None,
+            current_pin: None,
+            page_prev: None,
+            page_next: None,
             next_offset: 0,
             current_items: Vec::new(),
         }),

@@ -465,6 +465,7 @@ fn run_statement(
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
+                txn_waiter: None,
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -477,6 +478,7 @@ fn run_statement(
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
+                txn_waiter: None,
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -489,6 +491,7 @@ fn run_statement(
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
+                txn_waiter: None,
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -501,6 +504,7 @@ fn run_statement(
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
+                txn_waiter: None,
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -559,18 +563,20 @@ fn run_statement(
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
+                txn_waiter: None,
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
                 outer_rows: Vec::new(),
                 timed: false,
             };
-            execute_truncate_table(stmt, &relcache, &mut ctx)
+            execute_truncate_table(stmt, &relcache, &mut ctx, INVALID_TRANSACTION_ID)
         }
         Statement::Vacuum(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
+                txn_waiter: None,
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -586,6 +592,7 @@ fn run_statement(
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
+                    txn_waiter: None,
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
@@ -612,6 +619,7 @@ fn run_statement(
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
+                    txn_waiter: None,
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
@@ -638,6 +646,7 @@ fn run_statement(
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
+                    txn_waiter: None,
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,

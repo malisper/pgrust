@@ -4,9 +4,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::storage_backend::StorageBackend;
+use super::storage_backend::{SmgrStorageBackend, StorageBackend};
+use crate::backend::access::transam::xlog::{RM_BTREE_ID, RM_HEAP_ID};
 use crate::backend::access::transam::xlog::{INVALID_LSN, Lsn, WalWriter};
-use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::include::storage::buf_internals::*;
 
 struct BufferFrame {
@@ -625,12 +626,13 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Ok(())
     }
 
-    pub fn write_page_image_locked(
+    pub fn write_page_image_locked_with_rmgr(
         &self,
         buffer_id: BufferId,
         xid: u32,
         page: &Page,
         guard: &mut RwLockWriteGuard<'_, Page>,
+        rmid: u8,
     ) -> Result<(), Error> {
         let tag = {
             let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
@@ -644,7 +646,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
 
         if let Some(ref wal) = self.wal {
             let lsn = wal
-                .write_record(xid, tag, page)
+                .write_record_with_rmgr(xid, tag, page, rmid)
                 .map_err(|e| Error::Wal(e.to_string()))?;
             page_to_store[0..8].copy_from_slice(&lsn.to_le_bytes());
             **guard = page_to_store;
@@ -666,6 +668,26 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         Ok(())
+    }
+
+    pub fn write_page_image_locked(
+        &self,
+        buffer_id: BufferId,
+        xid: u32,
+        page: &Page,
+        guard: &mut RwLockWriteGuard<'_, Page>,
+    ) -> Result<(), Error> {
+        self.write_page_image_locked_with_rmgr(buffer_id, xid, page, guard, RM_HEAP_ID)
+    }
+
+    pub fn write_btree_page_image_locked(
+        &self,
+        buffer_id: BufferId,
+        xid: u32,
+        page: &Page,
+        guard: &mut RwLockWriteGuard<'_, Page>,
+    ) -> Result<(), Error> {
+        self.write_page_image_locked_with_rmgr(buffer_id, xid, page, guard, RM_BTREE_ID)
     }
 
     pub fn write_page_image(
@@ -956,6 +978,70 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         None
+    }
+}
+
+impl BufferPool<SmgrStorageBackend> {
+    pub fn ensure_relation_fork(
+        &self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+    ) -> Result<(), Error> {
+        self.with_storage_mut(|storage| {
+            let _ = storage.smgr.open(rel);
+            storage.smgr.create(rel, fork, true)
+        })
+        .map_err(|err| Error::Storage(err.to_string()))
+    }
+
+    pub fn ensure_block_exists(
+        &self,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block: u32,
+    ) -> Result<(), Error> {
+        self.ensure_relation_fork(rel, fork)?;
+        self.with_storage_mut(|storage| {
+            let nblocks = storage.smgr.nblocks(rel, fork)?;
+            if block >= nblocks {
+                let zero_page = [0u8; PAGE_SIZE];
+                for b in nblocks..=block {
+                    storage.smgr.extend(rel, fork, b, &zero_page, true)?;
+                }
+            }
+            Ok::<(), crate::backend::storage::smgr::SmgrError>(())
+        })
+        .map_err(|err| Error::Storage(err.to_string()))
+    }
+
+    pub fn pin_existing_block(
+        &self,
+        client_id: ClientId,
+        rel: RelFileLocator,
+        fork: ForkNumber,
+        block_number: u32,
+    ) -> Result<PinnedBuffer<'_, SmgrStorageBackend>, Error> {
+        let tag = BufferTag {
+            rel,
+            fork,
+            block: block_number,
+        };
+        let buffer_id = match self.request_page(client_id, tag)? {
+            RequestPageResult::Hit { buffer_id } => buffer_id,
+            RequestPageResult::ReadIssued { buffer_id } => {
+                if let Err(e) = self.complete_read(buffer_id) {
+                    let _ = self.fail_read(buffer_id);
+                    return Err(e);
+                }
+                buffer_id
+            }
+            RequestPageResult::WaitingOnRead { buffer_id } => {
+                self.wait_for_io(buffer_id)?;
+                buffer_id
+            }
+            RequestPageResult::AllBuffersPinned => return Err(Error::AllBuffersPinned),
+        };
+        Ok(self.wrap_pinned(client_id, buffer_id))
     }
 }
 

@@ -41,6 +41,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::BitIndexOutOfRange { .. } => "2202E",
         ExecError::NegativeSubstringLength => "22011",
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { .. }) => "42883",
+        ExecError::UniqueViolation { .. } => "23505",
         ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
             "42704"
         }
@@ -628,7 +629,14 @@ fn psql_describe_lookup_query(
             vec![vec![
                 Value::Int32(entry.relation_oid as i32),
                 Value::Text(nspname.into()),
-                Value::Text(relname.rsplit('.').next().unwrap_or(relname.as_str()).to_string().into()),
+                Value::Text(
+                    relname
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(relname.as_str())
+                        .to_string()
+                        .into(),
+                ),
             ]]
         })
         .unwrap_or_default();
@@ -1137,8 +1145,8 @@ fn execute_portal(
         return Ok(());
     }
     let catalog = session.catalog_lookup(db);
-    let sql =
-        rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &catalog)).into_owned();
+    let sql = rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &catalog))
+        .into_owned();
     clear_notices();
     match session.execute(db, &sql) {
         Ok(StatementResult::Query { rows, columns, .. }) => {
@@ -1431,7 +1439,10 @@ mod tests {
         session
             .execute(&db, "create temp table widgets (id int4 not null)")
             .unwrap();
-        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
 
         let sql = "select c.oid, n.nspname, c.relname \
              from pg_catalog.pg_class c \
@@ -1457,7 +1468,10 @@ mod tests {
             .unwrap();
         let mut session = Session::new(1);
         session
-            .execute(&db, "create temp table widgets (id int4 not null, note text)")
+            .execute(
+                &db,
+                "create temp table widgets (id int4 not null, note text)",
+            )
             .unwrap();
         let entry = session
             .catalog_lookup(&db)
@@ -1486,7 +1500,8 @@ mod tests {
     fn psql_describe_tableinfo_query_reports_visible_indexes() {
         let db = Database::open(temp_dir("describe_tableinfo_indexes"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (id int4 not null)").unwrap();
+        db.execute(1, "create table widgets (id int4 not null)")
+            .unwrap();
         db.execute(1, "create index widgets_id_idx on widgets (id)")
             .unwrap();
         let entry = session
@@ -1508,7 +1523,8 @@ mod tests {
     fn psql_describe_tableinfo_query_reports_visible_access_method() {
         let db = Database::open(temp_dir("describe_tableinfo_am"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (id int4 not null)").unwrap();
+        db.execute(1, "create table widgets (id int4 not null)")
+            .unwrap();
         db.execute(1, "create index widgets_id_idx on widgets (id)")
             .unwrap();
         let index = session

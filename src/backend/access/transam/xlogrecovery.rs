@@ -62,6 +62,16 @@ pub fn perform_wal_recovery(
                     .map_err(smgr_to_wal)?;
             }
 
+            WalRecord::BtreePageImage { xid, tag, mut page } => {
+                stats.fpis += 1;
+                seen_xids.insert(xid);
+
+                ensure_block_exists(smgr, tag.rel, tag.fork, tag.block)?;
+                page[0..8].copy_from_slice(&record_lsn.to_le_bytes());
+                smgr.write_block(tag.rel, tag.fork, tag.block, &*page, true)
+                    .map_err(smgr_to_wal)?;
+            }
+
             WalRecord::HeapInsert {
                 xid,
                 tag,

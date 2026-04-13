@@ -123,21 +123,35 @@ fn maintain_indexes_for_row(
         crate::backend::access::index::indexam::index_insert_stub(
             &crate::include::access::amapi::IndexInsertContext {
                 pool: ctx.pool.clone(),
+                txns: ctx.txns.clone(),
+                txn_waiter: ctx.txn_waiter.clone(),
                 client_id: ctx.client_id,
+                snapshot: ctx.snapshot.clone(),
                 heap_relation: heap_rel,
                 heap_desc: heap_desc.clone(),
                 index_relation: index.rel,
+                index_name: index.name.clone(),
                 index_desc: index.desc.clone(),
                 index_meta: index.index_meta.clone(),
                 values: values.to_vec(),
                 heap_tid,
+                unique_check: if index.index_meta.indisunique {
+                    crate::include::access::amapi::IndexUniqueCheck::Yes
+                } else {
+                    crate::include::access::amapi::IndexUniqueCheck::No
+                },
             },
             index.index_meta.am_oid,
         )
-        .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "index insertion",
-            actual: format!("{err:?}"),
-        }))?;
+        .map_err(|err| match err {
+            crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
+                ExecError::UniqueViolation { constraint }
+            }
+            other => ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index insertion",
+                actual: format!("{other:?}"),
+            }),
+        })?;
     }
     Ok(())
 }
@@ -145,6 +159,7 @@ fn maintain_indexes_for_row(
 fn reinitialize_index_relation(
     index: &BoundIndexRelation,
     ctx: &mut ExecutorContext,
+    xid: TransactionId,
 ) -> Result<(), ExecError> {
     let _ = ctx.pool.invalidate_relation(index.rel);
     ctx.pool
@@ -153,6 +168,8 @@ fn reinitialize_index_relation(
     crate::backend::access::index::indexam::index_build_empty_stub(
         &crate::include::access::amapi::IndexBuildEmptyContext {
             pool: ctx.pool.clone(),
+            client_id: ctx.client_id,
+            xid,
             index_relation: index.rel,
         },
         index.index_meta.am_oid,
@@ -398,6 +415,7 @@ pub fn execute_truncate_table(
     stmt: TruncateTableStatement,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
+    xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
     for table_name in stmt.table_names {
         let entry = catalog
@@ -412,7 +430,7 @@ pub fn execute_truncate_table(
             .iter()
             .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
         {
-            reinitialize_index_relation(index, ctx)?;
+            reinitialize_index_relation(index, ctx, xid)?;
         }
     }
     Ok(StatementResult::AffectedRows(0))

@@ -61,7 +61,7 @@ pub fn execute_statement(
             actual: "CREATE TABLE AS".into(),
         })),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
-        Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx),
+        Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx, xid),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog),
         Statement::Insert(stmt) => execute_insert(bind_insert(&stmt, catalog)?, ctx, xid, cid),
         Statement::Update(stmt) => execute_update(bind_update(&stmt, catalog)?, ctx, xid, cid),

@@ -10,6 +10,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
+use crate::pgrust::database::TransactionWaiter;
 use crate::{BufferPool, ClientId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -27,6 +28,7 @@ pub struct IndexBuildContext {
     pub heap_relation: RelFileLocator,
     pub heap_desc: RelationDesc,
     pub index_relation: RelFileLocator,
+    pub index_name: String,
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
     pub maintenance_work_mem_kb: usize,
@@ -35,19 +37,26 @@ pub struct IndexBuildContext {
 #[derive(Clone)]
 pub struct IndexInsertContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
+    pub txns: Arc<parking_lot::RwLock<TransactionManager>>,
+    pub txn_waiter: Option<Arc<TransactionWaiter>>,
     pub client_id: ClientId,
+    pub snapshot: Snapshot,
     pub heap_relation: RelFileLocator,
     pub heap_desc: RelationDesc,
     pub index_relation: RelFileLocator,
+    pub index_name: String,
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
     pub heap_tid: ItemPointerData,
     pub values: Vec<crate::include::nodes::datum::Value>,
+    pub unique_check: IndexUniqueCheck,
 }
 
 #[derive(Clone)]
 pub struct IndexBuildEmptyContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
+    pub client_id: ClientId,
+    pub xid: u32,
     pub index_relation: RelFileLocator,
 }
 
@@ -62,6 +71,12 @@ pub struct IndexBeginScanContext {
     pub index_meta: IndexRelCacheEntry,
     pub key_data: Vec<ScanKeyData>,
     pub direction: ScanDirection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexUniqueCheck {
+    No,
+    Yes,
 }
 
 pub type AmBuildFn = fn(&IndexBuildContext) -> Result<IndexBuildResult, CatalogError>;

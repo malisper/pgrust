@@ -79,6 +79,7 @@ pub(crate) const XLOG_XACT_COMMIT: u8 = 0; // Transaction commit
 /// xl_rmid values (resource manager IDs)
 pub(crate) const RM_HEAP_ID: u8 = 0;
 pub(crate) const RM_XACT_ID: u8 = 1;
+pub(crate) const RM_BTREE_ID: u8 = 2;
 
 #[derive(Debug)]
 pub enum WalError {
@@ -104,6 +105,11 @@ use crate::backend::storage::smgr::RelFileLocator;
 #[derive(Debug)]
 pub enum WalRecord {
     FullPageImage {
+        xid: u32,
+        tag: BufferTag,
+        page: Box<[u8; PAGE_SIZE]>,
+    },
+    BtreePageImage {
         xid: u32,
         tag: BufferTag,
         page: Box<[u8; PAGE_SIZE]>,
@@ -219,6 +225,35 @@ impl WalReader {
                 }
 
                 WalRecord::FullPageImage {
+                    xid: xl_xid,
+                    tag,
+                    page,
+                }
+            }
+            (RM_BTREE_ID, XLOG_FPI) => {
+                if xl_tot_len < WAL_RECORD_HEADER + FPI_HOLE_META {
+                    return Err(WalError::Corrupt("btree FPI record too short".into()));
+                }
+                let tag = parse_block_header(&record);
+                let hole_offset =
+                    u16::from_le_bytes([record[WAL_RECORD_HEADER], record[WAL_RECORD_HEADER + 1]])
+                        as usize;
+                let hole_length = u16::from_le_bytes([
+                    record[WAL_RECORD_HEADER + 2],
+                    record[WAL_RECORD_HEADER + 3],
+                ]) as usize;
+
+                let compressed = &record[WAL_RECORD_HEADER + FPI_HOLE_META..];
+                let mut page = Box::new([0u8; PAGE_SIZE]);
+                if hole_length > 0 {
+                    let ho = hole_offset;
+                    page[..ho].copy_from_slice(&compressed[..ho]);
+                    page[ho + hole_length..].copy_from_slice(&compressed[ho..]);
+                } else {
+                    page.copy_from_slice(compressed);
+                }
+
+                WalRecord::BtreePageImage {
                     xid: xl_xid,
                     tag,
                     page,
@@ -354,8 +389,27 @@ impl WalWriter {
         tag: BufferTag,
         page: &[u8; PAGE_SIZE],
     ) -> Result<Lsn, WalError> {
+        self.write_record_with_rmgr(xid, tag, page, RM_HEAP_ID)
+    }
+
+    pub fn write_btree_record(
+        &self,
+        xid: u32,
+        tag: BufferTag,
+        page: &[u8; PAGE_SIZE],
+    ) -> Result<Lsn, WalError> {
+        self.write_record_with_rmgr(xid, tag, page, RM_BTREE_ID)
+    }
+
+    pub fn write_record_with_rmgr(
+        &self,
+        xid: u32,
+        tag: BufferTag,
+        page: &[u8; PAGE_SIZE],
+        rmid: u8,
+    ) -> Result<Lsn, WalError> {
         let mut guard = self.inner.lock();
-        let lsn = Self::write_fpi(&mut guard, xid, tag, page)?;
+        let lsn = Self::write_fpi(&mut guard, xid, tag, page, rmid)?;
         guard.pages_with_image.insert(tag);
         self.maybe_wake_bg(&guard);
         Ok(lsn)
@@ -379,7 +433,7 @@ impl WalWriter {
 
         if !guard.pages_with_image.contains(&tag) {
             // First write to this page — write full page image.
-            let lsn = Self::write_fpi(&mut guard, xid, tag, page)?;
+            let lsn = Self::write_fpi(&mut guard, xid, tag, page, RM_HEAP_ID)?;
             guard.pages_with_image.insert(tag);
             self.maybe_wake_bg(&guard);
             return Ok(lsn);
@@ -467,6 +521,7 @@ impl WalWriter {
         xid: u32,
         tag: BufferTag,
         page: &[u8; PAGE_SIZE],
+        rmid: u8,
     ) -> Result<Lsn, WalError> {
         // Compute hole from page header: pd_lower at bytes 12-13, pd_upper at 14-15.
         let pd_lower = u16::from_le_bytes([page[12], page[13]]) as usize;
@@ -492,7 +547,7 @@ impl WalWriter {
         record[4..8].copy_from_slice(&xid.to_le_bytes());
         record[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
         record[16] = XLOG_FPI;
-        record[17] = RM_HEAP_ID;
+        record[17] = rmid;
 
         // Block header
         record[24..28].copy_from_slice(&tag.rel.spc_oid.to_le_bytes());

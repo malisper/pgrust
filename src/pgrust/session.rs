@@ -414,6 +414,7 @@ impl Session {
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
+                    txn_waiter: Some(db.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -436,6 +437,7 @@ impl Session {
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
+                    txn_waiter: Some(db.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -458,6 +460,7 @@ impl Session {
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
+                    txn_waiter: Some(db.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -486,6 +489,7 @@ impl Session {
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
+                    txn_waiter: Some(db.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -570,13 +574,14 @@ impl Session {
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
+                    txn_waiter: Some(db.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx)
+                execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx, xid)
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 unreachable!("handled in Session::execute")
@@ -664,6 +669,7 @@ impl Session {
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
+            txn_waiter: Some(db.txn_waiter.clone()),
             snapshot,
             client_id,
             next_command_id: cid,
@@ -834,6 +840,7 @@ impl Session {
             let mut ctx = ExecutorContext {
                 pool: Arc::clone(&db.pool),
                 txns: db.txns.clone(),
+                txn_waiter: Some(db.txn_waiter.clone()),
                 snapshot,
                 client_id: self.client_id,
                 next_command_id: cid,

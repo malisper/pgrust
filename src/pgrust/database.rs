@@ -369,8 +369,8 @@ impl Database {
             generation: 0,
         };
         let ctx = CatalogWriteContext {
-            pool: &self.pool,
-            txns: &self.txns,
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
             xid,
             cid,
             client_id,
@@ -431,8 +431,8 @@ impl Database {
         }
 
         let ctx = CatalogWriteContext {
-            pool: &self.pool,
-            txns: &self.txns,
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
             xid,
             cid,
             client_id,
@@ -508,12 +508,12 @@ impl Database {
             removed
         };
         let ctx = CatalogWriteContext {
-            pool: &self.pool,
-            txns: &self.txns,
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
             xid,
             cid,
             client_id,
-            waiter: Some(&self.txn_waiter),
+            waiter: Some(self.txn_waiter.clone()),
         };
         let effect = self
             .catalog
@@ -613,8 +613,8 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let ctx = CatalogWriteContext {
-            pool: &self.pool,
-            txns: &self.txns,
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
             xid,
             cid: 0,
             client_id,
@@ -677,8 +677,8 @@ impl Database {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
                 let ctx = CatalogWriteContext {
-                    pool: &self.pool,
-                    txns: &self.txns,
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
                     xid,
                     cid,
                     client_id,
@@ -702,6 +702,9 @@ impl Database {
                         }
                         CatalogError::UnknownType(name) => {
                             ExecError::Parse(ParseError::UnsupportedType(name))
+                        }
+                        CatalogError::UniqueViolation(constraint) => {
+                            ExecError::UniqueViolation { constraint }
                         }
                         CatalogError::Io(_) | CatalogError::Corrupt(_) => {
                             ExecError::Parse(ParseError::UnexpectedToken {
@@ -871,8 +874,8 @@ impl Database {
 
         let mut catalog_guard = self.catalog.write();
         let ctx = CatalogWriteContext {
-            pool: &self.pool,
-            txns: &self.txns,
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
             xid,
             cid,
             client_id,
@@ -913,6 +916,7 @@ impl Database {
                     heap_relation: entry.rel,
                     heap_desc: entry.desc.clone(),
                     index_relation: index_entry.rel,
+                    index_name: create_stmt.index_name.clone(),
                     index_desc: index_entry.desc.clone(),
                     index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry {
                         indrelid: index_meta.indrelid,
@@ -946,14 +950,19 @@ impl Database {
                     &build_ctx,
                     access_method.oid,
                 )
-                .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "index access method build",
-                    actual: "index build failed".into(),
-                }))?;
+                .map_err(|err| match err {
+                    CatalogError::UniqueViolation(constraint) => {
+                        ExecError::UniqueViolation { constraint }
+                    }
+                    _ => ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index access method build",
+                        actual: "index build failed".into(),
+                    }),
+                })?;
                 let mut catalog_guard = self.catalog.write();
                 let readiness_ctx = CatalogWriteContext {
-                    pool: &self.pool,
-                    txns: &self.txns,
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
                     xid,
                     cid: cid.saturating_add(1),
                     client_id,
@@ -987,6 +996,9 @@ impl Database {
                 }
                 CatalogError::UnknownType(name) => {
                     ExecError::Parse(ParseError::UnsupportedType(name))
+                }
+                CatalogError::UniqueViolation(constraint) => {
+                    ExecError::UniqueViolation { constraint }
                 }
                 CatalogError::Io(_) | CatalogError::Corrupt(_) => {
                     ExecError::Parse(ParseError::UnexpectedToken {
@@ -1057,12 +1069,12 @@ impl Database {
             };
             let mut catalog_guard = self.catalog.write();
             let ctx = CatalogWriteContext {
-                pool: &self.pool,
-                txns: &self.txns,
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
                 xid,
                 cid,
                 client_id,
-                waiter: Some(&self.txn_waiter),
+                waiter: Some(self.txn_waiter.clone()),
             };
             match catalog_guard.drop_relation_by_oid_mvcc(relation_oid, &ctx) {
                 Ok((entries, effect)) => {
@@ -1121,6 +1133,7 @@ impl Database {
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
+            txn_waiter: Some(self.txn_waiter.clone()),
             snapshot,
             client_id,
             next_command_id: cid,
@@ -1177,8 +1190,8 @@ impl Database {
                 };
                 let mut catalog_guard = self.catalog.write();
                 let write_ctx = CatalogWriteContext {
-                    pool: &self.pool,
-                    txns: &self.txns,
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
                     xid,
                     cid,
                     client_id,
@@ -1198,6 +1211,9 @@ impl Database {
                         }
                         CatalogError::UnknownType(name) => {
                             ExecError::Parse(ParseError::UnsupportedType(name))
+                        }
+                        CatalogError::UniqueViolation(constraint) => {
+                            ExecError::UniqueViolation { constraint }
                         }
                         CatalogError::Io(_) | CatalogError::Corrupt(_) => {
                             ExecError::Parse(ParseError::UnexpectedToken {
@@ -1234,6 +1250,7 @@ impl Database {
         let mut insert_ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
+            txn_waiter: Some(self.txn_waiter.clone()),
             snapshot,
             client_id,
             next_command_id: cid,
@@ -1360,6 +1377,7 @@ impl Database {
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -1386,6 +1404,7 @@ impl Database {
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -1413,6 +1432,7 @@ impl Database {
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -1446,6 +1466,7 @@ impl Database {
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -1520,13 +1541,19 @@ impl Database {
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
                     snapshot,
                     client_id,
                     next_command_id: 0,
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result = execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx);
+                let result = execute_truncate_table(
+                    truncate_stmt.clone(),
+                    &catalog,
+                    &mut ctx,
+                    INVALID_TRANSACTION_ID,
+                );
                 drop(ctx);
                 for rel in rels {
                     self.table_locks.unlock_table(rel, client_id);
@@ -1594,6 +1621,7 @@ impl Database {
         let ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
+            txn_waiter: Some(self.txn_waiter.clone()),
             snapshot,
             client_id,
             next_command_id: command_id,
@@ -1968,6 +1996,7 @@ fn map_catalog_error(err: CatalogError) -> ExecError {
         CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
         CatalogError::UnknownColumn(name) => ExecError::Parse(ParseError::UnknownColumn(name)),
         CatalogError::UnknownType(name) => ExecError::Parse(ParseError::UnsupportedType(name)),
+        CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation { constraint },
         CatalogError::Io(_) | CatalogError::Corrupt(_) => {
             ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "valid catalog state",
