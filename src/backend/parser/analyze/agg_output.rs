@@ -927,28 +927,62 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 n_keys,
             )?),
         )),
-        SqlExpr::JsonbExistsAny(l, r) => Ok(Expr::JsonbExistsAny(
-            Box::new(bind_agg_output_expr(
-                l,
-                group_by_exprs,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                agg_list,
-                n_keys,
-            )?),
-            Box::new(bind_agg_output_expr(
-                r,
-                group_by_exprs,
-                input_scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                agg_list,
-                n_keys,
-            )?),
-        )),
+        SqlExpr::JsonbExistsAny(l, r) => {
+            let left_type =
+                infer_sql_expr_type(l, input_scope, catalog, outer_scopes, grouped_outer);
+            let right_type =
+                infer_sql_expr_type(r, input_scope, catalog, outer_scopes, grouped_outer);
+            if is_geometry_type(left_type) || is_geometry_type(right_type) {
+                Ok(Expr::FuncCall {
+                    func: BuiltinScalarFunction::GeoIsVertical,
+                    args: vec![
+                        bind_agg_output_expr(
+                            l,
+                            group_by_exprs,
+                            input_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            agg_list,
+                            n_keys,
+                        )?,
+                        bind_agg_output_expr(
+                            r,
+                            group_by_exprs,
+                            input_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            agg_list,
+                            n_keys,
+                        )?,
+                    ],
+                })
+            } else {
+                Ok(Expr::JsonbExistsAny(
+                    Box::new(bind_agg_output_expr(
+                        l,
+                        group_by_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?),
+                    Box::new(bind_agg_output_expr(
+                        r,
+                        group_by_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?),
+                ))
+            }
+        }
         SqlExpr::JsonbExistsAll(l, r) => Ok(Expr::JsonbExistsAll(
             Box::new(bind_agg_output_expr(
                 l,

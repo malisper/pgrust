@@ -1559,6 +1559,31 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
             match next.as_rule() {
                 Rule::null_predicate_suffix => build_null_predicate(left, next),
+                Rule::between_suffix => {
+                    let mut negated = false;
+                    let mut bounds = Vec::new();
+                    for part in next.into_inner() {
+                        match part.as_rule() {
+                            Rule::kw_not => negated = true,
+                            Rule::concat_expr => bounds.push(build_expr(part)?),
+                            _ => {}
+                        }
+                    }
+                    let low = bounds
+                        .first()
+                        .cloned()
+                        .ok_or(ParseError::UnexpectedEof)?;
+                    let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
+                    let between = SqlExpr::And(
+                        Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),
+                        Box::new(SqlExpr::LtEq(Box::new(left), Box::new(high))),
+                    );
+                    Ok(if negated {
+                        SqlExpr::Not(Box::new(between))
+                    } else {
+                        between
+                    })
+                }
                 Rule::in_expr_list_suffix => {
                     let mut negated = false;
                     let mut values = Vec::new();
@@ -2241,7 +2266,7 @@ fn fold_infix(
                 "-" => SqlExpr::Sub(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
             },
-            Rule::bit_op => match op.as_str() {
+            Rule::bit_op => match op.as_str().trim() {
                 "&" => SqlExpr::BitAnd(Box::new(expr), Box::new(rhs)),
                 "|" => SqlExpr::BitOr(Box::new(expr), Box::new(rhs)),
                 "#" => SqlExpr::BitXor(Box::new(expr), Box::new(rhs)),

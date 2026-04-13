@@ -353,7 +353,10 @@ fn parse_path_text(text: &str) -> Result<GeoPath, ExecError> {
 }
 
 fn parse_polygon_text(text: &str) -> Result<GeoPolygon, ExecError> {
-    let (_closed, points) = parse_path_like(text, "polygon")?;
+    let points = match parse_path_like(text, "polygon") {
+        Ok((_closed, points)) => points,
+        Err(_) => parse_point_sequence(text, "polygon")?,
+    };
     if points.is_empty() {
         return Err(invalid_geometry_input("polygon", text));
     }
@@ -362,6 +365,7 @@ fn parse_polygon_text(text: &str) -> Result<GeoPolygon, ExecError> {
 
 fn parse_circle_text(text: &str) -> Result<GeoCircle, ExecError> {
     let mut parser = GeometryParser::new(text, "circle");
+    parser.skip_ws();
     let style = parser.peek();
     if style == Some('<') {
         parser.expect('<')?;
@@ -373,7 +377,6 @@ fn parse_circle_text(text: &str) -> Result<GeoCircle, ExecError> {
         return make_circle(center, radius).map_err(|_| invalid_geometry_input("circle", text));
     }
     if style == Some('(') {
-        let original_idx = parser.idx;
         parser.expect('(')?;
         parser.skip_ws();
         if parser.peek() == Some('(') {
@@ -384,20 +387,18 @@ fn parse_circle_text(text: &str) -> Result<GeoCircle, ExecError> {
             parser.finish()?;
             return make_circle(center, radius).map_err(|_| invalid_geometry_input("circle", text));
         }
-        parser.idx = original_idx;
     }
-    let x = parser.parse_number()?;
-    parser.expect(',')?;
-    let y = parser.parse_number()?;
+    let mut parser = GeometryParser::new(text, "circle");
+    let center = parser.parse_point_pair()?;
     parser.expect(',')?;
     let radius = parser.parse_number()?;
     parser.finish()?;
-    make_circle(GeoPoint { x, y }, radius).map_err(|_| invalid_geometry_input("circle", text))
+    make_circle(center, radius).map_err(|_| invalid_geometry_input("circle", text))
 }
 
 fn parse_path_like(text: &str, ty: &'static str) -> Result<(bool, Vec<GeoPoint>), ExecError> {
     let mut parser = GeometryParser::new(text, ty);
-    let mut closed = false;
+    let mut closed = true;
     let mut wrapped = false;
     parser.skip_ws();
     if parser.consume('[') {
@@ -433,6 +434,9 @@ fn parse_path_like(text: &str, ty: &'static str) -> Result<(bool, Vec<GeoPoint>)
         loop {
             numbers.push(parser.parse_number()?);
             parser.skip_ws();
+            if !wrapped && parser.peek().is_none() {
+                break;
+            }
             if wrapped {
                 let end = if closed { ')' } else { ']' };
                 if parser.consume(end) {
@@ -440,9 +444,6 @@ fn parse_path_like(text: &str, ty: &'static str) -> Result<(bool, Vec<GeoPoint>)
                 }
             }
             parser.expect(',')?;
-            if !wrapped && parser.peek().is_none() {
-                break;
-            }
         }
         if numbers.len() < 2 || numbers.len() % 2 != 0 {
             return Err(invalid_geometry_input(ty, text));
@@ -456,6 +457,21 @@ fn parse_path_like(text: &str, ty: &'static str) -> Result<(bool, Vec<GeoPoint>)
     }
     parser.finish()?;
     Ok((closed, points))
+}
+
+fn parse_point_sequence(text: &str, ty: &'static str) -> Result<Vec<GeoPoint>, ExecError> {
+    let mut parser = GeometryParser::new(text, ty);
+    let mut points = Vec::new();
+    loop {
+        points.push(parser.parse_point_pair()?);
+        parser.skip_ws();
+        if parser.peek().is_none() {
+            break;
+        }
+        parser.expect(',')?;
+    }
+    parser.finish()?;
+    Ok(points)
 }
 
 fn render_number(value: f64, options: FloatFormatOptions) -> String {
@@ -820,6 +836,14 @@ fn eval_geo_circle(values: &[Value]) -> Result<Value, ExecError> {
         }
         [Value::Point(center), Value::Int64(radius)] => {
             Ok(Value::Circle(make_circle(center.clone(), *radius as f64)?))
+        }
+        [Value::Point(center), Value::Numeric(radius)] => {
+            let radius = radius.render().parse::<f64>().map_err(|_| ExecError::TypeMismatch {
+                op: "circle",
+                left: Value::Point(center.clone()),
+                right: Value::Numeric(radius.clone()),
+            })?;
+            Ok(Value::Circle(make_circle(center.clone(), radius)?))
         }
         [Value::Box(geo_box)] => Ok(Value::Circle(box_to_circle(geo_box))),
         [Value::Polygon(poly)] => Ok(Value::Circle(polygon_to_circle(poly))),
@@ -1701,12 +1725,9 @@ fn point_mul(left: &GeoPoint, right: &GeoPoint) -> Result<GeoPoint, ExecError> {
 }
 
 fn point_div(left: &GeoPoint, right: &GeoPoint) -> Result<GeoPoint, ExecError> {
-    let div = right.x * right.x + right.y * right.y;
-    if div == 0.0 {
-        return Err(ExecError::DivisionByZero("/"));
-    }
-    let x = checked_div(left.x * right.x + left.y * right.y, div)?;
-    let y = checked_div(left.y * right.x - left.x * right.y, div)?;
+    let div = checked_sum(checked_mul(right.x, right.x)?, checked_mul(right.y, right.y)?)?;
+    let x = checked_div(checked_mul_add(left.x, right.x, left.y, right.y)?, div)?;
+    let y = checked_div(checked_mul_sub(left.y, right.x, left.x, right.y)?, div)?;
     Ok(GeoPoint { x, y })
 }
 
@@ -1950,7 +1971,18 @@ fn polygon_to_circle(poly: &GeoPolygon) -> GeoCircle {
 }
 
 fn poly_center(poly: &GeoPolygon) -> GeoPoint {
-    polygon_to_circle(poly).center
+    if poly.points.is_empty() {
+        return GeoPoint { x: 0.0, y: 0.0 };
+    }
+    let mut center = GeoPoint { x: 0.0, y: 0.0 };
+    for point in &poly.points {
+        center.x += point.x;
+        center.y += point.y;
+    }
+    let npts = poly.points.len() as f64;
+    center.x /= npts;
+    center.y /= npts;
+    center
 }
 
 fn polygon_same(left: &GeoPolygon, right: &GeoPolygon) -> bool {
@@ -2183,57 +2215,52 @@ fn line_perpendicular(left: &GeoLine, right: &GeoLine) -> bool {
 }
 
 fn line_contains_point(line: &GeoLine, point: &GeoPoint) -> bool {
-    fp_zero(line.a * point.x + line.b * point.y - line.c)
-        || fp_zero(line.a * point.x + line.b * point.y + line.c)
+    fp_zero(line.a * point.x + line.b * point.y + line.c)
 }
 
 fn normalized_line_eval(line: &GeoLine, point: &GeoPoint) -> f64 {
-    let plus = line.a * point.x + line.b * point.y + line.c;
-    let minus = line.a * point.x + line.b * point.y - line.c;
-    if plus.abs() <= minus.abs() {
-        plus
-    } else {
-        minus
-    }
+    line.a * point.x + line.b * point.y + line.c
 }
 
 fn line_intersection(left: &GeoLine, right: &GeoLine) -> Option<GeoPoint> {
-    let det = left.a * right.b - right.a * left.b;
-    if fp_zero(det) {
-        return None;
-    }
-    let left_c = line_constant(left);
-    let right_c = line_constant(right);
-    Some(GeoPoint {
-        x: (left.b * right_c - right.b * left_c) / det,
-        y: (right.a * left_c - left.a * right_c) / det,
-    })
-}
-
-fn line_constant(line: &GeoLine) -> f64 {
-    if fp_zero(line.a) || fp_zero(line.b) || fp_zero(line.c) {
-        line.c
+    let (x, y) = if !fp_zero(left.b) {
+        if fp_eq(right.a, left.a * (right.b / left.b)) {
+            return None;
+        }
+        let x = ((left.b * right.c) - (right.b * left.c))
+            / ((left.a * right.b) - (right.a * left.b));
+        let y = -((left.a * x) + left.c) / left.b;
+        (x, y)
+    } else if !fp_zero(right.b) {
+        if fp_eq(left.a, right.a * (left.b / right.b)) {
+            return None;
+        }
+        let x = ((right.b * left.c) - (left.b * right.c))
+            / ((right.a * left.b) - (left.a * right.b));
+        let y = -((right.a * x) + right.c) / right.b;
+        (x, y)
     } else {
-        -line.c
-    }
+        return None;
+    };
+    Some(GeoPoint {
+        x: if x == 0.0 { 0.0 } else { x },
+        y: if y == 0.0 { 0.0 } else { y },
+    })
 }
 
 fn line_distance(left: &GeoLine, right: &GeoLine) -> f64 {
     if line_intersection(left, right).is_some() {
         return 0.0;
     }
-    let point = point_on_line(left);
-    point_line_distance(&point, right)
-}
-
-fn point_on_line(line: &GeoLine) -> GeoPoint {
-    if fp_zero(line.b) {
-        GeoPoint { x: line.c, y: 0.0 }
-    } else if fp_zero(line.a) {
-        GeoPoint { x: 0.0, y: line.c }
+    let ratio = if !fp_zero(left.a) && !left.a.is_nan() && !fp_zero(right.a) && !right.a.is_nan()
+    {
+        left.a / right.a
+    } else if !fp_zero(left.b) && !left.b.is_nan() && !fp_zero(right.b) && !right.b.is_nan() {
+        left.b / right.b
     } else {
-        GeoPoint { x: 0.0, y: line.c }
-    }
+        1.0
+    };
+    (left.c - ratio * right.c).abs() / (left.a * left.a + left.b * left.b).sqrt()
 }
 
 fn point_line_distance(point: &GeoPoint, line: &GeoLine) -> f64 {
@@ -2242,16 +2269,9 @@ fn point_line_distance(point: &GeoPoint, line: &GeoLine) -> f64 {
 
 fn point_to_line_closest(line: &GeoLine, point: &GeoPoint) -> GeoPoint {
     let denom = line.a * line.a + line.b * line.b;
-    let c = if normalized_line_eval(line, point).abs()
-        <= (line.a * point.x + line.b * point.y - line.c).abs()
-    {
-        line.c
-    } else {
-        -line.c
-    };
     GeoPoint {
-        x: (line.b * (line.b * point.x - line.a * point.y) - line.a * c) / denom,
-        y: (line.a * (-line.b * point.x + line.a * point.y) - line.b * c) / denom,
+        x: (line.b * (line.b * point.x - line.a * point.y) - line.a * line.c) / denom,
+        y: (line.a * (-line.b * point.x + line.a * point.y) - line.b * line.c) / denom,
     }
 }
 
@@ -2782,24 +2802,24 @@ fn fp_ge(left: f64, right: f64) -> bool {
 
 fn checked_mul(left: f64, right: f64) -> Result<f64, ExecError> {
     let result = left * right;
-    if result.is_infinite() && left.is_finite() && right.is_finite() {
+    if result.is_infinite() && !left.is_infinite() && !right.is_infinite() {
         return Err(ExecError::FloatOverflow);
     }
-    if result == 0.0 && left != 0.0 && right != 0.0 && left.is_finite() && right.is_finite() {
+    if result == 0.0 && left != 0.0 && right != 0.0 {
         return Err(ExecError::FloatUnderflow);
     }
     Ok(result)
 }
 
 fn checked_div(numer: f64, denom: f64) -> Result<f64, ExecError> {
-    if denom == 0.0 {
+    if denom == 0.0 && !numer.is_nan() {
         return Err(ExecError::DivisionByZero("/"));
     }
     let result = numer / denom;
-    if result.is_infinite() && numer.is_finite() && denom.is_finite() {
+    if result.is_infinite() && !numer.is_infinite() {
         return Err(ExecError::FloatOverflow);
     }
-    if result == 0.0 && numer != 0.0 && numer.is_finite() && denom.is_finite() {
+    if result == 0.0 && numer != 0.0 && !denom.is_infinite() {
         return Err(ExecError::FloatUnderflow);
     }
     Ok(result)
@@ -2819,7 +2839,7 @@ fn checked_mul_sub(a: f64, b: f64, c: f64, d: f64) -> Result<f64, ExecError> {
 
 fn checked_sum(left: f64, right: f64) -> Result<f64, ExecError> {
     let result = left + right;
-    if result.is_infinite() && left.is_finite() && right.is_finite() {
+    if result.is_infinite() && !left.is_infinite() && !right.is_infinite() {
         return Err(ExecError::FloatOverflow);
     }
     Ok(result)

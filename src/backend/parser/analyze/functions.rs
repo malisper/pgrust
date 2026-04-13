@@ -823,6 +823,7 @@ fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, Sca
     static ARITIES: OnceLock<Vec<(BuiltinScalarFunction, ScalarFunctionArity)>> = OnceLock::new();
     ARITIES.get_or_init(|| {
         let mut by_func = Vec::new();
+        let mut overloaded = Vec::new();
         for row in bootstrap_pg_proc_rows() {
             if row.prokind != 'f' || row.proretset || row.provariadic != 0 {
                 continue;
@@ -831,14 +832,21 @@ fn scalar_function_arity_overrides() -> &'static Vec<(BuiltinScalarFunction, Sca
                 if !supports_exact_proc_arity(func) {
                     continue;
                 }
-                if by_func.iter().all(|(candidate, _)| *candidate != func) {
-                    by_func.push((
-                        func,
-                        ScalarFunctionArity::Exact(row.pronargs.max(0) as usize),
-                    ));
+                let arity = ScalarFunctionArity::Exact(row.pronargs.max(0) as usize);
+                if let Some((_, existing)) =
+                    by_func.iter().find(|(candidate, _)| *candidate == func)
+                {
+                    if *existing != arity && !overloaded.contains(&func) {
+                        overloaded.push(func);
+                    }
+                    continue;
+                }
+                if !overloaded.contains(&func) {
+                    by_func.push((func, arity));
                 }
             }
         }
+        by_func.retain(|(func, _)| !overloaded.contains(func));
         by_func
     })
 }
