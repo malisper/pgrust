@@ -111,6 +111,7 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         "CREATE" => "CREATE TABLE".to_string(),
         "DROP" => "DROP TABLE".to_string(),
         "ANALYZE" => "ANALYZE".to_string(),
+        "COMMENT" => "COMMENT".to_string(),
         "DO" => "DO".to_string(),
         "VACUUM" => "VACUUM".to_string(),
         "SET" => "SET".to_string(),

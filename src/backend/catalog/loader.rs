@@ -18,10 +18,10 @@ use crate::backend::catalog::rowcodec::{
     pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
     pg_auth_members_row_from_values, pg_authid_row_from_values, pg_cast_row_from_values,
     pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
-    pg_database_row_from_values, pg_depend_row_from_values, pg_index_row_from_values,
-    pg_language_row_from_values, pg_opclass_row_from_values, pg_operator_row_from_values,
-    pg_opfamily_row_from_values, pg_proc_row_from_values, pg_tablespace_row_from_values,
-    pg_type_row_from_values,
+    pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
+    pg_index_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
+    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
+    pg_tablespace_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -65,6 +65,7 @@ pub(crate) fn catalog_from_physical_rows(
     let attrdef_rows = rows.attrdefs;
     let depend_rows = rows.depends;
     let index_rows = rows.indexes;
+    let _description_rows = rows.descriptions;
     let _am_rows = rows.ams;
     let _authid_rows = rows.authids;
     let _auth_members_rows = rows.auth_members;
@@ -310,6 +311,7 @@ pub(crate) fn load_physical_catalog_rows(
     let mut rels = BTreeMap::new();
     let mut missing_attrdef = false;
     let mut missing_depend = false;
+    let mut missing_description = false;
     let mut missing_index = false;
     let mut missing_am = false;
     let mut missing_authid = false;
@@ -335,6 +337,10 @@ pub(crate) fn load_physical_catalog_rows(
             }
             if kind == BootstrapCatalogKind::PgDepend {
                 missing_depend = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgDescription {
+                missing_description = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgIndex {
@@ -557,6 +563,18 @@ pub(crate) fn load_physical_catalog_rows(
         .map(pg_depend_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let description_rows = if missing_description {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgDescription],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgDescription),
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let index_rows = if missing_index {
         Vec::new()
     } else {
@@ -600,6 +618,7 @@ pub(crate) fn load_physical_catalog_rows(
         attributes: attribute_rows,
         attrdefs: attrdef_rows,
         depends: depend_rows,
+        descriptions: description_rows,
         indexes: index_rows,
         ams: am_rows,
         amops: Vec::new(),
@@ -638,6 +657,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
     let mut rels = BTreeMap::new();
     let mut missing_attrdef = false;
     let mut missing_depend = false;
+    let mut missing_description = false;
     let mut missing_index = false;
     let mut missing_am = false;
     let mut missing_authid = false;
@@ -663,6 +683,10 @@ pub(crate) fn load_physical_catalog_rows_visible(
             }
             if kind == BootstrapCatalogKind::PgDepend {
                 missing_depend = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgDescription {
+                missing_description = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgIndex {
@@ -929,6 +953,21 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .map(pg_depend_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let description_rows = if missing_description {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgDescription],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgDescription),
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let index_rows = if missing_index {
         Vec::new()
     } else {
@@ -981,6 +1020,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
         attributes: attribute_rows,
         attrdefs: attrdef_rows,
         depends: depend_rows,
+        descriptions: description_rows,
         indexes: index_rows,
         ams: am_rows,
         amops: Vec::new(),

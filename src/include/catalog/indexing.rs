@@ -48,6 +48,7 @@ const PG_CONSTRAINT_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_CONSTRAINT_CONPARENTID_INDEX_KEYS: [i16; 1] = [12];
 const PG_DEPEND_DEPENDER_INDEX_KEYS: [i16; 3] = [1, 2, 3];
 const PG_DEPEND_REFERENCE_INDEX_KEYS: [i16; 3] = [4, 5, 6];
+const PG_DESCRIPTION_O_C_O_INDEX_KEYS: [i16; 3] = [1, 2, 3];
 const PG_INDEX_INDRELID_INDEX_KEYS: [i16; 1] = [2];
 const PG_INDEX_INDEXRELID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AM_NAME_INDEX_KEYS: [i16; 1] = [2];
@@ -136,7 +137,7 @@ const OID_OID_OID_INT2_OPCLASS_4: [u32; 4] = [
     INT2_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 51] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 52] = [
     CatalogIndexDescriptor { relation_oid: 2684, relation_name: "pg_namespace_nspname_index", heap_kind: BootstrapCatalogKind::PgNamespace, unique: true, key_attnums: &PG_NAMESPACE_NSPNAME_INDEX_KEYS, opclass_oids: &NAME_OPCLASS_1 },
     CatalogIndexDescriptor { relation_oid: 2685, relation_name: "pg_namespace_oid_index", heap_kind: BootstrapCatalogKind::PgNamespace, unique: true, key_attnums: &PG_NAMESPACE_OID_INDEX_KEYS, opclass_oids: &OID_OPCLASS_1 },
     CatalogIndexDescriptor { relation_oid: 2662, relation_name: "pg_class_oid_index", heap_kind: BootstrapCatalogKind::PgClass, unique: true, key_attnums: &PG_CLASS_OID_INDEX_KEYS, opclass_oids: &OID_OPCLASS_1 },
@@ -171,6 +172,7 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 51] = [
     CatalogIndexDescriptor { relation_oid: 2579, relation_name: "pg_constraint_conparentid_index", heap_kind: BootstrapCatalogKind::PgConstraint, unique: false, key_attnums: &PG_CONSTRAINT_CONPARENTID_INDEX_KEYS, opclass_oids: &OID_OPCLASS_1 },
     CatalogIndexDescriptor { relation_oid: 2673, relation_name: "pg_depend_depender_index", heap_kind: BootstrapCatalogKind::PgDepend, unique: false, key_attnums: &PG_DEPEND_DEPENDER_INDEX_KEYS, opclass_oids: &OID_OID_INT4_OPCLASS_3 },
     CatalogIndexDescriptor { relation_oid: 2674, relation_name: "pg_depend_reference_index", heap_kind: BootstrapCatalogKind::PgDepend, unique: false, key_attnums: &PG_DEPEND_REFERENCE_INDEX_KEYS, opclass_oids: &OID_OID_INT4_OPCLASS_3 },
+    CatalogIndexDescriptor { relation_oid: 2675, relation_name: "pg_description_o_c_o_index", heap_kind: BootstrapCatalogKind::PgDescription, unique: true, key_attnums: &PG_DESCRIPTION_O_C_O_INDEX_KEYS, opclass_oids: &OID_OID_INT4_OPCLASS_3 },
     CatalogIndexDescriptor { relation_oid: 2678, relation_name: "pg_index_indrelid_index", heap_kind: BootstrapCatalogKind::PgIndex, unique: false, key_attnums: &PG_INDEX_INDRELID_INDEX_KEYS, opclass_oids: &OID_OPCLASS_1 },
     CatalogIndexDescriptor { relation_oid: 2679, relation_name: "pg_index_indexrelid_index", heap_kind: BootstrapCatalogKind::PgIndex, unique: true, key_attnums: &PG_INDEX_INDEXRELID_INDEX_KEYS, opclass_oids: &OID_OPCLASS_1 },
     CatalogIndexDescriptor { relation_oid: 2651, relation_name: "pg_am_name_index", heap_kind: BootstrapCatalogKind::PgAm, unique: true, key_attnums: &PG_AM_NAME_INDEX_KEYS, opclass_oids: &NAME_OPCLASS_1 },

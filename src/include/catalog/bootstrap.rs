@@ -19,6 +19,7 @@ pub const PG_ATTRDEF_RELATION_OID: u32 = 2604;
 pub const PG_CAST_RELATION_OID: u32 = 2605;
 pub const PG_CONSTRAINT_RELATION_OID: u32 = 2606;
 pub const PG_DEPEND_RELATION_OID: u32 = 2608;
+pub const PG_DESCRIPTION_RELATION_OID: u32 = 2609;
 pub const PG_INDEX_RELATION_OID: u32 = 2610;
 pub const PG_LANGUAGE_RELATION_OID: u32 = 2612;
 pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
@@ -106,6 +107,7 @@ pub enum BootstrapCatalogKind {
     PgCast,
     PgConstraint,
     PgDepend,
+    PgDescription,
     PgIndex,
     PgOpclass,
     PgOpfamily,
@@ -133,6 +135,7 @@ impl BootstrapCatalogKind {
             Self::PgCast => PG_CAST_RELATION_OID,
             Self::PgConstraint => PG_CONSTRAINT_RELATION_OID,
             Self::PgDepend => PG_DEPEND_RELATION_OID,
+            Self::PgDescription => PG_DESCRIPTION_RELATION_OID,
             Self::PgIndex => PG_INDEX_RELATION_OID,
             Self::PgOpclass => PG_OPCLASS_RELATION_OID,
             Self::PgOpfamily => PG_OPFAMILY_RELATION_OID,
@@ -160,6 +163,7 @@ impl BootstrapCatalogKind {
             Self::PgCast => "pg_cast",
             Self::PgConstraint => "pg_constraint",
             Self::PgDepend => "pg_depend",
+            Self::PgDescription => "pg_description",
             Self::PgIndex => "pg_index",
             Self::PgOpclass => "pg_opclass",
             Self::PgOpfamily => "pg_opfamily",
@@ -187,6 +191,7 @@ impl BootstrapCatalogKind {
             Self::PgCast => 0,
             Self::PgConstraint => 0,
             Self::PgDepend => PG_DEPEND_ROWTYPE_OID,
+            Self::PgDescription => 0,
             Self::PgIndex => PG_INDEX_ROWTYPE_OID,
             Self::PgOpclass => 0,
             Self::PgOpfamily => 0,
@@ -194,7 +199,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 22] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 23] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -216,12 +221,15 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 22] = [
     BootstrapCatalogKind::PgCast,
     BootstrapCatalogKind::PgConstraint,
     BootstrapCatalogKind::PgDepend,
+    BootstrapCatalogKind::PgDescription,
     BootstrapCatalogKind::PgIndex,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 22] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 23] {
     CORE_BOOTSTRAP_KINDS
 }
+
+use crate::include::catalog::pg_description_desc;
 
 pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
     match kind {
@@ -244,6 +252,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgCast => pg_cast_desc(),
         BootstrapCatalogKind::PgConstraint => pg_constraint_desc(),
         BootstrapCatalogKind::PgDepend => pg_depend_desc(),
+        BootstrapCatalogKind::PgDescription => pg_description_desc(),
         BootstrapCatalogKind::PgIndex => pg_index_desc(),
         BootstrapCatalogKind::PgOpclass => pg_opclass_desc(),
         BootstrapCatalogKind::PgOpfamily => pg_opfamily_desc(),
@@ -254,7 +263,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 22] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 23] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -340,6 +349,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 22] = [
         name: "pg_depend",
     },
     BootstrapCatalogRelation {
+        oid: PG_DESCRIPTION_RELATION_OID,
+        name: "pg_description",
+    },
+    BootstrapCatalogRelation {
         oid: PG_INDEX_RELATION_OID,
         name: "pg_index",
     },
@@ -375,7 +388,8 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[18].oid, PG_CAST_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[19].oid, PG_CONSTRAINT_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_DEPEND_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_DESCRIPTION_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_INDEX_RELATION_OID);
     }
 
     #[test]
@@ -408,6 +422,7 @@ mod tests {
                 "pg_cast",
                 "pg_constraint",
                 "pg_depend",
+                "pg_description",
                 "pg_index",
             ]
         );

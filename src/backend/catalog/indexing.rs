@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 
 use crate::BufferPool;
 use crate::backend::access::index::indexam::{index_beginscan, index_build_stub, index_endscan, index_getnext};
-use crate::backend::access::transam::xact::TransactionManager;
+use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, CatalogIndexMeta};
 use crate::backend::catalog::store::CatalogWriteContext;
 use crate::backend::executor::RelationDesc;
@@ -139,8 +139,13 @@ pub fn rebuild_system_catalog_indexes(base_dir: &Path) -> Result<(), CatalogErro
     }
 
     let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 64));
-    let txns = Arc::new(RwLock::new(TransactionManager::default()));
-    let snapshot = Snapshot::bootstrap();
+    let txns = Arc::new(RwLock::new(
+        TransactionManager::new_durable(base_dir.to_path_buf()).unwrap_or_default(),
+    ));
+    let snapshot = txns
+        .read()
+        .snapshot(INVALID_TRANSACTION_ID)
+        .map_err(|err| CatalogError::Io(format!("system catalog snapshot failed: {err:?}")))?;
     for descriptor in system_catalog_indexes() {
         let build_ctx = IndexBuildContext {
             pool: Arc::clone(&pool),

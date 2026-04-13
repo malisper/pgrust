@@ -54,6 +54,10 @@ pub fn execute_statement(
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON TABLE handled by database/session layer",
+            actual: "COMMENT ON TABLE".into(),
+        })),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -91,6 +95,10 @@ pub fn execute_readonly_statement(
         Statement::Set(_) | Statement::Reset(_) | Statement::AlterTableSet(_) => {
             Ok(StatementResult::AffectedRows(0))
         }
+        Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON TABLE".into(),
+        })),
         Statement::CreateIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
