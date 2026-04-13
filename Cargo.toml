@@ -11,7 +11,9 @@ path = "src/lib.rs"
 default = []
 deadlock_detection = ["parking_lot/deadlock_detection"]
 [dependencies]
+base64 = "0.22"
 crc32c = "0.6.8"
+crc32fast = "1.4"
 itoa = "1"
 libc = "0.2"
 mimalloc = "0.1.48"
@@ -26,6 +28,7 @@ regex = "1"
 rustc-hash = "2.1.2"
 ryu = "1"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
 encoding_rs = "0.8"
 md-5 = "0.10"
 

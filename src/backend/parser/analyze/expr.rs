@@ -1085,6 +1085,45 @@ fn bind_scalar_function_call(
                     ],
                 });
             }
+            if left_type.kind == SqlTypeKind::Bytea && right_type.kind == SqlTypeKind::Bytea {
+                return Ok(Expr::FuncCall {
+                    func,
+                    args: vec![bound_args[0].clone(), bound_args[1].clone()],
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        left_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        right_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                ],
+            })
+        }
+        BuiltinScalarFunction::Strpos => {
+            let left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             Ok(Expr::FuncCall {
                 func,
                 args: vec![
@@ -1122,6 +1161,51 @@ fn bind_scalar_function_call(
                 if !is_integer_family(start_type) {
                     return Err(ParseError::UnexpectedToken {
                         expected: "substring(bit, int4[, int4])",
+                        actual: format!(
+                            "{func:?}({}, {})",
+                            sql_type_name(value_type),
+                            sql_type_name(start_type)
+                        ),
+                    });
+                }
+                let mut coerced = vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        start_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ];
+                if let Some(len_arg) = args.get(2) {
+                    let len_type = infer_sql_expr_type_with_ctes(
+                        len_arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    if !is_integer_family(len_type) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "integer length argument",
+                            actual: sql_type_name(len_type),
+                        });
+                    }
+                    coerced.push(coerce_bound_expr(
+                        bound_args[2].clone(),
+                        len_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ));
+                }
+                return Ok(Expr::FuncCall {
+                    func,
+                    args: coerced,
+                });
+            }
+            if value_type.kind == SqlTypeKind::Bytea {
+                if !is_integer_family(start_type) {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "substring(bytea, int4[, int4])",
                         actual: format!(
                             "{func:?}({}, {})",
                             sql_type_name(value_type),
@@ -1355,12 +1439,12 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(value_type)
-                || !is_bit_string_type(place_type)
-                || !is_integer_family(start_type)
-            {
+            let same_bit_kind = is_bit_string_type(value_type) && is_bit_string_type(place_type);
+            let same_bytea_kind =
+                value_type.kind == SqlTypeKind::Bytea && place_type.kind == SqlTypeKind::Bytea;
+            if (!same_bit_kind && !same_bytea_kind) || !is_integer_family(start_type) {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "overlay(bit, bit, int4[, int4])",
+                    expected: "overlay(bit, bit, int4[, int4]) or overlay(bytea, bytea, int4[, int4])",
                     actual: format!(
                         "{func:?}({}, {}, {})",
                         sql_type_name(value_type),
@@ -1369,17 +1453,29 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            let common = resolve_common_scalar_type(value_type, place_type)
-                .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
-            let mut coerced = vec![
-                coerce_bound_expr(bound_args[0].clone(), raw_value_type, common),
-                coerce_bound_expr(bound_args[1].clone(), raw_place_type, common),
-                coerce_bound_expr(
-                    bound_args[2].clone(),
-                    start_type,
-                    SqlType::new(SqlTypeKind::Int4),
-                ),
-            ];
+            let mut coerced = if same_bytea_kind {
+                vec![
+                    bound_args[0].clone(),
+                    bound_args[1].clone(),
+                    coerce_bound_expr(
+                        bound_args[2].clone(),
+                        start_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ]
+            } else {
+                let common = resolve_common_scalar_type(value_type, place_type)
+                    .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
+                vec![
+                    coerce_bound_expr(bound_args[0].clone(), raw_value_type, common),
+                    coerce_bound_expr(bound_args[1].clone(), raw_place_type, common),
+                    coerce_bound_expr(
+                        bound_args[2].clone(),
+                        start_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ]
+            };
             if let Some(len_arg) = args.get(3) {
                 let len_type = infer_sql_expr_type_with_ctes(
                     len_arg,
@@ -1423,9 +1519,11 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(value_type) || !is_integer_family(index_type) {
+            if !(is_bit_string_type(value_type) || value_type.kind == SqlTypeKind::Bytea)
+                || !is_integer_family(index_type)
+            {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "get_bit(bit, int4)",
+                    expected: "get_bit(bit, int4) or get_bit(bytea, int4)",
                     actual: format!(
                         "{func:?}({}, {})",
                         sql_type_name(value_type),
@@ -1470,12 +1568,12 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(value_type)
+            if !(is_bit_string_type(value_type) || value_type.kind == SqlTypeKind::Bytea)
                 || !is_integer_family(index_type)
                 || !is_integer_family(bit_type)
             {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "set_bit(bit, int4, int4)",
+                    expected: "set_bit(bit, int4, int4) or set_bit(bytea, int4, int4)",
                     actual: format!(
                         "{func:?}({}, {}, {})",
                         sql_type_name(value_type),
@@ -1510,15 +1608,110 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_bit_string_type(value_type) {
+            if !(is_bit_string_type(value_type) || value_type.kind == SqlTypeKind::Bytea) {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "bit argument",
+                    expected: "bit or bytea argument",
                     actual: format!("{func:?}({})", sql_type_name(value_type)),
                 });
             }
             Ok(Expr::FuncCall {
                 func,
                 args: vec![bound_args[0].clone()],
+            })
+        }
+        BuiltinScalarFunction::GetByte => {
+            let value_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let index_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if value_type.kind != SqlTypeKind::Bytea || !is_integer_family(index_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "get_byte(bytea, int4)",
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(value_type),
+                        sql_type_name(index_type)
+                    ),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        index_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ],
+            })
+        }
+        BuiltinScalarFunction::SetByte => {
+            let value_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let index_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let new_type = infer_sql_expr_type_with_ctes(
+                &args[2],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if value_type.kind != SqlTypeKind::Bytea
+                || !is_integer_family(index_type)
+                || !is_integer_family(new_type)
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "set_byte(bytea, int4, int4)",
+                    actual: format!(
+                        "{func:?}({}, {}, {})",
+                        sql_type_name(value_type),
+                        sql_type_name(index_type),
+                        sql_type_name(new_type)
+                    ),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        index_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                    coerce_bound_expr(
+                        bound_args[2].clone(),
+                        new_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
+                ],
             })
         }
         BuiltinScalarFunction::ConvertFrom => {
@@ -1570,6 +1763,145 @@ fn bind_scalar_function_call(
                     arg_type,
                     SqlType::new(SqlTypeKind::Text),
                 )],
+            })
+        }
+        BuiltinScalarFunction::Initcap
+        | BuiltinScalarFunction::Ascii
+        | BuiltinScalarFunction::Replace
+        | BuiltinScalarFunction::Translate => Ok(Expr::FuncCall {
+            func,
+            args: args
+                .iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    coerce_bound_expr(
+                        bound_args[idx].clone(),
+                        ty,
+                        SqlType::new(SqlTypeKind::Text),
+                    )
+                })
+                .collect(),
+        }),
+        BuiltinScalarFunction::Chr => {
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if !is_integer_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "integer argument",
+                    actual: sql_type_name(arg_type),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    SqlType::new(SqlTypeKind::Int4),
+                )],
+            })
+        }
+        BuiltinScalarFunction::SplitPart => Ok(Expr::FuncCall {
+            func,
+            args: vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    infer_sql_expr_type_with_ctes(
+                        &args[0],
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    ),
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    infer_sql_expr_type_with_ctes(
+                        &args[1],
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    ),
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+                coerce_bound_expr(
+                    bound_args[2].clone(),
+                    infer_sql_expr_type_with_ctes(
+                        &args[2],
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    ),
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+            ],
+        }),
+        BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => {
+            let value_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let len_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let mut coerced = vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    value_type,
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    len_type,
+                    SqlType::new(SqlTypeKind::Int4),
+                ),
+            ];
+            if let Some(fill_arg) = args.get(2) {
+                let fill_type = infer_sql_expr_type_with_ctes(
+                    fill_arg,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+                coerced.push(coerce_bound_expr(
+                    bound_args[2].clone(),
+                    fill_type,
+                    SqlType::new(SqlTypeKind::Text),
+                ));
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: coerced,
             })
         }
         BuiltinScalarFunction::BTrim
@@ -1712,6 +2044,97 @@ fn bind_scalar_function_call(
                 args: vec![bound_args[0].clone()],
             })
         }
+        BuiltinScalarFunction::Reverse
+        | BuiltinScalarFunction::Sha224
+        | BuiltinScalarFunction::Sha256
+        | BuiltinScalarFunction::Sha384
+        | BuiltinScalarFunction::Sha512
+        | BuiltinScalarFunction::Crc32
+        | BuiltinScalarFunction::Crc32c => {
+            let arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if !matches!(arg_type.kind, SqlTypeKind::Text | SqlTypeKind::Bytea) || arg_type.is_array
+            {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "text or bytea argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![bound_args[0].clone()],
+            })
+        }
+        BuiltinScalarFunction::Encode => {
+            let value_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let format_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            if value_type.kind != SqlTypeKind::Bytea {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "bytea argument",
+                    actual: sql_type_name(value_type),
+                });
+            }
+            Ok(Expr::FuncCall {
+                func,
+                args: vec![
+                    bound_args[0].clone(),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        format_type,
+                        SqlType::new(SqlTypeKind::Text),
+                    ),
+                ],
+            })
+        }
+        BuiltinScalarFunction::Decode => Ok(Expr::FuncCall {
+            func,
+            args: vec![
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    infer_sql_expr_type_with_ctes(
+                        &args[0],
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    ),
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+                coerce_bound_expr(
+                    bound_args[1].clone(),
+                    infer_sql_expr_type_with_ctes(
+                        &args[1],
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    ),
+                    SqlType::new(SqlTypeKind::Text),
+                ),
+            ],
+        }),
         BuiltinScalarFunction::ToChar => {
             let value_type = infer_sql_expr_type_with_ctes(
                 &args[0],

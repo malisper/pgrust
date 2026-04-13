@@ -6,6 +6,7 @@ use crate::backend::parser::{Catalog, CatalogEntry};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -6109,6 +6110,65 @@ fn trim_supports_bytea_arguments() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn text_helper_functions_work() {
+    let base = temp_dir("strings_text_helper_functions");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select strpos('high', 'ig'), replace('abcdef', 'cd', 'XX'), split_part('a,b,c', ',', 2), initcap('hi THOMAS'), lpad('hi', 5, 'xy'), rpad('hi', 5, 'xy'), translate('12345', '143', 'ax'), ascii('x'), chr(120)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Int32(2),
+            Value::Text("abXXef".into()),
+            Value::Text("b".into()),
+            Value::Text("Hi Thomas".into()),
+            Value::Text("xyxhi".into()),
+            Value::Text("hixyx".into()),
+            Value::Text("a2x5".into()),
+            Value::Int32(120),
+            Value::Text("x".into()),
+        ]],
+    );
+}
+
+#[test]
+fn bytea_hash_and_encoding_functions_work() {
+    let base = temp_dir("strings_bytea_helper_functions");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select encode(E'\\\\336\\\\255\\\\276\\\\357'::bytea, 'hex'), decode('deadbeef', 'hex'), sha256('abc'), crc32('abc'), crc32c('abc'), reverse(E'\\\\001\\\\002\\\\003'::bytea), position(E'\\\\002\\\\003'::bytea in E'\\\\001\\\\002\\\\003\\\\002'::bytea), substring(E'\\\\001\\\\002\\\\003\\\\004'::bytea from 2 for 2), overlay(E'\\\\001\\\\002\\\\003\\\\004'::bytea placing E'\\\\252\\\\273'::bytea from 2 for 2), get_bit(E'\\\\200'::bytea, 0), set_bit(E'\\\\000'::bytea, 0, 1), get_byte(E'\\\\001\\\\002'::bytea, 1), set_byte(E'\\\\001\\\\002'::bytea, 1, 255), bit_count(E'\\\\360'::bytea)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("deadbeef".into()),
+            Value::Bytea(vec![0xde, 0xad, 0xbe, 0xef]),
+            Value::Bytea(Sha256::digest(b"abc").to_vec()),
+            Value::Int64(crc32fast::hash(b"abc") as i64),
+            Value::Int64(crc32c::crc32c(b"abc") as i64),
+            Value::Bytea(vec![3, 2, 1]),
+            Value::Int32(2),
+            Value::Bytea(vec![2, 3]),
+            Value::Bytea(vec![1, 0xaa, 0xbb, 4]),
+            Value::Int32(1),
+            Value::Bytea(vec![0x80]),
+            Value::Int32(2),
+            Value::Bytea(vec![1, 255]),
+            Value::Int64(4),
+        ]],
+    );
 }
 
 #[test]

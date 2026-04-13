@@ -148,10 +148,23 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::Initcap
+            | BuiltinScalarFunction::Ascii
+            | BuiltinScalarFunction::Chr
+            | BuiltinScalarFunction::Reverse
+            | BuiltinScalarFunction::Sha224
+            | BuiltinScalarFunction::Sha256
+            | BuiltinScalarFunction::Sha384
+            | BuiltinScalarFunction::Sha512
+            | BuiltinScalarFunction::Crc32
+            | BuiltinScalarFunction::Crc32c => args.len() == 1,
             BuiltinScalarFunction::Position
+            | BuiltinScalarFunction::Strpos
             | BuiltinScalarFunction::ConvertFrom
             | BuiltinScalarFunction::Left
             | BuiltinScalarFunction::Repeat
+            | BuiltinScalarFunction::Encode
+            | BuiltinScalarFunction::Decode
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
             | BuiltinScalarFunction::RegexpLike
@@ -160,6 +173,10 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgInputErrorDetail
             | BuiltinScalarFunction::PgInputErrorHint
             | BuiltinScalarFunction::PgInputErrorSqlState => args.len() == 2,
+            BuiltinScalarFunction::Replace
+            | BuiltinScalarFunction::Translate
+            | BuiltinScalarFunction::SplitPart => args.len() == 3,
+            BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::RegexpReplace => matches!(args.len(), 3..=6),
             BuiltinScalarFunction::RegexpCount => matches!(args.len(), 2..=4),
             BuiltinScalarFunction::RegexpInstr => matches!(args.len(), 2..=7),
@@ -168,6 +185,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Substring => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::SimilarSubstring => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::Overlay => matches!(args.len(), 3 | 4),
+            BuiltinScalarFunction::GetByte => args.len() == 2,
+            BuiltinScalarFunction::SetByte => args.len() == 3,
             BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
             BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
@@ -554,14 +573,25 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "jsonb_path_query_first",
             BuiltinScalarFunction::JsonbPathQueryFirst,
         ),
+        ("initcap", BuiltinScalarFunction::Initcap),
         ("left", BuiltinScalarFunction::Left),
+        ("lpad", BuiltinScalarFunction::LPad),
+        ("rpad", BuiltinScalarFunction::RPad),
         ("repeat", BuiltinScalarFunction::Repeat),
         ("length", BuiltinScalarFunction::Length),
         ("lower", BuiltinScalarFunction::Lower),
+        ("ascii", BuiltinScalarFunction::Ascii),
+        ("chr", BuiltinScalarFunction::Chr),
+        ("replace", BuiltinScalarFunction::Replace),
+        ("split_part", BuiltinScalarFunction::SplitPart),
+        ("translate", BuiltinScalarFunction::Translate),
         ("position", BuiltinScalarFunction::Position),
+        ("strpos", BuiltinScalarFunction::Strpos),
         ("substring", BuiltinScalarFunction::Substring),
+        ("substr", BuiltinScalarFunction::Substring),
         ("similar_substring", BuiltinScalarFunction::SimilarSubstring),
         ("overlay", BuiltinScalarFunction::Overlay),
+        ("reverse", BuiltinScalarFunction::Reverse),
         ("trim", BuiltinScalarFunction::BTrim),
         ("btrim", BuiltinScalarFunction::BTrim),
         ("ltrim", BuiltinScalarFunction::LTrim),
@@ -577,9 +607,19 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("get_bit", BuiltinScalarFunction::GetBit),
         ("set_bit", BuiltinScalarFunction::SetBit),
+        ("get_byte", BuiltinScalarFunction::GetByte),
+        ("set_byte", BuiltinScalarFunction::SetByte),
         ("bit_count", BuiltinScalarFunction::BitCount),
+        ("encode", BuiltinScalarFunction::Encode),
+        ("decode", BuiltinScalarFunction::Decode),
         ("convert_from", BuiltinScalarFunction::ConvertFrom),
         ("md5", BuiltinScalarFunction::Md5),
+        ("sha224", BuiltinScalarFunction::Sha224),
+        ("sha256", BuiltinScalarFunction::Sha256),
+        ("sha384", BuiltinScalarFunction::Sha384),
+        ("sha512", BuiltinScalarFunction::Sha512),
+        ("crc32", BuiltinScalarFunction::Crc32),
+        ("crc32c", BuiltinScalarFunction::Crc32c),
         ("to_char", BuiltinScalarFunction::ToChar),
         ("to_number", BuiltinScalarFunction::ToNumber),
         ("abs", BuiltinScalarFunction::Abs),
@@ -784,17 +824,35 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
             | BuiltinScalarFunction::JsonbPathQueryFirst
+            | BuiltinScalarFunction::Initcap
             | BuiltinScalarFunction::Left
+            | BuiltinScalarFunction::LPad
+            | BuiltinScalarFunction::RPad
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Length
             | BuiltinScalarFunction::Lower
+            | BuiltinScalarFunction::Ascii
+            | BuiltinScalarFunction::Chr
+            | BuiltinScalarFunction::Replace
+            | BuiltinScalarFunction::SplitPart
+            | BuiltinScalarFunction::Translate
+            | BuiltinScalarFunction::Strpos
             | BuiltinScalarFunction::Position
             | BuiltinScalarFunction::SimilarSubstring
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
+            | BuiltinScalarFunction::Reverse
             | BuiltinScalarFunction::ConvertFrom
+            | BuiltinScalarFunction::Encode
+            | BuiltinScalarFunction::Decode
             | BuiltinScalarFunction::Md5
+            | BuiltinScalarFunction::Sha224
+            | BuiltinScalarFunction::Sha256
+            | BuiltinScalarFunction::Sha384
+            | BuiltinScalarFunction::Sha512
+            | BuiltinScalarFunction::Crc32
+            | BuiltinScalarFunction::Crc32c
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToNumber
             | BuiltinScalarFunction::RegexpReplace
@@ -812,6 +870,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Mod
             | BuiltinScalarFunction::WidthBucket
             | BuiltinScalarFunction::GetBit
+            | BuiltinScalarFunction::GetByte
             | BuiltinScalarFunction::BitCount
             | BuiltinScalarFunction::Float4Send
             | BuiltinScalarFunction::Float8Send
@@ -836,6 +895,8 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Substring
             | BuiltinScalarFunction::SimilarSubstring
             | BuiltinScalarFunction::Overlay
+            | BuiltinScalarFunction::LPad
+            | BuiltinScalarFunction::RPad
             | BuiltinScalarFunction::BTrim
             | BuiltinScalarFunction::LTrim
             | BuiltinScalarFunction::RTrim
