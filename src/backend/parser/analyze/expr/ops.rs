@@ -327,7 +327,11 @@ pub(super) fn bind_overloaded_binary_expr(
     );
 
     if op == "@@" {
-        if matches!(left_type.kind, SqlTypeKind::TsVector) && right_is_string_literal {
+        if matches!(left_type.kind, SqlTypeKind::Jsonb) && right_is_string_literal {
+            right_type = SqlType::new(SqlTypeKind::JsonPath);
+        } else if matches!(right_type.kind, SqlTypeKind::Jsonb) && left_is_string_literal {
+            left_type = SqlType::new(SqlTypeKind::JsonPath);
+        } else if matches!(left_type.kind, SqlTypeKind::TsVector) && right_is_string_literal {
             right_type = SqlType::new(SqlTypeKind::TsQuery);
         } else if matches!(right_type.kind, SqlTypeKind::TsVector) && left_is_string_literal {
             left_type = SqlType::new(SqlTypeKind::TsQuery);
@@ -349,8 +353,16 @@ pub(super) fn bind_overloaded_binary_expr(
         "@@" => {
             if left_type.kind == SqlTypeKind::Jsonb && right_type.kind == SqlTypeKind::JsonPath {
                 return Ok(Expr::JsonbPathMatch(
-                    Box::new(left_bound),
-                    Box::new(right_bound),
+                    Box::new(coerce_bound_expr(
+                        left_bound,
+                        raw_left_type,
+                        SqlType::new(SqlTypeKind::Jsonb),
+                    )),
+                    Box::new(coerce_bound_expr(
+                        right_bound,
+                        raw_right_type,
+                        SqlType::new(SqlTypeKind::JsonPath),
+                    )),
                 ));
             }
             if matches!(left_type.kind, SqlTypeKind::TsVector)
@@ -398,9 +410,28 @@ pub(super) fn bind_overloaded_binary_expr(
         }
         "&&" => {
             if left_type.is_array && right_type.is_array {
+                let left_expr = coerce_bound_expr(left_bound, raw_left_type, left_type);
+                let left_expr = if left_is_string_literal {
+                    if let Expr::ArrayLiteral { array_type, .. } = &right_bound {
+                        coerce_bound_expr(left_expr, left_type, *array_type)
+                    } else {
+                        left_expr
+                    }
+                } else {
+                    left_expr
+                };
+                let right_expr = if right_is_string_literal {
+                    if let Expr::ArrayLiteral { array_type, .. } = &left_expr {
+                        coerce_bound_expr(right_bound, raw_right_type, *array_type)
+                    } else {
+                        coerce_bound_expr(right_bound, raw_right_type, right_type)
+                    }
+                } else {
+                    coerce_bound_expr(right_bound, raw_right_type, right_type)
+                };
                 return Ok(Expr::ArrayOverlap(
-                    Box::new(left_bound),
-                    Box::new(right_bound),
+                    Box::new(left_expr),
+                    Box::new(right_expr),
                 ));
             }
             if matches!(left_type.kind, SqlTypeKind::TsQuery)

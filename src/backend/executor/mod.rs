@@ -127,6 +127,12 @@ pub enum ExecError {
         detail: Option<String>,
         sqlstate: &'static str,
     },
+    DetailedError {
+        message: String,
+        detail: Option<String>,
+        hint: Option<String>,
+        sqlstate: &'static str,
+    },
     StringDataRightTruncation {
         ty: String,
     },

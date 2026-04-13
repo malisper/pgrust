@@ -756,8 +756,12 @@ pub(super) fn bind_agg_output_expr_in_clause(
             agg_list,
             n_keys,
         ),
-        SqlExpr::ArrayOverlap(l, r) => Ok(Expr::ArrayOverlap(
-            Box::new(bind_agg_output_expr(
+        SqlExpr::ArrayOverlap(l, r) => {
+            let raw_left_type =
+                infer_sql_expr_type_with_ctes(l, input_scope, catalog, outer_scopes, grouped_outer, &[]);
+            let raw_right_type =
+                infer_sql_expr_type_with_ctes(r, input_scope, catalog, outer_scopes, grouped_outer, &[]);
+            let left = bind_agg_output_expr(
                 l,
                 group_by_exprs,
                 input_scope,
@@ -766,8 +770,8 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 grouped_outer,
                 agg_list,
                 n_keys,
-            )?),
-            Box::new(bind_agg_output_expr(
+            )?;
+            let right = bind_agg_output_expr(
                 r,
                 group_by_exprs,
                 input_scope,
@@ -776,8 +780,33 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 grouped_outer,
                 agg_list,
                 n_keys,
-            )?),
-        )),
+            )?;
+            let right = if matches!(
+                &**r,
+                SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+            ) {
+                if let Expr::ArrayLiteral { array_type, .. } = &left {
+                    coerce_bound_expr(right, raw_right_type, *array_type)
+                } else {
+                    right
+                }
+            } else {
+                right
+            };
+            let left = if matches!(
+                &**l,
+                SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+            ) {
+                if let Expr::ArrayLiteral { array_type, .. } = &right {
+                    coerce_bound_expr(left, raw_left_type, *array_type)
+                } else {
+                    left
+                }
+            } else {
+                left
+            };
+            Ok(Expr::ArrayOverlap(Box::new(left), Box::new(right)))
+        }
         SqlExpr::JsonGet(l, r) => Ok(Expr::JsonGet(
             Box::new(bind_agg_output_expr(
                 l,
