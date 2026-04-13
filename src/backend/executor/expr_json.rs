@@ -474,6 +474,11 @@ fn variadic_args(
                     flatten_variadic_items(item, out);
                 }
             }
+            Value::PgArray(array) => {
+                for item in array.to_nested_values() {
+                    flatten_variadic_items(&item, out);
+                }
+            }
             other => out.push(other.clone()),
         }
     }
@@ -493,10 +498,17 @@ fn variadic_args(
             }
             Ok(Some(out))
         }
+        Value::PgArray(array) => {
+            let mut out = values[..fixed_prefix].to_vec();
+            for item in array.to_nested_values() {
+                flatten_variadic_items(&item, &mut out);
+            }
+            Ok(Some(out))
+        }
         other => Err(ExecError::TypeMismatch {
             op,
             left: other.clone(),
-            right: Value::Array(Vec::new()),
+            right: Value::PgArray(crate::include::nodes::datum::ArrayValue::empty()),
         }),
     }
 }
@@ -1004,6 +1016,21 @@ fn parse_jsonb_path_arg(value: &Value, op: &'static str) -> Result<Vec<Option<St
                 }),
             })
             .collect(),
+        Value::PgArray(array) => array
+            .elements
+            .iter()
+            .map(|item| match item {
+                Value::Null => Ok(None),
+                Value::Text(_) | Value::TextRef(_, _) => {
+                    Ok(Some(item.as_text().unwrap().to_string()))
+                }
+                other => Err(ExecError::TypeMismatch {
+                    op,
+                    left: other.clone(),
+                    right: Value::Null,
+                }),
+            })
+            .collect(),
         other => Err(ExecError::TypeMismatch {
             op,
             left: other.clone(),
@@ -1108,6 +1135,24 @@ fn apply_jsonb_delete(target: &JsonbValue, key: &Value) -> Result<JsonbValue, Ex
         Value::Array(keys) => {
             let mut result = target.clone();
             for key in keys {
+                let text = match key {
+                    Value::Null => continue,
+                    Value::Text(_) | Value::TextRef(_, _) => key.as_text().unwrap(),
+                    other => {
+                        return Err(ExecError::TypeMismatch {
+                            op: "jsonb_delete",
+                            left: other.clone(),
+                            right: Value::Null,
+                        });
+                    }
+                };
+                result = apply_jsonb_delete(&result, &Value::Text(CompactString::new(text)))?;
+            }
+            result
+        }
+        Value::PgArray(keys) => {
+            let mut result = target.clone();
+            for key in &keys.elements {
                 let text = match key {
                     Value::Null => continue,
                     Value::Text(_) | Value::TextRef(_, _) => key.as_text().unwrap(),
@@ -1357,6 +1402,19 @@ fn parse_json_path_value(
 ) -> Result<Vec<String>, ExecError> {
     match value {
         Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Text(_) | Value::TextRef(_, _) => Ok(item.as_text().unwrap().to_string()),
+                Value::Null => Ok(String::new()),
+                other => Err(ExecError::TypeMismatch {
+                    op,
+                    left: left.clone(),
+                    right: other.clone(),
+                }),
+            })
+            .collect(),
+        Value::PgArray(array) => array
+            .elements
             .iter()
             .map(|item| match item {
                 Value::Text(_) | Value::TextRef(_, _) => Ok(item.as_text().unwrap().to_string()),

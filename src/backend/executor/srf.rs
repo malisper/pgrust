@@ -222,6 +222,11 @@ fn eval_unnest(
                 max_len = max_len.max(values.len());
                 arrays.push(Some(values));
             }
+            Value::PgArray(array) => {
+                let values = array.to_nested_values();
+                max_len = max_len.max(values.len());
+                arrays.push(Some(values));
+            }
             other => {
                 return Err(ExecError::TypeMismatch {
                     op: "unnest",

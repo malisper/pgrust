@@ -476,28 +476,36 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    if let (Some(mut left_array), Some(right_array)) =
+        (normalize_array_value(&left), normalize_array_value(&right))
+    {
+        left_array.elements.extend(right_array.elements);
+        left_array.dimensions = vec![ArrayDimension {
+            lower_bound: 1,
+            length: left_array.elements.len(),
+        }];
+        return Ok(Value::PgArray(left_array));
+    }
+    if let Some(mut left_array) = normalize_array_value(&left) {
+        left_array.elements.push(right);
+        left_array.dimensions = vec![ArrayDimension {
+            lower_bound: 1,
+            length: left_array.elements.len(),
+        }];
+        return Ok(Value::PgArray(left_array));
+    }
+    if let Some(right_array) = normalize_array_value(&right) {
+        let mut elements = Vec::with_capacity(right_array.elements.len() + 1);
+        elements.push(left);
+        elements.extend(right_array.elements);
+        return Ok(Value::PgArray(ArrayValue::from_1d(elements)));
+    }
     match (&left, &right) {
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(concat_bit_strings(l, r))),
         (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Jsonb(encode_jsonb(&jsonb_concat(
             &decode_jsonb(l)?,
             &decode_jsonb(r)?,
         )))),
-        (Value::Array(l), Value::Array(r)) => {
-            let mut items = l.clone();
-            items.extend(r.iter().cloned());
-            Ok(Value::Array(items))
-        }
-        (Value::Array(l), _) => {
-            let mut items = l.clone();
-            items.push(right);
-            Ok(Value::Array(items))
-        }
-        (_, Value::Array(r)) => {
-            let mut items = Vec::with_capacity(r.len() + 1);
-            items.push(left);
-            items.extend(r.iter().cloned());
-            Ok(Value::Array(items))
-        }
         _ => {
             let text_type = SqlType::new(SqlTypeKind::Text);
             let left_text = cast_value(left, text_type)?;
