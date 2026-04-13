@@ -4777,7 +4777,13 @@ fn select_list_generate_series_expands_rows() {
     let base = temp_dir("project_set_generate_series");
     let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
-        run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select generate_series(1, 3)").unwrap(),
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select generate_series(1, 3)",
+        )
+        .unwrap(),
         vec![
             vec![Value::Int32(1)],
             vec![Value::Int32(2)],
@@ -4818,10 +4824,7 @@ fn select_list_json_scalar_srfs_work() {
             "select json_object_keys('{\"a\":1,\"b\":2}'::json)",
         )
         .unwrap(),
-        vec![
-            vec![Value::Text("a".into())],
-            vec![Value::Text("b".into())],
-        ],
+        vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())]],
     );
     assert_query_rows(
         run_sql(
@@ -4870,7 +4873,10 @@ fn select_list_composite_srf_is_rejected() {
         "select json_each('{\"a\":1}'::json)",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::Parse(ParseError::UnexpectedToken { .. })));
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnexpectedToken { .. })
+    ));
 }
 #[test]
 fn join_alias_hides_inner_relation_names() {
@@ -5681,7 +5687,10 @@ fn jsonb_object_and_pretty_functions_work() {
                         )
                         .unwrap()
                     ),
-                    Value::Text("{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": 3\n  }\n}".into()),
+                    Value::Text(
+                        "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": 3\n  }\n}"
+                            .into()
+                    ),
                 ]]
             );
         }
@@ -5713,8 +5722,7 @@ fn jsonb_delete_and_delete_path_functions_work() {
                             .unwrap()
                     ),
                     Value::Jsonb(
-                        crate::backend::executor::jsonb::parse_jsonb_text("[\"a\",\"c\"]")
-                            .unwrap()
+                        crate::backend::executor::jsonb::parse_jsonb_text("[\"a\",\"c\"]").unwrap()
                     ),
                     Value::Jsonb(
                         crate::backend::executor::jsonb::parse_jsonb_text("[10,30]").unwrap()
@@ -5958,6 +5966,7 @@ fn regexp_scalar_functions_work() {
         "select regexp_count('123123123123', '123', 3), \
                 regexp_instr('abcabcabc', 'a.c', 1, 3), \
                 regexp_substr('1234567890', '(123)(4(56)(78))', 1, 1, 'i', 3), \
+                regexp_match('foobarbequebaz', '(bar)(.*)(baz)'), \
                 regexp_split_to_array('the quick brown fox', '\\s+')",
     )
     .unwrap()
@@ -5970,6 +5979,11 @@ fn regexp_scalar_functions_work() {
                     Value::Int32(7),
                     Value::Text("56".into()),
                     Value::Array(vec![
+                        Value::Text("bar".into()),
+                        Value::Text("beque".into()),
+                        Value::Text("baz".into()),
+                    ]),
+                    Value::Array(vec![
                         Value::Text("the".into()),
                         Value::Text("quick".into()),
                         Value::Text("brown".into()),
@@ -5980,6 +5994,41 @@ fn regexp_scalar_functions_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn regexp_match_edge_cases_work() {
+    let base = temp_dir("regexp_match_edge_cases");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_match('abc', 'd') is null, regexp_match(null, 'a') is null",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Bool(true), Value::Bool(true)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regexp_match('abc', 'a', 'g')",
+    )
+    .expect_err("global regexp_match flag should error");
+    assert!(matches!(
+        err,
+        ExecError::Regex(RegexError { sqlstate, message, hint, .. })
+            if sqlstate == "22023"
+                && message == "regexp_match() does not support the \"global\" option"
+                && hint.as_deref() == Some("Use the regexp_matches function instead.")
+    ));
 }
 
 #[test]
@@ -6000,7 +6049,10 @@ fn sql_regex_substring_forms_work() {
             "select substring('abcdefg' similar 'a#\"%#\"g' escape '#')",
             Value::Text("bcdef".into()),
         ),
-        ("select substring('abcdefg' from 'c.e')", Value::Text("cde".into())),
+        (
+            "select substring('abcdefg' from 'c.e')",
+            Value::Text("cde".into()),
+        ),
         (
             "select substring('abcdefg' from 'b(.*)f')",
             Value::Text("cde".into()),
@@ -6214,10 +6266,7 @@ fn json_jsonb_table_functions_accept_named_sql_args() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![
-                    vec![Value::Text("a".into())],
-                    vec![Value::Text("b".into())],
-                ]
+                vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())],]
             );
         }
         other => panic!("expected query result, got {:?}", other),

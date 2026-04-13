@@ -27,6 +27,7 @@ use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices}
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
+        ExecError::Regex(err) => err.sqlstate,
         ExecError::Parse(crate::backend::parser::ParseError::InvalidInteger(_))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidNumeric(_))
         | ExecError::InvalidIntegerInput { .. }
@@ -65,6 +66,20 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::CardinalityViolation(_) => "21000",
         ExecError::Parse(_) => "42601",
         _ => "XX000",
+    }
+}
+
+fn exec_error_detail(e: &ExecError) -> Option<&str> {
+    match e {
+        ExecError::Regex(err) => err.detail.as_deref(),
+        _ => None,
+    }
+}
+
+fn exec_error_hint(e: &ExecError) -> Option<&str> {
+    match e {
+        ExecError::Regex(err) => err.hint.as_deref(),
+        _ => None,
     }
 }
 
@@ -247,6 +262,8 @@ where
                     "08P01",
                     &format!("unsupported protocol version: {code}"),
                     None,
+                    None,
+                    None,
                 )?;
                 writer.flush()?;
                 return Ok(());
@@ -338,6 +355,8 @@ where
                     &mut writer,
                     "0A000",
                     &format!("unsupported message type: '{}'", msg_type as char),
+                    None,
+                    None,
                     None,
                 )?;
                 send_ready_for_query(&mut writer, state.session.ready_status())?;
@@ -453,6 +472,8 @@ fn handle_query(
                         stream,
                         exec_error_sqlstate(&e),
                         &format_exec_error(&e),
+                        exec_error_detail(&e),
+                        exec_error_hint(&e),
                         exec_error_position(&sql, &e),
                     )?;
                 } else {
@@ -469,6 +490,8 @@ fn handle_query(
                     stream,
                     exec_error_sqlstate(&e),
                     &format_exec_error(&e),
+                    exec_error_detail(&e),
+                    exec_error_hint(&e),
                     exec_error_position(&sql, &e),
                 )?;
             }
@@ -499,6 +522,8 @@ fn handle_query(
                     stream,
                     exec_error_sqlstate(&e),
                     &format_exec_error(&e),
+                    exec_error_detail(&e),
+                    exec_error_hint(&e),
                     exec_error_position(&sql, &e),
                 )?;
             }
@@ -972,7 +997,14 @@ fn handle_copy_fail(
 ) -> io::Result<()> {
     state.copy_in = None;
     let message = cstr_from_bytes(body);
-    send_error(stream, "57014", &format!("copy failed: {message}"), None)?;
+    send_error(
+        stream,
+        "57014",
+        &format!("copy failed: {message}"),
+        None,
+        None,
+        None,
+    )?;
     send_ready_for_query(stream, state.session.ready_status())?;
     Ok(())
 }
@@ -1057,7 +1089,14 @@ fn handle_bind(
     }
 
     let Some(stmt) = state.prepared.get(&statement_name) else {
-        send_error(stream, "26000", "unknown prepared statement", None)?;
+        send_error(
+            stream,
+            "26000",
+            "unknown prepared statement",
+            None,
+            None,
+            None,
+        )?;
         return Ok(());
     };
     state.portals.insert(
@@ -1117,7 +1156,7 @@ fn handle_execute(
     let portal_name = read_cstr(body, &mut offset)?;
     let _max_rows = read_i32_bytes(body, &mut offset)?;
     let Some(portal) = state.portals.get(&portal_name) else {
-        send_error(stream, "26000", "unknown portal", None)?;
+        send_error(stream, "26000", "unknown portal", None, None, None)?;
         return Ok(());
     };
     execute_portal(stream, db, &mut state.session, portal)
@@ -1188,6 +1227,8 @@ fn execute_portal(
                 stream,
                 exec_error_sqlstate(&e),
                 &format_exec_error(&e),
+                exec_error_detail(&e),
+                exec_error_hint(&e),
                 exec_error_position(&sql, &e),
             )?;
         }
@@ -1282,6 +1323,8 @@ fn try_handle_float_shell_ddl(stream: &mut impl Write, sql: &str) -> io::Result<
                 stream,
                 "42704",
                 "type \"no_such_type\" does not exist",
+                None,
+                None,
                 sql.find("no_such_type").map(|idx| idx + 1),
             )?;
             return Ok(true);

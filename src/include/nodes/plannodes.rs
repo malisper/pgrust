@@ -1,9 +1,9 @@
 use crate::RelFileLocator;
+use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::include::access::htup::AttributeDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
-use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
-use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
-use crate::include::access::htup::AttributeDesc;
 use crate::include::nodes::datum::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +145,7 @@ pub enum BuiltinScalarFunction {
     BTrim,
     LTrim,
     RTrim,
+    RegexpMatch,
     RegexpLike,
     RegexpReplace,
     RegexpCount,
