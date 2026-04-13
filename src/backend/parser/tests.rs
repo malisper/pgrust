@@ -2468,6 +2468,49 @@ fn parse_unicode_string_and_identifier_literals() {
 }
 
 #[test]
+fn parse_unicode_string_rejects_when_standard_conforming_strings_is_off() {
+    let err = parse_statement_with_options(
+        "select U&'d\\0061ta'",
+        ParseOptions {
+            standard_conforming_strings: false,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.to_string(), "unsafe use of string constant with Unicode escapes");
+}
+
+#[test]
+fn parse_unicode_string_validates_surrogate_pairs() {
+    let stmt = parse_statement(r"select U&'\D83D\DE00'").unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(stmt.targets[0].expr, SqlExpr::Const(Value::Text("😀".into())));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+
+    let err = parse_statement(r"select U&'\D83D\0061'").unwrap_err();
+    assert_eq!(err.to_string(), "invalid Unicode surrogate pair");
+}
+
+#[test]
+fn parse_escape_string_validates_unicode_escapes() {
+    let stmt = parse_statement(r"select E'\uD83D\uDE00'").unwrap();
+    match stmt {
+        Statement::Select(stmt) => {
+            assert_eq!(stmt.targets[0].expr, SqlExpr::Const(Value::Text("😀".into())));
+        }
+        other => panic!("expected select statement, got {other:?}"),
+    }
+
+    let err = parse_statement(r"select E'\u061'").unwrap_err();
+    assert_eq!(err.to_string(), "invalid Unicode escape");
+
+    let err = parse_statement(r"select E'\uD83D\u0061'").unwrap_err();
+    assert_eq!(err.to_string(), "invalid Unicode surrogate pair");
+}
+
+#[test]
 fn parse_like_and_trim_syntax() {
     let stmt =
         parse_statement("select trim(leading 'x' from 'xxxabc'), 'abc' ilike 'A%' escape '#'")
