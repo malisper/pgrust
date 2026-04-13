@@ -1,4 +1,5 @@
 pub const PG_CATALOG_NAMESPACE_OID: u32 = 11;
+pub const PG_TOAST_NAMESPACE_OID: u32 = 99;
 pub const PUBLIC_NAMESPACE_OID: u32 = 2200;
 
 pub const PG_TYPE_RELATION_OID: u32 = 1247;
@@ -388,7 +389,10 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[18].oid, PG_CAST_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[19].oid, PG_CONSTRAINT_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[20].oid, PG_DEPEND_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[21].oid, PG_DESCRIPTION_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[21].oid,
+            PG_DESCRIPTION_RELATION_OID
+        );
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[22].oid, PG_INDEX_RELATION_OID);
     }
 

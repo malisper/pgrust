@@ -524,7 +524,12 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
         typname: expect_text(&values[1])?,
         typnamespace: expect_oid(&values[2])?,
         typowner: expect_oid(&values[3])?,
-        typrelid: expect_oid(&values[4])?,
+        typlen: expect_int16(&values[4])?,
+        typalign: AttributeAlign::from_char(expect_char(&values[5], "typalign")?)
+            .ok_or(CatalogError::Corrupt("invalid typalign"))?,
+        typstorage: AttributeStorage::from_char(expect_char(&values[6], "typstorage")?)
+            .ok_or(CatalogError::Corrupt("invalid typstorage"))?,
+        typrelid: expect_oid(&values[7])?,
         sql_type: decode_builtin_sql_type(oid).unwrap_or(SqlType::new(SqlTypeKind::Text)),
     })
 }
@@ -762,6 +767,9 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::Text(row.typname.into()),
         Value::Int32(row.typnamespace as i32),
         Value::Int32(row.typowner as i32),
+        Value::Int16(row.typlen),
+        Value::InternalChar(row.typalign.as_char() as u8),
+        Value::InternalChar(row.typstorage.as_char() as u8),
         Value::Int32(row.typrelid as i32),
     ]
 }

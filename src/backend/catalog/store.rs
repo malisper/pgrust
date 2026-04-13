@@ -10,7 +10,9 @@ use crate::backend::access::transam::xact::{
     CommandId, Snapshot, TransactionId, TransactionManager,
 };
 use crate::backend::catalog::bootstrap::bootstrap_catalog_entry;
-use crate::backend::catalog::catalog::{Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions};
+use crate::backend::catalog::catalog::{
+    Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions,
+};
 use crate::backend::catalog::indexing::{
     insert_bootstrap_system_indexes, probe_system_catalog_rows_visible,
     rebuild_system_catalog_indexes,
@@ -19,6 +21,7 @@ use crate::backend::catalog::loader::{
     load_catalog_from_physical, load_catalog_from_visible_physical,
     load_physical_catalog_rows_visible,
 };
+use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create_toast_table};
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
     sync_catalog_rows_subset,
@@ -208,9 +211,30 @@ impl CatalogStore {
         let name = name.into();
         let mut catalog = self.catalog_snapshot_with_control()?;
         let entry = catalog.create_table(name.clone(), desc)?;
+        let toast = new_relation_create_toast_table(&mut catalog, entry.relation_oid)?;
+        let entry = toast
+            .as_ref()
+            .map(|changes| changes.new_parent.clone())
+            .unwrap_or(entry);
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_state(&catalog)?;
         append_catalog_entry_rows(&self.base_dir, &catalog, &name, &entry, &kinds)?;
+        if let Some(toast) = toast {
+            append_catalog_entry_rows(
+                &self.base_dir,
+                &catalog,
+                &toast.toast_name,
+                &toast.toast_entry,
+                &create_table_sync_kinds(&toast.toast_entry),
+            )?;
+            append_catalog_entry_rows(
+                &self.base_dir,
+                &catalog,
+                &toast.index_name,
+                &toast.index_entry,
+                &create_index_sync_kinds(),
+            )?;
+        }
         Ok(entry)
     }
 
@@ -351,9 +375,24 @@ impl CatalogStore {
             db_oid,
             relpersistence,
         )?;
-        let kinds = create_table_sync_kinds(&entry);
+        let toast = if relpersistence == 't' {
+            None
+        } else {
+            new_relation_create_toast_table(&mut catalog, entry.relation_oid)?
+        };
+        let entry = toast
+            .as_ref()
+            .map(|changes| changes.new_parent.clone())
+            .unwrap_or(entry);
+        let mut kinds = create_table_sync_kinds(&entry);
         self.persist_control_state(&catalog)?;
-        let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
+        let mut rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
+        if let Some(toast) = &toast {
+            add_catalog_entry_rows(&mut rows, &catalog, &toast.toast_name, &toast.toast_entry);
+            add_catalog_entry_rows(&mut rows, &catalog, &toast.index_name, &toast.index_entry);
+            merge_catalog_kinds(&mut kinds, &create_table_sync_kinds(&toast.toast_entry));
+            merge_catalog_kinds(&mut kinds, &create_index_sync_kinds());
+        }
         insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
 
         let mut effect = CatalogMutationEffect::default();
@@ -362,6 +401,9 @@ impl CatalogStore {
         effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
         effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        if let Some(toast) = toast {
+            record_toast_effects(&mut effect, &toast);
+        }
         Ok((entry, effect))
     }
 
@@ -550,8 +592,16 @@ impl CatalogStore {
         let (_name, old_entry, new_entry) = catalog.alter_table_add_column(relation_oid, column)?;
         self.persist_control_state(&catalog)?;
 
-        let mut kinds = vec![BootstrapCatalogKind::PgAttribute, BootstrapCatalogKind::PgDepend];
-        if new_entry.desc.columns.iter().any(|column| column.attrdef_oid.is_some()) {
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgAttribute,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        if new_entry
+            .desc
+            .columns
+            .iter()
+            .any(|column| column.attrdef_oid.is_some())
+        {
             kinds.push(BootstrapCatalogKind::PgAttrdef);
         }
         let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &_name, &old_entry);
@@ -726,7 +776,7 @@ fn collect_relation_drop_oids(
             continue;
         }
         if let Some(dependent) = catalog.get_by_oid(row.objid) {
-            if dependent.relkind != 'r' && dependent.relkind != 'i' {
+            if dependent.relkind != 'r' && dependent.relkind != 'i' && dependent.relkind != 't' {
                 continue;
             }
             collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);
@@ -838,6 +888,39 @@ fn effect_record_oid(oids: &mut Vec<u32>, oid: u32) {
     }
 }
 
+fn add_catalog_entry_rows(
+    target: &mut PhysicalCatalogRows,
+    catalog: &Catalog,
+    relation_name: &str,
+    entry: &CatalogEntry,
+) {
+    extend_physical_catalog_rows(
+        target,
+        physical_catalog_rows_for_catalog_entry(catalog, relation_name, entry),
+    );
+}
+
+fn merge_catalog_kinds(
+    target: &mut Vec<BootstrapCatalogKind>,
+    kinds: &[BootstrapCatalogKind],
+) {
+    for &kind in kinds {
+        if !target.contains(&kind) {
+            target.push(kind);
+        }
+    }
+}
+
+fn record_toast_effects(effect: &mut CatalogMutationEffect, toast: &ToastCatalogChanges) {
+    effect_record_rel(&mut effect.created_rels, toast.toast_entry.rel);
+    effect_record_oid(&mut effect.relation_oids, toast.toast_entry.relation_oid);
+    effect_record_oid(&mut effect.namespace_oids, toast.toast_entry.namespace_oid);
+    effect_record_oid(&mut effect.type_oids, toast.toast_entry.row_type_oid);
+    effect_record_rel(&mut effect.created_rels, toast.index_entry.rel);
+    effect_record_oid(&mut effect.relation_oids, toast.index_entry.relation_oid);
+    effect_record_oid(&mut effect.namespace_oids, toast.index_entry.namespace_oid);
+}
+
 fn persist_control_file(path: &Path, control: &CatalogControl) -> Result<(), CatalogError> {
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&CONTROL_FILE_MAGIC.to_le_bytes());
@@ -885,8 +968,8 @@ mod tests {
         DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, HEAP_TABLE_AM_OID, INT4_TYPE_OID, INT8_TYPE_OID,
         JSON_TYPE_OID, OID_TYPE_OID, PG_ATTRDEF_RELATION_OID, PG_CLASS_RELATION_OID,
         PG_CONSTRAINT_RELATION_OID, PG_LANGUAGE_INTERNAL_OID, PG_NAMESPACE_RELATION_OID,
-        PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID, TEXT_TYPE_OID,
-        VARCHAR_TYPE_OID,
+        PG_TOAST_NAMESPACE_OID, PG_TYPE_RELATION_OID, POSIX_COLLATION_OID, PUBLIC_NAMESPACE_OID,
+        TEXT_TYPE_OID, VARCHAR_TYPE_OID,
     };
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
@@ -1132,6 +1215,57 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_creates_toast_table_and_index() {
+        let base = temp_dir("toast_create");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let table = store
+            .create_table(
+                "docs",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("payload", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+
+        assert_ne!(table.reltoastrelid, 0);
+
+        let rows = load_physical_catalog_rows(&base).unwrap();
+        let table_row = rows
+            .classes
+            .iter()
+            .find(|row| row.oid == table.relation_oid)
+            .unwrap();
+        assert_eq!(table_row.reltoastrelid, table.reltoastrelid);
+
+        let toast_row = rows
+            .classes
+            .iter()
+            .find(|row| row.oid == table.reltoastrelid)
+            .unwrap();
+        assert_eq!(toast_row.relkind, 't');
+        assert_eq!(toast_row.relnamespace, PG_TOAST_NAMESPACE_OID);
+
+        let toast_index = rows
+            .indexes
+            .iter()
+            .find(|row| row.indrelid == toast_row.oid)
+            .unwrap();
+        assert!(toast_index.indisunique);
+        assert_eq!(toast_index.indkey, vec![1, 2]);
+
+        assert!(rows.depends.iter().any(|row| {
+            row.classid == PG_CLASS_RELATION_OID
+                && row.objid == toast_row.oid
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == table.relation_oid
+                && row.deptype == DEPENDENCY_INTERNAL
+        }));
+    }
+
+    #[test]
     fn catalog_store_persists_pg_am_rows() {
         let base = temp_dir("am_rows");
         let _store = CatalogStore::load(&base).unwrap();
@@ -1330,10 +1464,7 @@ mod tests {
             reopened_entry.desc.columns[0].not_null_constraint_oid,
             Some(constraint_oid)
         );
-        assert_eq!(
-            reopened_catalog.next_oid(),
-            constraint_oid.saturating_add(1)
-        );
+        assert!(reopened_catalog.next_oid() > constraint_oid);
         assert!(rows.constraints.iter().any(|row| {
             row.oid == constraint_oid
                 && row.conname == "people_id_not_null"
@@ -1632,20 +1763,16 @@ mod tests {
             .unwrap();
 
         let dropped = store.drop_table("people").unwrap();
-        assert_eq!(
-            dropped
-                .iter()
-                .map(|entry| entry.relation_oid)
-                .collect::<Vec<_>>(),
-            vec![index.relation_oid, table.relation_oid]
-        );
-        assert_eq!(
-            dropped
-                .iter()
-                .map(|entry| entry.relkind)
-                .collect::<Vec<_>>(),
-            vec!['i', 'r']
-        );
+        assert!(dropped.iter().any(|entry| entry.relation_oid == index.relation_oid));
+        assert!(dropped.iter().any(|entry| entry.relation_oid == table.relation_oid));
+        assert!(dropped.iter().any(|entry| entry.relkind == 't'));
+        assert!(dropped.iter().any(|entry| {
+            entry.relkind == 'i'
+                && entry
+                    .index_meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.indrelid == table.reltoastrelid)
+        }));
 
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
@@ -1670,6 +1797,38 @@ mod tests {
     }
 
     #[test]
+    fn catalog_store_drop_table_cascades_toast_relations() {
+        let base = temp_dir("drop_toast_cascade");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let table = store
+            .create_table(
+                "docs",
+                RelationDesc {
+                    columns: vec![
+                        column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                        column_desc("payload", SqlType::new(SqlTypeKind::Text), true),
+                    ],
+                },
+            )
+            .unwrap();
+
+        let dropped = store.drop_table("docs").unwrap();
+        assert!(dropped.iter().any(|entry| entry.relation_oid == table.relation_oid));
+        assert!(
+            dropped
+                .iter()
+                .any(|entry| entry.relation_oid == table.reltoastrelid && entry.relkind == 't')
+        );
+        assert!(dropped.iter().any(|entry| {
+            entry.relkind == 'i'
+                && entry
+                    .index_meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.indrelid == table.reltoastrelid)
+        }));
+    }
+
+    #[test]
     fn catalog_store_drop_table_removes_constraint_and_depend_rows() {
         let base = temp_dir("drop_constraint_depend_cleanup");
         let mut store = CatalogStore::load(&base).unwrap();
@@ -1685,8 +1844,8 @@ mod tests {
         let constraint_oid = entry.desc.columns[0].not_null_constraint_oid.unwrap();
 
         let dropped = store.drop_table("notes").unwrap();
-        assert_eq!(dropped.len(), 1);
-        assert_eq!(dropped[0].relation_oid, entry.relation_oid);
+        assert!(dropped.iter().any(|dropped| dropped.relation_oid == entry.relation_oid));
+        assert!(dropped.iter().any(|dropped| dropped.relkind == 't'));
 
         let reopened = CatalogStore::load(&base).unwrap();
         let reopened_catalog = reopened.catalog_snapshot().unwrap();
