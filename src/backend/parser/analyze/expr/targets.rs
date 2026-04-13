@@ -57,10 +57,11 @@ pub(crate) fn bind_select_targets(
     let base_width = scope.columns.len();
 
     for item in targets {
-        if let Some((name, args)) = top_level_set_returning_call(&item.expr) {
+        if let Some((name, args, func_variadic)) = top_level_set_returning_call(&item.expr) {
             let (call, sql_type) = bind_select_list_srf_call(
                 &name,
                 &args,
+                func_variadic,
                 scope,
                 catalog,
                 outer_scopes,
@@ -161,18 +162,20 @@ fn bind_plain_select_targets(
 
 #[derive(Default)]
 struct TargetSrfInfo {
-    top_level: Option<(String, Vec<SqlFunctionArg>)>,
+    top_level: Option<(String, Vec<SqlFunctionArg>, bool)>,
     has_nested: bool,
 }
 
 fn classify_select_target_srf(expr: &SqlExpr) -> TargetSrfInfo {
     match expr {
-        SqlExpr::FuncCall { name, args } if set_returning_function_name(name).is_some() => {
-            TargetSrfInfo {
-                top_level: Some((name.clone(), args.clone())),
-                has_nested: false,
-            }
-        }
+        SqlExpr::FuncCall {
+            name,
+            args,
+            func_variadic,
+        } if set_returning_function_name(name).is_some() => TargetSrfInfo {
+            top_level: Some((name.clone(), args.clone(), *func_variadic)),
+            has_nested: false,
+        },
         _ => {
             let mut info = TargetSrfInfo::default();
             visit_nested_srfs(expr, &mut info);
@@ -181,10 +184,14 @@ fn classify_select_target_srf(expr: &SqlExpr) -> TargetSrfInfo {
     }
 }
 
-fn top_level_set_returning_call(expr: &SqlExpr) -> Option<(String, Vec<SqlFunctionArg>)> {
+fn top_level_set_returning_call(expr: &SqlExpr) -> Option<(String, Vec<SqlFunctionArg>, bool)> {
     match expr {
-        SqlExpr::FuncCall { name, args } if set_returning_function_name(name).is_some() => {
-            Some((name.clone(), args.clone()))
+        SqlExpr::FuncCall {
+            name,
+            args,
+            func_variadic,
+        } if set_returning_function_name(name).is_some() => {
+            Some((name.clone(), args.clone(), *func_variadic))
         }
         _ => None,
     }
@@ -192,7 +199,7 @@ fn top_level_set_returning_call(expr: &SqlExpr) -> Option<(String, Vec<SqlFuncti
 
 fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
     match expr {
-        SqlExpr::FuncCall { name, args } => {
+        SqlExpr::FuncCall { name, args, .. } => {
             if set_returning_function_name(name).is_some() {
                 info.has_nested = true;
             }
@@ -322,6 +329,7 @@ fn set_returning_function_name(name: &str) -> Option<&str> {
 fn bind_select_list_srf_call(
     name: &str,
     args: &[SqlFunctionArg],
+    func_variadic: bool,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -329,6 +337,18 @@ fn bind_select_list_srf_call(
     ctes: &[BoundCte],
 ) -> Result<(SetReturningCall, SqlType), ParseError> {
     let args = lower_named_table_function_args(name, args)?;
+    let actual_types = args
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
+    let resolved_proc_oid = resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0);
+    let resolved_func_variadic = resolved
+        .as_ref()
+        .map(|call| call.func_variadic)
+        .unwrap_or(func_variadic);
     match name.to_ascii_lowercase().as_str() {
         "generate_series" => {
             if args.len() < 2 || args.len() > 3 {
@@ -353,13 +373,27 @@ fn bind_select_list_srf_call(
                 grouped_outer,
                 ctes,
             )?;
-            let start_type =
-                infer_sql_expr_type_with_ctes(&args[0], scope, catalog, outer_scopes, grouped_outer, ctes);
-            let stop_type =
-                infer_sql_expr_type_with_ctes(&args[1], scope, catalog, outer_scopes, grouped_outer, ctes);
+            let start_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let stop_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
-            if !matches!(common.kind, SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric)
-            {
+            if !matches!(
+                common.kind,
+                SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+            ) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "generate_series integer or numeric arguments",
                     actual: sql_type_name(common),
@@ -386,14 +420,16 @@ fn bind_select_list_srf_call(
             } else {
                 match common.kind {
                     SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),
-                    SqlTypeKind::Numeric => {
-                        Expr::Const(Value::Numeric(crate::include::nodes::datum::NumericValue::from_i64(1)))
-                    }
+                    SqlTypeKind::Numeric => Expr::Const(Value::Numeric(
+                        crate::include::nodes::datum::NumericValue::from_i64(1),
+                    )),
                     _ => Expr::Const(Value::Int32(1)),
                 }
             };
             Ok((
                 SetReturningCall::GenerateSeries {
+                    func_oid: resolved_proc_oid,
+                    func_variadic: resolved_func_variadic,
                     start: coerce_bound_expr(start, start_type, common),
                     stop: coerce_bound_expr(stop, stop_type, common),
                     step,
@@ -410,6 +446,12 @@ fn bind_select_list_srf_call(
                 return Err(ParseError::UnexpectedToken {
                     expected: "unnest(array_expr [, array_expr ...])",
                     actual: "unnest()".into(),
+                });
+            }
+            if args.len() > 1 {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single-argument unnest(array_expr) in select list",
+                    actual: format!("unnest with {} arguments", args.len()),
                 });
             }
             let mut bound_args = Vec::with_capacity(args.len());
@@ -456,6 +498,8 @@ fn bind_select_list_srf_call(
             }
             Ok((
                 SetReturningCall::Unnest {
+                    func_oid: resolved_proc_oid,
+                    func_variadic: resolved_func_variadic,
                     args: bound_args,
                     output_columns: output_columns.clone(),
                 },
@@ -512,6 +556,8 @@ fn bind_select_list_srf_call(
                 };
                 Ok((
                     SetReturningCall::JsonTableFunction {
+                        func_oid: resolved_proc_oid,
+                        func_variadic: resolved_func_variadic,
                         kind,
                         args: bound_args,
                         output_columns: output_columns.clone(),
@@ -519,11 +565,12 @@ fn bind_select_list_srf_call(
                     output_columns[0].sql_type,
                 ))
             } else {
-                let kind =
-                    resolve_regex_table_function(other).ok_or_else(|| ParseError::UnexpectedToken {
+                let kind = resolve_regex_table_function(other).ok_or_else(|| {
+                    ParseError::UnexpectedToken {
                         expected: "supported set-returning function",
                         actual: other.to_string(),
-                    })?;
+                    }
+                })?;
                 let bound_args = args
                     .iter()
                     .map(|arg| {
@@ -538,16 +585,20 @@ fn bind_select_list_srf_call(
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let output_columns = match kind {
-                    crate::include::nodes::plannodes::RegexTableFunction::Matches => vec![QueryColumn {
-                        name: "regexp_matches".into(),
-                        sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                    }],
+                    crate::include::nodes::plannodes::RegexTableFunction::Matches => {
+                        vec![QueryColumn {
+                            name: "regexp_matches".into(),
+                            sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                        }]
+                    }
                     crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
                         vec![QueryColumn::text("regexp_split_to_table")]
                     }
                 };
                 Ok((
                     SetReturningCall::RegexTableFunction {
+                        func_oid: resolved_proc_oid,
+                        func_variadic: resolved_func_variadic,
                         kind,
                         args: bound_args,
                         output_columns: output_columns.clone(),

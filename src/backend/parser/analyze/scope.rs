@@ -340,380 +340,419 @@ pub(super) fn bind_from_item_with_ctes(
         FromItem::Values { rows } => {
             bind_values_rows(rows, None, catalog, outer_scopes, grouped_outer, ctes)
         }
-        FromItem::FunctionCall { name, args } => {
+        FromItem::FunctionCall {
+            name,
+            args,
+            func_variadic,
+        } => {
             let args = lower_named_table_function_args(name, args)?;
+            let call_scope = empty_scope();
+            let actual_types = args
+                .iter()
+                .map(|arg| {
+                    infer_sql_expr_type(arg, &call_scope, catalog, outer_scopes, grouped_outer)
+                })
+                .collect::<Vec<_>>();
+            let resolved = resolve_function_call(catalog, name, &actual_types, *func_variadic).ok();
+            let resolved_proc_oid = resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0);
+            let resolved_func_variadic = resolved
+                .as_ref()
+                .map(|call| call.func_variadic)
+                .unwrap_or(*func_variadic);
             match name.as_str() {
-            "generate_series" => {
-                if args.len() < 2 || args.len() > 3 {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "generate_series(start, stop[, step])",
-                        actual: format!("generate_series with {} arguments", args.len()),
-                    });
-                }
-                let empty_scope = empty_scope();
-                let start = bind_expr_with_outer(
-                    &args[0],
-                    &empty_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                )?;
-                let stop = bind_expr_with_outer(
-                    &args[1],
-                    &empty_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                )?;
-                let start_type = infer_sql_expr_type(
-                    &args[0],
-                    &empty_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                );
-                let stop_type = infer_sql_expr_type(
-                    &args[1],
-                    &empty_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                );
-                let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
-                if !matches!(
-                    common.kind,
-                    SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
-                ) {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "generate_series integer or numeric arguments",
-                        actual: sql_type_name(common),
-                    });
-                }
-                let step = if args.len() == 3 {
-                    let step_expr = bind_expr_with_outer(
-                        &args[2],
-                        &empty_scope,
+                "generate_series" => {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "generate_series(start, stop[, step])",
+                            actual: format!("generate_series with {} arguments", args.len()),
+                        });
+                    }
+                    let start = bind_expr_with_outer(
+                        &args[0],
+                        &call_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
                     )?;
-                    let step_type = infer_sql_expr_type(
-                        &args[2],
-                        &empty_scope,
+                    let stop = bind_expr_with_outer(
+                        &args[1],
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                    )?;
+                    let start_type = infer_sql_expr_type(
+                        &args[0],
+                        &call_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
                     );
-                    coerce_bound_expr(step_expr, step_type, common)
-                } else {
-                    match common.kind {
-                        SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),
-                        SqlTypeKind::Numeric => Expr::Const(Value::Numeric(
-                            crate::include::nodes::datum::NumericValue::from_i64(1),
-                        )),
-                        _ => Expr::Const(Value::Int32(1)),
-                    }
-                };
-                let desc = RelationDesc {
-                    columns: vec![column_desc("generate_series", common, false)],
-                };
-                let scope = scope_for_relation(Some(name), &desc);
-                Ok((
-                    Plan::FunctionScan {
-                        call: SetReturningCall::GenerateSeries {
-                            start: coerce_bound_expr(start, start_type, common),
-                            stop: coerce_bound_expr(stop, stop_type, common),
-                            step,
-                            output: QueryColumn {
-                                name: "generate_series".to_string(),
-                                sql_type: common,
-                            },
-                        },
-                    },
-                    scope,
-                ))
-            }
-            "unnest" => {
-                if args.is_empty() {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "unnest(array_expr [, array_expr ...])",
-                        actual: "unnest()".into(),
-                    });
-                }
-                let empty_scope = empty_scope();
-                let mut bound_args = Vec::with_capacity(args.len());
-                let mut output_columns = Vec::with_capacity(args.len());
-                let mut desc_columns = Vec::with_capacity(args.len());
-                for (idx, arg) in args.iter().enumerate() {
-                    let arg_type = infer_sql_expr_type(
-                        arg,
-                        &empty_scope,
+                    let stop_type = infer_sql_expr_type(
+                        &args[1],
+                        &call_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
                     );
-                    if !arg_type.is_array {
+                    let common = resolve_numeric_binary_type("+", start_type, stop_type)?;
+                    if !matches!(
+                        common.kind,
+                        SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Numeric
+                    ) {
                         return Err(ParseError::UnexpectedToken {
-                            expected: "array argument to unnest",
-                            actual: format!("{arg:?}"),
+                            expected: "generate_series integer or numeric arguments",
+                            actual: sql_type_name(common),
                         });
                     }
-                    let element_type = arg_type.element_type();
-                    let column_name = if idx == 0 {
-                        "unnest".to_string()
+                    let step = if args.len() == 3 {
+                        let step_expr = bind_expr_with_outer(
+                            &args[2],
+                            &call_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )?;
+                        let step_type = infer_sql_expr_type(
+                            &args[2],
+                            &call_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        );
+                        coerce_bound_expr(step_expr, step_type, common)
                     } else {
-                        format!("unnest_{}", idx + 1)
+                        match common.kind {
+                            SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),
+                            SqlTypeKind::Numeric => Expr::Const(Value::Numeric(
+                                crate::include::nodes::datum::NumericValue::from_i64(1),
+                            )),
+                            _ => Expr::Const(Value::Int32(1)),
+                        }
                     };
-                    bound_args.push(bind_expr_with_outer(
-                        arg,
-                        &empty_scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                    )?);
-                    output_columns.push(QueryColumn {
-                        name: column_name.clone(),
-                        sql_type: element_type,
-                    });
-                    desc_columns.push(column_desc(column_name, element_type, true));
-                }
-                let desc = RelationDesc {
-                    columns: desc_columns,
-                };
-                let scope = scope_for_relation(Some(name), &desc);
-                Ok((
-                    Plan::FunctionScan {
-                        call: SetReturningCall::Unnest {
-                            args: bound_args,
-                            output_columns,
+                    let desc = RelationDesc {
+                        columns: vec![column_desc("generate_series", common, false)],
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    Ok((
+                        Plan::FunctionScan {
+                            call: SetReturningCall::GenerateSeries {
+                                func_oid: resolved_proc_oid,
+                                func_variadic: resolved_func_variadic,
+                                start: coerce_bound_expr(start, start_type, common),
+                                stop: coerce_bound_expr(stop, stop_type, common),
+                                step,
+                                output: QueryColumn {
+                                    name: "generate_series".to_string(),
+                                    sql_type: common,
+                                },
+                            },
                         },
-                    },
-                    scope,
-                ))
-            }
-            "pg_input_error_info" => {
-                if args.len() != 2 {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "pg_input_error_info(text, text)",
-                        actual: format!("pg_input_error_info with {} arguments", args.len()),
-                    });
+                        scope,
+                    ))
                 }
-                let empty_scope = empty_scope();
-                let text_type = SqlType::new(SqlTypeKind::Text);
-                let left_type = infer_sql_expr_type(
-                    &args[0],
-                    &empty_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                );
-                let right_type = infer_sql_expr_type(
-                    &args[1],
-                    &empty_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                );
-                let left = coerce_bound_expr(
-                    bind_expr_with_outer(
+                "unnest" => {
+                    if args.is_empty() {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "unnest(array_expr [, array_expr ...])",
+                            actual: "unnest()".into(),
+                        });
+                    }
+                    if *func_variadic && args.len() > 1 {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "ordinary multi-argument unnest() in FROM without VARIADIC decoration",
+                            actual: format!("unnest with {} arguments and VARIADIC", args.len()),
+                        });
+                    }
+                    let mut bound_args = Vec::with_capacity(args.len());
+                    let mut output_columns = Vec::with_capacity(args.len());
+                    let mut desc_columns = Vec::with_capacity(args.len());
+                    for (idx, arg) in args.iter().enumerate() {
+                        let arg_type = infer_sql_expr_type(
+                            arg,
+                            &call_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        );
+                        if !arg_type.is_array {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "array argument to unnest",
+                                actual: format!("{arg:?}"),
+                            });
+                        }
+                        let element_type = arg_type.element_type();
+                        let column_name = if idx == 0 {
+                            "unnest".to_string()
+                        } else {
+                            format!("unnest_{}", idx + 1)
+                        };
+                        bound_args.push(bind_expr_with_outer(
+                            arg,
+                            &call_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )?);
+                        output_columns.push(QueryColumn {
+                            name: column_name.clone(),
+                            sql_type: element_type,
+                        });
+                        desc_columns.push(column_desc(column_name, element_type, true));
+                    }
+                    let desc = RelationDesc {
+                        columns: desc_columns,
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    Ok((
+                        Plan::FunctionScan {
+                            call: SetReturningCall::Unnest {
+                                func_oid: resolved_proc_oid,
+                                func_variadic: resolved_func_variadic,
+                                args: bound_args,
+                                output_columns,
+                            },
+                        },
+                        scope,
+                    ))
+                }
+                "pg_input_error_info" => {
+                    if args.len() != 2 {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "pg_input_error_info(text, text)",
+                            actual: format!("pg_input_error_info with {} arguments", args.len()),
+                        });
+                    }
+                    let empty_scope = empty_scope();
+                    let text_type = SqlType::new(SqlTypeKind::Text);
+                    let left_type = infer_sql_expr_type(
                         &args[0],
                         &empty_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
-                    )?,
-                    left_type,
-                    text_type,
-                );
-                let right = coerce_bound_expr(
-                    bind_expr_with_outer(
+                    );
+                    let right_type = infer_sql_expr_type(
                         &args[1],
                         &empty_scope,
                         catalog,
                         outer_scopes,
                         grouped_outer,
-                    )?,
-                    right_type,
-                    text_type,
-                );
-                let output_columns = vec![
-                    QueryColumn::text("message"),
-                    QueryColumn::text("detail"),
-                    QueryColumn::text("hint"),
-                    QueryColumn::text("sql_error_code"),
-                ];
-                let desc = RelationDesc {
-                    columns: output_columns
-                        .iter()
-                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                        .collect(),
-                };
-                let scope = scope_for_relation(Some(name), &desc);
-                Ok((
-                    Plan::Projection {
-                        input: Box::new(Plan::Result),
-                        targets: vec![
-                            TargetEntry {
-                                name: "message".into(),
-                                expr: Expr::FuncCall {
-                                    func: BuiltinScalarFunction::PgInputErrorMessage,
-                                    args: vec![left.clone(), right.clone()],
+                    );
+                    let left = coerce_bound_expr(
+                        bind_expr_with_outer(
+                            &args[0],
+                            &empty_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )?,
+                        left_type,
+                        text_type,
+                    );
+                    let right = coerce_bound_expr(
+                        bind_expr_with_outer(
+                            &args[1],
+                            &empty_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )?,
+                        right_type,
+                        text_type,
+                    );
+                    let output_columns = vec![
+                        QueryColumn::text("message"),
+                        QueryColumn::text("detail"),
+                        QueryColumn::text("hint"),
+                        QueryColumn::text("sql_error_code"),
+                    ];
+                    let desc = RelationDesc {
+                        columns: output_columns
+                            .iter()
+                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                            .collect(),
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    Ok((
+                        Plan::Projection {
+                            input: Box::new(Plan::Result),
+                            targets: vec![
+                                TargetEntry {
+                                    name: "message".into(),
+                                    expr: Expr::FuncCall {
+                                        func_oid: 0,
+                                        func: BuiltinScalarFunction::PgInputErrorMessage,
+                                        args: vec![left.clone(), right.clone()],
+                                        func_variadic: false,
+                                    },
+                                    sql_type: text_type,
                                 },
-                                sql_type: text_type,
-                            },
-                            TargetEntry {
-                                name: "detail".into(),
-                                expr: Expr::FuncCall {
-                                    func: BuiltinScalarFunction::PgInputErrorDetail,
-                                    args: vec![left.clone(), right.clone()],
+                                TargetEntry {
+                                    name: "detail".into(),
+                                    expr: Expr::FuncCall {
+                                        func_oid: 0,
+                                        func: BuiltinScalarFunction::PgInputErrorDetail,
+                                        args: vec![left.clone(), right.clone()],
+                                        func_variadic: false,
+                                    },
+                                    sql_type: text_type,
                                 },
-                                sql_type: text_type,
-                            },
-                            TargetEntry {
-                                name: "hint".into(),
-                                expr: Expr::FuncCall {
-                                    func: BuiltinScalarFunction::PgInputErrorHint,
-                                    args: vec![left.clone(), right.clone()],
+                                TargetEntry {
+                                    name: "hint".into(),
+                                    expr: Expr::FuncCall {
+                                        func_oid: 0,
+                                        func: BuiltinScalarFunction::PgInputErrorHint,
+                                        args: vec![left.clone(), right.clone()],
+                                        func_variadic: false,
+                                    },
+                                    sql_type: text_type,
                                 },
-                                sql_type: text_type,
-                            },
-                            TargetEntry {
-                                name: "sql_error_code".into(),
-                                expr: Expr::FuncCall {
-                                    func: BuiltinScalarFunction::PgInputErrorSqlState,
-                                    args: vec![left, right],
+                                TargetEntry {
+                                    name: "sql_error_code".into(),
+                                    expr: Expr::FuncCall {
+                                        func_oid: 0,
+                                        func: BuiltinScalarFunction::PgInputErrorSqlState,
+                                        args: vec![left, right],
+                                        func_variadic: false,
+                                    },
+                                    sql_type: text_type,
                                 },
-                                sql_type: text_type,
-                            },
-                        ],
-                    },
-                    scope,
-                ))
-            }
-            other => {
-                if let Some(kind) = resolve_json_table_function(other) {
-                    let empty_scope = empty_scope();
-                    let bound_args = args
-                        .iter()
-                        .map(|arg| {
-                            bind_expr_with_outer(
-                                arg,
-                                &empty_scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let output_columns = match kind {
-                        JsonTableFunction::ObjectKeys => {
-                            vec![QueryColumn::text("json_object_keys")]
-                        }
-                        JsonTableFunction::Each => vec![
-                            QueryColumn::text("key"),
-                            QueryColumn {
-                                name: "value".into(),
+                            ],
+                        },
+                        scope,
+                    ))
+                }
+                other => {
+                    if let Some(kind) = resolve_json_table_function(other) {
+                        let empty_scope = empty_scope();
+                        let bound_args = args
+                            .iter()
+                            .map(|arg| {
+                                bind_expr_with_outer(
+                                    arg,
+                                    &empty_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let output_columns = match kind {
+                            JsonTableFunction::ObjectKeys => {
+                                vec![QueryColumn::text("json_object_keys")]
+                            }
+                            JsonTableFunction::Each => vec![
+                                QueryColumn::text("key"),
+                                QueryColumn {
+                                    name: "value".into(),
+                                    sql_type: SqlType::new(SqlTypeKind::Json),
+                                },
+                            ],
+                            JsonTableFunction::EachText => {
+                                vec![QueryColumn::text("key"), QueryColumn::text("value")]
+                            }
+                            JsonTableFunction::ArrayElements => vec![QueryColumn {
+                                name: "json_array_elements".into(),
                                 sql_type: SqlType::new(SqlTypeKind::Json),
-                            },
-                        ],
-                        JsonTableFunction::EachText => {
-                            vec![QueryColumn::text("key"), QueryColumn::text("value")]
-                        }
-                        JsonTableFunction::ArrayElements => vec![QueryColumn {
-                            name: "json_array_elements".into(),
-                            sql_type: SqlType::new(SqlTypeKind::Json),
-                        }],
-                        JsonTableFunction::ArrayElementsText => {
-                            vec![QueryColumn::text("json_array_elements_text")]
-                        }
-                        JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
-                            name: "jsonb_path_query".into(),
-                            sql_type: SqlType::new(SqlTypeKind::Jsonb),
-                        }],
-                        JsonTableFunction::JsonbObjectKeys => {
-                            vec![QueryColumn::text("jsonb_object_keys")]
-                        }
-                        JsonTableFunction::JsonbEach => vec![
-                            QueryColumn::text("key"),
-                            QueryColumn {
-                                name: "value".into(),
+                            }],
+                            JsonTableFunction::ArrayElementsText => {
+                                vec![QueryColumn::text("json_array_elements_text")]
+                            }
+                            JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
+                                name: "jsonb_path_query".into(),
                                 sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                            }],
+                            JsonTableFunction::JsonbObjectKeys => {
+                                vec![QueryColumn::text("jsonb_object_keys")]
+                            }
+                            JsonTableFunction::JsonbEach => vec![
+                                QueryColumn::text("key"),
+                                QueryColumn {
+                                    name: "value".into(),
+                                    sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                                },
+                            ],
+                            JsonTableFunction::JsonbEachText => {
+                                vec![QueryColumn::text("key"), QueryColumn::text("value")]
+                            }
+                            JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
+                                name: "jsonb_array_elements".into(),
+                                sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                            }],
+                            JsonTableFunction::JsonbArrayElementsText => {
+                                vec![QueryColumn::text("jsonb_array_elements_text")]
+                            }
+                        };
+                        let desc = RelationDesc {
+                            columns: output_columns
+                                .iter()
+                                .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                                .collect(),
+                        };
+                        let scope = scope_for_relation(Some(name), &desc);
+                        Ok((
+                            Plan::FunctionScan {
+                                call: SetReturningCall::JsonTableFunction {
+                                    func_oid: resolved_proc_oid,
+                                    func_variadic: resolved_func_variadic,
+                                    kind,
+                                    args: bound_args,
+                                    output_columns,
+                                },
                             },
-                        ],
-                        JsonTableFunction::JsonbEachText => {
-                            vec![QueryColumn::text("key"), QueryColumn::text("value")]
-                        }
-                        JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
-                            name: "jsonb_array_elements".into(),
-                            sql_type: SqlType::new(SqlTypeKind::Jsonb),
-                        }],
-                        JsonTableFunction::JsonbArrayElementsText => {
-                            vec![QueryColumn::text("jsonb_array_elements_text")]
-                        }
-                    };
-                    let desc = RelationDesc {
-                        columns: output_columns
+                            scope,
+                        ))
+                    } else if let Some(kind) = resolve_regex_table_function(other) {
+                        let empty_scope = empty_scope();
+                        let bound_args = args
                             .iter()
-                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                            .collect(),
-                    };
-                    let scope = scope_for_relation(Some(name), &desc);
-                    Ok((
-                        Plan::FunctionScan {
-                            call: SetReturningCall::JsonTableFunction {
-                                kind,
-                                args: bound_args,
-                                output_columns,
+                            .map(|arg| {
+                                bind_expr_with_outer(
+                                    arg,
+                                    &empty_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let output_columns = match kind {
+                            crate::include::nodes::plannodes::RegexTableFunction::Matches => {
+                                vec![QueryColumn {
+                                    name: "regexp_matches".into(),
+                                    sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                                }]
+                            }
+                            crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+                                vec![QueryColumn::text("regexp_split_to_table")]
+                            }
+                        };
+                        let desc = RelationDesc {
+                            columns: output_columns
+                                .iter()
+                                .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                                .collect(),
+                        };
+                        let scope = scope_for_relation(Some(name), &desc);
+                        Ok((
+                            Plan::FunctionScan {
+                                call: SetReturningCall::RegexTableFunction {
+                                    func_oid: resolved_proc_oid,
+                                    func_variadic: resolved_func_variadic,
+                                    kind,
+                                    args: bound_args,
+                                    output_columns,
+                                },
                             },
-                        },
-                        scope,
-                    ))
-                } else if let Some(kind) = resolve_regex_table_function(other) {
-                    let empty_scope = empty_scope();
-                    let bound_args = args
-                        .iter()
-                        .map(|arg| {
-                            bind_expr_with_outer(
-                                arg,
-                                &empty_scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let output_columns = match kind {
-                        crate::include::nodes::plannodes::RegexTableFunction::Matches => vec![QueryColumn {
-                            name: "regexp_matches".into(),
-                            sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                        }],
-                        crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
-                            vec![QueryColumn::text("regexp_split_to_table")]
-                        }
-                    };
-                    let desc = RelationDesc {
-                        columns: output_columns
-                            .iter()
-                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                            .collect(),
-                    };
-                    let scope = scope_for_relation(Some(name), &desc);
-                    Ok((
-                        Plan::FunctionScan {
-                            call: SetReturningCall::RegexTableFunction {
-                                kind,
-                                args: bound_args,
-                                output_columns,
-                            },
-                        },
-                        scope,
-                    ))
-                } else {
-                    Err(ParseError::UnknownTable(other.to_string()))
+                            scope,
+                        ))
+                    } else {
+                        Err(ParseError::UnknownTable(other.to_string()))
+                    }
                 }
             }
         }
-        },
         FromItem::DerivedTable(select) => {
             let plan = build_plan_with_outer(select, catalog, &[], None, ctes)?;
             let desc = synthetic_desc_from_plan(&plan);

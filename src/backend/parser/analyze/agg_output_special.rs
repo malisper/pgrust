@@ -11,7 +11,7 @@ pub(super) fn bind_grouped_concat_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let left_expr = bind_agg_output_expr(
@@ -77,7 +77,7 @@ pub(super) fn bind_grouped_in_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let subquery_plan =
@@ -114,7 +114,7 @@ pub(super) fn bind_grouped_quantified_subquery(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let subquery_plan =
@@ -155,7 +155,7 @@ pub(super) fn bind_grouped_quantified_array(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let left = Box::new(bind_agg_output_expr(
@@ -193,7 +193,7 @@ pub(super) fn bind_grouped_func_call(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     if name.eq_ignore_ascii_case("coalesce") {
@@ -231,10 +231,20 @@ pub(super) fn bind_grouped_func_call(
         .collect::<Result<Vec<_>, _>>()?;
     match func {
         BuiltinScalarFunction::Left | BuiltinScalarFunction::Repeat => {
-            let left_type =
-                infer_sql_expr_type(&lowered_args[0], input_scope, catalog, outer_scopes, grouped_outer);
-            let right_type =
-                infer_sql_expr_type(&lowered_args[1], input_scope, catalog, outer_scopes, grouped_outer);
+            let left_type = infer_sql_expr_type(
+                &lowered_args[0],
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let right_type = infer_sql_expr_type(
+                &lowered_args[1],
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
             if !should_use_text_concat(&lowered_args[0], left_type, &lowered_args[0], left_type) {
                 return Err(ParseError::UnexpectedToken {
                     expected: "text argument",
@@ -248,6 +258,7 @@ pub(super) fn bind_grouped_func_call(
                 });
             }
             Ok(Expr::FuncCall {
+                func_oid: 0,
                 func,
                 args: vec![
                     coerce_bound_expr(
@@ -261,23 +272,33 @@ pub(super) fn bind_grouped_func_call(
                         SqlType::new(SqlTypeKind::Int4),
                     ),
                 ],
+                func_variadic: false,
             })
         }
         BuiltinScalarFunction::Lower => {
-            let arg_type =
-                infer_sql_expr_type(&lowered_args[0], input_scope, catalog, outer_scopes, grouped_outer);
+            let arg_type = infer_sql_expr_type(
+                &lowered_args[0],
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
             Ok(Expr::FuncCall {
+                func_oid: 0,
                 func,
                 args: vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     SqlType::new(SqlTypeKind::Text),
                 )],
+                func_variadic: false,
             })
         }
         _ => Ok(Expr::FuncCall {
+            func_oid: 0,
             func,
             args: bound_args,
+            func_variadic: false,
         }),
     }
 }
@@ -344,7 +365,7 @@ pub(super) fn bind_grouped_array_literal(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool)],
+    agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     Ok(Expr::ArrayLiteral {

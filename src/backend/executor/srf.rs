@@ -15,6 +15,7 @@ pub(crate) fn eval_set_returning_call(
             stop,
             step,
             output,
+            ..
         } => eval_generate_series(start, stop, step, output.sql_type.kind, slot, ctx),
         SetReturningCall::Unnest { args, .. } => eval_unnest(args, slot, ctx),
         SetReturningCall::JsonTableFunction { kind, args, .. } => {

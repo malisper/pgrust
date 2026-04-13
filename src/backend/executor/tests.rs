@@ -4813,6 +4813,24 @@ fn select_list_unnest_expands_rows() {
 }
 
 #[test]
+fn select_list_multi_arg_unnest_is_rejected() {
+    let base = temp_dir("project_set_multi_arg_unnest");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select unnest(ARRAY[1, 2], ARRAY['x', 'y']::varchar[])",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UnexpectedToken { expected, .. })
+            if expected == "single-argument unnest(array_expr) in select list"
+    ));
+}
+
+#[test]
 fn select_list_json_scalar_srfs_work() {
     let base = temp_dir("project_set_json");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -5912,6 +5930,38 @@ fn json_builders_and_object_agg_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn json_variadic_calls_match_supported_postgres_cases() {
+    let base = temp_dir("json_variadic_calls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_build_array(VARIADIC NULL::text[]), \
+                json_build_array(VARIADIC '{{1,4},{2,5},{3,6}}'::int[][]), \
+                json_build_object(VARIADIC '{}'::text[]), \
+                json_build_object(VARIADIC '{{1,4},{2,5},{3,6}}'::int[][]), \
+                json_extract_path('{\"a\":{\"b\":2}}'::json, VARIADIC ARRAY['a','b']::text[])",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Null,
+                    Value::Json("[1,4,2,5,3,6]".into()),
+                    Value::Json("{}".into()),
+                    Value::Json("{\"1\":4,\"2\":5,\"3\":6}".into()),
+                    Value::Json("2".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]
@@ -7136,6 +7186,45 @@ fn jsonb_builders_and_object_agg_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn jsonb_variadic_calls_match_supported_postgres_cases() {
+    let base = temp_dir("jsonb_variadic_calls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_build_array(VARIADIC NULL::text[]), \
+                jsonb_build_array(VARIADIC '{{1,4},{2,5},{3,6}}'::int[][]), \
+                jsonb_build_object(VARIADIC '{}'::text[]), \
+                jsonb_build_object(VARIADIC '{{1,4},{2,5},{3,6}}'::int[][]), \
+                jsonb_extract_path('{\"a\":{\"b\":2}}'::jsonb, VARIADIC ARRAY['a','b']::text[])",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Null,
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("[1,4,2,5,3,6]").unwrap()
+                    ),
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("{}").unwrap()),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"1\":4,\"2\":5,\"3\":6}"
+                        )
+                        .unwrap()
+                    ),
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("2").unwrap()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
 }
 
 #[test]

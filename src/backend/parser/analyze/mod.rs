@@ -259,11 +259,7 @@ pub fn derive_literal_default_value(sql: &str, target: SqlType) -> Result<Value,
                     });
                 }
             },
-            if from_type == target {
-                target
-            } else {
-                target
-            },
+            if from_type == target { target } else { target },
         ) {
             Ok(value) => value,
             Err(_) => {
@@ -667,7 +663,7 @@ fn build_plan_with_outer(
     };
 
     if needs_agg {
-        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool)> = Vec::new();
+        let mut aggs: Vec<(AggFunc, Vec<SqlFunctionArg>, bool, bool)> = Vec::new();
         for target in &stmt.targets {
             collect_aggs(&target.expr, &mut aggs);
         }
@@ -692,7 +688,7 @@ fn build_plan_with_outer(
 
         let accumulators: Vec<AggAccum> = aggs
             .iter()
-            .map(|(func, args, distinct)| {
+            .map(|(func, args, distinct, func_variadic)| {
                 if aggregate_args_are_named(args) {
                     return Err(ParseError::UnexpectedToken {
                         expected: "aggregate arguments without names",
@@ -701,17 +697,27 @@ fn build_plan_with_outer(
                 }
                 let arg_values: Vec<SqlExpr> = args.iter().map(|arg| arg.value.clone()).collect();
                 validate_aggregate_arity(*func, &arg_values)?;
-                let arg_type = arg_values.first().map(|e| {
-                    infer_sql_expr_type_with_ctes(
-                        e,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer.as_ref(),
-                        &visible_ctes,
-                    )
-                });
+                let arg_types = arg_values
+                    .iter()
+                    .map(|e| {
+                        infer_sql_expr_type_with_ctes(
+                            e,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &visible_ctes,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let resolved =
+                    resolve_function_call(catalog, func.name(), &arg_types, *func_variadic).ok();
                 Ok(AggAccum {
+                    aggfnoid: resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0),
+                    agg_variadic: resolved
+                        .as_ref()
+                        .map(|call| call.func_variadic)
+                        .unwrap_or(*func_variadic),
                     func: *func,
                     args: arg_values
                         .iter()
@@ -727,7 +733,7 @@ fn build_plan_with_outer(
                         })
                         .collect::<Result<_, _>>()?,
                     distinct: *distinct,
-                    sql_type: aggregate_sql_type(*func, arg_type),
+                    sql_type: aggregate_sql_type(*func, arg_types.first().copied()),
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -747,7 +753,7 @@ fn build_plan_with_outer(
                 ),
             });
         }
-        for (func, args, _) in &aggs {
+        for (func, args, _, _) in &aggs {
             output_columns.push(QueryColumn {
                 name: func.name().to_string(),
                 sql_type: aggregate_sql_type(
@@ -991,10 +997,12 @@ fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
                 relation_oid,
                 desc,
             } => (rel, relation_oid, desc, Some(predicate), None),
-            other => return Plan::Filter {
-                input: Box::new(other),
-                predicate,
-            },
+            other => {
+                return Plan::Filter {
+                    input: Box::new(other),
+                    predicate,
+                };
+            }
         },
         Plan::OrderBy { input, items } => match *input {
             Plan::SeqScan {
@@ -1086,7 +1094,9 @@ fn choose_index_scan(
             predicate,
         };
     }
-    if !chosen.removes_order && let Some(items) = order_items {
+    if !chosen.removes_order
+        && let Some(items) = order_items
+    {
         plan = Plan::OrderBy {
             input: Box::new(plan),
             items,
@@ -1150,7 +1160,8 @@ fn choose_index_path(
         }
 
         let usable_prefix = keys.len();
-        let order_match = order_items.and_then(|items| index_order_match(items, index, equality_prefix));
+        let order_match =
+            order_items.and_then(|items| index_order_match(items, index, equality_prefix));
         let has_qual = usable_prefix > 0;
         if !has_qual && order_match.is_none() {
             continue;
@@ -1159,7 +1170,12 @@ fn choose_index_path(
             let used_exprs = parsed_quals
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, qual)| used.get(idx).copied().unwrap_or(false).then_some(&qual.expr))
+                .filter_map(|(idx, qual)| {
+                    used.get(idx)
+                        .copied()
+                        .unwrap_or(false)
+                        .then_some(&qual.expr)
+                })
                 .collect::<Vec<_>>();
             let residual = conjuncts
                 .iter()
@@ -1185,13 +1201,15 @@ fn choose_index_path(
         match &best {
             None => best = Some(chosen),
             Some(existing) => {
-                if (chosen.has_qual as u8, chosen.usable_prefix, chosen.removes_order as u8)
-                    > (
-                        existing.has_qual as u8,
-                        existing.usable_prefix,
-                        existing.removes_order as u8,
-                    )
-                {
+                if (
+                    chosen.has_qual as u8,
+                    chosen.usable_prefix,
+                    chosen.removes_order as u8,
+                ) > (
+                    existing.has_qual as u8,
+                    existing.usable_prefix,
+                    existing.removes_order as u8,
+                ) {
                     best = Some(chosen);
                 }
             }
@@ -1205,7 +1223,8 @@ fn choose_modify_row_source(
     predicate: Option<&Expr>,
     indexes: &[BoundIndexRelation],
 ) -> BoundModifyRowSource {
-    if let Some(chosen) = choose_index_path(predicate, None, indexes).filter(|chosen| chosen.has_qual)
+    if let Some(chosen) =
+        choose_index_path(predicate, None, indexes).filter(|chosen| chosen.has_qual)
     {
         BoundModifyRowSource::Index {
             index: chosen.index,
@@ -1250,9 +1269,10 @@ fn index_order_match(
         }
         matched += 1;
     }
-    (matched == items.len()).then_some((matched, direction.unwrap_or(
-        crate::include::access::relscan::ScanDirection::Forward,
-    )))
+    (matched == items.len()).then_some((
+        matched,
+        direction.unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
+    ))
 }
 
 fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
@@ -1589,9 +1609,7 @@ pub fn bind_update(
     let predicate = stmt
         .where_clause
         .as_ref()
-        .map(|expr| {
-            bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
-        })
+        .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
         .transpose()?;
 
     Ok(BoundUpdateStatement {
@@ -1631,9 +1649,7 @@ pub fn bind_delete(
     let predicate = stmt
         .where_clause
         .as_ref()
-        .map(|expr| {
-            bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes)
-        })
+        .map(|expr| bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &local_ctes))
         .transpose()?;
     let indexes = catalog.index_relations_for_heap(entry.relation_oid);
 

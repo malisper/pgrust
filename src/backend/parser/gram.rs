@@ -157,7 +157,9 @@ fn validate_unicode_uescape_clause(sql: &str, mut i: usize) -> Result<usize, Par
         };
         return Err(ParseError::UnexpectedToken {
             expected: "UESCAPE string literal",
-            actual: format!("UESCAPE must be followed by a simple string literal at or near \"{actual}\""),
+            actual: format!(
+                "UESCAPE must be followed by a simple string literal at or near \"{actual}\""
+            ),
         });
     }
 
@@ -197,8 +199,8 @@ fn starts_uescape_keyword(bytes: &[u8], i: usize) -> bool {
         return false;
     }
     let before_ok = i == 0 || !is_identifier_continuation(bytes[i - 1] as char);
-    let after_ok =
-        i + keyword.len() == bytes.len() || !is_identifier_continuation(bytes[i + keyword.len()] as char);
+    let after_ok = i + keyword.len() == bytes.len()
+        || !is_identifier_continuation(bytes[i + keyword.len()] as char);
     before_ok && after_ok
 }
 
@@ -800,19 +802,20 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         }),
         Rule::srf_from_item => {
             let mut name = None;
-            let mut args = Vec::new();
+            let mut parsed_args = ParsedFunctionArgs::default();
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::function_arg_list => {
-                        args = build_function_arg_list(part)?;
+                        parsed_args = build_function_arg_list(part)?;
                     }
                     _ => {}
                 }
             }
             Ok(FromItem::FunctionCall {
                 name: name.ok_or(ParseError::UnexpectedEof)?,
-                args,
+                args: parsed_args.args,
+                func_variadic: parsed_args.func_variadic,
             })
         }
         Rule::derived_from_item => {
@@ -1138,7 +1141,9 @@ fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatemen
             | Rule::string_literal
             | Rule::unicode_string_literal
             | Rule::escape_string_literal
-            | Rule::dollar_string_literal => comment = Some(Some(decode_string_literal_pair(part)?)),
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
             Rule::kw_null => comment = Some(None),
             _ => {}
         }
@@ -1547,12 +1552,14 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
     match pair.as_rule() {
         Rule::type_name => {
             let mut inner = pair.into_inner();
-            let base = build_type(inner.next().expect("type_name base"));
-            if inner.next().is_some() {
-                SqlType::array_of(base)
-            } else {
-                base
+            let mut ty = build_type(inner.next().expect("type_name base"));
+            // :HACK: SqlType only tracks whether a value is an array, not its full
+            // dimensionality, so repeated [] suffixes collapse to the same array type.
+            // The value layer still preserves nested array contents for transient cases.
+            for _ in inner {
+                ty = SqlType::array_of(ty);
             }
+            ty
         }
         Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
         Rule::kw_int2 | Rule::kw_smallint => SqlType::new(SqlTypeKind::Int2),
@@ -1706,16 +1713,19 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 Ok(SqlExpr::FuncCall {
                     name: "cbrt".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
+                    func_variadic: false,
                 })
             } else if raw.starts_with("|/") {
                 Ok(SqlExpr::FuncCall {
                     name: "sqrt".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
+                    func_variadic: false,
                 })
             } else if raw.starts_with('@') {
                 Ok(SqlExpr::FuncCall {
                     name: "abs".into(),
                     args: vec![SqlFunctionArg::positional(expr)],
+                    func_variadic: false,
                 })
             } else if raw.starts_with('~') {
                 Ok(SqlExpr::BitNot(Box::new(expr)))
@@ -1923,15 +1933,20 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::func_call => {
             let mut inner = pair.into_inner();
             let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let args = inner
+            let parsed_args = inner
                 .find(|part| part.as_rule() == Rule::function_arg_list)
                 .map(build_function_arg_list)
                 .transpose()?
                 .unwrap_or_default();
+            let args = parsed_args.args;
             if name.eq_ignore_ascii_case("random") && args.is_empty() {
                 Ok(SqlExpr::Random)
             } else {
-                Ok(SqlExpr::FuncCall { name, args })
+                Ok(SqlExpr::FuncCall {
+                    name,
+                    args,
+                    func_variadic: parsed_args.func_variadic,
+                })
             }
         }
         Rule::position_expr => {
@@ -1952,6 +1967,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         value: haystack,
                     },
                 ],
+                func_variadic: false,
             })
         }
         Rule::substring_expr => {
@@ -1979,6 +1995,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Ok(SqlExpr::FuncCall {
                         name: "substring".into(),
                         args: args.into_iter().map(SqlFunctionArg::positional).collect(),
+                        func_variadic: false,
                     })
                 }
                 Rule::substring_similar_expr => {
@@ -1999,7 +2016,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             .trim(),
                     )?;
                     let pattern = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-                    let mut args = vec![SqlFunctionArg::positional(value), SqlFunctionArg::positional(pattern)];
+                    let mut args = vec![
+                        SqlFunctionArg::positional(value),
+                        SqlFunctionArg::positional(pattern),
+                    ];
                     if let Some(escape_clause) = inner.next() {
                         let expr = escape_clause
                             .into_inner()
@@ -2010,6 +2030,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Ok(SqlExpr::FuncCall {
                         name: "similar_substring".into(),
                         args,
+                        func_variadic: false,
                     })
                 }
                 _ => Err(ParseError::UnexpectedToken {
@@ -2052,13 +2073,15 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             Ok(SqlExpr::FuncCall {
                 name: "overlay".into(),
                 args: args.into_iter().map(SqlFunctionArg::positional).collect(),
+                func_variadic: false,
             })
         }
         Rule::trim_expr => build_trim_expr(pair),
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
             let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let literal = decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+            let literal =
+                decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             Ok(SqlExpr::Cast(
                 Box::new(SqlExpr::Const(Value::Text(literal.into()))),
                 ty,
@@ -2091,7 +2114,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
 
 fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut func = None;
-    let mut args: Vec<SqlFunctionArg> = Vec::new();
+    let mut parsed_args = ParsedFunctionArgs::default();
     let mut is_star = false;
     let mut distinct = false;
     for part in pair.into_inner() {
@@ -2121,23 +2144,48 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             Rule::agg_distinct => distinct = true,
             Rule::star => is_star = true,
             Rule::function_arg_list => {
-                args = build_function_arg_list(part)?;
+                parsed_args = build_function_arg_list(part)?;
             }
             _ => {}
         }
     }
     Ok(SqlExpr::AggCall {
         func: func.ok_or(ParseError::UnexpectedEof)?,
-        args: if is_star { Vec::new() } else { args },
+        args: if is_star {
+            Vec::new()
+        } else {
+            parsed_args.args
+        },
         distinct,
+        func_variadic: !is_star && parsed_args.func_variadic,
     })
 }
 
-fn build_function_arg_list(pair: Pair<'_, Rule>) -> Result<Vec<SqlFunctionArg>, ParseError> {
-    pair.into_inner()
-        .filter(|part| part.as_rule() == Rule::function_arg)
-        .map(build_function_arg)
-        .collect()
+#[derive(Default)]
+struct ParsedFunctionArgs {
+    args: Vec<SqlFunctionArg>,
+    func_variadic: bool,
+}
+
+fn build_function_arg_list(pair: Pair<'_, Rule>) -> Result<ParsedFunctionArgs, ParseError> {
+    let mut parsed = ParsedFunctionArgs::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::function_arg => parsed.args.push(build_function_arg(part)?),
+            Rule::variadic_function_arg => {
+                let expr = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::expr)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                parsed
+                    .args
+                    .push(SqlFunctionArg::positional(build_expr(expr)?));
+                parsed.func_variadic = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(parsed)
 }
 
 fn build_function_arg(pair: Pair<'_, Rule>) -> Result<SqlFunctionArg, ParseError> {
@@ -2150,6 +2198,13 @@ fn build_function_arg(pair: Pair<'_, Rule>) -> Result<SqlFunctionArg, ParseError
             Ok(SqlFunctionArg {
                 name: Some(name),
                 value,
+            })
+        }
+        Rule::positional_function_arg => {
+            let expr = inner.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            Ok(SqlFunctionArg {
+                name: None,
+                value: build_expr(expr)?,
             })
         }
         Rule::expr => Ok(SqlFunctionArg {
@@ -2338,6 +2393,7 @@ fn build_trim_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         }
         .into(),
         args,
+        func_variadic: false,
     })
 }
 
@@ -2368,6 +2424,7 @@ fn fold_infix(
                     SqlFunctionArg::positional(expr),
                     SqlFunctionArg::positional(rhs),
                 ],
+                func_variadic: false,
             },
             Rule::shift_op => match op.as_str() {
                 "<<" => SqlExpr::Shl(Box::new(expr), Box::new(rhs)),
@@ -2388,10 +2445,7 @@ fn fold_infix(
 }
 
 fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
-    if raw.len() >= 2
-        && matches!(raw.as_bytes()[0], b'u' | b'U')
-        && raw.as_bytes()[1] == b'&'
-    {
+    if raw.len() >= 2 && matches!(raw.as_bytes()[0], b'u' | b'U') && raw.as_bytes()[1] == b'&' {
         return decode_unicode_string_literal(raw);
     }
 
@@ -2685,9 +2739,14 @@ fn decode_escape_codepoint(
     code: u32,
 ) -> Result<char, ParseError> {
     if let Some(high) = as_high_surrogate(code) {
-        let low_prefix = chars.next().ok_or_else(|| unicode_error("invalid Unicode surrogate pair"))?;
+        let low_prefix = chars
+            .next()
+            .ok_or_else(|| unicode_error("invalid Unicode surrogate pair"))?;
         let expected_len = match low_prefix {
-            '\\' => match chars.next().ok_or_else(|| unicode_error("invalid Unicode surrogate pair"))? {
+            '\\' => match chars
+                .next()
+                .ok_or_else(|| unicode_error("invalid Unicode surrogate pair"))?
+            {
                 'u' => 4,
                 'U' => 8,
                 _ => return Err(unicode_error("invalid Unicode surrogate pair")),
@@ -2722,8 +2781,8 @@ fn decode_unicode_codepoint_with_surrogates(
             return Err(unicode_error("invalid Unicode surrogate pair"));
         };
         let codepoint = 0x10000 + (((high as u32) - 0xD800) << 10) + ((low as u32) - 0xDC00);
-        let decoded =
-            char::from_u32(codepoint).ok_or_else(|| unicode_error("invalid Unicode escape value"))?;
+        let decoded = char::from_u32(codepoint)
+            .ok_or_else(|| unicode_error("invalid Unicode escape value"))?;
         Ok((decoded, consumed))
     } else if as_low_surrogate(code).is_some() {
         let _ = start;
@@ -2753,12 +2812,18 @@ fn parse_next_unicode_escape(
         if start + 8 > chars.len() {
             return Err(unicode_error("invalid Unicode surrogate pair"));
         }
-        (chars[start + 2..start + 8].iter().collect::<String>(), start + 8)
+        (
+            chars[start + 2..start + 8].iter().collect::<String>(),
+            start + 8,
+        )
     } else {
         if start + 5 > chars.len() {
             return Err(unicode_error("invalid Unicode surrogate pair"));
         }
-        (chars[start + 1..start + 5].iter().collect::<String>(), start + 5)
+        (
+            chars[start + 1..start + 5].iter().collect::<String>(),
+            start + 5,
+        )
     };
     let code = u32::from_str_radix(&digits, 16)
         .map_err(|_| unicode_error("invalid Unicode surrogate pair"))?;
@@ -2773,13 +2838,9 @@ fn unicode_error(message: &'static str) -> ParseError {
 }
 
 fn as_high_surrogate(code: u32) -> Option<u16> {
-    (0xD800..=0xDBFF)
-        .contains(&code)
-        .then_some(code as u16)
+    (0xD800..=0xDBFF).contains(&code).then_some(code as u16)
 }
 
 fn as_low_surrogate(code: u32) -> Option<u16> {
-    (0xDC00..=0xDFFF)
-        .contains(&code)
-        .then_some(code as u16)
+    (0xDC00..=0xDFFF).contains(&code).then_some(code as u16)
 }
