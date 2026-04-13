@@ -11,7 +11,8 @@ This skill rebases the currently checked out branch onto `perf-optimization`.
 
 - Verify the current branch first with `git branch --show-current`.
 - If the current branch is already `perf-optimization`, stop and say there is nothing to rebase onto.
-- Do not discard uncommitted changes. If the worktree is dirty, report it and either use `git rebase --autostash perf-optimization` or tell the user why the local changes are risky.
+- Require a clean worktree before rebasing. If there are uncommitted changes, tell the user to commit them first before continuing.
+- Do not discard uncommitted changes.
 - Do not use merge for this workflow.
 
 ## Default command sequence
@@ -21,7 +22,7 @@ Run from the repo root:
 ```bash
 git branch --show-current
 git status --short
-git rebase --autostash perf-optimization
+git rebase perf-optimization
 ```
 
 ## Conflict handling
@@ -36,7 +37,6 @@ git rebase --autostash perf-optimization
 When finished, report:
 
 - original branch name
-- whether autostash was used
 - whether conflicts occurred
 - final `git status --short --branch`
 
