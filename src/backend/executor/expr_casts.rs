@@ -260,13 +260,22 @@ pub(crate) fn parse_text_array_literal(
     raw: &str,
     element_type: SqlType,
 ) -> Result<Value, ExecError> {
-    parse_text_array_literal_with_op(raw, element_type, "::array")
+    parse_text_array_literal_with_options(raw, element_type, "::array", true)
 }
 
 pub(crate) fn parse_text_array_literal_with_op(
     raw: &str,
     element_type: SqlType,
     op: &'static str,
+) -> Result<Value, ExecError> {
+    parse_text_array_literal_with_options(raw, element_type, op, true)
+}
+
+pub(crate) fn parse_text_array_literal_with_options(
+    raw: &str,
+    element_type: SqlType,
+    op: &'static str,
+    explicit: bool,
 ) -> Result<Value, ExecError> {
     let input = strip_array_bounds_prefix(raw).unwrap_or(raw);
     if input == "{}" {
@@ -279,7 +288,7 @@ pub(crate) fn parse_text_array_literal_with_op(
             right: Value::Text(raw.into()),
         });
     }
-    let mut parser = ArrayTextParser::new(input, element_type, op);
+    let mut parser = ArrayTextParser::new(input, element_type, op, explicit);
     let value = parser.parse_array()?;
     parser.skip_ws();
     if !parser.is_eof() {
@@ -305,15 +314,17 @@ struct ArrayTextParser<'a> {
     offset: usize,
     element_type: SqlType,
     op: &'static str,
+    explicit: bool,
 }
 
 impl<'a> ArrayTextParser<'a> {
-    fn new(input: &'a str, element_type: SqlType, op: &'static str) -> Self {
+    fn new(input: &'a str, element_type: SqlType, op: &'static str, explicit: bool) -> Self {
         Self {
             input,
             offset: 0,
             element_type,
             op,
+            explicit,
         }
     }
 
@@ -349,14 +360,14 @@ impl<'a> ArrayTextParser<'a> {
             Some('{') => self.parse_array(),
             Some('"') => {
                 let text = self.parse_quoted_string()?;
-                cast_text_value(&text, self.element_type, true)
+                cast_text_value(&text, self.element_type, self.explicit)
             }
             Some(_) => {
                 let text = self.parse_unquoted_token();
                 if text.eq_ignore_ascii_case("NULL") {
                     Ok(Value::Null)
                 } else {
-                    cast_text_value(text.trim_end(), self.element_type, true)
+                    cast_text_value(text.trim_end(), self.element_type, self.explicit)
                 }
             }
             None => self.type_mismatch(),
