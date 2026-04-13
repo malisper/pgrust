@@ -139,6 +139,16 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ArrayToJson => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::JsonBuildArray | BuiltinScalarFunction::JsonBuildObject => true,
             BuiltinScalarFunction::JsonObject => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonStripNulls => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonbObject => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonbStripNulls => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::JsonbPretty => args.len() == 1,
+            BuiltinScalarFunction::JsonbDelete => args.len() == 2,
+            BuiltinScalarFunction::JsonbDeletePath => args.len() == 2,
+            BuiltinScalarFunction::JsonbSet | BuiltinScalarFunction::JsonbInsert => {
+                matches!(args.len(), 3 | 4)
+            }
+            BuiltinScalarFunction::JsonbSetLax => matches!(args.len(), 3..=5),
             BuiltinScalarFunction::JsonTypeof
             | BuiltinScalarFunction::JsonArrayLength
             | BuiltinScalarFunction::JsonbTypeof
@@ -260,6 +270,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("json_build_array", BuiltinScalarFunction::JsonBuildArray),
         ("json_build_object", BuiltinScalarFunction::JsonBuildObject),
         ("json_object", BuiltinScalarFunction::JsonObject),
+        ("json_strip_nulls", BuiltinScalarFunction::JsonStripNulls),
         ("json_typeof", BuiltinScalarFunction::JsonTypeof),
         ("json_array_length", BuiltinScalarFunction::JsonArrayLength),
         ("json_extract_path", BuiltinScalarFunction::JsonExtractPath),
@@ -280,11 +291,19 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "jsonb_extract_path_text",
             BuiltinScalarFunction::JsonbExtractPathText,
         ),
+        ("jsonb_object", BuiltinScalarFunction::JsonbObject),
+        ("jsonb_strip_nulls", BuiltinScalarFunction::JsonbStripNulls),
+        ("jsonb_pretty", BuiltinScalarFunction::JsonbPretty),
         ("jsonb_build_array", BuiltinScalarFunction::JsonbBuildArray),
         (
             "jsonb_build_object",
             BuiltinScalarFunction::JsonbBuildObject,
         ),
+        ("jsonb_delete", BuiltinScalarFunction::JsonbDelete),
+        ("jsonb_delete_path", BuiltinScalarFunction::JsonbDeletePath),
+        ("jsonb_set", BuiltinScalarFunction::JsonbSet),
+        ("jsonb_set_lax", BuiltinScalarFunction::JsonbSetLax),
+        ("jsonb_insert", BuiltinScalarFunction::JsonbInsert),
         ("jsonb_path_exists", BuiltinScalarFunction::JsonbPathExists),
         ("jsonb_path_match", BuiltinScalarFunction::JsonbPathMatch),
         (
@@ -487,16 +506,25 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::JsonBuildArray
             | BuiltinScalarFunction::JsonBuildObject
             | BuiltinScalarFunction::JsonObject
+            | BuiltinScalarFunction::JsonStripNulls
             | BuiltinScalarFunction::JsonTypeof
             | BuiltinScalarFunction::JsonArrayLength
             | BuiltinScalarFunction::JsonExtractPath
             | BuiltinScalarFunction::JsonExtractPathText
+            | BuiltinScalarFunction::JsonbObject
+            | BuiltinScalarFunction::JsonbStripNulls
+            | BuiltinScalarFunction::JsonbPretty
             | BuiltinScalarFunction::JsonbTypeof
             | BuiltinScalarFunction::JsonbArrayLength
             | BuiltinScalarFunction::JsonbExtractPath
             | BuiltinScalarFunction::JsonbExtractPathText
             | BuiltinScalarFunction::JsonbBuildArray
             | BuiltinScalarFunction::JsonbBuildObject
+            | BuiltinScalarFunction::JsonbDelete
+            | BuiltinScalarFunction::JsonbDeletePath
+            | BuiltinScalarFunction::JsonbSet
+            | BuiltinScalarFunction::JsonbSetLax
+            | BuiltinScalarFunction::JsonbInsert
             | BuiltinScalarFunction::JsonbPathExists
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray
@@ -547,12 +575,20 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::JsonBuildArray
             | BuiltinScalarFunction::JsonBuildObject
             | BuiltinScalarFunction::JsonObject
+            | BuiltinScalarFunction::JsonStripNulls
             | BuiltinScalarFunction::JsonExtractPath
             | BuiltinScalarFunction::JsonExtractPathText
+            | BuiltinScalarFunction::JsonbObject
+            | BuiltinScalarFunction::JsonbStripNulls
             | BuiltinScalarFunction::JsonbExtractPath
             | BuiltinScalarFunction::JsonbExtractPathText
             | BuiltinScalarFunction::JsonbBuildArray
             | BuiltinScalarFunction::JsonbBuildObject
+            | BuiltinScalarFunction::JsonbDelete
+            | BuiltinScalarFunction::JsonbDeletePath
+            | BuiltinScalarFunction::JsonbSet
+            | BuiltinScalarFunction::JsonbSetLax
+            | BuiltinScalarFunction::JsonbInsert
             | BuiltinScalarFunction::JsonbPathExists
             | BuiltinScalarFunction::JsonbPathMatch
             | BuiltinScalarFunction::JsonbPathQueryArray

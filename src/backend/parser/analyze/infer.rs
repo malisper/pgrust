@@ -169,11 +169,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)
                 | Some(BuiltinScalarFunction::JsonBuildObject)
-                | Some(BuiltinScalarFunction::JsonObject) => SqlType::new(SqlTypeKind::Json),
+                | Some(BuiltinScalarFunction::JsonObject)
+                | Some(BuiltinScalarFunction::JsonStripNulls) => SqlType::new(SqlTypeKind::Json),
                 Some(BuiltinScalarFunction::ToJsonb)
+                | Some(BuiltinScalarFunction::JsonbObject)
                 | Some(BuiltinScalarFunction::JsonbExtractPath)
+                | Some(BuiltinScalarFunction::JsonbStripNulls)
                 | Some(BuiltinScalarFunction::JsonbBuildArray)
                 | Some(BuiltinScalarFunction::JsonbBuildObject)
+                | Some(BuiltinScalarFunction::JsonbDelete)
+                | Some(BuiltinScalarFunction::JsonbDeletePath)
+                | Some(BuiltinScalarFunction::JsonbSet)
+                | Some(BuiltinScalarFunction::JsonbSetLax)
+                | Some(BuiltinScalarFunction::JsonbInsert)
                 | Some(BuiltinScalarFunction::JsonbPathQueryArray)
                 | Some(BuiltinScalarFunction::JsonbPathQueryFirst) => {
                     SqlType::new(SqlTypeKind::Jsonb)
@@ -181,6 +189,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::GetDatabaseEncoding)
                 | Some(BuiltinScalarFunction::JsonTypeof)
                 | Some(BuiltinScalarFunction::JsonExtractPathText)
+                | Some(BuiltinScalarFunction::JsonbPretty)
                 | Some(BuiltinScalarFunction::JsonbTypeof)
                 | Some(BuiltinScalarFunction::JsonbExtractPathText)
                 | Some(BuiltinScalarFunction::BpcharToText)

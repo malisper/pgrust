@@ -5492,6 +5492,44 @@ fn json_scalar_functions_work() {
 }
 
 #[test]
+fn json_strip_nulls_functions_work() {
+    let base = temp_dir("json_strip_nulls");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select json_strip_nulls('{\"a\":1,\"b\":null,\"c\":[2,null,3]}'::json), \
+                json_strip_nulls('{\"a\":1,\"b\":null,\"c\":[2,null,3]}'::json, true), \
+                jsonb_strip_nulls('{\"a\":1,\"b\":null,\"c\":[2,null,3]}'::jsonb), \
+                jsonb_strip_nulls('{\"a\":1,\"b\":null,\"c\":[2,null,3]}'::jsonb, true)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Json("{\"a\":1,\"c\":[2,null,3]}".into()),
+                    Value::Json("{\"a\":1,\"c\":[2,3]}".into()),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"a\":1,\"c\":[2,null,3]}"
+                        )
+                        .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1,\"c\":[2,3]}")
+                            .unwrap()
+                    ),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn json_builders_and_object_agg_work() {
     let base = temp_dir("json_builders");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -5609,6 +5647,126 @@ fn jsonb_operators_and_scalar_functions_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn jsonb_object_and_pretty_functions_work() {
+    let base = temp_dir("jsonb_object_and_pretty");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object(ARRAY['a','1','b','2']::varchar[]), \
+                jsonb_object(ARRAY['a','b']::varchar[], ARRAY['1','2']::varchar[]), \
+                jsonb_pretty('{\"a\":[1,2],\"b\":{\"c\":3}}'::jsonb)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"a\":\"1\",\"b\":\"2\"}"
+                        )
+                        .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"a\":\"1\",\"b\":\"2\"}"
+                        )
+                        .unwrap()
+                    ),
+                    Value::Text("{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": 3\n  }\n}".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_delete_and_delete_path_functions_work() {
+    let base = temp_dir("jsonb_delete");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_delete('{\"a\":1,\"b\":2,\"c\":3}'::jsonb, 'b'), \
+                jsonb_delete('[\"a\",\"b\",\"c\"]'::jsonb, 'b'), \
+                jsonb_delete('[10,20,30]'::jsonb, 1), \
+                jsonb_delete_path('{\"a\":{\"b\":[1,2,3]}}'::jsonb, ARRAY['a','b','1']::varchar[])",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1,\"c\":3}")
+                            .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("[\"a\",\"c\"]")
+                            .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("[10,30]").unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":{\"b\":[1,3]}}")
+                            .unwrap()
+                    ),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_set_insert_and_set_lax_functions_work() {
+    let base = temp_dir("jsonb_set_insert");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_set('{\"a\":[1,2,3],\"b\":{\"c\":4}}'::jsonb, ARRAY['a','1']::varchar[], '9'::jsonb), \
+                jsonb_set('{\"a\":[1,2,3],\"b\":{\"c\":4}}'::jsonb, ARRAY['b','d']::varchar[], '5'::jsonb, true), \
+                jsonb_insert('{\"a\":[1,2,3]}'::jsonb, ARRAY['a','1']::varchar[], '9'::jsonb), \
+                jsonb_set_lax('{\"a\":1,\"b\":2}'::jsonb, ARRAY['b']::varchar[], null, true, 'delete_key')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":[1,9,3],\"b\":{\"c\":4}}")
+                            .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":[1,2,3],\"b\":{\"c\":4,\"d\":5}}")
+                            .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":[1,9,2,3]}")
+                            .unwrap()
+                    ),
+                    Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1}").unwrap()
+                    ),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
