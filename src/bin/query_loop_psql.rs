@@ -135,9 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(&workload_path);
 
     if cfg.quiet {
-        cmd.arg("-q")
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
+        cmd.arg("-q").stdout(Stdio::null()).stderr(Stdio::inherit());
     }
 
     let status = cmd.status()?;

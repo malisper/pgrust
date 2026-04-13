@@ -65,8 +65,8 @@ pub(super) fn bind_comparison_expr(
     } else {
         let (left, right, resolved_left_type, resolved_right_type) =
             if !left_type.is_array && !right_type.is_array {
-                if let Some(common) =
-                    resolve_common_scalar_type(left_type, right_type).filter(|ty| !is_numeric_family(*ty))
+                if let Some(common) = resolve_common_scalar_type(left_type, right_type)
+                    .filter(|ty| !is_numeric_family(*ty))
                 {
                     (
                         coerce_bound_expr(left_bound, raw_left_type, common),

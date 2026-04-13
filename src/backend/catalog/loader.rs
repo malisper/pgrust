@@ -6,9 +6,7 @@ use serde_json::Value as JsonValue;
 
 use crate::BufferPool;
 use crate::backend::access::heap::heapam::{heap_scan_begin, heap_scan_next};
-use crate::backend::access::transam::xact::{
-    INVALID_TRANSACTION_ID, Snapshot, TransactionManager,
-};
+use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Snapshot, TransactionManager};
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexMeta, column_desc,
 };
@@ -33,8 +31,8 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgClassRow, PgCollationRow, PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
-    PgTypeRow, bootstrap_catalog_kinds, bootstrap_relation_desc,
+    PgClassRow, PgCollationRow, PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow,
+    bootstrap_catalog_kinds, bootstrap_relation_desc,
 };
 use crate::include::nodes::datum::Value;
 
@@ -174,9 +172,10 @@ pub(crate) fn catalog_from_physical_rows(
                     desc.attrdef_oid = Some(catalog.next_oid);
                     catalog.next_oid = catalog.next_oid.saturating_add(1);
                 }
-                if let Some(constraint_oid) = not_null_constraint_oids
-                    .get(&(row.oid, not_null_constraint_name(&row.relname, &attr.attname)))
-                {
+                if let Some(constraint_oid) = not_null_constraint_oids.get(&(
+                    row.oid,
+                    not_null_constraint_name(&row.relname, &attr.attname),
+                )) {
                     desc.not_null_constraint_oid = Some(*constraint_oid);
                 }
                 Ok(desc)
@@ -619,7 +618,12 @@ pub(crate) fn load_physical_catalog_rows(
         tablespaces: tablespace_rows,
         types: type_rows,
     };
-    restore_missing_first_class_catalog_rows(base_dir, &mut rows, missing_constraint, missing_depend)?;
+    restore_missing_first_class_catalog_rows(
+        base_dir,
+        &mut rows,
+        missing_constraint,
+        missing_depend,
+    )?;
     Ok(rows)
 }
 
@@ -995,7 +999,12 @@ pub(crate) fn load_physical_catalog_rows_visible(
         tablespaces: tablespace_rows,
         types: type_rows,
     };
-    restore_missing_first_class_catalog_rows(base_dir, &mut rows, missing_constraint, missing_depend)?;
+    restore_missing_first_class_catalog_rows(
+        base_dir,
+        &mut rows,
+        missing_constraint,
+        missing_depend,
+    )?;
     Ok(rows)
 }
 
@@ -1006,10 +1015,17 @@ pub(crate) fn load_visible_namespace_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgNamespaceRow>, CatalogError> {
-    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgNamespace)?
-        .into_iter()
-        .map(namespace_row_from_values)
-        .collect()
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgNamespace,
+    )?
+    .into_iter()
+    .map(namespace_row_from_values)
+    .collect()
 }
 
 pub(crate) fn load_visible_type_rows(
@@ -1019,10 +1035,17 @@ pub(crate) fn load_visible_type_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgTypeRow>, CatalogError> {
-    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgType)?
-        .into_iter()
-        .map(pg_type_row_from_values)
-        .collect()
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgType,
+    )?
+    .into_iter()
+    .map(pg_type_row_from_values)
+    .collect()
 }
 
 pub(crate) fn load_visible_class_rows(
@@ -1032,10 +1055,17 @@ pub(crate) fn load_visible_class_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgClassRow>, CatalogError> {
-    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgClass)?
-        .into_iter()
-        .map(pg_class_row_from_values)
-        .collect()
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgClass,
+    )?
+    .into_iter()
+    .map(pg_class_row_from_values)
+    .collect()
 }
 
 pub(crate) fn load_visible_attribute_rows(
@@ -1045,10 +1075,17 @@ pub(crate) fn load_visible_attribute_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAttributeRow>, CatalogError> {
-    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAttribute)?
-        .into_iter()
-        .map(pg_attribute_row_from_values)
-        .collect()
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgAttribute,
+    )?
+    .into_iter()
+    .map(pg_attribute_row_from_values)
+    .collect()
 }
 
 pub(crate) fn load_visible_attrdef_rows(
@@ -1058,10 +1095,17 @@ pub(crate) fn load_visible_attrdef_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAttrdefRow>, CatalogError> {
-    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAttrdef)?
-        .into_iter()
-        .map(pg_attrdef_row_from_values)
-        .collect()
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgAttrdef,
+    )?
+    .into_iter()
+    .map(pg_attrdef_row_from_values)
+    .collect()
 }
 
 pub(crate) fn load_visible_index_rows(
@@ -1071,10 +1115,17 @@ pub(crate) fn load_visible_index_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgIndexRow>, CatalogError> {
-    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgIndex)?
-        .into_iter()
-        .map(pg_index_row_from_values)
-        .collect()
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgIndex,
+    )?
+    .into_iter()
+    .map(pg_index_row_from_values)
+    .collect()
 }
 
 pub(crate) fn load_visible_am_rows(
@@ -1084,10 +1135,17 @@ pub(crate) fn load_visible_am_rows(
     snapshot: &Snapshot,
     client_id: crate::ClientId,
 ) -> Result<Vec<PgAmRow>, CatalogError> {
-    load_visible_catalog_kind(base_dir, pool, txns, snapshot, client_id, BootstrapCatalogKind::PgAm)?
-        .into_iter()
-        .map(pg_am_row_from_values)
-        .collect()
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgAm,
+    )?
+    .into_iter()
+    .map(pg_am_row_from_values)
+    .collect()
 }
 
 pub(crate) fn load_visible_amop_rows(

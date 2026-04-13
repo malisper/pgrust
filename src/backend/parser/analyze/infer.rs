@@ -164,237 +164,247 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 return sql_type;
             }
             match resolved {
-            Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
-            Some(BuiltinScalarFunction::ToJson)
-            | Some(BuiltinScalarFunction::ArrayToJson)
-            | Some(BuiltinScalarFunction::JsonBuildArray)
-            | Some(BuiltinScalarFunction::JsonBuildObject)
-            | Some(BuiltinScalarFunction::JsonObject) => SqlType::new(SqlTypeKind::Json),
-            Some(BuiltinScalarFunction::ToJsonb)
-            | Some(BuiltinScalarFunction::JsonbExtractPath)
-            | Some(BuiltinScalarFunction::JsonbBuildArray)
-            | Some(BuiltinScalarFunction::JsonbBuildObject)
-            | Some(BuiltinScalarFunction::JsonbPathQueryArray)
-            | Some(BuiltinScalarFunction::JsonbPathQueryFirst) => SqlType::new(SqlTypeKind::Jsonb),
-            Some(BuiltinScalarFunction::GetDatabaseEncoding)
-            | Some(BuiltinScalarFunction::JsonTypeof)
-            | Some(BuiltinScalarFunction::JsonExtractPathText)
-            | Some(BuiltinScalarFunction::JsonbTypeof)
-            | Some(BuiltinScalarFunction::JsonbExtractPathText)
-            | Some(BuiltinScalarFunction::BpcharToText)
-            | Some(BuiltinScalarFunction::Lower)
-            | Some(BuiltinScalarFunction::Left)
-            | Some(BuiltinScalarFunction::Repeat)
-            | Some(BuiltinScalarFunction::Md5)
-            | Some(BuiltinScalarFunction::ConvertFrom)
-            | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
-            Some(BuiltinScalarFunction::Length)
-            | Some(BuiltinScalarFunction::JsonArrayLength)
-            | Some(BuiltinScalarFunction::JsonbArrayLength)
-            | Some(BuiltinScalarFunction::Scale)
-            | Some(BuiltinScalarFunction::MinScale)
-            | Some(BuiltinScalarFunction::WidthBucket) => SqlType::new(SqlTypeKind::Int4),
-            Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
-            Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => {
-                args.first().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
-                    infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                })
-            }
-            Some(BuiltinScalarFunction::GetBit) => SqlType::new(SqlTypeKind::Int4),
-            Some(BuiltinScalarFunction::SetBit) => {
-                args.first().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
-                    infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                })
-            }
-            Some(BuiltinScalarFunction::BitCount) => SqlType::new(SqlTypeKind::Int8),
-            Some(BuiltinScalarFunction::JsonbPathExists)
-            | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
-            Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
-            Some(BuiltinScalarFunction::Abs) => {
-                args.first().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
-                    infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                })
-            }
-            Some(BuiltinScalarFunction::Div)
-            | Some(BuiltinScalarFunction::Mod)
-            | Some(BuiltinScalarFunction::TrimScale)
-            | Some(BuiltinScalarFunction::NumericInc)
-            | Some(BuiltinScalarFunction::Factorial) => SqlType::new(SqlTypeKind::Numeric),
-            Some(
-                BuiltinScalarFunction::Sqrt
-                | BuiltinScalarFunction::Cbrt
-                | BuiltinScalarFunction::Power
-                | BuiltinScalarFunction::Exp
-                | BuiltinScalarFunction::Ln
-                | BuiltinScalarFunction::Sinh
-                | BuiltinScalarFunction::Cosh
-                | BuiltinScalarFunction::Tanh
-                | BuiltinScalarFunction::Asinh
-                | BuiltinScalarFunction::Acosh
-                | BuiltinScalarFunction::Atanh
-                | BuiltinScalarFunction::Sind
-                | BuiltinScalarFunction::Cosd
-                | BuiltinScalarFunction::Tand
-                | BuiltinScalarFunction::Cotd
-                | BuiltinScalarFunction::Asind
-                | BuiltinScalarFunction::Acosd
-                | BuiltinScalarFunction::Atand
-                | BuiltinScalarFunction::Atan2d
-                | BuiltinScalarFunction::Erf
-                | BuiltinScalarFunction::Erfc
-                | BuiltinScalarFunction::Gamma
-                | BuiltinScalarFunction::Lgamma,
-            ) => SqlType::new(SqlTypeKind::Float8),
-            Some(BuiltinScalarFunction::Log | BuiltinScalarFunction::Log10) => {
-                if args.len() == 2 {
-                    args.first()
-                        .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
-                            let ty = infer_sql_expr_type_with_ctes(
-                                arg,
-                                scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                                ctes,
-                            );
-                            match ty.element_type().kind {
-                                SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-                                    SqlType::new(SqlTypeKind::Float8)
-                                }
-                                _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
-                                _ => SqlType::new(SqlTypeKind::Float8),
-                            }
-                        })
-                } else {
-                    args.first()
-                        .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
-                            let ty = infer_sql_expr_type_with_ctes(
-                                arg,
-                                scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer,
-                                ctes,
-                            );
-                            match ty.element_type().kind {
-                                SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-                                    SqlType::new(SqlTypeKind::Float8)
-                                }
-                                _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
-                                _ => SqlType::new(SqlTypeKind::Float8),
-                            }
-                        })
+                Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
+                Some(BuiltinScalarFunction::ToJson)
+                | Some(BuiltinScalarFunction::ArrayToJson)
+                | Some(BuiltinScalarFunction::JsonBuildArray)
+                | Some(BuiltinScalarFunction::JsonBuildObject)
+                | Some(BuiltinScalarFunction::JsonObject) => SqlType::new(SqlTypeKind::Json),
+                Some(BuiltinScalarFunction::ToJsonb)
+                | Some(BuiltinScalarFunction::JsonbExtractPath)
+                | Some(BuiltinScalarFunction::JsonbBuildArray)
+                | Some(BuiltinScalarFunction::JsonbBuildObject)
+                | Some(BuiltinScalarFunction::JsonbPathQueryArray)
+                | Some(BuiltinScalarFunction::JsonbPathQueryFirst) => {
+                    SqlType::new(SqlTypeKind::Jsonb)
                 }
-            }
-            Some(
-                BuiltinScalarFunction::Ceil
-                | BuiltinScalarFunction::Ceiling
-                | BuiltinScalarFunction::Floor
-                | BuiltinScalarFunction::Sign,
-            ) => args
-                .first()
-                .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
-                    let ty = infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                    match ty.element_type().kind {
-                        SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-                            SqlType::new(SqlTypeKind::Float8)
-                        }
-                        _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
-                        _ => SqlType::new(SqlTypeKind::Float8),
-                    }
-                }),
-            Some(BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round) => args
-                .first()
-                .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
-                    let ty = infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                    match ty.element_type().kind {
-                        SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
-                            SqlType::new(SqlTypeKind::Float8)
-                        }
-                        _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
-                        _ => SqlType::new(SqlTypeKind::Float8),
-                    }
-                }),
-            Some(BuiltinScalarFunction::BitcastIntegerToFloat4) => {
-                SqlType::new(SqlTypeKind::Float4)
-            }
-            Some(BuiltinScalarFunction::BitcastBigintToFloat8) => SqlType::new(SqlTypeKind::Float8),
-            Some(BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send) => {
-                SqlType::new(SqlTypeKind::Text)
-            }
-            Some(BuiltinScalarFunction::BoolEq | BuiltinScalarFunction::BoolNe) => {
-                SqlType::new(SqlTypeKind::Bool)
-            }
-            Some(BuiltinScalarFunction::Gcd) | Some(BuiltinScalarFunction::Lcm) => args
-                .first()
-                .zip(args.get(1))
-                .map_or(SqlType::new(SqlTypeKind::Text), |(left, right)| {
-                    resolve_numeric_binary_type(
-                        "+",
+                Some(BuiltinScalarFunction::GetDatabaseEncoding)
+                | Some(BuiltinScalarFunction::JsonTypeof)
+                | Some(BuiltinScalarFunction::JsonExtractPathText)
+                | Some(BuiltinScalarFunction::JsonbTypeof)
+                | Some(BuiltinScalarFunction::JsonbExtractPathText)
+                | Some(BuiltinScalarFunction::BpcharToText)
+                | Some(BuiltinScalarFunction::Lower)
+                | Some(BuiltinScalarFunction::Left)
+                | Some(BuiltinScalarFunction::Repeat)
+                | Some(BuiltinScalarFunction::Md5)
+                | Some(BuiltinScalarFunction::ConvertFrom)
+                | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::Length)
+                | Some(BuiltinScalarFunction::JsonArrayLength)
+                | Some(BuiltinScalarFunction::JsonbArrayLength)
+                | Some(BuiltinScalarFunction::Scale)
+                | Some(BuiltinScalarFunction::MinScale)
+                | Some(BuiltinScalarFunction::WidthBucket) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::Position) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => {
+                    args.first().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
                         infer_sql_expr_type_with_ctes(
-                            left,
+                            arg,
                             scope,
                             catalog,
                             outer_scopes,
                             grouped_outer,
                             ctes,
-                        ),
+                        )
+                    })
+                }
+                Some(BuiltinScalarFunction::GetBit) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::SetBit) => {
+                    args.first().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
                         infer_sql_expr_type_with_ctes(
-                            right,
+                            arg,
                             scope,
                             catalog,
                             outer_scopes,
                             grouped_outer,
                             ctes,
-                        ),
-                    )
-                    .unwrap_or(SqlType::new(SqlTypeKind::Text))
-                }),
-            Some(BuiltinScalarFunction::PgInputIsValid) => SqlType::new(SqlTypeKind::Bool),
-            Some(BuiltinScalarFunction::ToNumber) => SqlType::new(SqlTypeKind::Numeric),
-            Some(BuiltinScalarFunction::ToChar)
-            | Some(BuiltinScalarFunction::PgInputErrorMessage)
-            | Some(BuiltinScalarFunction::PgInputErrorDetail)
-            | Some(BuiltinScalarFunction::PgInputErrorHint)
-            | Some(BuiltinScalarFunction::PgInputErrorSqlState) => SqlType::new(SqlTypeKind::Text),
-            None => resolve_function_cast_type(catalog, name)
-                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
-        }
+                        )
+                    })
+                }
+                Some(BuiltinScalarFunction::BitCount) => SqlType::new(SqlTypeKind::Int8),
+                Some(BuiltinScalarFunction::JsonbPathExists)
+                | Some(BuiltinScalarFunction::JsonbPathMatch) => SqlType::new(SqlTypeKind::Bool),
+                Some(BuiltinScalarFunction::JsonExtractPath) => SqlType::new(SqlTypeKind::Json),
+                Some(BuiltinScalarFunction::Abs) => {
+                    args.first().map_or(SqlType::new(SqlTypeKind::Text), |arg| {
+                        infer_sql_expr_type_with_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                }
+                Some(BuiltinScalarFunction::Div)
+                | Some(BuiltinScalarFunction::Mod)
+                | Some(BuiltinScalarFunction::TrimScale)
+                | Some(BuiltinScalarFunction::NumericInc)
+                | Some(BuiltinScalarFunction::Factorial) => SqlType::new(SqlTypeKind::Numeric),
+                Some(
+                    BuiltinScalarFunction::Sqrt
+                    | BuiltinScalarFunction::Cbrt
+                    | BuiltinScalarFunction::Power
+                    | BuiltinScalarFunction::Exp
+                    | BuiltinScalarFunction::Ln
+                    | BuiltinScalarFunction::Sinh
+                    | BuiltinScalarFunction::Cosh
+                    | BuiltinScalarFunction::Tanh
+                    | BuiltinScalarFunction::Asinh
+                    | BuiltinScalarFunction::Acosh
+                    | BuiltinScalarFunction::Atanh
+                    | BuiltinScalarFunction::Sind
+                    | BuiltinScalarFunction::Cosd
+                    | BuiltinScalarFunction::Tand
+                    | BuiltinScalarFunction::Cotd
+                    | BuiltinScalarFunction::Asind
+                    | BuiltinScalarFunction::Acosd
+                    | BuiltinScalarFunction::Atand
+                    | BuiltinScalarFunction::Atan2d
+                    | BuiltinScalarFunction::Erf
+                    | BuiltinScalarFunction::Erfc
+                    | BuiltinScalarFunction::Gamma
+                    | BuiltinScalarFunction::Lgamma,
+                ) => SqlType::new(SqlTypeKind::Float8),
+                Some(BuiltinScalarFunction::Log | BuiltinScalarFunction::Log10) => {
+                    if args.len() == 2 {
+                        args.first()
+                            .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
+                                let ty = infer_sql_expr_type_with_ctes(
+                                    arg,
+                                    scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                    ctes,
+                                );
+                                match ty.element_type().kind {
+                                    SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+                                        SqlType::new(SqlTypeKind::Float8)
+                                    }
+                                    _ if is_numeric_family(ty) => {
+                                        SqlType::new(SqlTypeKind::Numeric)
+                                    }
+                                    _ => SqlType::new(SqlTypeKind::Float8),
+                                }
+                            })
+                    } else {
+                        args.first()
+                            .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
+                                let ty = infer_sql_expr_type_with_ctes(
+                                    arg,
+                                    scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                    ctes,
+                                );
+                                match ty.element_type().kind {
+                                    SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+                                        SqlType::new(SqlTypeKind::Float8)
+                                    }
+                                    _ if is_numeric_family(ty) => {
+                                        SqlType::new(SqlTypeKind::Numeric)
+                                    }
+                                    _ => SqlType::new(SqlTypeKind::Float8),
+                                }
+                            })
+                    }
+                }
+                Some(
+                    BuiltinScalarFunction::Ceil
+                    | BuiltinScalarFunction::Ceiling
+                    | BuiltinScalarFunction::Floor
+                    | BuiltinScalarFunction::Sign,
+                ) => args
+                    .first()
+                    .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
+                        let ty = infer_sql_expr_type_with_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
+                        match ty.element_type().kind {
+                            SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+                                SqlType::new(SqlTypeKind::Float8)
+                            }
+                            _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
+                            _ => SqlType::new(SqlTypeKind::Float8),
+                        }
+                    }),
+                Some(BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round) => args
+                    .first()
+                    .map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
+                        let ty = infer_sql_expr_type_with_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        );
+                        match ty.element_type().kind {
+                            SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+                                SqlType::new(SqlTypeKind::Float8)
+                            }
+                            _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
+                            _ => SqlType::new(SqlTypeKind::Float8),
+                        }
+                    }),
+                Some(BuiltinScalarFunction::BitcastIntegerToFloat4) => {
+                    SqlType::new(SqlTypeKind::Float4)
+                }
+                Some(BuiltinScalarFunction::BitcastBigintToFloat8) => {
+                    SqlType::new(SqlTypeKind::Float8)
+                }
+                Some(BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send) => {
+                    SqlType::new(SqlTypeKind::Text)
+                }
+                Some(BuiltinScalarFunction::BoolEq | BuiltinScalarFunction::BoolNe) => {
+                    SqlType::new(SqlTypeKind::Bool)
+                }
+                Some(BuiltinScalarFunction::Gcd) | Some(BuiltinScalarFunction::Lcm) => args
+                    .first()
+                    .zip(args.get(1))
+                    .map_or(SqlType::new(SqlTypeKind::Text), |(left, right)| {
+                        resolve_numeric_binary_type(
+                            "+",
+                            infer_sql_expr_type_with_ctes(
+                                left,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            ),
+                            infer_sql_expr_type_with_ctes(
+                                right,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            ),
+                        )
+                        .unwrap_or(SqlType::new(SqlTypeKind::Text))
+                    }),
+                Some(BuiltinScalarFunction::PgInputIsValid) => SqlType::new(SqlTypeKind::Bool),
+                Some(BuiltinScalarFunction::ToNumber) => SqlType::new(SqlTypeKind::Numeric),
+                Some(BuiltinScalarFunction::ToChar)
+                | Some(BuiltinScalarFunction::PgInputErrorMessage)
+                | Some(BuiltinScalarFunction::PgInputErrorDetail)
+                | Some(BuiltinScalarFunction::PgInputErrorHint)
+                | Some(BuiltinScalarFunction::PgInputErrorSqlState) => {
+                    SqlType::new(SqlTypeKind::Text)
+                }
+                None => resolve_function_cast_type(catalog, name)
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            }
         }
         SqlExpr::CurrentTimestamp => SqlType::new(SqlTypeKind::Timestamp),
     }

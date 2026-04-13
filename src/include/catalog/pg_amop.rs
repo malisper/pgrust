@@ -28,7 +28,11 @@ pub fn pg_amop_desc() -> RelationDesc {
             column_desc("amoplefttype", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("amoprighttype", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("amopstrategy", SqlType::new(SqlTypeKind::Int2), false),
-            column_desc("amoppurpose", SqlType::new(SqlTypeKind::InternalChar), false),
+            column_desc(
+                "amoppurpose",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
             column_desc("amopopr", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("amopmethod", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("amopsortfamily", SqlType::new(SqlTypeKind::Oid), false),
@@ -40,12 +44,36 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
     let mut oid = 8000u32;
     let mut rows = Vec::new();
     for (family, type_oid, operators) in [
-        (BTREE_BOOL_FAMILY_OID, BOOL_TYPE_OID, [58, 1694, 91, 1695, 59]),
-        (BTREE_INTEGER_FAMILY_OID, INT4_TYPE_OID, [97, 523, 96, 525, 521]),
-        (BTREE_TEXT_FAMILY_OID, TEXT_TYPE_OID, [664, 665, 98, 667, 666]),
-        (BTREE_BIT_FAMILY_OID, BIT_TYPE_OID, [1786, 1788, 1784, 1789, 1787]),
-        (BTREE_VARBIT_FAMILY_OID, VARBIT_TYPE_OID, [1806, 1808, 1804, 1809, 1807]),
-        (BTREE_BYTEA_FAMILY_OID, BYTEA_TYPE_OID, [1957, 1958, 1955, 1960, 1959]),
+        (
+            BTREE_BOOL_FAMILY_OID,
+            BOOL_TYPE_OID,
+            [58, 1694, 91, 1695, 59],
+        ),
+        (
+            BTREE_INTEGER_FAMILY_OID,
+            INT4_TYPE_OID,
+            [97, 523, 96, 525, 521],
+        ),
+        (
+            BTREE_TEXT_FAMILY_OID,
+            TEXT_TYPE_OID,
+            [664, 665, 98, 667, 666],
+        ),
+        (
+            BTREE_BIT_FAMILY_OID,
+            BIT_TYPE_OID,
+            [1786, 1788, 1784, 1789, 1787],
+        ),
+        (
+            BTREE_VARBIT_FAMILY_OID,
+            VARBIT_TYPE_OID,
+            [1806, 1808, 1804, 1809, 1807],
+        ),
+        (
+            BTREE_BYTEA_FAMILY_OID,
+            BYTEA_TYPE_OID,
+            [1957, 1958, 1955, 1960, 1959],
+        ),
     ] {
         for (strategy, operator_oid) in (1_i16..=5).zip(operators) {
             rows.push(PgAmopRow {
