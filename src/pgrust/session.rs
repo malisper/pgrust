@@ -448,6 +448,35 @@ impl Session {
                     db.execute_drop_role_stmt(self.client_id, drop_stmt)
                 }
             }
+            Statement::SetSessionAuthorization(ref set_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    self.auth = db.execute_set_session_authorization_stmt(self.client_id, set_stmt)?;
+                    Ok(StatementResult::AffectedRows(0))
+                }
+            }
+            Statement::ResetSessionAuthorization(ref reset_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    self.auth =
+                        db.execute_reset_session_authorization_stmt(self.client_id, reset_stmt)?;
+                    Ok(StatementResult::AffectedRows(0))
+                }
+            }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
@@ -826,11 +855,17 @@ impl Session {
             Statement::AlterRole(ref alter_stmt) => db.execute_alter_role_stmt(client_id, alter_stmt),
             Statement::DropRole(ref drop_stmt) => db.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::CommentOnRole(_)
-            | Statement::SetSessionAuthorization(_)
-            | Statement::ResetSessionAuthorization(_)
             | Statement::ReassignOwned(_) => Err(ExecError::Parse(
                 ParseError::FeatureNotSupported("role management".into()),
             )),
+            Statement::SetSessionAuthorization(ref set_stmt) => {
+                self.auth = db.execute_set_session_authorization_stmt(client_id, set_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::ResetSessionAuthorization(ref reset_stmt) => {
+                self.auth = db.execute_reset_session_authorization_stmt(client_id, reset_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Unsupported(ref unsupported_stmt) => {
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                     "{}: {}",
