@@ -1,6 +1,7 @@
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
+use std::cmp::Ordering;
 
 use super::ExecError;
 use super::expr_ops::parse_numeric_text;
@@ -10,6 +11,11 @@ const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
 const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
 const NUMERIC_MAX_DISPLAY_SCALE: i32 = 16383;
 const NUMERIC_MAX_RESULT_WEIGHT: f64 = 131072.0;
+const NUMERIC_GUARD_DIGITS: i32 = 20;
+const LOG10_E: f64 = 0.434294481903252;
+const LOG10_2: f64 = 0.301029995663981;
+const LN_10: f64 = 2.302585092994046;
+const NUMERIC_EXP_LIMIT: i64 = (NUMERIC_MAX_DISPLAY_SCALE as i64) * 3;
 
 fn numeric_domain_error(message: impl Into<String>) -> ExecError {
     ExecError::InvalidStorageValue {
@@ -91,17 +97,8 @@ fn numeric_to_f64(value: &NumericValue) -> Option<f64> {
     }
 }
 
-fn numeric_from_f64(value: f64, scale: usize) -> NumericValue {
-    if value.is_nan() {
-        return NumericValue::NaN;
-    }
-    if value == f64::INFINITY {
-        return NumericValue::PosInf;
-    }
-    if value == f64::NEG_INFINITY {
-        return NumericValue::NegInf;
-    }
-    parse_numeric_text(&format!("{value:.scale$}")).unwrap_or_else(|| NumericValue::zero())
+fn numeric_const(text: &str) -> NumericValue {
+    parse_numeric_text(text).expect("valid numeric constant")
 }
 
 fn finite_integer(value: &NumericValue) -> Option<i64> {
@@ -115,6 +112,68 @@ fn finite_dscale(value: &NumericValue) -> u32 {
     match value {
         NumericValue::Finite { dscale, .. } => *dscale,
         _ => 0,
+    }
+}
+
+fn clamp_display_scale(scale: i32) -> u32 {
+    scale.clamp(NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_MAX_DISPLAY_SCALE) as u32
+}
+
+fn numeric_sign(value: &NumericValue) -> i32 {
+    match value {
+        NumericValue::PosInf => 1,
+        NumericValue::NegInf => -1,
+        NumericValue::NaN => 0,
+        NumericValue::Finite { coeff, .. } if coeff.is_zero() => 0,
+        NumericValue::Finite { coeff, .. } if coeff.is_negative() => -1,
+        NumericValue::Finite { .. } => 1,
+    }
+}
+
+fn numeric_is_zero(value: &NumericValue) -> bool {
+    matches!(value, NumericValue::Finite { coeff, .. } if coeff.is_zero())
+}
+
+fn numeric_is_integral(value: &NumericValue) -> bool {
+    matches!(value.clone().normalize(), NumericValue::Finite { scale: 0, .. })
+}
+
+fn integral_is_odd(value: &NumericValue) -> bool {
+    match value.clone().normalize() {
+        NumericValue::Finite { coeff, scale: 0, .. } => coeff.is_odd(),
+        _ => false,
+    }
+}
+
+fn numeric_to_f64_approx(value: &NumericValue) -> f64 {
+    if let Some(exact) = numeric_to_f64(value) {
+        return exact;
+    }
+    match value {
+        NumericValue::PosInf => f64::INFINITY,
+        NumericValue::NegInf => f64::NEG_INFINITY,
+        NumericValue::NaN => f64::NAN,
+        NumericValue::Finite { coeff, scale, .. } => {
+            if coeff.is_zero() {
+                return 0.0;
+            }
+            let digits = coeff.abs().to_str_radix(10);
+            let head_len = digits.len().min(16);
+            let head = digits[..head_len].parse::<f64>().unwrap_or(0.0);
+            let exp10 = digits.len() as i32 - head_len as i32 - *scale as i32;
+            let magnitude = if exp10 > 308 {
+                f64::INFINITY
+            } else if exp10 < -350 {
+                0.0
+            } else {
+                head * 10f64.powi(exp10)
+            };
+            if coeff.is_negative() {
+                -magnitude
+            } else {
+                magnitude
+            }
+        }
     }
 }
 
@@ -141,14 +200,44 @@ fn choose_power_result_scale(base: &NumericValue, exp_dscale: u32, approx_weight
     rscale as u32
 }
 
-fn clamp_numeric_scale(value: NumericValue, max_scale: u32) -> NumericValue {
+fn clamp_numeric_to_scale(value: NumericValue, target_scale: i32) -> NumericValue {
     match value {
-        NumericValue::Finite { scale, .. } if scale > max_scale => value
-            .round_to_scale(max_scale)
-            .unwrap_or(value)
-            .with_dscale(max_scale),
-        other => other,
+        NumericValue::Finite { scale, .. } if target_scale >= 0 && scale <= target_scale as u32 => {
+            value
+        }
+        _ => round_numeric_to_scale(&value, target_scale),
     }
+}
+
+fn add_numeric_clamped(left: &NumericValue, right: &NumericValue, target_scale: i32) -> NumericValue {
+    clamp_numeric_to_scale(left.add(right), target_scale)
+}
+
+fn mul_numeric_clamped(left: &NumericValue, right: &NumericValue, target_scale: i32) -> NumericValue {
+    clamp_numeric_to_scale(left.mul(right), target_scale)
+}
+
+fn div_numeric_clamped(
+    left: &NumericValue,
+    right: &NumericValue,
+    target_scale: i32,
+) -> Result<NumericValue, ExecError> {
+    let divided = left
+        .div(right, target_scale.max(0) as u32)
+        .ok_or(ExecError::DivisionByZero("/"))?;
+    Ok(if target_scale >= 0 {
+        divided
+    } else {
+        round_numeric_to_scale(&divided, target_scale)
+    })
+}
+
+fn div_numeric_by_i64(
+    value: &NumericValue,
+    divisor: i64,
+    target_scale: i32,
+) -> Result<NumericValue, ExecError> {
+    div_numeric_clamped(value, &NumericValue::from_i64(divisor), target_scale)
 }
 
 fn floor_div_i32(value: i32, divisor: i32) -> i32 {
@@ -178,6 +267,59 @@ fn sqrt_result_scale(value: &NumericValue) -> u32 {
     rscale as u32
 }
 
+fn estimate_ln_dweight(value: &NumericValue) -> i32 {
+    if numeric_sign(value) <= 0 {
+        return 0;
+    }
+
+    let zero_nine = numeric_const("0.9");
+    let one = NumericValue::from_i64(1);
+    let one_point_one = numeric_const("1.1");
+
+    if value.cmp(&zero_nine) != Ordering::Less && value.cmp(&one_point_one) != Ordering::Greater {
+        let delta = value.sub(&one).abs();
+        if numeric_is_zero(&delta) {
+            0
+        } else {
+            decimal_weight(&delta)
+        }
+    } else {
+        match value {
+            NumericValue::Finite { coeff, scale, .. } if !coeff.is_zero() => {
+                let digits = coeff.abs().to_str_radix(10);
+                let head_len = digits.len().min(16);
+                let head = digits[..head_len].parse::<f64>().unwrap_or(1.0);
+                let dweight = digits.len() as i32 - head_len as i32 - *scale as i32;
+                let ln_approx = head.ln() + f64::from(dweight) * LN_10;
+                if ln_approx == 0.0 {
+                    0
+                } else {
+                    ln_approx.abs().log10() as i32
+                }
+            }
+            _ => 0,
+        }
+    }
+}
+
+fn exp_result_scale(value: &NumericValue) -> u32 {
+    let mut approx_weight = numeric_to_f64_approx(value) * LOG10_E;
+    approx_weight = approx_weight.clamp(
+        -(NUMERIC_MAX_DISPLAY_SCALE as f64),
+        NUMERIC_MAX_DISPLAY_SCALE as f64,
+    );
+
+    let mut rscale = NUMERIC_MIN_SIG_DIGITS - approx_weight as i32;
+    rscale = rscale.max(finite_dscale(value) as i32);
+    clamp_display_scale(rscale)
+}
+
+fn ln_result_scale(value: &NumericValue) -> u32 {
+    let mut rscale = NUMERIC_MIN_SIG_DIGITS - estimate_ln_dweight(value);
+    rscale = rscale.max(finite_dscale(value) as i32);
+    clamp_display_scale(rscale)
+}
+
 fn bigint_sqrt_floor(value: &BigInt) -> BigInt {
     if value <= &BigInt::from(0u8) {
         return BigInt::from(0u8);
@@ -201,6 +343,41 @@ fn bigint_sqrt_floor(value: &BigInt) -> BigInt {
         guess = next;
     }
     guess
+}
+
+fn sqrt_numeric_with_scale(value: &NumericValue, target_scale: i32) -> Result<NumericValue, ExecError> {
+    match value {
+        NumericValue::NaN => Ok(NumericValue::NaN),
+        NumericValue::PosInf => Ok(NumericValue::PosInf),
+        NumericValue::NegInf => Err(numeric_domain_error(
+            "cannot take square root of a negative number",
+        )),
+        NumericValue::Finite { coeff, .. } if coeff.is_negative() => Err(numeric_domain_error(
+            "cannot take square root of a negative number",
+        )),
+        NumericValue::Finite { coeff, .. } if coeff.is_zero() => {
+            let dscale = target_scale.max(0) as u32;
+            Ok(NumericValue::zero().with_dscale(dscale))
+        }
+        NumericValue::Finite { coeff, scale, .. } => {
+            let work_scale = (*scale).div_ceil(2).max(target_scale.max(0) as u32);
+            let scaled = coeff * pow10_bigint(work_scale.saturating_mul(2) - *scale);
+            let floor = bigint_sqrt_floor(&scaled);
+            let remainder = &scaled - (&floor * &floor);
+            let rounded = if remainder > floor {
+                floor + 1u8
+            } else {
+                floor
+            };
+            let work = NumericValue::finite(rounded, work_scale).normalize();
+            let result = clamp_numeric_to_scale(work, target_scale);
+            Ok(if target_scale >= 0 {
+                result.with_dscale(target_scale as u32).normalize()
+            } else {
+                result.normalize()
+            })
+        }
+    }
 }
 
 fn numeric_pow_integer(
@@ -242,25 +419,55 @@ fn numeric_pow_integer(
         return Ok(NumericValue::zero().with_dscale(out_scale));
     }
 
-    let negative = exp < 0;
-    let work_scale = out_scale.saturating_add(8).min(NUMERIC_MAX_DISPLAY_SCALE as u32);
-    let mut result = NumericValue::from_i64(1);
-    let mut power = clamp_numeric_scale(base.clone(), work_scale);
-    let mut remaining = exp.unsigned_abs();
-
-    while remaining > 0 {
-        if remaining & 1 == 1 {
-            result = clamp_numeric_scale(result.mul(&power), work_scale);
-            if !negative && numeric_digits_before_decimal(&result) > 131072 {
-                return Err(numeric_domain_error("value overflows numeric format"));
-            }
+    match exp {
+        1 => return Ok(round_numeric_to_scale(base, out_scale as i32).with_dscale(out_scale)),
+        -1 => {
+            return NumericValue::from_i64(1)
+                .div(base, out_scale)
+                .map(|value| value.with_dscale(out_scale))
+                .ok_or_else(|| numeric_domain_error("zero raised to a negative power is undefined"));
         }
-        remaining >>= 1;
-        if remaining > 0 {
-            power = clamp_numeric_scale(power.mul(&power), work_scale);
-            if !negative && numeric_digits_before_decimal(&power) > 131072 {
-                return Err(numeric_domain_error("value overflows numeric format"));
+        2 => return Ok(mul_numeric_clamped(base, base, out_scale as i32).with_dscale(out_scale)),
+        _ => {}
+    }
+
+    let negative = exp < 0;
+    let mut sig_digits = 1 + out_scale as i32 + approx_weight as i32;
+    sig_digits = sig_digits.max(1);
+    sig_digits += (f64::from(exp.unsigned_abs().max(1) as u32).ln() as i32) + NUMERIC_GUARD_DIGITS;
+
+    let mut base_prod = base.clone();
+    let mut result = if exp.unsigned_abs() & 1 == 1 {
+        base.clone()
+    } else {
+        NumericValue::from_i64(1)
+    };
+    let mut mask = exp.unsigned_abs();
+
+    while {
+        mask >>= 1;
+        mask > 0
+    } {
+        let mut local_scale = sig_digits - 2 * decimal_weight(&base_prod);
+        local_scale = local_scale.min((2 * finite_dscale(&base_prod) as i32).max(0));
+        local_scale = local_scale.max(NUMERIC_MIN_DISPLAY_SCALE);
+        base_prod = mul_numeric_clamped(&base_prod, &base_prod, local_scale);
+
+        if mask & 1 == 1 {
+            let mut local_scale = sig_digits - decimal_weight(&base_prod) - decimal_weight(&result);
+            local_scale = local_scale
+                .min((finite_dscale(&base_prod) + finite_dscale(&result)) as i32);
+            local_scale = local_scale.max(NUMERIC_MIN_DISPLAY_SCALE);
+            result = mul_numeric_clamped(&base_prod, &result, local_scale);
+        }
+
+        if numeric_digits_before_decimal(&base_prod) > 131072
+            || numeric_digits_before_decimal(&result) > 131072
+        {
+            if negative {
+                return Ok(NumericValue::zero());
             }
+            return Err(numeric_domain_error("value overflows numeric format"));
         }
     }
 
@@ -271,58 +478,84 @@ fn numeric_pow_integer(
             .ok_or_else(|| numeric_domain_error("zero raised to a negative power is undefined"));
     }
 
-    Ok(result.with_dscale(out_scale))
+    Ok(round_numeric_to_scale(&result, out_scale as i32).with_dscale(out_scale))
 }
 
 fn eval_sqrt_numeric(value: &NumericValue) -> Result<NumericValue, ExecError> {
+    sqrt_numeric_with_scale(value, sqrt_result_scale(value) as i32)
+}
+
+fn eval_exp_numeric_with_scale(value: &NumericValue, rscale: u32) -> Result<NumericValue, ExecError> {
     match value {
         NumericValue::NaN => Ok(NumericValue::NaN),
         NumericValue::PosInf => Ok(NumericValue::PosInf),
-        NumericValue::NegInf => Err(numeric_domain_error(
-            "cannot take square root of a negative number",
-        )),
-        NumericValue::Finite { coeff, .. } if coeff.is_negative() => Err(numeric_domain_error(
-            "cannot take square root of a negative number",
-        )),
-        NumericValue::Finite { coeff, scale, .. } if coeff.is_zero() => {
-            let rscale = sqrt_result_scale(value);
-            Ok(NumericValue::zero().with_dscale(rscale))
+        NumericValue::NegInf => Ok(NumericValue::zero()),
+        finite if finite.cmp(&NumericValue::from_i64(NUMERIC_EXP_LIMIT)) == Ordering::Greater => {
+            Err(numeric_domain_error("value overflows numeric format"))
         }
-        NumericValue::Finite { coeff, scale, .. } => {
-            let rscale = sqrt_result_scale(value);
-            let exp = rscale.saturating_mul(2).saturating_sub(*scale);
-            let scaled = coeff * pow10_bigint(exp);
-            let floor = bigint_sqrt_floor(&scaled);
-            let remainder = scaled - (&floor * &floor);
-            let rounded = if remainder > floor {
-                floor + 1u8
-            } else {
-                floor
-            };
-            Ok(NumericValue::finite(rounded, rscale)
+        finite if finite.cmp(&NumericValue::from_i64(-NUMERIC_EXP_LIMIT)) == Ordering::Less => {
+            Ok(NumericValue::zero())
+        }
+        finite => {
+            let mut x = finite.clone();
+            let mut ndiv2 = 0;
+            let reduce_limit = numeric_const("0.01");
+            while x.abs().cmp(&reduce_limit) == Ordering::Greater {
+                ndiv2 += 1;
+                let local_scale = finite_dscale(finite) as i32 + ndiv2 + NUMERIC_GUARD_DIGITS;
+                x = div_numeric_by_i64(&x, 2, local_scale)?;
+            }
+
+            let dweight = (numeric_to_f64_approx(finite) * LOG10_E) as i32;
+            let sig_digits = (1
+                + dweight
+                + rscale as i32
+                + (f64::from(ndiv2) * LOG10_2) as i32)
+                .max(0)
+                + NUMERIC_GUARD_DIGITS;
+            let mut local_scale = sig_digits - 1;
+
+            let one = NumericValue::from_i64(1);
+            let mut result = add_numeric_clamped(&one, &x, local_scale);
+            let xx = mul_numeric_clamped(&x, &x, local_scale);
+            let mut elem = div_numeric_by_i64(&xx, 2, local_scale)?;
+            let mut ni = 2i64;
+
+            while !numeric_is_zero(&elem) {
+                let next = add_numeric_clamped(&result, &elem, local_scale);
+                if next == result {
+                    break;
+                }
+                result = next;
+
+                ni += 1;
+                let next_elem = mul_numeric_clamped(&elem, &x, local_scale);
+                elem = div_numeric_by_i64(&next_elem, ni, local_scale)?;
+            }
+
+            while ndiv2 > 0 {
+                local_scale = (sig_digits - 2 * decimal_weight(&result))
+                    .max(NUMERIC_MIN_DISPLAY_SCALE);
+                result = mul_numeric_clamped(&result, &result, local_scale);
+                ndiv2 -= 1;
+            }
+
+            let result = round_numeric_to_scale(&result, rscale as i32)
                 .with_dscale(rscale)
-                .normalize())
+                .normalize();
+            if numeric_digits_before_decimal(&result) > 131072 {
+                return Err(numeric_domain_error("value overflows numeric format"));
+            }
+            Ok(result)
         }
     }
 }
 
 fn eval_exp_numeric(value: &NumericValue) -> Result<NumericValue, ExecError> {
-    match value {
-        NumericValue::NaN => Ok(NumericValue::NaN),
-        NumericValue::PosInf => Ok(NumericValue::PosInf),
-        NumericValue::NegInf => Ok(NumericValue::zero()),
-        finite => {
-            let as_f64 = numeric_to_f64(finite).unwrap_or(f64::NAN);
-            let result = as_f64.exp();
-            if result.is_infinite() && as_f64.is_finite() {
-                return Err(numeric_domain_error("value overflows numeric format"));
-            }
-            Ok(numeric_from_f64(result, 16))
-        }
-    }
+    eval_exp_numeric_with_scale(value, exp_result_scale(value))
 }
 
-fn eval_ln_numeric(value: &NumericValue) -> Result<NumericValue, ExecError> {
+fn eval_ln_numeric_with_scale(value: &NumericValue, rscale: u32) -> Result<NumericValue, ExecError> {
     match value {
         NumericValue::NaN => Ok(NumericValue::NaN),
         NumericValue::PosInf => Ok(NumericValue::PosInf),
@@ -335,46 +568,192 @@ fn eval_ln_numeric(value: &NumericValue) -> Result<NumericValue, ExecError> {
         NumericValue::Finite { coeff, .. } if coeff.is_negative() => Err(numeric_domain_error(
             "cannot take logarithm of a negative number",
         )),
-        finite => Ok(numeric_from_f64(
-            numeric_to_f64(finite).unwrap_or(f64::NAN).ln(),
-            16,
-        )),
+        finite if finite.cmp(&NumericValue::from_i64(1)) == Ordering::Equal => {
+            Ok(NumericValue::zero().with_dscale(rscale))
+        }
+        finite => {
+            let mut x = finite.clone();
+            let mut nsqrt = 0usize;
+            let zero_nine = numeric_const("0.9");
+            let one = NumericValue::from_i64(1);
+            let one_point_one = numeric_const("1.1");
+
+            while x.cmp(&zero_nine) != Ordering::Greater {
+                let local_scale = (rscale as i32 - decimal_weight(&x) / 2 + NUMERIC_GUARD_DIGITS)
+                    .max(-NUMERIC_MAX_DISPLAY_SCALE);
+                x = sqrt_numeric_with_scale(&x, local_scale)?;
+                nsqrt += 1;
+            }
+            while x.cmp(&one_point_one) != Ordering::Less {
+                let local_scale = (rscale as i32 - decimal_weight(&x) / 2 + NUMERIC_GUARD_DIGITS)
+                    .max(-NUMERIC_MAX_DISPLAY_SCALE);
+                x = sqrt_numeric_with_scale(&x, local_scale)?;
+                nsqrt += 1;
+            }
+
+            let local_scale = (rscale as i32
+                + (f64::from((nsqrt + 1) as u32) * LOG10_2) as i32
+                + NUMERIC_GUARD_DIGITS)
+                .max(NUMERIC_MIN_DISPLAY_SCALE);
+
+            let numerator = x.sub(&one);
+            let denominator = x.add(&one);
+            let mut result = div_numeric_clamped(&numerator, &denominator, local_scale)?;
+            let zsq = mul_numeric_clamped(&result, &result, local_scale);
+            let mut term = result.clone();
+            let mut ni = 1i64;
+
+            loop {
+                ni += 2;
+                term = mul_numeric_clamped(&term, &zsq, local_scale);
+                let elem = div_numeric_by_i64(&term, ni, local_scale)?;
+                if numeric_is_zero(&elem) {
+                    break;
+                }
+                let next = add_numeric_clamped(&result, &elem, local_scale);
+                if next == result {
+                    break;
+                }
+                result = next;
+            }
+
+            let factor = NumericValue::finite(BigInt::from(1u8) << (nsqrt + 1), 0);
+            let result = mul_numeric_clamped(&result, &factor, rscale as i32);
+            Ok(round_numeric_to_scale(&result, rscale as i32)
+                .with_dscale(rscale)
+                .normalize())
+        }
     }
 }
 
+fn eval_ln_numeric(value: &NumericValue) -> Result<NumericValue, ExecError> {
+    eval_ln_numeric_with_scale(value, ln_result_scale(value))
+}
+
 fn eval_power_numeric(base: &NumericValue, exp: &NumericValue) -> Result<NumericValue, ExecError> {
-    if matches!(exp, NumericValue::NaN) {
-        return if matches!(base, NumericValue::Finite { coeff, .. } if coeff == &BigInt::from(1u8))
-        {
+    if matches!(base, NumericValue::NaN) {
+        return if exp.cmp(&NumericValue::zero()) == Ordering::Equal {
             Ok(NumericValue::from_i64(1))
         } else {
             Ok(NumericValue::NaN)
         };
     }
+    if matches!(exp, NumericValue::NaN) {
+        return if base.cmp(&NumericValue::from_i64(1)) == Ordering::Equal {
+            Ok(NumericValue::from_i64(1))
+        } else {
+            Ok(NumericValue::NaN)
+        };
+    }
+
+    let sign1 = numeric_sign(base);
+    let sign2 = numeric_sign(exp);
+    let base_is_inf = matches!(base, NumericValue::PosInf | NumericValue::NegInf);
+    let exp_is_inf = matches!(exp, NumericValue::PosInf | NumericValue::NegInf);
+
+    if base_is_inf || exp_is_inf {
+        if sign1 == 0 && sign2 < 0 {
+            return Err(numeric_domain_error(
+                "zero raised to a negative power is undefined",
+            ));
+        }
+        if sign1 < 0 && !exp_is_inf && !numeric_is_integral(exp) {
+            return Err(numeric_domain_error(
+                "a negative number raised to a non-integer power yields a complex result",
+            ));
+        }
+        if base.cmp(&NumericValue::from_i64(1)) == Ordering::Equal {
+            return Ok(NumericValue::from_i64(1));
+        }
+        if sign2 == 0 {
+            return Ok(NumericValue::from_i64(1));
+        }
+        if sign1 == 0 && sign2 > 0 {
+            return Ok(NumericValue::zero());
+        }
+
+        if exp_is_inf {
+            if base.cmp(&NumericValue::from_i64(-1)) == Ordering::Equal {
+                return Ok(NumericValue::from_i64(1));
+            }
+            let abs_x_gt_one = if base_is_inf {
+                true
+            } else {
+                base.abs().cmp(&NumericValue::from_i64(1)) == Ordering::Greater
+            };
+            return Ok(if abs_x_gt_one == (sign2 > 0) {
+                NumericValue::PosInf
+            } else {
+                NumericValue::zero()
+            });
+        }
+
+        if matches!(base, NumericValue::PosInf) {
+            return Ok(if sign2 > 0 {
+                NumericValue::PosInf
+            } else {
+                NumericValue::zero()
+            });
+        }
+
+        if sign2 < 0 {
+            return Ok(NumericValue::zero());
+        }
+        return Ok(if integral_is_odd(exp) {
+            NumericValue::NegInf
+        } else {
+            NumericValue::PosInf
+        });
+    }
+
+    if sign1 == 0 && sign2 < 0 {
+        return Err(numeric_domain_error(
+            "zero raised to a negative power is undefined",
+        ));
+    }
     if let Some(exp_i64) = finite_integer(exp) {
         return numeric_pow_integer(base, exp_i64, finite_dscale(exp));
     }
-    match (base, exp) {
-        (NumericValue::NaN, _) => Ok(NumericValue::NaN),
-        (NumericValue::Finite { coeff, .. }, _) if coeff.is_zero() => {
-            let exp_f = numeric_to_f64(exp).unwrap_or(f64::NAN);
-            if exp_f < 0.0 {
-                Err(numeric_domain_error("zero raised to a negative power is undefined"))
-            } else {
-                Ok(NumericValue::zero())
-            }
-        }
-        (NumericValue::Finite { coeff, .. }, _) if coeff.is_negative() => Err(
-            numeric_domain_error(
-                "a negative number raised to a non-integer power yields a complex result",
-            ),
-        ),
-        (base, exp) => Ok(numeric_from_f64(
-            numeric_to_f64(base)
-                .unwrap_or(f64::NAN)
-                .powf(numeric_to_f64(exp).unwrap_or(f64::NAN)),
-            16,
+    match base {
+        NumericValue::Finite { coeff, .. } if coeff.is_zero() => Ok(NumericValue::zero()),
+        NumericValue::Finite { coeff, .. } if coeff.is_negative() => Err(numeric_domain_error(
+            "a negative number raised to a non-integer power yields a complex result",
         )),
+        _ if base.cmp(&NumericValue::from_i64(1)) == Ordering::Equal => {
+            Ok(NumericValue::from_i64(1))
+        }
+        _ => {
+            let ln_dweight = estimate_ln_dweight(base);
+            let mut local_rscale =
+                (NUMERIC_GUARD_DIGITS - ln_dweight).max(NUMERIC_MIN_DISPLAY_SCALE);
+            let ln_base = eval_ln_numeric_with_scale(base, clamp_display_scale(local_rscale))?;
+            let ln_num = mul_numeric_clamped(&ln_base, exp, local_rscale);
+
+            let mut approx_weight = numeric_to_f64_approx(&ln_num);
+            if approx_weight.abs() > NUMERIC_MAX_DISPLAY_SCALE as f64 * 3.01 {
+                return if approx_weight > 0.0 {
+                    Err(numeric_domain_error("value overflows numeric format"))
+                } else {
+                    Ok(NumericValue::zero())
+                };
+            }
+
+            approx_weight *= LOG10_E;
+            let mut rscale = NUMERIC_MIN_SIG_DIGITS - approx_weight as i32;
+            rscale = rscale.max(finite_dscale(base) as i32);
+            rscale = rscale.max(finite_dscale(exp) as i32);
+            rscale = rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
+            rscale = rscale.min(NUMERIC_MAX_DISPLAY_SCALE);
+
+            let sig_digits = (rscale + approx_weight as i32).max(0);
+            local_rscale =
+                (sig_digits - ln_dweight + NUMERIC_GUARD_DIGITS).max(NUMERIC_MIN_DISPLAY_SCALE);
+
+            let ln_base = eval_ln_numeric_with_scale(base, clamp_display_scale(local_rscale))?;
+            let ln_num = mul_numeric_clamped(&ln_base, exp, local_rscale);
+
+            eval_exp_numeric_with_scale(&ln_num, rscale as u32)
+        }
     }
 }
 
@@ -796,59 +1175,68 @@ pub(super) fn eval_div_function(values: &[Value]) -> Result<Value, ExecError> {
 }
 
 fn eval_log_numeric_unary(value: &NumericValue) -> Result<NumericValue, ExecError> {
-    match value {
-        NumericValue::NaN => Ok(NumericValue::NaN),
-        NumericValue::PosInf => Ok(NumericValue::PosInf),
-        NumericValue::NegInf => Err(numeric_domain_error(
-            "cannot take logarithm of a negative number",
-        )),
-        NumericValue::Finite { coeff, .. } if coeff.is_zero() => {
-            Err(numeric_domain_error("cannot take logarithm of zero"))
-        }
-        NumericValue::Finite { coeff, .. } if coeff.is_negative() => Err(numeric_domain_error(
-            "cannot take logarithm of a negative number",
-        )),
-        finite => Ok(numeric_from_f64(
-            numeric_to_f64(finite).unwrap_or(f64::NAN).log10(),
-            16,
-        )),
-    }
+    eval_log_numeric_binary(&NumericValue::from_i64(10), value)
 }
 
 fn eval_log_numeric_binary(
     base: &NumericValue,
     value: &NumericValue,
 ) -> Result<NumericValue, ExecError> {
+    if matches!(base, NumericValue::NaN) || matches!(value, NumericValue::NaN) {
+        return Ok(NumericValue::NaN);
+    }
+
+    let sign1 = numeric_sign(base);
+    let sign2 = numeric_sign(value);
+    if sign1 < 0 || sign2 < 0 {
+        return Err(numeric_domain_error(
+            "cannot take logarithm of a negative number",
+        ));
+    }
+    if sign1 == 0 || sign2 == 0 {
+        return Err(numeric_domain_error("cannot take logarithm of zero"));
+    }
+
     match (base, value) {
-        (NumericValue::NaN, _) | (_, NumericValue::NaN) => Ok(NumericValue::NaN),
-        (
-            NumericValue::PosInf | NumericValue::NegInf,
-            NumericValue::PosInf | NumericValue::NegInf,
-        ) => Ok(NumericValue::NaN),
-        (NumericValue::NegInf, _) => Err(numeric_domain_error(
-            "cannot take logarithm of a negative number",
-        )),
-        (_, NumericValue::NegInf) => Err(numeric_domain_error(
-            "cannot take logarithm of a negative number",
-        )),
-        (NumericValue::Finite { coeff, .. }, _) if coeff.is_zero() => {
-            Err(numeric_domain_error("cannot take logarithm of zero"))
+        (NumericValue::PosInf, NumericValue::PosInf) => Ok(NumericValue::NaN),
+        (NumericValue::PosInf, _) => Ok(NumericValue::zero()),
+        (_, NumericValue::PosInf) => Ok(NumericValue::PosInf),
+        _ if base.cmp(&NumericValue::from_i64(1)) == Ordering::Equal => {
+            Err(ExecError::DivisionByZero("/"))
         }
-        (_, NumericValue::Finite { coeff, .. }) if coeff.is_zero() => {
-            Err(numeric_domain_error("cannot take logarithm of zero"))
+        _ => {
+            let ln_base_dweight = estimate_ln_dweight(base);
+            let ln_num_dweight = estimate_ln_dweight(value);
+            let result_dweight = ln_num_dweight - ln_base_dweight;
+
+            let mut rscale = NUMERIC_MIN_SIG_DIGITS - result_dweight;
+            rscale = rscale.max(finite_dscale(base) as i32);
+            rscale = rscale.max(finite_dscale(value) as i32);
+            rscale = rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
+            rscale = rscale.min(NUMERIC_MAX_DISPLAY_SCALE);
+
+            let mut ln_base_rscale =
+                rscale + result_dweight - ln_base_dweight + NUMERIC_GUARD_DIGITS;
+            ln_base_rscale = ln_base_rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
+
+            let mut ln_num_rscale =
+                rscale + result_dweight - ln_num_dweight + NUMERIC_GUARD_DIGITS;
+            ln_num_rscale = ln_num_rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
+
+            let ln_base =
+                eval_ln_numeric_with_scale(base, clamp_display_scale(ln_base_rscale))?;
+            let ln_num =
+                eval_ln_numeric_with_scale(value, clamp_display_scale(ln_num_rscale))?;
+
+            ln_num
+                .div(&ln_base, clamp_display_scale(rscale + NUMERIC_GUARD_DIGITS))
+                .ok_or(ExecError::DivisionByZero("/"))
+                .map(|result| {
+                    round_numeric_to_scale(&result, rscale)
+                        .with_dscale(rscale as u32)
+                        .normalize()
+                })
         }
-        (NumericValue::Finite { coeff, .. }, _) if coeff.is_negative() => Err(
-            numeric_domain_error("cannot take logarithm of a negative number"),
-        ),
-        (_, NumericValue::Finite { coeff, .. }) if coeff.is_negative() => Err(
-            numeric_domain_error("cannot take logarithm of a negative number"),
-        ),
-        (base, value) => Ok(numeric_from_f64(
-            numeric_to_f64(value)
-                .unwrap_or(f64::NAN)
-                .log(numeric_to_f64(base).unwrap_or(f64::NAN)),
-            16,
-        )),
     }
 }
 

@@ -5191,9 +5191,9 @@ fn numeric_math_misc_helpers_cover_log_factorial_and_pg_lsn() {
                     rows,
                     vec![vec![
                         Value::Numeric("5.2".into()),
-                        Value::Numeric("1".into()),
-                        Value::Numeric("1".into()),
-                        Value::Numeric("2.0703893278913981".into()),
+                        Value::Numeric("1.0000000000000000".into()),
+                        Value::Numeric("1.0000000000000000".into()),
+                        Value::Numeric("2.0703893278913979".into()),
                         Value::Numeric("24".into()),
                         Value::Text("0/16AE7F8".into()),
                         Value::Numeric("-7".into()),
@@ -5204,6 +5204,91 @@ fn numeric_math_misc_helpers_cover_log_factorial_and_pg_lsn() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn numeric_transcendentals_match_postgres_reference_values() {
+    let base = temp_dir("numeric_transcendental_reference_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                exp(1.0::numeric(71,70)), \
+                ln(0.99949452::numeric), \
+                log(1.23e-89::numeric, 6.4689e45::numeric), \
+                power(4.2::numeric, 4.2::numeric)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Numeric(
+                "2.7182818284590452353602874713526624977572470936999595749669676277240766"
+                    .into(),
+            ),
+            Value::Numeric("-0.00050560779808326467".into()),
+            Value::Numeric(
+                "-0.5152489207781856983977054971756484879653568168479201885425588841094788842469115325262329756"
+                    .into(),
+            ),
+            Value::Numeric("414.61691860129675".into()),
+        ]],
+    );
+}
+
+#[test]
+fn numeric_power_special_values_follow_postgres() {
+    let base = temp_dir("numeric_power_special_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                power('-1'::numeric, 'inf'::numeric), \
+                power('-2'::numeric, 'inf'::numeric), \
+                power('-2'::numeric, '-inf'::numeric), \
+                power('-inf'::numeric, '3'::numeric), \
+                power('inf'::numeric, '-2'::numeric), \
+                power(1::numeric, 'nan'::numeric), \
+                power('nan'::numeric, 0::numeric)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Numeric("1".into()),
+            Value::Numeric("Infinity".into()),
+            Value::Numeric("0".into()),
+            Value::Numeric("-Infinity".into()),
+            Value::Numeric("0".into()),
+            Value::Numeric("1".into()),
+            Value::Numeric("1".into()),
+        ]],
+    );
+}
+
+#[test]
+fn numeric_log_special_values_follow_postgres() {
+    let base = temp_dir("numeric_log_special_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                log('inf'::numeric, 2::numeric), \
+                log(2::numeric, 'inf'::numeric), \
+                log('inf'::numeric, 'inf'::numeric)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Numeric("0".into()),
+            Value::Numeric("Infinity".into()),
+            Value::Numeric("NaN".into()),
+        ]],
+    );
 }
 
 #[test]
