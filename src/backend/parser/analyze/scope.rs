@@ -322,6 +322,7 @@ pub(super) fn resolve_column_with_outer(
 fn from_item_is_lateral(item: &FromItem) -> bool {
     match item {
         FromItem::Lateral(_) => true,
+        FromItem::FunctionCall { .. } => true,
         FromItem::Alias { source, .. } => from_item_is_lateral(source),
         _ => false,
     }
