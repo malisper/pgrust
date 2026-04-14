@@ -1,6 +1,9 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
+use crate::include::catalog::{PgRewriteRow, sort_pg_rewrite_rows};
+use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
+use crate::include::nodes::primnodes::{JoinType, Var};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -42,6 +45,31 @@ fn pets_entry() -> CatalogEntry {
             ],
         },
     )
+}
+
+fn people_view_entry() -> CatalogEntry {
+    CatalogEntry {
+        rel: crate::RelFileLocator {
+            spc_oid: 0,
+            db_oid: 1,
+            rel_number: 15020,
+        },
+        relation_oid: 50020,
+        namespace_oid: 11,
+        row_type_oid: 60020,
+        reltoastrelid: 0,
+        relpersistence: 'p',
+        relkind: 'v',
+        relpages: 0,
+        reltuples: 0.0,
+        desc: RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("name", SqlType::new(SqlTypeKind::Text), false),
+            ],
+        },
+        index_meta: None,
+    }
 }
 
 fn catalog() -> Catalog {
@@ -180,6 +208,103 @@ fn visible_catalog_without_operator(
 fn pest_matches_basic_select_keyword() {
     let result = gram::pest_parse_keyword(gram::Rule::kw_select_atom, "select").unwrap();
     assert_eq!(result, "select");
+}
+
+#[test]
+fn analyze_join_using_creates_join_rte_alias_vars() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+
+    let stmt = parse_select("select id from people join pets using (id)").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+
+    assert_eq!(query.rtable.len(), 3);
+    match &query.jointree {
+        Some(JoinTreeNode::JoinExpr { rtindex, .. }) => assert_eq!(*rtindex, 3),
+        other => panic!("expected join jointree, got {other:?}"),
+    }
+    match &query.rtable[2].kind {
+        RangeTblEntryKind::Join {
+            jointype,
+            joinmergedcols,
+            joinaliasvars,
+            joinleftcols,
+            joinrightcols,
+        } => {
+            assert_eq!(*jointype, JoinType::Inner);
+            assert_eq!(*joinmergedcols, 1);
+            assert_eq!(joinleftcols, &vec![1, 2, 3]);
+            assert_eq!(joinrightcols, &vec![1, 2]);
+            match &joinaliasvars[0] {
+                Expr::Coalesce(left, right) => {
+                    assert_eq!(
+                        left.as_ref(),
+                        &Expr::Var(Var {
+                            varno: 1,
+                            varattno: 1,
+                            varlevelsup: 0,
+                            vartype: SqlType::new(SqlTypeKind::Int4),
+                        })
+                    );
+                    assert_eq!(
+                        right.as_ref(),
+                        &Expr::Var(Var {
+                            varno: 2,
+                            varattno: 1,
+                            varlevelsup: 0,
+                            vartype: SqlType::new(SqlTypeKind::Int4),
+                        })
+                    );
+                }
+                other => panic!("expected merged join alias expr, got {other:?}"),
+            }
+        }
+        other => panic!("expected join rte, got {other:?}"),
+    }
+    assert_eq!(
+        query.target_list[0].expr,
+        Expr::Var(Var {
+            varno: 3,
+            varattno: 1,
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Int4),
+        })
+    );
+}
+
+#[test]
+fn rewrite_query_expands_view_relation_rtes() {
+    let mut catalog = catalog();
+    let view = people_view_entry();
+    catalog.insert("people_view", view.clone());
+    catalog.rewrites.push(PgRewriteRow {
+        oid: 70000,
+        rulename: "_RETURN".into(),
+        ev_class: view.relation_oid,
+        ev_type: '1',
+        ev_enabled: 'O',
+        is_instead: true,
+        ev_qual: String::new(),
+        ev_action: "select id, name from people".into(),
+    });
+    sort_pg_rewrite_rows(&mut catalog.rewrites);
+
+    let stmt = parse_select("select id from people_view").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    assert!(matches!(
+        query.rtable[0].kind,
+        RangeTblEntryKind::Relation { relkind: 'v', .. }
+    ));
+
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(matches!(
+        rewritten.rtable[0].kind,
+        RangeTblEntryKind::Subquery { .. }
+    ));
 }
 
 #[test]

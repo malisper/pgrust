@@ -139,6 +139,11 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
             RangeTblEntryKind::Relation { rel, .. } => {
                 rels.insert(*rel);
             }
+            RangeTblEntryKind::Join { joinaliasvars, .. } => {
+                for expr in joinaliasvars {
+                    collect_rels_from_expr(expr, rels);
+                }
+            }
             RangeTblEntryKind::Values { rows, .. } => {
                 for row in rows {
                     for expr in row {

@@ -18,6 +18,7 @@ use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner;
+use crate::backend::rewrite::pg_rewrite_query;
 use crate::include::catalog::{
     PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
     bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
@@ -48,16 +49,17 @@ pub use modify::{
     bind_insert, bind_insert_prepared, bind_update,
 };
 pub use paths::BoundModifyRowSource;
+pub(crate) use query::analyze_select_query_with_outer;
 use paths::bind_order_by_items;
 use query::{
-    AnalyzedFrom, analyze_select_query_with_outer, analyze_values_query_with_outer,
+    AnalyzedFrom, analyze_values_query_with_outer,
     identity_target_list, normalize_target_list, rewrite_agg_accums, rewrite_expr_columns,
     rewrite_order_by_entries, rewrite_project_set_targets, rewrite_target_entries,
 };
 pub use scope::BoundRelation;
+pub(crate) use views::analyze_view_rule_sql;
 use scope::*;
 use system_views::*;
-use views::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundIndexRelation {
@@ -702,6 +704,9 @@ fn build_values_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
+    let [query] = pg_rewrite_query(query, catalog)?
+        .try_into()
+        .expect("values rewrite should return a single query");
     Ok(planner(query, catalog))
 }
 
@@ -1145,5 +1150,8 @@ fn build_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
+    let [query] = pg_rewrite_query(query, catalog)?
+        .try_into()
+        .expect("select rewrite should return a single query");
     Ok(planner(query, catalog))
 }

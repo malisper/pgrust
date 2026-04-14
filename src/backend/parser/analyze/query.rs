@@ -1,5 +1,5 @@
 use super::*;
-use crate::include::nodes::primnodes::{SubLink, SubPlan};
+use crate::include::nodes::primnodes::SubLink;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
@@ -12,7 +12,16 @@ pub(super) struct AnalyzedFrom {
     pub(super) output_exprs: Vec<Expr>,
 }
 
-pub(super) fn analyze_select_query_with_outer(
+#[derive(Debug, Clone)]
+pub(super) struct JoinAliasInfo {
+    pub(super) output_columns: Vec<QueryColumn>,
+    pub(super) output_exprs: Vec<Expr>,
+    pub(super) joinmergedcols: usize,
+    pub(super) joinleftcols: Vec<usize>,
+    pub(super) joinrightcols: Vec<usize>,
+}
+
+pub(crate) fn analyze_select_query_with_outer(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -61,6 +70,7 @@ impl AnalyzedFrom {
     pub(super) fn relation(
         rel: crate::RelFileLocator,
         relation_oid: u32,
+        relkind: char,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
     ) -> Self {
@@ -79,6 +89,7 @@ impl AnalyzedFrom {
                 kind: RangeTblEntryKind::Relation {
                     rel,
                     relation_oid,
+                    relkind,
                     toast,
                 },
             }],
@@ -152,24 +163,71 @@ impl AnalyzedFrom {
         }
     }
 
-    pub(super) fn join(left: Self, right: Self, kind: JoinType, on: Expr) -> Self {
+    pub(super) fn join(
+        left: Self,
+        right: Self,
+        kind: JoinType,
+        on: Expr,
+        alias_info: Option<JoinAliasInfo>,
+    ) -> Self {
         let right = right.shift_rtindexes(left.rtable.len());
-        let mut output_columns = left.output_columns.clone();
-        output_columns.extend(right.output_columns);
-        let mut output_exprs = left.output_exprs.clone();
-        output_exprs.extend(right.output_exprs);
+        let mut child_output_columns = left.output_columns.clone();
+        child_output_columns.extend(right.output_columns.clone());
+        let mut child_output_exprs = left.output_exprs.clone();
+        child_output_exprs.extend(right.output_exprs.clone());
+        let mut rtable = left.rtable;
+        rtable.extend(right.rtable);
+        let join_rtindex = rtable.len() + 1;
+        let (output_columns, joinaliasvars, joinmergedcols, joinleftcols, joinrightcols) =
+            match alias_info {
+                Some(alias_info) => (
+                    alias_info.output_columns,
+                    alias_info
+                        .output_exprs
+                        .into_iter()
+                        .map(|expr| rewrite_expr_columns(expr, &child_output_exprs))
+                        .collect(),
+                    alias_info.joinmergedcols,
+                    alias_info.joinleftcols,
+                    alias_info.joinrightcols,
+                ),
+                None => (
+                    child_output_columns.clone(),
+                    child_output_exprs.clone(),
+                    0,
+                    (1..=left.output_columns.len()).collect(),
+                    (1..=right.output_columns.len()).collect(),
+                ),
+            };
+        let output_exprs = rte_output_exprs(join_rtindex, &output_columns);
         let jointree = match (left.jointree, right.jointree) {
             (Some(left_tree), Some(right_tree)) => Some(JoinTreeNode::JoinExpr {
                 left: Box::new(left_tree),
                 right: Box::new(right_tree),
                 kind,
-                quals: rewrite_expr_columns(on, &output_exprs),
+                quals: rewrite_expr_columns(on, &child_output_exprs),
+                rtindex: join_rtindex,
             }),
             (Some(tree), None) | (None, Some(tree)) => Some(tree),
             (None, None) => None,
         };
-        let mut rtable = left.rtable;
-        rtable.extend(right.rtable);
+        let desc = RelationDesc {
+            columns: output_columns
+                .iter()
+                .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+                .collect(),
+        };
+        rtable.push(RangeTblEntry {
+            alias: None,
+            desc,
+            kind: RangeTblEntryKind::Join {
+                jointype: kind,
+                joinmergedcols,
+                joinaliasvars,
+                joinleftcols,
+                joinrightcols,
+            },
+        });
         Self {
             rtable,
             jointree,
@@ -197,7 +255,11 @@ impl AnalyzedFrom {
             return self;
         }
         Self {
-            rtable: self.rtable,
+            rtable: self
+                .rtable
+                .into_iter()
+                .map(|entry| shift_rte_rtindexes(entry, offset))
+                .collect(),
             jointree: self.jointree.map(|node| shift_jointree_rtindexes(node, offset)),
             output_columns: self.output_columns,
             output_exprs: self
@@ -245,12 +307,42 @@ fn shift_jointree_rtindexes(node: JoinTreeNode, offset: usize) -> JoinTreeNode {
             right,
             kind,
             quals,
+            rtindex,
         } => JoinTreeNode::JoinExpr {
             left: Box::new(shift_jointree_rtindexes(*left, offset)),
             right: Box::new(shift_jointree_rtindexes(*right, offset)),
             kind,
             quals: shift_expr_rtindexes(quals, offset),
+            rtindex: rtindex + offset,
         },
+    }
+}
+
+fn shift_rte_rtindexes(entry: RangeTblEntry, offset: usize) -> RangeTblEntry {
+    if offset == 0 {
+        return entry;
+    }
+    RangeTblEntry {
+        kind: match entry.kind {
+            RangeTblEntryKind::Join {
+                jointype,
+                joinmergedcols,
+                joinaliasvars,
+                joinleftcols,
+                joinrightcols,
+            } => RangeTblEntryKind::Join {
+                jointype,
+                joinmergedcols,
+                joinaliasvars: joinaliasvars
+                    .into_iter()
+                    .map(|expr| shift_expr_rtindexes(expr, offset))
+                    .collect(),
+                joinleftcols,
+                joinrightcols,
+            },
+            other => other,
+        },
+        ..entry
     }
 }
 
@@ -431,12 +523,7 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .map(|expr| Box::new(shift_expr_rtindexes(*expr, offset))),
             ..*sublink
         })),
-        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
-            testexpr: subplan
-                .testexpr
-                .map(|expr| Box::new(shift_expr_rtindexes(*expr, offset))),
-            ..*subplan
-        })),
+        Expr::SubPlan(_) => unreachable!("semantic analyze should not shift planned subqueries"),
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(shift_expr_rtindexes(*left, offset)),
             Box::new(shift_expr_rtindexes(*right, offset)),
@@ -878,12 +965,9 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
                 .map(|expr| Box::new(rewrite_expr_columns(*expr, output_exprs))),
             ..*sublink
         })),
-        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
-            testexpr: subplan
-                .testexpr
-                .map(|expr| Box::new(rewrite_expr_columns(*expr, output_exprs))),
-            ..*subplan
-        })),
+        Expr::SubPlan(_) => {
+            unreachable!("semantic analyze should not rewrite planned subqueries")
+        }
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),

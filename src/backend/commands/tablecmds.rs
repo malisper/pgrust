@@ -16,6 +16,7 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
+use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
@@ -694,7 +695,11 @@ pub fn execute_insert(
             vec![values]
         }
         BoundInsertSource::Select(query) => {
-            let planned = planner((**query).clone(), catalog);
+            let [query] = pg_rewrite_query((**query).clone(), catalog)
+                .map_err(ExecError::Parse)?
+                .try_into()
+                .expect("insert-select rewrite should return a single query");
+            let planned = planner(query, catalog);
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let saved_subplans =
                     std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
