@@ -2370,6 +2370,46 @@ fn build_plan_with_group_by_order_by_wraps_aggregate_then_sort() {
 }
 
 #[test]
+fn grouped_join_using_projects_scanjoin_target_before_aggregate() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+
+    let stmt = parse_select(
+        "select id, count(owner_id) from people left join pets using (id) group by id order by id",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog).unwrap();
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            assert_eq!(targets.len(), 2);
+            match *input {
+                Plan::OrderBy { input, items, .. } => {
+                    assert_eq!(items.len(), 1);
+                    assert!(matches!(items[0].expr, Expr::Column(0)));
+                    match *input {
+                        Plan::Aggregate { input, group_by, .. } => {
+                            assert_eq!(group_by.len(), 1);
+                            assert!(matches!(group_by[0], Expr::Column(0)));
+                            match *input {
+                                Plan::Projection { targets, .. } => {
+                                    assert_eq!(targets.len(), 2);
+                                }
+                                other => panic!(
+                                    "expected scan/join projection below aggregate, got {other:?}"
+                                ),
+                            }
+                        }
+                        other => panic!("expected aggregate below order by, got {other:?}"),
+                    }
+                }
+                other => panic!("expected order by above aggregate, got {other:?}"),
+            }
+        }
+        other => panic!("expected projection, got {other:?}"),
+    }
+}
+
+#[test]
 fn analyze_grouped_query_keeps_semantic_group_refs() {
     let stmt = parse_select(
         "select name, count(*) from people group by name having name is not null order by name",
