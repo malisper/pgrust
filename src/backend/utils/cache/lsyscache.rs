@@ -12,9 +12,10 @@ use crate::backend::catalog::rowcodec::{
 };
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
+use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::backend::utils::cache::syscache::{
-    catalog_snapshot_for_lookup, ensure_class_rows, ensure_constraint_rows, ensure_namespace_rows,
-    ensure_rewrite_rows, ensure_type_rows,
+    catalog_snapshot_for_lookup, ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows,
+    ensure_namespace_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
 };
 use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
@@ -778,33 +779,20 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
-        let namespace_names = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .map(|row| (row.oid, row.nspname))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let rewrite_by_view = ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.rulename == "_RETURN")
-            .map(|row| (row.ev_class, row.ev_action))
-            .collect::<std::collections::BTreeMap<_, _>>();
+        build_pg_views_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+        )
+    }
 
-        ensure_class_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|class| class.relkind == 'v')
-            .filter_map(|class| {
-                let definition = rewrite_by_view.get(&class.oid)?.clone();
-                let schemaname = namespace_names
-                    .get(&class.relnamespace)
-                    .cloned()
-                    .unwrap_or_else(|| "public".to_string());
-                Some(vec![
-                    Value::Text(schemaname.into()),
-                    Value::Text(class.relname.into()),
-                    Value::Text("postgres".into()),
-                    Value::Text(definition.into()),
-                ])
-            })
-            .collect()
+    fn pg_stats_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_stats_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_attribute_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_statistic_rows(self.db, self.client_id, self.txn_ctx),
+        )
     }
 
     fn index_relations_for_heap(

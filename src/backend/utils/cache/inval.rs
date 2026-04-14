@@ -115,6 +115,14 @@ pub fn apply_session_catalog_invalidation(
     if invalidation
         .touched_catalogs
         .iter()
+        .any(|kind| matches!(kind, BootstrapCatalogKind::PgStatistic))
+    {
+        state.statistic_rows = None;
+        state.catalog_snapshot = None;
+    }
+    if invalidation
+        .touched_catalogs
+        .iter()
         .any(|kind| matches!(kind, BootstrapCatalogKind::PgDepend))
     {
         state.depend_rows = None;
