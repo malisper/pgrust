@@ -1,5 +1,5 @@
 use super::*;
-use super::query::AnalyzedFrom;
+use super::query::{AnalyzedFrom, JoinAliasInfo};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::nodes::plannodes::JoinType;
 
@@ -332,18 +332,7 @@ pub(super) fn bind_from_item_with_ctes(
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if entry.relkind == 'v' {
-                return bind_view_reference(
-                    name,
-                    &entry,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                    expanded_views,
-                );
-            }
-            if entry.relkind != 'r' {
+            if !matches!(entry.relkind, 'r' | 'v') {
                 return Err(ParseError::WrongObjectType {
                     name: name.to_string(),
                     expected: "table",
@@ -351,7 +340,13 @@ pub(super) fn bind_from_item_with_ctes(
             }
             let desc = entry.desc.clone();
             Ok((
-                AnalyzedFrom::relation(entry.rel, entry.relation_oid, entry.toast, desc.clone()),
+                AnalyzedFrom::relation(
+                    entry.rel,
+                    entry.relation_oid,
+                    entry.relkind,
+                    entry.toast,
+                    desc.clone(),
+                ),
                 scope_for_relation(Some(name), &desc),
             ))
         }
@@ -794,7 +789,7 @@ pub(super) fn bind_from_item_with_ctes(
                 expanded_views,
             )?;
             let raw_scope = combine_scopes(&left_scope, &right_scope);
-            let (on, projection) = bind_join_constraint_with_ctes(
+            let (on, alias_info, scope) = bind_join_constraint_with_ctes(
                 kind,
                 constraint,
                 &left_scope,
@@ -805,12 +800,10 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            let plan = AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on);
-            if let Some((targets, scope)) = projection {
-                Ok((plan.with_projection(targets), scope))
-            } else {
-                Ok((plan, raw_scope))
-            }
+            Ok((
+                AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on, alias_info),
+                scope.unwrap_or(raw_scope),
+            ))
         }
         FromItem::Alias {
             source,
@@ -886,7 +879,7 @@ fn plan_join_type(kind: JoinKind) -> JoinType {
     }
 }
 
-type JoinProjection = Option<(Vec<TargetEntry>, BoundScope)>;
+type JoinBinding = (Expr, Option<JoinAliasInfo>, Option<BoundScope>);
 
 #[allow(clippy::too_many_arguments)]
 fn bind_join_constraint_with_ctes(
@@ -899,7 +892,7 @@ fn bind_join_constraint_with_ctes(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
-) -> Result<(Expr, JoinProjection), ParseError> {
+) -> Result<JoinBinding, ParseError> {
     match constraint {
         JoinConstraint::None => {
             if !matches!(kind, JoinKind::Cross) {
@@ -908,7 +901,7 @@ fn bind_join_constraint_with_ctes(
                     actual: format!("{kind:?}"),
                 });
             }
-            Ok((Expr::Const(Value::Bool(true)), None))
+            Ok((Expr::Const(Value::Bool(true)), None, None))
         }
         JoinConstraint::On(on) => Ok((
             bind_expr_with_outer_and_ctes(
@@ -919,6 +912,7 @@ fn bind_join_constraint_with_ctes(
                 grouped_outer,
                 ctes,
             )?,
+            None,
             None,
         )),
         JoinConstraint::Using(columns) => {
@@ -952,7 +946,7 @@ fn bind_join_using_projection(
     columns: &[String],
     left_scope: &BoundScope,
     right_scope: &BoundScope,
-) -> Result<(Expr, JoinProjection), ParseError> {
+) -> Result<JoinBinding, ParseError> {
     let mut using_pairs = Vec::with_capacity(columns.len());
     for name in columns {
         let left_index = resolve_column(left_scope, name)?;
@@ -974,11 +968,14 @@ fn bind_join_using_projection(
             }
         });
 
-    let mut targets = Vec::new();
+    let mut alias_exprs = Vec::new();
+    let mut output_columns = Vec::new();
     let mut desc_columns = Vec::new();
     let mut scope_columns = Vec::new();
     let mut used_left = vec![false; left_scope.columns.len()];
     let mut used_right = vec![false; right_scope.columns.len()];
+    let mut joinleftcols = Vec::new();
+    let mut joinrightcols = Vec::new();
 
     for (name, left_index, right_index) in &using_pairs {
         used_left[*left_index] = true;
@@ -986,12 +983,13 @@ fn bind_join_using_projection(
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
         let left_expr = Expr::Column(*left_index);
         let right_expr = Expr::Column(left_scope.columns.len() + *right_index);
-        targets.push(TargetEntry::new(
-            name.clone(),
-            Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
-            left_ty,
-            targets.len() + 1,
-        ));
+        alias_exprs.push(Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)));
+        output_columns.push(QueryColumn {
+            name: name.clone(),
+            sql_type: left_ty,
+        });
+        joinleftcols.push(*left_index + 1);
+        joinrightcols.push(*right_index + 1);
         desc_columns.push(column_desc(name.clone(), left_ty, true));
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
@@ -1005,12 +1003,12 @@ fn bind_join_using_projection(
         if used_left[index] {
             continue;
         }
-        targets.push(TargetEntry::new(
-            column.output_name.clone(),
-            Expr::Column(index),
-            left_scope.desc.columns[index].sql_type,
-            targets.len() + 1,
-        ));
+        alias_exprs.push(Expr::Column(index));
+        output_columns.push(QueryColumn {
+            name: column.output_name.clone(),
+            sql_type: left_scope.desc.columns[index].sql_type,
+        });
+        joinleftcols.push(index + 1);
         desc_columns.push(left_scope.desc.columns[index].clone());
         scope_columns.push(column.clone());
     }
@@ -1020,12 +1018,12 @@ fn bind_join_using_projection(
             continue;
         }
         let raw_index = left_scope.columns.len() + index;
-        targets.push(TargetEntry::new(
-            column.output_name.clone(),
-            Expr::Column(raw_index),
-            right_scope.desc.columns[index].sql_type,
-            targets.len() + 1,
-        ));
+        alias_exprs.push(Expr::Column(raw_index));
+        output_columns.push(QueryColumn {
+            name: column.output_name.clone(),
+            sql_type: right_scope.desc.columns[index].sql_type,
+        });
+        joinrightcols.push(index + 1);
         desc_columns.push(right_scope.desc.columns[index].clone());
         scope_columns.push(column.clone());
     }
@@ -1036,7 +1034,17 @@ fn bind_join_using_projection(
         },
         columns: scope_columns,
     };
-    Ok((on, Some((targets, scope))))
+    Ok((
+        on,
+        Some(JoinAliasInfo {
+            output_columns,
+            output_exprs: alias_exprs,
+            joinmergedcols: using_pairs.len(),
+            joinleftcols,
+            joinrightcols,
+        }),
+        Some(scope),
+    ))
 }
 
 fn synthetic_desc_from_analyzed_from(plan: &AnalyzedFrom) -> RelationDesc {

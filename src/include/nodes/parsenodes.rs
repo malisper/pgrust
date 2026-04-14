@@ -263,7 +263,15 @@ pub enum RangeTblEntryKind {
     Relation {
         rel: crate::RelFileLocator,
         relation_oid: u32,
+        relkind: char,
         toast: Option<ToastRelationRef>,
+    },
+    Join {
+        jointype: JoinType,
+        joinmergedcols: usize,
+        joinaliasvars: Vec<Expr>,
+        joinleftcols: Vec<usize>,
+        joinrightcols: Vec<usize>,
     },
     Values {
         rows: Vec<Vec<Expr>>,
@@ -285,6 +293,7 @@ pub enum JoinTreeNode {
         right: Box<JoinTreeNode>,
         kind: JoinType,
         quals: Expr,
+        rtindex: usize,
     },
 }
 

@@ -522,6 +522,7 @@ impl PlannerPathBuilder {
                     RangeTblEntryKind::Relation {
                         rel,
                         relation_oid,
+                        relkind: _,
                         toast,
                     } => PlannerPath::SeqScan {
                         plan_info: PlanEstimate::default(),
@@ -575,10 +576,13 @@ impl PlannerPathBuilder {
                                         ),
                                         &layout,
                                     )
-                                })
+                            })
                                 .collect(),
                         }
                     }
+                    RangeTblEntryKind::Join { .. } => unreachable!(
+                        "join RTEs are referenced through JoinExpr nodes, not bare RangeTblRef"
+                    ),
                 }
             }
             JoinTreeNode::JoinExpr {
@@ -586,22 +590,60 @@ impl PlannerPathBuilder {
                 right,
                 kind,
                 quals,
+                rtindex,
             } => {
+                let join_rte = rtable.get(rtindex.saturating_sub(1)).cloned();
                 let left = self.from_jointree(*left, rtable.clone());
                 let right = self.from_jointree(*right, rtable);
                 let mut layout = left.output_vars();
                 layout.extend(right.output_vars());
-                PlannerPath::NestedLoopJoin {
+                let join = PlannerPath::NestedLoopJoin {
                     plan_info: PlanEstimate::default(),
                     left: Box::new(left),
                     right: Box::new(right),
                     kind,
                     on: PlannerJoinExpr::from_input_expr_with_layout(&quals, &layout),
+                };
+                let Some(rte) = join_rte else {
+                    return join;
+                };
+                let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
+                    return join;
+                };
+                if join_alias_vars_match_layout(joinaliasvars, &layout) {
+                    return join;
+                }
+                PlannerPath::Projection {
+                    plan_info: PlanEstimate::default(),
+                    slot_id: rtindex,
+                    input: Box::new(join),
+                    targets: joinaliasvars
+                        .iter()
+                        .enumerate()
+                        .map(|(index, expr)| {
+                            PlannerTargetEntry::from_target_entry_with_layout(
+                                crate::backend::executor::TargetEntry::new(
+                                    rte.desc.columns[index].name.clone(),
+                                    expr.clone(),
+                                    rte.desc.columns[index].sql_type,
+                                    index + 1,
+                                ),
+                                &layout,
+                            )
+                        })
+                        .collect(),
                 }
             }
         }
     }
 
+}
+
+fn join_alias_vars_match_layout(joinaliasvars: &[Expr], layout: &[PlannerJoinExpr]) -> bool {
+    joinaliasvars.len() == layout.len()
+        && joinaliasvars.iter().zip(layout.iter()).all(|(expr, expected)| {
+            PlannerJoinExpr::from_input_expr_with_layout(expr, layout) == *expected
+        })
 }
 
 impl PlannerTargetEntry {

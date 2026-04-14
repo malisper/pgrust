@@ -1,18 +1,19 @@
 use super::*;
-use super::query::AnalyzedFrom;
 
 const RETURN_RULE_NAME: &str = "_RETURN";
 
-fn view_display_name(name: &str) -> String {
-    name.rsplit('.').next().unwrap_or(name).to_string()
+fn view_display_name(relation_oid: u32, alias: Option<&str>) -> String {
+    alias
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("view {relation_oid}"))
 }
 
-fn return_rule_sql(
+pub(crate) fn return_rule_sql(
     catalog: &dyn CatalogLookup,
-    relation: &BoundRelation,
+    relation_oid: u32,
     display_name: &str,
 ) -> Result<String, ParseError> {
-    let mut rows = catalog.rewrite_rows_for_relation(relation.relation_oid);
+    let mut rows = catalog.rewrite_rows_for_relation(relation_oid);
     rows.retain(|row| row.rulename == RETURN_RULE_NAME);
     match rows.as_slice() {
         [row] => Ok(row.ev_action.clone()),
@@ -27,20 +28,19 @@ fn return_rule_sql(
     }
 }
 
-fn validate_view_shape(
-    plan: &Query,
-    relation: &BoundRelation,
+pub(crate) fn validate_view_shape(
+    query: &Query,
+    relation_desc: &RelationDesc,
     display_name: &str,
 ) -> Result<(), ParseError> {
-    let actual_columns = plan.columns();
-    if actual_columns.len() != relation.desc.columns.len() {
+    let actual_columns = query.columns();
+    if actual_columns.len() != relation_desc.columns.len() {
         return Err(ParseError::UnexpectedToken {
             expected: "view query width matching stored view columns",
             actual: format!("stale view definition for {display_name}"),
         });
     }
-    for (actual_column, stored_column) in
-        actual_columns.into_iter().zip(relation.desc.columns.iter())
+    for (actual_column, stored_column) in actual_columns.into_iter().zip(relation_desc.columns.iter())
     {
         if !actual_column.name.eq_ignore_ascii_case(&stored_column.name)
             || actual_column.sql_type != stored_column.sql_type
@@ -54,20 +54,18 @@ fn validate_view_shape(
     Ok(())
 }
 
-pub(super) fn bind_view_reference(
-    relation_name: &str,
-    relation: &BoundRelation,
+pub(crate) fn analyze_view_rule_sql(
+    relation_oid: u32,
+    relation_desc: &RelationDesc,
+    alias: Option<&str>,
     catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
-    let display_name = view_display_name(relation_name);
-    if expanded_views.contains(&relation.relation_oid) {
+) -> Result<Query, ParseError> {
+    let display_name = view_display_name(relation_oid, alias);
+    if expanded_views.contains(&relation_oid) {
         return Err(ParseError::RecursiveView(display_name));
     }
-    let sql = return_rule_sql(catalog, relation, &display_name)?;
+    let sql = return_rule_sql(catalog, relation_oid, &display_name)?;
     let stmt = crate::backend::parser::parse_statement(&sql)?;
     let Statement::Select(select) = stmt else {
         return Err(ParseError::UnexpectedToken {
@@ -76,18 +74,15 @@ pub(super) fn bind_view_reference(
         });
     };
     let mut next_views = expanded_views.to_vec();
-    next_views.push(relation.relation_oid);
-    let (plan, _) = analyze_select_query_with_outer(
+    next_views.push(relation_oid);
+    let (query, _) = analyze_select_query_with_outer(
         &select,
         catalog,
-        outer_scopes,
-        grouped_outer.cloned(),
-        ctes,
+        &[],
+        None,
+        &[],
         &next_views,
     )?;
-    validate_view_shape(&plan, relation, &display_name)?;
-    Ok((
-        AnalyzedFrom::subquery(plan),
-        scope_for_relation(Some(relation_name), &relation.desc),
-    ))
+    validate_view_shape(&query, relation_desc, &display_name)?;
+    Ok(query)
 }
