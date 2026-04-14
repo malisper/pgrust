@@ -14,11 +14,9 @@ use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::plannodes::{
     AggAccum, DeferredSelectPlan, ExprArraySubscript, JoinType, ProjectSetTarget, SetReturningCall,
+    PlannerJoinExpr, PlannerOrderByEntry, PlannerProjectSetTarget, PlannerTargetEntry,
 };
-use pathnodes::{
-    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget, PlannerTargetEntry,
-    next_synthetic_slot_id,
-};
+use pathnodes::{PlannerPath, next_synthetic_slot_id};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
