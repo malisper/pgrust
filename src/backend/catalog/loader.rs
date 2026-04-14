@@ -71,8 +71,8 @@ pub(crate) fn catalog_from_physical_rows(
     let index_rows = rows.indexes;
     let _description_rows = rows.descriptions;
     let _am_rows = rows.ams;
-    let _authid_rows = rows.authids;
-    let _auth_members_rows = rows.auth_members;
+    let authid_rows = rows.authids;
+    let auth_members_rows = rows.auth_members;
     let _language_rows = rows.languages;
     let _ts_parser_rows = rows.ts_parsers;
     let _ts_template_rows = rows.ts_templates;
@@ -149,6 +149,20 @@ pub(crate) fn catalog_from_physical_rows(
                 }),
         )
         .max(
+            authid_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
+            auth_members_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
             constraint_rows
                 .iter()
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
@@ -160,6 +174,8 @@ pub(crate) fn catalog_from_physical_rows(
         constraints: Vec::new(),
         depends: Vec::new(),
         rewrites: Vec::new(),
+        authids: authid_rows,
+        auth_members: auth_members_rows,
         next_rel_number: DEFAULT_FIRST_REL_NUMBER,
         next_oid,
     };

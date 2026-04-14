@@ -13,7 +13,8 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
-    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow, PgRewriteRow,
+    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow, PgAuthMembersRow, PgConstraintRow,
+    PgDependRow, PgRewriteRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
     builtin_type_rows, sort_pg_rewrite_rows,
 };
 
@@ -81,6 +82,8 @@ pub struct Catalog {
     pub(crate) constraints: Vec<PgConstraintRow>,
     pub(crate) depends: Vec<PgDependRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
+    pub(crate) authids: Vec<PgAuthIdRow>,
+    pub(crate) auth_members: Vec<PgAuthMembersRow>,
     pub(crate) next_rel_number: u32,
     pub(crate) next_oid: u32,
 }
@@ -92,6 +95,8 @@ impl Default for Catalog {
             constraints: Vec::new(),
             depends: Vec::new(),
             rewrites: Vec::new(),
+            authids: bootstrap_pg_authid_rows(),
+            auth_members: bootstrap_pg_auth_members_rows().into(),
             next_rel_number: DEFAULT_FIRST_REL_NUMBER,
             next_oid: DEFAULT_FIRST_USER_OID,
         };
@@ -184,6 +189,14 @@ impl Catalog {
 
     pub fn next_oid(&self) -> u32 {
         self.next_oid
+    }
+
+    pub fn authid_rows(&self) -> &[PgAuthIdRow] {
+        &self.authids
+    }
+
+    pub fn auth_members_rows(&self) -> &[PgAuthMembersRow] {
+        &self.auth_members
     }
 
     pub fn create_table(
