@@ -104,6 +104,9 @@ pub struct SpecialJoinInfo {
     pub rtindex: usize,
     pub min_lefthand: Vec<usize>,
     pub min_righthand: Vec<usize>,
+    pub syn_lefthand: Vec<usize>,
+    pub syn_righthand: Vec<usize>,
+    pub join_quals: Expr,
 }
 
 #[derive(Debug, Clone)]
@@ -247,7 +250,7 @@ fn build_special_join_info(jointree: Option<&JoinTreeNode>) -> Vec<SpecialJoinIn
                 right,
                 kind,
                 rtindex,
-                ..
+                quals,
             } => {
                 let left_relids = walk(left, joins);
                 let right_relids = walk(right, joins);
@@ -257,6 +260,9 @@ fn build_special_join_info(jointree: Option<&JoinTreeNode>) -> Vec<SpecialJoinIn
                         rtindex: *rtindex,
                         min_lefthand: left_relids.clone(),
                         min_righthand: right_relids.clone(),
+                        syn_lefthand: left_relids.clone(),
+                        syn_righthand: right_relids.clone(),
+                        join_quals: quals.clone(),
                     });
                 }
                 let mut relids = left_relids;
