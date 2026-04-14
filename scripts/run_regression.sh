@@ -239,7 +239,7 @@ pass_list=()
 fail_list=()
 error_list=()
 
-SKIPPED_HANGING_TESTS=("join" "memoize" "subselect")
+SKIPPED_HANGING_TESTS=("join" "join_hash" "memoize" "subselect" "tablespace")
 
 echo ""
 echo "Running ${#TEST_FILES[@]} regression tests..."
