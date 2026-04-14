@@ -185,6 +185,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             return SqlType::new(SqlTypeKind::VarBit);
         }
         match peer_type.element_type().kind {
+            SqlTypeKind::Date => return SqlType::new(SqlTypeKind::Date),
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),

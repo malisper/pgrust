@@ -226,7 +226,7 @@ fn parse_numeric_triplet(
         .parse::<i32>()
         .map_err(|_| DateTimeParseError::Invalid)?;
 
-    if first.len() >= 4 || a > 31 || matches!(config.date_order, DateOrder::Ymd) {
+    if first.len() >= 3 || a > 31 {
         return validate_date(
             parse_year_number(first, true).unwrap_or(a),
             b,
@@ -236,6 +236,9 @@ fn parse_numeric_triplet(
         );
     }
     if third.len() >= 4 || c > 31 {
+        if matches!(config.date_order, DateOrder::Ymd) {
+            return Err(DateTimeParseError::FieldOutOfRange);
+        }
         let year = parse_year_number(third, true).ok_or(DateTimeParseError::Invalid)?;
         return match config.date_order {
             DateOrder::Mdy => validate_date(
@@ -320,8 +323,11 @@ pub fn parse_date_token_with_config(
     if trimmed.is_empty() {
         return Ok(None);
     }
-    if let Some(parts) = parse_date_parts(trimmed) {
-        return Ok(Some(parts));
+    let iso_parts = trimmed.split('-').collect::<Vec<_>>();
+    if iso_parts.len() == 3 && iso_parts[0].len() >= 4 {
+        if let Some(parts) = parse_date_parts(trimmed) {
+            return Ok(Some(parts));
+        }
     }
     if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
         return match trimmed.len() {
@@ -378,10 +384,28 @@ pub fn parse_date_token_with_config(
                 return Ok(Some(validate_date(year, month, day)?));
             }
             if let Some(month) = month_number(parts[1]) {
-                let day = parts[0]
+                let first = parts[0];
+                let third = parts[2];
+                let first_value = first
+                    .parse::<i32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let year_first = first.len() >= 3 || first_value > 31;
+                let (day_text, year_text) = if year_first {
+                    (third, first)
+                } else {
+                    (first, third)
+                };
+                let day = day_text
                     .parse::<u32>()
                     .map_err(|_| DateTimeParseError::Invalid)?;
-                let year = parse_year_number(parts[2], true).ok_or(DateTimeParseError::Invalid)?;
+                let year = parse_year_number(year_text, true).ok_or(DateTimeParseError::Invalid)?;
+                return Ok(Some(validate_date(year, month, day)?));
+            }
+            if let Some(month) = month_number(parts[2]) {
+                let day = parts[1]
+                    .parse::<u32>()
+                    .map_err(|_| DateTimeParseError::Invalid)?;
+                let year = parse_year_number(parts[0], true).ok_or(DateTimeParseError::Invalid)?;
                 return Ok(Some(validate_date(year, month, day)?));
             }
             if parts

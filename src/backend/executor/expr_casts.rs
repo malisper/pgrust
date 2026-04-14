@@ -15,7 +15,7 @@ use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::backend::utils::time::date::{parse_date_text, parse_time_text, parse_timetz_text};
+use crate::backend::utils::time::date::{DateParseError, parse_date_text, parse_time_text, parse_timetz_text};
 use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows};
@@ -774,6 +774,31 @@ fn datetime_parse_error_details(ty: &'static str, text: &str, err: DateTimeParse
         DateTimeParseError::UnknownTimeZone(zone) => {
             format!("time zone \"{zone}\" not recognized")
         }
+    }
+}
+
+fn date_parse_error(text: &str, err: DateParseError) -> ExecError {
+    match err {
+        DateParseError::Invalid => ExecError::DetailedError {
+            message: format!("invalid input syntax for type date: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22007",
+        },
+        DateParseError::FieldOutOfRange { datestyle_hint } => ExecError::DetailedError {
+            message: format!("date/time field value out of range: \"{text}\""),
+            detail: None,
+            hint: datestyle_hint.then_some(
+                "Perhaps you need a different \"DateStyle\" setting.".into(),
+            ),
+            sqlstate: "22008",
+        },
+        DateParseError::OutOfRange => ExecError::DetailedError {
+            message: format!("date out of range: \"{text}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        },
     }
 }
 
@@ -1677,10 +1702,7 @@ pub(super) fn cast_text_value_with_config(
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::Date => parse_date_text(text, config)
             .map(Value::Date)
-            .ok_or_else(|| ExecError::InvalidStorageValue {
-                column: "date".into(),
-                details: format!("invalid input syntax for type date: \"{text}\""),
-            }),
+            .map_err(|err| date_parse_error(text, err)),
         SqlTypeKind::Time => parse_time_text(text)
             .map(Value::Time)
             .map(|value| apply_time_precision(value, ty.time_precision()))
