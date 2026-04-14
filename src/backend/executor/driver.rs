@@ -6,7 +6,15 @@ use super::{
     execute_vacuum, executor_start, parse_statement, pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::UnsupportedStatement;
 use crate::pl::plpgsql::execute_do;
+
+fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
+    ExecError::Parse(ParseError::FeatureNotSupported(format!(
+        "{}: {}",
+        stmt.feature, stmt.sql
+    )))
+}
 
 pub fn execute_planned_stmt(
     planned_stmt: PlannedStmt,
@@ -139,6 +147,7 @@ fn execute_statement_with_source(
             execute_update(bind_update(&stmt, catalog)?, catalog, ctx, xid, cid)
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
+        Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::Begin | Statement::Commit | Statement::Rollback => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "non-transaction-control statement",
@@ -166,6 +175,7 @@ pub fn execute_readonly_statement(
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON TABLE".into(),

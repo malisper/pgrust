@@ -478,6 +478,30 @@ fn parse_alter_table_set_statement() {
 }
 
 #[test]
+fn parse_unsupported_alter_table_statement_into_placeholder() {
+    let stmt = parse_statement("alter table items rename to items_new").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Unsupported(UnsupportedStatement {
+            sql: "alter table items rename to items_new".into(),
+            feature: "ALTER TABLE form",
+        })
+    );
+}
+
+#[test]
+fn parse_unsupported_role_statement_into_placeholder() {
+    let stmt = parse_statement("drop role if exists regress_alter_table_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Unsupported(UnsupportedStatement {
+            sql: "drop role if exists regress_alter_table_user1".into(),
+            feature: "DROP ROLE",
+        })
+    );
+}
+
+#[test]
 fn parse_numeric_type_with_negative_scale() {
     assert_eq!(
         parse_type_name("numeric(3, -6)").unwrap(),

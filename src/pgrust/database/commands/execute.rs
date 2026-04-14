@@ -51,6 +51,12 @@ impl Database {
             | Statement::Set(_)
             | Statement::Reset(_)
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::Unsupported(ref unsupported_stmt) => {
+                Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                    "{}: {}",
+                    unsupported_stmt.feature, unsupported_stmt.sql
+                ))))
+            }
             Statement::CopyFrom(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "COPY handled by session layer",
                 actual: "COPY".into(),

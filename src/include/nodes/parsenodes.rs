@@ -58,6 +58,7 @@ pub enum ParseError {
     TempTableInNonTempSchema(String),
     OnlyTemporaryRelationsInTemporarySchemas(String),
     NoSchemaSelectedForCreate,
+    FeatureNotSupported(String),
     WrongObjectType {
         name: String,
         expected: &'static str,
@@ -158,6 +159,9 @@ impl fmt::Display for ParseError {
             ParseError::NoSchemaSelectedForCreate => {
                 write!(f, "no schema has been selected to create in")
             }
+            ParseError::FeatureNotSupported(feature) => {
+                write!(f, "feature not supported: {feature}")
+            }
             ParseError::WrongObjectType { name, expected } => {
                 write!(f, "\"{name}\" is not a {expected}")
             }
@@ -210,9 +214,16 @@ pub enum Statement {
     Insert(InsertStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
+    Unsupported(UnsupportedStatement),
     Begin,
     Commit,
     Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedStatement {
+    pub sql: String,
+    pub feature: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
