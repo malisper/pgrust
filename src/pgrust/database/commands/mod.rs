@@ -6,3 +6,4 @@ mod execute;
 mod index;
 mod maintenance;
 mod rename;
+mod role;
