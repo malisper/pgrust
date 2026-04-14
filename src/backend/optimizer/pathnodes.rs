@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::pathnodes::PlannerPath;
+use crate::include::nodes::pathnodes::Path;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry,
@@ -10,13 +10,18 @@ use crate::include::nodes::primnodes::{
     Var,
 };
 
-static NEXT_SYNTHETIC_SLOT_ID: AtomicUsize = AtomicUsize::new(1);
+// :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
+// rtindex Vars, so keep synthetic slots in a disjoint high range until slot identity is split
+// from relation identity more cleanly.
+const SYNTHETIC_SLOT_ID_BASE: usize = 1_000_000;
+
+static NEXT_SYNTHETIC_SLOT_ID: AtomicUsize = AtomicUsize::new(SYNTHETIC_SLOT_ID_BASE);
 
 pub(crate) fn next_synthetic_slot_id() -> usize {
     NEXT_SYNTHETIC_SLOT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-impl PlannerPath {
+impl Path {
     pub fn into_plan(self) -> Plan {
         match self {
             Self::Result { plan_info } => Plan::Result { plan_info },

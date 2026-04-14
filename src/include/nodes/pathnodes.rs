@@ -114,7 +114,7 @@ pub struct RelOptInfo {
     pub relids: Vec<usize>,
     pub reloptkind: RelOptKind,
     pub reltarget: PathTarget,
-    pub pathlist: Vec<PlannerPath>,
+    pub pathlist: Vec<Path>,
     pub cheapest_total_path: Option<usize>,
     pub baserestrictinfo: Vec<RestrictInfo>,
     pub joininfo: Vec<RestrictInfo>,
@@ -135,7 +135,7 @@ impl RelOptInfo {
         }
     }
 
-    pub fn add_path(&mut self, path: PlannerPath) {
+    pub fn add_path(&mut self, path: Path) {
         let total_cost = path.plan_info().total_cost.as_f64();
         let next_index = self.pathlist.len();
         let replace_cheapest = self
@@ -155,7 +155,7 @@ impl RelOptInfo {
         }
     }
 
-    pub fn cheapest_total_path(&self) -> Option<&PlannerPath> {
+    pub fn cheapest_total_path(&self) -> Option<&Path> {
         self.cheapest_total_path
             .and_then(|index| self.pathlist.get(index))
     }
@@ -194,6 +194,7 @@ pub struct PlannerInfo {
     pub simple_rel_array: Vec<Option<RelOptInfo>>,
     pub join_rel_list: Vec<RelOptInfo>,
     pub join_info_list: Vec<SpecialJoinInfo>,
+    pub inner_join_clauses: Vec<RestrictInfo>,
     pub processed_tlist: Vec<TargetEntry>,
     pub final_target: PathTarget,
     pub query_pathkeys: Vec<PathKey>,
@@ -213,6 +214,7 @@ impl PlannerInfo {
             simple_rel_array,
             join_rel_list: Vec::new(),
             join_info_list,
+            inner_join_clauses: Vec::new(),
             final_rel: None,
             parse,
         }
@@ -383,7 +385,7 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlannerPath {
+pub enum Path {
     Result {
         plan_info: PlanEstimate,
     },
@@ -409,37 +411,37 @@ pub enum PlannerPath {
     },
     Filter {
         plan_info: PlanEstimate,
-        input: Box<PlannerPath>,
+        input: Box<Path>,
         predicate: Expr,
     },
     NestedLoopJoin {
         plan_info: PlanEstimate,
-        left: Box<PlannerPath>,
-        right: Box<PlannerPath>,
+        left: Box<Path>,
+        right: Box<Path>,
         kind: JoinType,
         on: Expr,
     },
     Projection {
         plan_info: PlanEstimate,
         slot_id: usize,
-        input: Box<PlannerPath>,
+        input: Box<Path>,
         targets: Vec<TargetEntry>,
     },
     OrderBy {
         plan_info: PlanEstimate,
-        input: Box<PlannerPath>,
+        input: Box<Path>,
         items: Vec<OrderByEntry>,
     },
     Limit {
         plan_info: PlanEstimate,
-        input: Box<PlannerPath>,
+        input: Box<Path>,
         limit: Option<usize>,
         offset: usize,
     },
     Aggregate {
         plan_info: PlanEstimate,
         slot_id: usize,
-        input: Box<PlannerPath>,
+        input: Box<Path>,
         group_by: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         having: Option<Expr>,
@@ -459,7 +461,7 @@ pub enum PlannerPath {
     ProjectSet {
         plan_info: PlanEstimate,
         slot_id: usize,
-        input: Box<PlannerPath>,
+        input: Box<Path>,
         targets: Vec<ProjectSetTarget>,
     },
 }
