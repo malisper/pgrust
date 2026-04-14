@@ -18,6 +18,7 @@ use crate::include::catalog::{
     PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID, PG_NAMESPACE_RELATION_OID,
     PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID, PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID,
     PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
+    RECORD_TYPE_OID,
     REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
     REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
     TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
@@ -57,6 +58,7 @@ pub fn pg_type_desc() -> RelationDesc {
 pub fn builtin_type_rows() -> Vec<PgTypeRow> {
     vec![
         builtin_type_row("anyarray", ANYARRAYOID, SqlType::new(SqlTypeKind::AnyArray)),
+        builtin_type_row("record", RECORD_TYPE_OID, SqlType::record(RECORD_TYPE_OID)),
         builtin_type_row("bool", BOOL_TYPE_OID, SqlType::new(SqlTypeKind::Bool)),
         builtin_type_row(
             "_bool",
@@ -342,7 +344,7 @@ fn composite_type_row(name: &str, oid: u32, relid: u32) -> PgTypeRow {
         typalign: AttributeAlign::Double,
         typstorage: AttributeStorage::Extended,
         typrelid: relid,
-        sql_type: SqlType::new(SqlTypeKind::Text),
+        sql_type: SqlType::named_composite(oid, relid),
     }
 }
 
@@ -433,6 +435,19 @@ mod tests {
     }
 
     #[test]
+    fn builtin_types_include_record() {
+        let row = builtin_type_rows()
+            .into_iter()
+            .find(|row| row.oid == RECORD_TYPE_OID)
+            .expect("record row");
+        assert_eq!(row.typname, "record");
+        assert_eq!(row.typlen, -1);
+        assert_eq!(row.typalign, AttributeAlign::Double);
+        assert_eq!(row.typstorage, AttributeStorage::Extended);
+        assert_eq!(row.sql_type, SqlType::record(RECORD_TYPE_OID));
+    }
+
+    #[test]
     fn composite_types_use_varlena_storage_metadata() {
         let row = bootstrap_composite_type_rows()
             .into_iter()
@@ -441,5 +456,19 @@ mod tests {
         assert_eq!(row.typlen, -1);
         assert_eq!(row.typalign, AttributeAlign::Double);
         assert_eq!(row.typstorage, AttributeStorage::Extended);
+    }
+
+    #[test]
+    fn composite_types_preserve_row_type_identity() {
+        let row = bootstrap_composite_type_rows()
+            .into_iter()
+            .find(|row| row.typname == "pg_class")
+            .unwrap();
+        assert_eq!(row.oid, PG_CLASS_ROWTYPE_OID);
+        assert_eq!(row.typrelid, PG_CLASS_RELATION_OID);
+        assert_eq!(
+            row.sql_type,
+            SqlType::named_composite(PG_CLASS_ROWTYPE_OID, PG_CLASS_RELATION_OID)
+        );
     }
 }

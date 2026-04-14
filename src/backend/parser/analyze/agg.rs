@@ -19,7 +19,9 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
         | SqlExpr::LocalTimestamp { .. } => false,
-        SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_contains_agg),
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
+            elements.iter().any(expr_contains_agg)
+        }
         SqlExpr::BinaryOperator { left, right, .. } => {
             expr_contains_agg(left) || expr_contains_agg(right)
         }
@@ -131,7 +133,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
             expr_references_input_scope(expr)
         }
-        SqlExpr::ArrayLiteral(elements) => elements.iter().any(expr_references_input_scope),
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
+            elements.iter().any(expr_references_input_scope)
+        }
         SqlExpr::ArraySubscript { array, subscripts } => {
             expr_references_input_scope(array)
                 || subscripts.iter().any(|subscript| {
@@ -270,7 +274,7 @@ pub(super) fn collect_aggs(
                 collect_aggs(&arg.value, aggs);
             }
         }
-        SqlExpr::ArrayLiteral(elements) => {
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
             for element in elements {
                 collect_aggs(element, aggs);
             }

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
-use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::parser::SqlType;
 use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
@@ -228,7 +228,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             typalign: crate::include::access::htup::AttributeAlign::Double,
             typstorage: crate::include::access::htup::AttributeStorage::Extended,
             typrelid: entry.relation_oid,
-            sql_type: SqlType::new(SqlTypeKind::Text),
+            sql_type: SqlType::named_composite(entry.row_type_oid, entry.relation_oid),
         });
     }
 

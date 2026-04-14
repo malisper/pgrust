@@ -91,6 +91,9 @@ pub struct PgProcRow {
     pub pronargdefaults: i16,
     pub prorettype: u32,
     pub proargtypes: String,
+    pub proallargtypes: Option<Vec<u32>>,
+    pub proargmodes: Option<Vec<u8>>,
+    pub proargnames: Option<Vec<String>>,
     pub prosrc: String,
 }
 
@@ -127,6 +130,21 @@ pub fn pg_proc_desc() -> RelationDesc {
             column_desc("pronargdefaults", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("prorettype", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("proargtypes", SqlType::new(SqlTypeKind::OidVector), false),
+            column_desc(
+                "proallargtypes",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Oid)),
+                true,
+            ),
+            column_desc(
+                "proargmodes",
+                SqlType::array_of(SqlType::new(SqlTypeKind::InternalChar)),
+                true,
+            ),
+            column_desc(
+                "proargnames",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
         ],
     }
@@ -477,21 +495,21 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "json_object_keys",
             1,
         ),
-        set_returning_proc_row(
+        record_out_proc_row(
             6251,
             "json_each",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[JSON_TYPE_OID]),
             "json_each",
             1,
+            &[("key", TEXT_TYPE_OID), ("value", JSON_TYPE_OID)],
         ),
-        set_returning_proc_row(
+        record_out_proc_row(
             6252,
             "json_each_text",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[JSON_TYPE_OID]),
             "json_each_text",
             1,
+            &[("key", TEXT_TYPE_OID), ("value", TEXT_TYPE_OID)],
         ),
         set_returning_proc_row(
             6253,
@@ -530,21 +548,21 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "jsonb_object_keys",
             1,
         ),
-        set_returning_proc_row(
+        record_out_proc_row(
             6256,
             "jsonb_each",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[JSONB_TYPE_OID]),
             "jsonb_each",
             1,
+            &[("key", TEXT_TYPE_OID), ("value", JSONB_TYPE_OID)],
         ),
-        set_returning_proc_row(
+        record_out_proc_row(
             6257,
             "jsonb_each_text",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[JSONB_TYPE_OID]),
             "jsonb_each_text",
             1,
+            &[("key", TEXT_TYPE_OID), ("value", TEXT_TYPE_OID)],
         ),
         set_returning_proc_row(
             6258,
@@ -931,37 +949,45 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
                 &[BPCHAR_TYPE_OID],
             )
         },
-        set_returning_proc_row(
+        record_out_proc_row(
             3713,
             "ts_token_type",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[OID_TYPE_OID]),
             "ts_token_type_byid",
             1,
+            &[
+                ("tokid", INT4_TYPE_OID),
+                ("alias", TEXT_TYPE_OID),
+                ("description", TEXT_TYPE_OID),
+            ],
         ),
-        set_returning_proc_row(
+        record_out_proc_row(
             3714,
             "ts_token_type",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID]),
             "ts_token_type_byname",
             1,
+            &[
+                ("tokid", INT4_TYPE_OID),
+                ("alias", TEXT_TYPE_OID),
+                ("description", TEXT_TYPE_OID),
+            ],
         ),
-        set_returning_proc_row(
+        record_out_proc_row(
             3715,
             "ts_parse",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[OID_TYPE_OID, TEXT_TYPE_OID]),
             "ts_parse_byid",
             2,
+            &[("tokid", INT4_TYPE_OID), ("token", TEXT_TYPE_OID)],
         ),
-        set_returning_proc_row(
+        record_out_proc_row(
             3716,
             "ts_parse",
-            RECORD_TYPE_OID,
             &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
             "ts_parse_byname",
             2,
+            &[("tokid", INT4_TYPE_OID), ("token", TEXT_TYPE_OID)],
         ),
         proc_row(
             3717,
@@ -3986,6 +4012,9 @@ fn proc_row(
         pronargdefaults: 0,
         prorettype,
         proargtypes: proargtypes.into(),
+        proallargtypes: None,
+        proargmodes: None,
+        proargnames: None,
         prosrc: prosrc.into(),
     }
 }
@@ -4094,6 +4123,52 @@ fn comparison_proc_row(oid: u32, proname: &str, arg_oids: &[u32]) -> PgProcRow {
     row
 }
 
+fn record_out_proc_row(
+    oid: u32,
+    proname: &str,
+    proargtypes: &str,
+    prosrc: &str,
+    pronargs: i16,
+    out_args: &[(&str, u32)],
+) -> PgProcRow {
+    let mut row = set_returning_proc_row(
+        oid,
+        proname,
+        RECORD_TYPE_OID,
+        proargtypes,
+        prosrc,
+        pronargs,
+    );
+    row.proallargtypes = Some(
+        parse_proc_argtype_oids(proargtypes)
+            .unwrap_or_default()
+            .into_iter()
+            .chain(out_args.iter().map(|(_, oid)| *oid))
+            .collect(),
+    );
+    row.proargmodes = Some(
+        std::iter::repeat_n(b'i', pronargs as usize)
+            .chain(std::iter::repeat_n(b'o', out_args.len()))
+            .collect(),
+    );
+    row.proargnames = Some(
+        std::iter::repeat_n(String::new(), pronargs as usize)
+            .chain(out_args.iter().map(|(name, _)| (*name).to_string()))
+            .collect(),
+    );
+    row
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
+    if argtypes.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
 fn oid_argtypes(arg_oids: &[u32]) -> String {
     arg_oids
         .iter()
@@ -4137,8 +4212,29 @@ mod tests {
                 "pronargdefaults",
                 "prorettype",
                 "proargtypes",
+                "proallargtypes",
+                "proargmodes",
+                "proargnames",
                 "prosrc",
             ]
+        );
+    }
+
+    #[test]
+    fn bootstrap_record_returning_rows_expose_out_metadata() {
+        let row = bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| row.proname == "json_each" && row.proargtypes == oid_argtypes(&[JSON_TYPE_OID]))
+            .expect("json_each row");
+        assert_eq!(row.prorettype, RECORD_TYPE_OID);
+        assert_eq!(
+            row.proallargtypes,
+            Some(vec![JSON_TYPE_OID, TEXT_TYPE_OID, JSON_TYPE_OID])
+        );
+        assert_eq!(row.proargmodes, Some(vec![b'i', b'o', b'o']));
+        assert_eq!(
+            row.proargnames,
+            Some(vec![String::new(), "key".into(), "value".into()])
         );
     }
 

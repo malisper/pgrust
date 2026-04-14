@@ -807,6 +807,8 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
     if sql_type.is_array {
         return match sql_type.kind {
             SqlTypeKind::AnyArray => "anyarray",
+            SqlTypeKind::Record => "unsupported array",
+            SqlTypeKind::Composite => "unsupported array",
             SqlTypeKind::Bool => "_bool",
             SqlTypeKind::Bit => "_bit",
             SqlTypeKind::VarBit => "_varbit",
@@ -850,6 +852,8 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
 
     match sql_type.kind {
         SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::Record => "record",
+        SqlTypeKind::Composite => "record",
         SqlTypeKind::Bool => "bool",
         SqlTypeKind::Bit => "bit",
         SqlTypeKind::VarBit => "varbit",

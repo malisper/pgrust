@@ -1061,10 +1061,20 @@ fn apply_relation_alias(
     mut plan: AnalyzedFrom,
     scope: BoundScope,
     alias: &str,
-    column_aliases: &[String],
+    column_aliases: &AliasColumnSpec,
     preserve_source_names: bool,
     source_is_alias: bool,
 ) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
+    let column_aliases = match column_aliases {
+        AliasColumnSpec::None => &[][..],
+        AliasColumnSpec::Names(names) => names.as_slice(),
+        AliasColumnSpec::Definitions(_) => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "column alias names",
+                actual: "column definition list".into(),
+            });
+        }
+    };
     if column_aliases.len() > scope.columns.len() {
         return Err(ParseError::UnexpectedToken {
             expected: "table alias column count to match source columns",

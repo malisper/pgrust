@@ -2,7 +2,9 @@ use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::catalog::{PgRewriteRow, sort_pg_rewrite_rows};
-use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{
+    AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
+};
 use crate::include::nodes::primnodes::{JoinType, Var};
 
 fn desc() -> RelationDesc {
@@ -13,6 +15,17 @@ fn desc() -> RelationDesc {
             column_desc("note", SqlType::new(SqlTypeKind::Text), true),
         ],
     }
+}
+
+fn builtin_type(ty: SqlType) -> RawTypeName {
+    RawTypeName::Builtin(ty)
+}
+
+fn assert_alias_names(spec: &AliasColumnSpec, expected: &[&str]) {
+    assert_eq!(
+        spec,
+        &AliasColumnSpec::Names(expected.iter().map(|name| (*name).to_string()).collect())
+    );
 }
 
 fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
@@ -452,7 +465,7 @@ fn parse_alter_table_add_column_statement() {
             table_name: "items".into(),
             column: ColumnDef {
                 name: "note".into(),
-                ty: SqlType::new(SqlTypeKind::Text),
+                ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
                 nullable: true,
                 primary_key: false,
@@ -506,6 +519,17 @@ fn parse_numeric_type_with_negative_scale() {
     assert_eq!(
         parse_type_name("numeric(3, -6)").unwrap(),
         SqlType::with_numeric_precision_scale(3, -6)
+    );
+}
+
+#[test]
+fn parse_record_and_named_type_names() {
+    assert_eq!(parse_type_name("record").unwrap(), RawTypeName::Record);
+    assert_eq!(
+        parse_type_name("widget_row").unwrap(),
+        RawTypeName::Named {
+            name: "widget_row".into(),
+        }
     );
 }
 
@@ -877,7 +901,7 @@ fn parse_table_alias() {
                 name: "people".into(),
             }),
             alias: "s".into(),
-            column_aliases: vec![],
+            column_aliases: AliasColumnSpec::None,
             preserve_source_names: false,
         })
     );
@@ -894,7 +918,7 @@ fn parse_table_alias_with_as() {
                 name: "people".into(),
             }),
             alias: "s".into(),
-            column_aliases: vec![],
+            column_aliases: AliasColumnSpec::None,
             preserve_source_names: false,
         })
     );
@@ -916,7 +940,7 @@ fn parse_select_star_with_table_alias() {
                 name: "people".into(),
             }),
             alias: "p".into(),
-            column_aliases: vec![],
+            column_aliases: AliasColumnSpec::None,
             preserve_source_names: false,
         })
     );
@@ -927,6 +951,22 @@ fn parse_select_star_with_table_alias() {
 fn parse_select_alias_overrides_qualified_column_name() {
     let stmt = parse_select("select p.name as w from people p").unwrap();
     assert_eq!(stmt.targets[0].output_name, "w");
+}
+
+#[test]
+fn parse_row_constructor_expression() {
+    let stmt = parse_select("select row(1, 'x')").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "row");
+    match &stmt.targets[0].expr {
+        SqlExpr::Row(args) => {
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0], SqlExpr::IntegerLiteral(value) if value == "1"));
+            assert!(
+                matches!(&args[1], SqlExpr::Const(Value::Text(text)) if text.as_str() == "x")
+            );
+        }
+        other => panic!("expected row constructor, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1106,8 +1146,8 @@ fn parse_cast_function_syntax_expression() {
 fn parse_oid_cast_type() {
     let stmt = parse_select("select cast(42 as oid)").unwrap();
     assert!(matches!(
-        stmt.targets[0].expr,
-        SqlExpr::Cast(_, ty) if ty == SqlType::new(SqlTypeKind::Oid)
+        &stmt.targets[0].expr,
+        SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::Oid)
     ));
     assert_eq!(stmt.targets[0].output_name, "oid");
 }
@@ -1150,12 +1190,12 @@ fn parse_typed_string_literal_expression() {
         other => panic!("expected typed string literal cast, got {other:?}"),
     }
     assert!(matches!(
-        stmt.targets[3].expr,
-        SqlExpr::Cast(_, ty) if ty == SqlType::new(SqlTypeKind::Date)
+        &stmt.targets[3].expr,
+        SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::Date)
     ));
     assert!(matches!(
-        stmt.targets[4].expr,
-        SqlExpr::Cast(_, ty) if ty == SqlType::new(SqlTypeKind::TimestampTz)
+        &stmt.targets[4].expr,
+        SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::TimestampTz)
     ));
 }
 
@@ -1274,7 +1314,7 @@ fn parse_extended_numeric_type_cast_expressions() {
     ];
     for (target, kind) in stmt.targets.iter().zip(expected) {
         match &target.expr {
-            SqlExpr::Cast(_, ty) => assert_eq!(ty.kind, kind),
+            SqlExpr::Cast(_, ty) => assert_eq!(ty.as_builtin().map(|ty| ty.kind), Some(kind)),
             other => panic!("expected cast expression, got {other:?}"),
         }
     }
@@ -1330,7 +1370,7 @@ fn parse_cross_join_with_aliases() {
                     name: "people".into(),
                 }),
                 alias: "p".into(),
-                column_aliases: vec![],
+                column_aliases: AliasColumnSpec::None,
                 preserve_source_names: false,
             }),
             right: Box::new(FromItem::Alias {
@@ -1338,7 +1378,7 @@ fn parse_cross_join_with_aliases() {
                     name: "pets".into(),
                 }),
                 alias: "q".into(),
-                column_aliases: vec![],
+                column_aliases: AliasColumnSpec::None,
                 preserve_source_names: false,
             }),
             kind: JoinKind::Cross,
@@ -2174,9 +2214,9 @@ fn parse_create_table_with_array_types() {
 fn parse_multidimensional_array_cast_type() {
     let stmt = parse_select("select '{{1,2},{3,4}}'::int4[][]").unwrap();
     assert!(matches!(
-        stmt.targets[0].expr,
+        &stmt.targets[0].expr,
         SqlExpr::Cast(_, ty)
-            if ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+            if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
     ));
 }
 
@@ -2509,6 +2549,38 @@ fn build_plan_for_select_list_json_each_is_rejected() {
 }
 
 #[test]
+fn parse_srf_with_column_definitions() {
+    let stmt =
+        parse_select("select * from json_each('{\"a\":1}'::json) as j(key text, value json)")
+            .unwrap();
+    match &stmt.from {
+        Some(FromItem::Alias {
+            alias,
+            column_aliases,
+            preserve_source_names,
+            ..
+        }) => {
+            assert_eq!(alias, "j");
+            assert_eq!(
+                column_aliases,
+                &AliasColumnSpec::Definitions(vec![
+                    AliasColumnDef {
+                        name: "key".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
+                    },
+                    AliasColumnDef {
+                        name: "value".into(),
+                        ty: builtin_type(SqlType::new(SqlTypeKind::Json)),
+                    },
+                ])
+            );
+            assert!(!preserve_source_names);
+        }
+        other => panic!("expected aliased function call, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_srf_with_column_alias() {
     let stmt = parse_select("select * from generate_series(1, 3) as g(val)").unwrap();
     match &stmt.from {
@@ -2524,7 +2596,7 @@ fn parse_srf_with_column_alias() {
             assert_eq!(name, "generate_series");
             assert_eq!(args.len(), 2);
             assert_eq!(alias, "g");
-            assert_eq!(column_aliases, &["val"]);
+            assert_alias_names(column_aliases, &["val"]);
             assert!(!preserve_source_names);
         }
         other => panic!("expected Alias, got {:?}", other),
@@ -2579,7 +2651,7 @@ fn parse_derived_table_with_column_aliases() {
             preserve_source_names,
         }) => {
             assert_eq!(alias, "p");
-            assert_eq!(column_aliases, vec!["x", "y"]);
+            assert_alias_names(&column_aliases, &["x", "y"]);
             assert!(matches!(*source, FromItem::DerivedTable(_)));
             assert!(!preserve_source_names);
         }
@@ -2603,7 +2675,7 @@ fn parse_parenthesized_table_keyword_from_item() {
                 name: "people".into()
             }),
             alias: "p".into(),
-            column_aliases: vec![],
+            column_aliases: AliasColumnSpec::None,
             preserve_source_names: false,
         })
     );
@@ -2778,7 +2850,7 @@ fn parse_values_from_item() {
             preserve_source_names,
         }) => {
             assert_eq!(alias, "t");
-            assert_eq!(column_aliases, vec!["x"]);
+            assert_alias_names(&column_aliases, &["x"]);
             assert!(!preserve_source_names);
             assert!(
                 matches!(*source, FromItem::Values { ref rows } if rows.len() == 2 && rows[0].len() == 1)
@@ -3019,7 +3091,10 @@ fn parse_jsonpath_type_and_operators() {
         )
         .unwrap();
     assert!(
-        matches!(stmt.targets[0].expr, SqlExpr::Cast(_, ty) if ty.kind == SqlTypeKind::JsonPath)
+        matches!(
+            &stmt.targets[0].expr,
+            SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::JsonPath)
+        )
     );
     assert!(matches!(
         stmt.targets[1].expr,
