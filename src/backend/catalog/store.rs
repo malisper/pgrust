@@ -26,7 +26,9 @@ use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
     sync_catalog_rows_subset,
 };
-use crate::backend::catalog::rowcodec::pg_description_row_from_values;
+use crate::backend::catalog::rowcodec::{
+    pg_description_row_from_values, pg_statistic_row_from_values,
+};
 use crate::backend::catalog::rows::{
     PhysicalCatalogRows, create_index_sync_kinds, create_table_sync_kinds,
     drop_relation_delete_kinds, drop_relation_sync_kinds, extend_physical_catalog_rows,
@@ -39,8 +41,8 @@ use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgDependRow,
-    PgDescriptionRow, PgNamespaceRow, bootstrap_catalog_kinds,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID,
+    PgDependRow, PgDescriptionRow, PgNamespaceRow, PgStatisticRow, bootstrap_catalog_kinds,
 };
 use crate::include::nodes::datum::Value;
 
@@ -81,6 +83,7 @@ pub struct CatalogWriteContext {
 }
 
 const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
+const PG_STATISTIC_RELID_ATT_INH_INDEX_OID: u32 = 2696;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CatalogControl {
@@ -744,6 +747,84 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn set_relation_analyze_stats_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relpages: i32,
+        reltuples: f64,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (name, old_entry, new_entry) = catalog.set_relation_stats(relation_oid, relpages, reltuples)?;
+        let kinds = vec![BootstrapCatalogKind::PgClass];
+        let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn replace_relation_statistics_mvcc(
+        &mut self,
+        relation_oid: u32,
+        statistics: Vec<PgStatisticRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let existing = probe_system_catalog_rows_visible(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            PG_STATISTIC_RELID_ATT_INH_INDEX_OID,
+            vec![crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                argument: Value::Int64(i64::from(relation_oid)),
+            }],
+        )?
+        .into_iter()
+        .map(pg_statistic_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let kinds = vec![BootstrapCatalogKind::PgStatistic];
+        if !existing.is_empty() {
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    statistics: existing,
+                    ..PhysicalCatalogRows::default()
+                },
+                1,
+                &kinds,
+            )?;
+        }
+        if !statistics.is_empty() {
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    statistics,
+                    ..PhysicalCatalogRows::default()
+                },
+                1,
+                &kinds,
+            )?;
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
         Ok(effect)
     }
 

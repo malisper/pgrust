@@ -601,6 +601,33 @@ impl Catalog {
         Ok((name, old_entry, new_entry))
     }
 
+    pub fn set_relation_stats(
+        &mut self,
+        relation_oid: u32,
+        relpages: i32,
+        reltuples: f64,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        entry.relpages = relpages;
+        entry.reltuples = reltuples;
+        let new_entry = entry.clone();
+        Ok((name, old_entry, new_entry))
+    }
+
     pub fn remove_by_oid(&mut self, relation_oid: u32) -> Option<(String, CatalogEntry)> {
         let name = self
             .tables

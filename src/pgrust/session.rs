@@ -7,7 +7,7 @@ use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_analyze, execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
+    execute_delete_with_waiter, execute_insert, execute_prepared_insert_row,
     execute_truncate_table, execute_update_with_waiter,
 };
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
@@ -536,8 +536,16 @@ impl Session {
                 )
             }
             Statement::Analyze(ref analyze_stmt) => {
-                let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                execute_analyze(analyze_stmt.clone(), &catalog)
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_analyze_stmt_in_transaction_with_search_path(
+                    client_id,
+                    analyze_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))

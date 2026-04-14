@@ -1,7 +1,7 @@
 #!/bin/bash
 # Run PostgreSQL regression tests against pgrust and report pass/fail statistics.
 #
-# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--test TESTNAME] [--pgrust-setup]
+# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--test TESTNAME] [--upstream-setup]
 #
 # By default, this script:
 #   1. Builds pgrust_server in release mode
@@ -17,7 +17,7 @@
 #   --timeout SECS    Per-test timeout in seconds (default: 30)
 #   --test TESTNAME   Run only this test (without .sql extension)
 #   --results-dir DIR Directory for results (default: /tmp/pgrust_regress)
-#   --pgrust-setup   Run scripts/test_setup_pgrust.sql before tests and skip upstream test_setup.sql
+#   --upstream-setup Use upstream test_setup.sql instead of the pgrust bootstrap (default: use pgrust bootstrap)
 
 set -euo pipefail
 
@@ -55,7 +55,7 @@ SINGLE_TEST=""
 RESULTS_DIR="/tmp/pgrust_regress"
 DATA_DIR="/tmp/pgrust_regress_data"
 SERVER_PID=""
-USE_PGRUST_SETUP=false
+USE_PGRUST_SETUP=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -66,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --test) SINGLE_TEST="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
+        --upstream-setup) USE_PGRUST_SETUP=false; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -78,6 +79,50 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+wait_for_server_ready() {
+    local pid="$1"
+
+    echo "Waiting for server to accept connections..."
+    for i in $(seq 1 30); do
+        if psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1; then
+            echo "Server ready."
+            return 0
+        fi
+        if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+            return 1
+        fi
+        sleep 0.5
+    done
+
+    psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1
+}
+
+start_server() {
+    echo "Starting pgrust server on port $PORT (data: $DATA_DIR)..."
+    "$SERVER_BIN" "$DATA_DIR" "$PORT" &
+    SERVER_PID=$!
+
+    if ! wait_for_server_ready "$SERVER_PID"; then
+        return 1
+    fi
+
+    return 0
+}
+
+restart_server() {
+    echo "  -> Server crashed, restarting..."
+    cleanup
+    rm -rf "$DATA_DIR"
+    mkdir -p "$DATA_DIR"
+
+    if ! start_server; then
+        echo "  -> Restart failed; aborting run to avoid contaminating later results."
+        return 1
+    fi
+
+    return 0
+}
 
 # Resolve a working timeout command (GNU coreutils on macOS installs as gtimeout)
 if command -v timeout >/dev/null 2>&1; then
@@ -112,25 +157,7 @@ if [[ "$SKIP_SERVER" == false ]]; then
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
 
-    echo "Starting pgrust server on port $PORT (data: $DATA_DIR)..."
-    "$SERVER_BIN" "$DATA_DIR" "$PORT" &
-    SERVER_PID=$!
-
-    # Wait for server to be ready
-    echo "Waiting for server to accept connections..."
-    for i in $(seq 1 30); do
-        if psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1; then
-            echo "Server ready."
-            break
-        fi
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            echo "ERROR: Server exited unexpectedly"
-            exit 1
-        fi
-        sleep 0.5
-    done
-
-    if ! psql -X -h 127.0.0.1 -p "$PORT" -U postgres -c "SELECT 1" >/dev/null 2>&1; then
+    if ! start_server; then
         echo "ERROR: Server did not become ready in time"
         exit 1
     fi
@@ -459,12 +486,9 @@ for sql_file in "${TEST_FILES[@]}"; do
 
             # If server crashed, try to restart it
             if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                echo "  -> Server crashed, restarting..."
-                rm -rf "$DATA_DIR"
-                mkdir -p "$DATA_DIR"
-                "$SERVER_BIN" "$DATA_DIR" "$PORT" &
-                SERVER_PID=$!
-                sleep 2
+                if ! restart_server; then
+                    break
+                fi
             fi
         else
             printf "%-40s FAIL  (%d/%d queries matched, %d diff lines)\n" "$test_name" "$q_matched" "$q_total" "$best_diff_lines"

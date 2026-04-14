@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn bootstrap_pg_attribute_rows_cover_core_catalog_columns() {
         let rows = bootstrap_pg_attribute_rows();
-        assert_eq!(rows.len(), 201);
+        assert_eq!(rows.len(), 204);
         assert!(rows.iter().any(|row| {
             row.attrelid == PG_CLASS_RELATION_OID
                 && row.attname == "relkind"

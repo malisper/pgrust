@@ -2108,6 +2108,8 @@ fn pg_attribute_exposes_bootstrap_columns() {
             vec![Value::Text("relpersistence".into())],
             vec![Value::Text("relkind".into())],
             vec![Value::Text("relnatts".into())],
+            vec![Value::Text("relpages".into())],
+            vec![Value::Text("reltuples".into())],
         ],
     );
 }
