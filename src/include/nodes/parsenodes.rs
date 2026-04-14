@@ -745,6 +745,7 @@ pub enum SqlTypeKind {
     Bytea,
     Float4,
     Float8,
+    Money,
     Numeric,
     Json,
     Jsonb,

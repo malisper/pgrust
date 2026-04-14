@@ -8,6 +8,7 @@ use super::expr_geometry::{
     cast_geometry_value, geometry_input_error_message, parse_geometry_text,
 };
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
+use super::expr_money::{money_format_text, money_from_float, money_numeric_text, money_parse_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_type_name};
@@ -945,6 +946,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 ..
             } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
             SqlType {
+                kind: SqlTypeKind::Money,
+                ..
+            } => Ok(Value::Money(i64::from(v) * 100)),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Name
@@ -1031,6 +1036,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::Numeric,
                 ..
             } => Ok(Value::Numeric(NumericValue::from_i64(v as i64))),
+            SqlType {
+                kind: SqlTypeKind::Money,
+                ..
+            } => Ok(Value::Money(i64::from(v) * 100)),
             SqlType {
                 kind:
                     SqlTypeKind::Text
@@ -1132,6 +1141,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     | SqlTypeKind::Bytea
                     | SqlTypeKind::Float4
                     | SqlTypeKind::Float8
+                    | SqlTypeKind::Money
                     | SqlTypeKind::Numeric,
                 ..
             } => Err(ExecError::TypeMismatch {
@@ -1418,6 +1428,18 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 ..
             } => Ok(Value::Numeric(NumericValue::from_i64(v))),
             SqlType {
+                kind: SqlTypeKind::Money,
+                ..
+            } => v
+                .checked_mul(100)
+                .map(Value::Money)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "money out of range".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "22003",
+                }),
+            SqlType {
                 kind:
                     SqlTypeKind::Text
                     | SqlTypeKind::Name
@@ -1488,6 +1510,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                     .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?,
                 ty,
             )?)),
+            SqlType {
+                kind: SqlTypeKind::Money,
+                ..
+            } => Ok(Value::Money(money_from_float(v)?)),
             SqlType {
                 kind:
                     SqlTypeKind::Text
@@ -1563,6 +1589,15 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             } => Err(unsupported_record_input()),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
+        Value::Money(v) => match ty.kind {
+            SqlTypeKind::Money => Ok(Value::Money(v)),
+            SqlTypeKind::Numeric => Ok(Value::Numeric(NumericValue::from(money_numeric_text(v)))),
+            SqlTypeKind::Int8 => Ok(Value::Int64(v / 100)),
+            SqlTypeKind::Int4 => i32::try_from(v / 100).map(Value::Int32).map_err(|_| ExecError::Int4OutOfRange),
+            SqlTypeKind::Int2 => i16::try_from(v / 100).map(Value::Int16).map_err(|_| ExecError::Int2OutOfRange),
+            SqlTypeKind::Float4 | SqlTypeKind::Float8 => Ok(Value::Float64(v as f64 / 100.0)),
+            _ => cast_text_value(&money_format_text(v), ty, true),
+        },
         Value::Bit(bits) => match ty.kind {
             SqlTypeKind::Bit | SqlTypeKind::VarBit => {
                 Ok(Value::Bit(coerce_bit_string(bits, ty, true)?))
@@ -1662,6 +1697,7 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         SqlTypeKind::Int2 => cast_text_to_int2(text),
         SqlTypeKind::Int4 => cast_text_to_int4(text),
         SqlTypeKind::Int8 => cast_text_to_int8(text),
+        SqlTypeKind::Money => money_parse_text(text).map(Value::Money),
         SqlTypeKind::Oid => cast_text_to_oid(text),
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text, ty.kind).map(|v| {
             Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
@@ -1695,6 +1731,7 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
+        SqlTypeKind::Money => money_parse_text(&value.render()).map(Value::Money),
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector

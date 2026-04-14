@@ -406,6 +406,7 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
     match func {
         AggFunc::Sum => match arg_type.map(|t| t.element_type().kind) {
             Some(Int2 | Int4) => SqlType::new(Int8),
+            Some(Money) => SqlType::new(Money),
             Some(Int8 | Numeric) => SqlType::new(Numeric),
             Some(Float4) => SqlType::new(Float4),
             Some(Float8) => SqlType::new(Float8),

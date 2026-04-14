@@ -239,6 +239,9 @@ impl AccumState {
             AccumState::Count { count } => Value::Int64(*count),
             AccumState::CountDistinct { seen } => Value::Int64(seen.len() as i64),
             AccumState::Sum { sum, result_type } => match sum {
+                Some(NumericAccum::Int(v)) if matches!(result_type.kind, SqlTypeKind::Money) => {
+                    Value::Money(*v)
+                }
                 Some(NumericAccum::Int(v)) => Value::Int64(*v),
                 Some(NumericAccum::Float(v)) => Value::Float64(*v),
                 Some(NumericAccum::Numeric(v)) => {
@@ -435,6 +438,7 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Bool(v) => {
             if *v {
@@ -471,6 +475,7 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Bool(v) => {
@@ -533,6 +538,7 @@ fn accumulate_value(
         Value::Int16(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
         Value::Int32(v) => Some(accumulate_integral(sum, result_type, *v as i64)),
         Value::Int64(v) => Some(accumulate_integral(sum, result_type, *v)),
+        Value::Money(v) => Some(accumulate_integral(sum, result_type, *v)),
         Value::Float64(v) => Some(match sum {
             Some(NumericAccum::Numeric(cur)) => {
                 let rhs = parse_numeric_text(&v.to_string()).unwrap_or_else(NumericValue::zero);

@@ -77,6 +77,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Money => "money",
         SqlTypeKind::Numeric => "numeric",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
@@ -176,6 +177,9 @@ pub(super) fn coerce_unknown_string_literal_type(
         }
         if is_numeric_family(peer_type) {
             return peer_type.element_type();
+        }
+        if matches!(peer_type.element_type().kind, SqlTypeKind::Money) {
+            return SqlType::new(SqlTypeKind::Money);
         }
         if is_bit_string_type(peer_type) {
             return SqlType::new(SqlTypeKind::VarBit);

@@ -21,6 +21,7 @@ use super::expr_math::{
     eval_erf, eval_erfc, eval_float_send_function, eval_gamma, eval_gcd_function,
     eval_lcm_function, eval_lgamma, eval_unary_float_function, sind, snap_degree, tand,
 };
+use super::expr_money::{cash_words_text, money_larger, money_smaller};
 use super::expr_numeric::{
     eval_ceil_function, eval_div_function, eval_exp_function, eval_factorial_function,
     eval_floor_function, eval_ln_function, eval_log_function, eval_log10_function,
@@ -669,6 +670,34 @@ fn eval_plpgsql_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::CashLarger => match values.as_slice() {
+            [Value::Money(left), Value::Money(right)] => {
+                Ok(Value::Money(money_larger(*left, *right)))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "cashlarger",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::CashSmaller => match values.as_slice() {
+            [Value::Money(left), Value::Money(right)] => {
+                Ok(Value::Money(money_smaller(*left, *right)))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "cashsmaller",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::CashWords => match values.as_slice() {
+            [Value::Money(value)] => Ok(Value::Text(cash_words_text(*value).into())),
+            _ => Err(ExecError::TypeMismatch {
+                op: "cash_words",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Null,
+            }),
+        },
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
@@ -1105,6 +1134,34 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::WebSearchToTsQuery
         | BuiltinScalarFunction::TsLexize => eval_text_search_builtin_function(func, &values),
         BuiltinScalarFunction::Random => Ok(Value::Float64(rand::random::<f64>())),
+        BuiltinScalarFunction::CashLarger => match values.as_slice() {
+            [Value::Money(left), Value::Money(right)] => {
+                Ok(Value::Money(money_larger(*left, *right)))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "cashlarger",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::CashSmaller => match values.as_slice() {
+            [Value::Money(left), Value::Money(right)] => {
+                Ok(Value::Money(money_smaller(*left, *right)))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "cashsmaller",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
+        BuiltinScalarFunction::CashWords => match values.as_slice() {
+            [Value::Money(value)] => Ok(Value::Text(cash_words_text(*value).into())),
+            _ => Err(ExecError::TypeMismatch {
+                op: "cash_words",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: Value::Null,
+            }),
+        },
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp

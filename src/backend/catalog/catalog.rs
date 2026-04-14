@@ -12,6 +12,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Int16 => (2, AttributeAlign::Short),
         ScalarType::Int32 => (4, AttributeAlign::Int),
         ScalarType::Int64 => (8, AttributeAlign::Double),
+        ScalarType::Money => (8, AttributeAlign::Double),
         ScalarType::Date => (4, AttributeAlign::Int),
         ScalarType::Time => (8, AttributeAlign::Double),
         ScalarType::TimeTz => (12, AttributeAlign::Double),
@@ -98,6 +99,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Int2
         | SqlTypeKind::Int4
         | SqlTypeKind::Int8
+        | SqlTypeKind::Money
         | SqlTypeKind::Oid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
@@ -138,6 +140,7 @@ fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Int2Vector => ScalarType::Text,
         SqlTypeKind::Int4 => ScalarType::Int32,
         SqlTypeKind::Int8 => ScalarType::Int64,
+        SqlTypeKind::Money => ScalarType::Money,
         SqlTypeKind::Name => ScalarType::Text,
         SqlTypeKind::Oid => ScalarType::Int32,
         SqlTypeKind::OidVector => ScalarType::Text,

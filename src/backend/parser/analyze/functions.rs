@@ -432,6 +432,10 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::TsQueryAnd
             | BuiltinScalarFunction::TsQueryOr
             | BuiltinScalarFunction::TsVectorConcat => args.len() == 2,
+            BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller => {
+                args.len() == 2
+            }
+            BuiltinScalarFunction::CashWords => args.len() == 1,
             BuiltinScalarFunction::Random => args.is_empty(),
             BuiltinScalarFunction::Now
             | BuiltinScalarFunction::TransactionTimestamp
@@ -980,6 +984,9 @@ fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarF
 fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFunction)] {
     &[
         ("random", BuiltinScalarFunction::Random),
+        ("cashlarger", BuiltinScalarFunction::CashLarger),
+        ("cashsmaller", BuiltinScalarFunction::CashSmaller),
+        ("cash_words", BuiltinScalarFunction::CashWords),
         ("now", BuiltinScalarFunction::Now),
         (
             "transaction_timestamp",
@@ -1387,6 +1394,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::TsQueryNot
             | BuiltinScalarFunction::TsVectorConcat
             | BuiltinScalarFunction::Random
+            | BuiltinScalarFunction::CashLarger
+            | BuiltinScalarFunction::CashSmaller
+            | BuiltinScalarFunction::CashWords
             | BuiltinScalarFunction::Now
             | BuiltinScalarFunction::TransactionTimestamp
             | BuiltinScalarFunction::StatementTimestamp

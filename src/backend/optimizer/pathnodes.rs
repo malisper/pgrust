@@ -1317,6 +1317,7 @@ fn value_sql_type_hint(value: &Value) -> SqlType {
         Value::Int16(_) => SqlType::new(SqlTypeKind::Int2),
         Value::Int32(_) => SqlType::new(SqlTypeKind::Int4),
         Value::Int64(_) => SqlType::new(SqlTypeKind::Int8),
+        Value::Money(_) => SqlType::new(SqlTypeKind::Money),
         Value::Date(_) => SqlType::new(SqlTypeKind::Date),
         Value::Time(_) => SqlType::new(SqlTypeKind::Time),
         Value::TimeTz(_) => SqlType::new(SqlTypeKind::TimeTz),

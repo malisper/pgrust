@@ -3837,6 +3837,7 @@ fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         SqlTypeKind::Int2 => 2,
         SqlTypeKind::Int4 | SqlTypeKind::Oid | SqlTypeKind::Date | SqlTypeKind::Float4 => 4,
         SqlTypeKind::Int8
+        | SqlTypeKind::Money
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::Time

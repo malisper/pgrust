@@ -172,6 +172,7 @@ fn render_raise_value(value: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Bit(v) => crate::backend::executor::render_bit_text(v),
