@@ -375,22 +375,22 @@ fn slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
 }
 
 fn project_pathkeys(slot_id: usize, targets: &[TargetEntry], input_pathkeys: &[PathKey]) -> Vec<PathKey> {
-    let mut pathkeys = Vec::new();
-    for key in input_pathkeys {
-        let Some((index, target)) = targets
-            .iter()
-            .enumerate()
-            .find(|(_, target)| target.expr == key.expr)
-        else {
-            break;
-        };
-        pathkeys.push(PathKey {
-            expr: slot_var(slot_id, index + 1, target.sql_type),
-            descending: key.descending,
-            nulls_first: key.nulls_first,
-        });
-    }
-    pathkeys
+    input_pathkeys
+        .iter()
+        .map(|key| {
+            let expr = targets
+                .iter()
+                .enumerate()
+                .find(|(_, target)| target.expr == key.expr)
+                .map(|(index, target)| slot_var(slot_id, index + 1, target.sql_type))
+                .unwrap_or_else(|| key.expr.clone());
+            PathKey {
+                expr,
+                descending: key.descending,
+                nulls_first: key.nulls_first,
+            }
+        })
+        .collect()
 }
 
 pub(super) fn aggregate_output_vars(

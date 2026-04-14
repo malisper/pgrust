@@ -17,6 +17,7 @@ The current code supports:
 - inner joins (`JOIN ... ON`) and cross joins (`FROM a, b`)
 - qualified column names (`table.column`)
 - `GROUP BY`, `HAVING`
+- `LEFT JOIN`
 - aggregate functions: `COUNT(*)`, `COUNT(expr)`, `SUM`, `AVG`, `MIN`, `MAX`
 - boolean operators: `AND`, `OR`, `NOT`
 - comparison operators: `=`, `<`, `>`
@@ -28,6 +29,7 @@ The current code supports:
 - durable transaction status (persisted to disk)
 - wire protocol server (psql-compatible)
 - `TRUNCATE` and `TRUNCATE TABLE`
+- `CREATE INDEX` and B-tree index scans
 - `VACUUM` accepted as a no-op compatibility shim
 - limited `COPY FROM STDIN` compatibility for pgbench-style data loading
 
@@ -87,51 +89,57 @@ No subquery support of any kind:
 
 ## JOIN types
 
-Only `INNER JOIN` and implicit cross join (`FROM a, b`) are supported.
+`INNER JOIN`, implicit cross join (`FROM a, b`), and `LEFT JOIN` are supported.
+Join reordering also exists, with `SpecialJoinInfo`-driven legality checks for
+outer joins.
 
-- `LEFT JOIN` / `LEFT OUTER JOIN`
-- `RIGHT JOIN` / `RIGHT OUTER JOIN`
-- `FULL OUTER JOIN`
-- `CROSS JOIN` (explicit syntax)
-- `NATURAL JOIN`
-- `USING` clause
-- multi-way joins (more than two tables)
-- self-joins
+Still incomplete versus PostgreSQL:
+
+- `RIGHT JOIN` / `RIGHT OUTER JOIN` edge cases
+- `FULL OUTER JOIN` planning and reassociation fidelity
+- complete `NATURAL JOIN` / `USING` behavior across all planner paths
+- richer outer-join identity/barrier handling
+- some self-join and multi-way outer-join corner cases
 
 ## Index access methods
 
-No indexes exist. All scans are sequential scans. PostgreSQL supports:
+B-tree indexes and index scans exist. PostgreSQL supports more index access
+methods than pgrust currently implements:
 
-- B-tree indexes
 - Hash indexes
 - GiST indexes
 - GIN indexes
 - BRIN indexes
 - SP-GiST indexes
 
-**To add:** An index AM interface, a B-tree implementation, `CREATE INDEX`
-syntax, and an index scan plan node.
+**To add:** More index AMs beyond B-tree, plus broader planner support for
+index-driven strategies.
 
 ## Planner / optimizer
 
-There is no cost-based optimizer, and the logical planner only supports
-`SELECT` queries today. `UPDATE` and `DELETE` execution exist, but they do not
-go through the same planner path as `SELECT`.
+pgrust has a cost-based `SELECT` planner with PostgreSQL-shaped planner state.
+Current path and plan support includes:
 
-For `SELECT`, the planner always produces:
-- sequential scan for table access
-- nested loop for joins
-- in-memory sort for `ORDER BY`
+- sequential scan
+- index scan
+- nested loop join
+- sort
+- aggregate
+- limit
+- projection
+- values scan
+- function scan
+- project-set
+- join reordering with outer-join legality checks
 
-Missing planner features:
+Still missing planner features:
 
-- cost model and statistics
-- index scan selection
 - merge join, hash join
-- join reordering
-- predicate pushdown
-- projection pushdown
-- common subexpression elimination
+- parameterized paths
+- parallel paths
+- PG-style path domination pruning
+- equivalence-class and pathkey machinery at PostgreSQL depth
+- lateral join planning
 - plan caching
 
 ## ALTER TABLE
