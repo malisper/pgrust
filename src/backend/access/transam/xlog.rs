@@ -18,8 +18,11 @@ use std::time::Duration;
 
 use crate::backend::access::transam::xloginsert::RegisteredXLogRecord;
 use crate::backend::access::transam::xlogreader::{
-    BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_STANDARD, BKPBLOCK_WILL_INIT, CRC_OFFSET,
-    DecodedBkpBlock, DecodedXLogRecord, XLOG_BLOCK_HEADER,
+    BKPIMAGE_APPLY, BKPIMAGE_HAS_HOLE, BKPBLOCK_FORK_MASK, BKPBLOCK_HAS_DATA,
+    BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL, BKPBLOCK_WILL_INIT, CRC_OFFSET,
+    DecodedBkpBlock, DecodedXLogRecord, XLOG_BLOCK_HEADER, XLOG_BLOCK_IMAGE_HEADER,
+    XLOG_RECORD_DATA_HEADER_LONG, XLOG_RECORD_DATA_HEADER_SHORT, XLR_BLOCK_ID_DATA_LONG,
+    XLR_BLOCK_ID_DATA_SHORT, XLR_MAX_BLOCK_ID,
 };
 use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator};
@@ -34,6 +37,7 @@ pub use crate::backend::access::transam::xlogreader::{WAL_RECORD_LEN, XLOG_RECOR
 const WAL_BUF_SIZE: usize = 64 * 1024;
 /// Threshold of buffered WAL data that wakes the background writer.
 const BG_FLUSH_THRESHOLD: u64 = 1024 * 1024;
+const WAL_RECORD_ALIGN: u64 = 8;
 
 pub type Lsn = u64;
 pub const INVALID_LSN: Lsn = 0;
@@ -62,6 +66,11 @@ pub const XLOG_BTREE_MARK_PAGE_HALFDEAD: u8 = 0x18;
 pub const XLOG_BTREE_UNLINK_PAGE: u8 = 0x19;
 pub const XLOG_BTREE_UNLINK_PAGE_META: u8 = 0x1a;
 pub const XLOG_BTREE_REUSE_PAGE: u8 = 0x1b;
+
+fn align_up(value: u64, align: u64) -> u64 {
+    debug_assert!(align.is_power_of_two());
+    (value + (align - 1)) & !(align - 1)
+}
 
 #[derive(Debug)]
 pub enum WalError {
@@ -128,6 +137,7 @@ impl WalReader {
     }
 
     pub fn next_decoded_record(&mut self) -> Result<Option<DecodedXLogRecord>, WalError> {
+        self.position = align_up(self.position, WAL_RECORD_ALIGN);
         if self.position >= self.file_size {
             return Ok(None);
         }
@@ -138,6 +148,7 @@ impl WalReader {
         }
 
         let mut header = [0u8; XLOG_RECORD_HEADER];
+        self.file.seek(SeekFrom::Start(self.position))?;
         if self.file.read_exact(&mut header).is_err() {
             return Ok(None);
         }
@@ -149,7 +160,8 @@ impl WalReader {
 
         let mut raw = vec![0u8; total_len];
         raw[..XLOG_RECORD_HEADER].copy_from_slice(&header);
-        if self.file.read_exact(&mut raw[XLOG_RECORD_HEADER..]).is_err() {
+        self.file.seek(SeekFrom::Start(self.position))?;
+        if self.file.read_exact(&mut raw).is_err() {
             return Ok(None);
         }
 
@@ -162,53 +174,151 @@ impl WalReader {
 
         let xid = u32::from_le_bytes(raw[4..8].try_into().unwrap());
         let prev = u64::from_le_bytes(raw[8..16].try_into().unwrap());
-        let main_data_len = u32::from_le_bytes(raw[16..20].try_into().unwrap()) as usize;
-        let block_count = raw[20] as usize;
-        let rmid = raw[21];
-        let info = raw[22];
-        let record_end = self.position + total_len as u64;
+        let info = raw[16];
+        let rmid = raw[17];
+        let record_start = self.position;
+        let record_end = record_start + total_len as u64;
+
+        #[derive(Clone)]
+        struct PendingBlock {
+            block_id: u8,
+            tag: BufferTag,
+            flags: u8,
+            data_len: usize,
+            image_len: usize,
+            hole_offset: u16,
+            hole_length: u16,
+        }
 
         let mut offset = XLOG_RECORD_HEADER;
-        let mut blocks = Vec::with_capacity(block_count);
-        for _ in 0..block_count {
-            if offset + XLOG_BLOCK_HEADER > raw.len() {
-                return Err(WalError::Corrupt("truncated WAL block header".into()));
-            }
-            let block_id = raw[offset];
-            let flags = raw[offset + 1];
-            let fork = ForkNumber::from_u8(raw[offset + 2]);
-            let tag = BufferTag {
-                rel: RelFileLocator {
-                    spc_oid: u32::from_le_bytes(raw[offset + 4..offset + 8].try_into().unwrap()),
-                    db_oid: u32::from_le_bytes(raw[offset + 8..offset + 12].try_into().unwrap()),
-                    rel_number: u32::from_le_bytes(
-                        raw[offset + 12..offset + 16].try_into().unwrap(),
-                    ),
-                },
-                fork,
-                block: u32::from_le_bytes(raw[offset + 16..offset + 20].try_into().unwrap()),
-            };
-            let data_len = u32::from_le_bytes(raw[offset + 20..offset + 24].try_into().unwrap())
-                as usize;
-            let image_len = u32::from_le_bytes(raw[offset + 24..offset + 28].try_into().unwrap())
-                as usize;
-            let hole_offset =
-                u16::from_le_bytes(raw[offset + 28..offset + 30].try_into().unwrap());
-            let hole_length =
-                u16::from_le_bytes(raw[offset + 30..offset + 32].try_into().unwrap());
-            offset += XLOG_BLOCK_HEADER;
+        let mut data_total = 0usize;
+        let mut main_data_len = 0usize;
+        let mut blocks = Vec::<PendingBlock>::new();
+        let mut previous_rel: Option<RelFileLocator> = None;
 
-            let image = if flags & BKPBLOCK_HAS_IMAGE != 0 {
-                if offset + image_len > raw.len() {
+        while total_len - offset > data_total {
+            let block_id = raw[offset];
+            offset += 1;
+            match block_id {
+                XLR_BLOCK_ID_DATA_SHORT => {
+                    if offset + 1 > raw.len() {
+                        return Err(WalError::Corrupt("truncated WAL short data header".into()));
+                    }
+                    main_data_len = raw[offset] as usize;
+                    offset += XLOG_RECORD_DATA_HEADER_SHORT - 1;
+                    data_total += main_data_len;
+                    break;
+                }
+                XLR_BLOCK_ID_DATA_LONG => {
+                    if offset + 4 > raw.len() {
+                        return Err(WalError::Corrupt("truncated WAL long data header".into()));
+                    }
+                    main_data_len =
+                        u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap()) as usize;
+                    offset += XLOG_RECORD_DATA_HEADER_LONG - 1;
+                    data_total += main_data_len;
+                    break;
+                }
+                id if id <= XLR_MAX_BLOCK_ID => {
+                    if offset + (XLOG_BLOCK_HEADER - 1) > raw.len() {
+                        return Err(WalError::Corrupt("truncated WAL block header".into()));
+                    }
+                    let fork_flags = raw[offset];
+                    let mut flags = fork_flags & !BKPBLOCK_FORK_MASK;
+                    let fork = ForkNumber::from_u8(fork_flags & BKPBLOCK_FORK_MASK);
+                    let data_len =
+                        u16::from_le_bytes(raw[offset + 1..offset + 3].try_into().unwrap()) as usize;
+                    offset += XLOG_BLOCK_HEADER - 1;
+                    data_total += data_len;
+
+                    let mut image_len = 0usize;
+                    let mut hole_offset = 0u16;
+                    let mut hole_length = 0u16;
+                    if flags & BKPBLOCK_HAS_IMAGE != 0 {
+                        if offset + XLOG_BLOCK_IMAGE_HEADER > raw.len() {
+                            return Err(WalError::Corrupt("truncated WAL block image header".into()));
+                        }
+                        image_len =
+                            u16::from_le_bytes(raw[offset..offset + 2].try_into().unwrap()) as usize;
+                        hole_offset =
+                            u16::from_le_bytes(raw[offset + 2..offset + 4].try_into().unwrap());
+                        let bimg_info = raw[offset + 4];
+                        offset += XLOG_BLOCK_IMAGE_HEADER;
+                        data_total += image_len;
+                        if bimg_info & BKPIMAGE_HAS_HOLE != 0 {
+                            if hole_offset as usize > PAGE_SIZE || image_len >= PAGE_SIZE {
+                                return Err(WalError::Corrupt("invalid WAL hole-compressed image".into()));
+                            }
+                            hole_length = (PAGE_SIZE - image_len) as u16;
+                        }
+                        if bimg_info & BKPIMAGE_APPLY == 0 {
+                            flags &= !BKPBLOCK_HAS_IMAGE;
+                        }
+                    }
+
+                    let rel = if flags & BKPBLOCK_SAME_REL != 0 {
+                        previous_rel.ok_or_else(|| {
+                            WalError::Corrupt("BKPBLOCK_SAME_REL without prior rel".into())
+                        })?
+                    } else {
+                        if offset + 12 > raw.len() {
+                            return Err(WalError::Corrupt("truncated WAL rel locator".into()));
+                        }
+                        let rel = RelFileLocator {
+                            spc_oid: u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap()),
+                            db_oid: u32::from_le_bytes(
+                                raw[offset + 4..offset + 8].try_into().unwrap(),
+                            ),
+                            rel_number: u32::from_le_bytes(
+                                raw[offset + 8..offset + 12].try_into().unwrap(),
+                            ),
+                        };
+                        offset += 12;
+                        previous_rel = Some(rel);
+                        rel
+                    };
+
+                    if offset + 4 > raw.len() {
+                        return Err(WalError::Corrupt("truncated WAL block number".into()));
+                    }
+                    let block = u32::from_le_bytes(raw[offset..offset + 4].try_into().unwrap());
+                    offset += 4;
+
+                    blocks.push(PendingBlock {
+                        block_id: id,
+                        tag: BufferTag { rel, fork, block },
+                        flags,
+                        data_len,
+                        image_len,
+                        hole_offset,
+                        hole_length,
+                    });
+                }
+                other => {
+                    return Err(WalError::Corrupt(format!("invalid WAL block id {other}")));
+                }
+            }
+        }
+
+        if total_len - offset != data_total {
+            return Err(WalError::Corrupt("WAL header/data length mismatch".into()));
+        }
+
+        let mut payload_offset = offset;
+        let mut decoded_blocks = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let image = if block.image_len > 0 {
+                if payload_offset + block.image_len > raw.len() {
                     return Err(WalError::Corrupt("truncated WAL block image".into()));
                 }
-                let compressed = &raw[offset..offset + image_len];
-                offset += image_len;
+                let compressed = &raw[payload_offset..payload_offset + block.image_len];
+                payload_offset += block.image_len;
                 let mut page = Box::new([0u8; PAGE_SIZE]);
-                if hole_length > 0 {
-                    let hole_start = hole_offset as usize;
-                    let hole_size = hole_length as usize;
-                    if hole_start + hole_size > PAGE_SIZE || compressed.len() + hole_size != PAGE_SIZE
+                if block.hole_length > 0 {
+                    let hole_start = block.hole_offset as usize;
+                    let hole_size = block.hole_length as usize;
+                    if hole_start + hole_size > PAGE_SIZE
+                        || compressed.len() + hole_size != PAGE_SIZE
                     {
                         return Err(WalError::Corrupt("invalid WAL hole-compressed image".into()));
                     }
@@ -224,42 +334,43 @@ impl WalReader {
                 None
             };
 
-            let data = if flags & BKPBLOCK_HAS_DATA != 0 {
-                if offset + data_len > raw.len() {
+            let data = if block.data_len > 0 {
+                if payload_offset + block.data_len > raw.len() {
                     return Err(WalError::Corrupt("truncated WAL block data".into()));
                 }
-                let bytes = raw[offset..offset + data_len].to_vec();
-                offset += data_len;
+                let bytes = raw[payload_offset..payload_offset + block.data_len].to_vec();
+                payload_offset += block.data_len;
                 bytes
             } else {
                 Vec::new()
             };
 
-            blocks.push(DecodedBkpBlock {
-                block_id,
-                tag,
-                flags,
+            decoded_blocks.push(DecodedBkpBlock {
+                block_id: block.block_id,
+                tag: block.tag,
+                flags: block.flags,
                 data,
                 image,
-                hole_offset,
-                hole_length,
+                hole_offset: block.hole_offset,
+                hole_length: block.hole_length,
             });
         }
 
-        if offset + main_data_len > raw.len() {
+        if payload_offset + main_data_len > raw.len() {
             return Err(WalError::Corrupt("truncated WAL main data".into()));
         }
-        let main_data = raw[offset..offset + main_data_len].to_vec();
+        let main_data = raw[payload_offset..payload_offset + main_data_len].to_vec();
         self.position = record_end;
 
         Ok(Some(DecodedXLogRecord {
+            start_lsn: record_start,
             end_lsn: record_end,
             total_len: total_len as u32,
             xid,
             prev,
             rmid,
             info,
-            blocks,
+            blocks: decoded_blocks,
             main_data,
         }))
     }
@@ -346,11 +457,31 @@ impl WalReader {
     }
 }
 
+fn scan_existing_wal_state(wal_dir: &Path) -> Result<(u64, u64), WalError> {
+    let path = wal_dir.join("wal.log");
+    if !path.exists() {
+        return Ok((0, INVALID_LSN));
+    }
+    let size = std::fs::metadata(&path)?.len();
+    if size == 0 {
+        return Ok((0, INVALID_LSN));
+    }
+    let mut reader = WalReader::open(wal_dir)?;
+    let mut last_start = INVALID_LSN;
+    let mut last_end = 0;
+    while let Some(record) = reader.next_decoded_record()? {
+        last_start = record.start_lsn;
+        last_end = record.end_lsn;
+    }
+    Ok((size.max(last_end), last_start))
+}
+
 struct WalWriterInner {
     file: BufWriter<File>,
     insert_lsn: Lsn,
     written_lsn: Lsn,
     flushed_lsn: Lsn,
+    last_record_ptr: Lsn,
     pages_with_image: HashSet<BufferTag>,
 }
 
@@ -371,13 +502,13 @@ impl WalWriter {
     pub fn new(wal_dir: &Path) -> Result<Self, WalError> {
         std::fs::create_dir_all(wal_dir)?;
         let path = wal_dir.join("wal.log");
+        let (size, last_record_ptr) = scan_existing_wal_state(wal_dir)?;
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .open(&path)?;
         let mut file = file;
-        let size = file.metadata()?.len();
         file.seek(SeekFrom::End(0))?;
         Ok(Self {
             inner: Mutex::new(WalWriterInner {
@@ -385,6 +516,7 @@ impl WalWriter {
                 insert_lsn: size,
                 written_lsn: size,
                 flushed_lsn: size,
+                last_record_ptr,
                 pages_with_image: HashSet::new(),
             }),
             bg_wake: Condvar::new(),
@@ -488,11 +620,15 @@ impl WalWriter {
         info: u8,
         record: RegisteredXLogRecord,
     ) -> Result<Lsn, WalError> {
+        let mut header = Vec::new();
+        let mut payload = Vec::new();
         let main_data_len = record.main_data.len();
-        let mut total_len = XLOG_RECORD_HEADER + main_data_len;
-        let mut encoded_blocks = Vec::with_capacity(record.blocks.len());
+        let mut previous_rel: Option<RelFileLocator> = None;
 
         for (_, block) in record.blocks {
+            if block.data.len() > u16::MAX as usize {
+                return Err(WalError::Corrupt("WAL block data too large".into()));
+            }
             let mut encoded =
                 EncodedBlock::new(block.tag, block.block_id, block.flags, block.data);
             if let Some(image) = block.page_image {
@@ -501,71 +637,88 @@ impl WalWriter {
                 encoded.hole_length = hole_length;
                 encoded.image = compressed_image;
             }
-            total_len += XLOG_BLOCK_HEADER + encoded.image.len() + encoded.data.len();
-            encoded_blocks.push(encoded);
+
+            let same_rel = previous_rel == Some(encoded.tag.rel);
+            let mut fork_flags = encoded.tag.fork.as_u8() & BKPBLOCK_FORK_MASK;
+            if !encoded.image.is_empty() {
+                fork_flags |= BKPBLOCK_HAS_IMAGE;
+            }
+            if !encoded.data.is_empty() {
+                fork_flags |= BKPBLOCK_HAS_DATA;
+            }
+            if encoded.reg_flags & REGBUF_WILL_INIT != 0 {
+                fork_flags |= BKPBLOCK_WILL_INIT;
+            }
+            if same_rel {
+                fork_flags |= BKPBLOCK_SAME_REL;
+            } else {
+                previous_rel = Some(encoded.tag.rel);
+            }
+
+            header.push(encoded.block_id);
+            header.push(fork_flags);
+            header.extend_from_slice(&(encoded.data.len() as u16).to_le_bytes());
+
+            if !encoded.image.is_empty() {
+                let mut bimg_info = BKPIMAGE_APPLY;
+                if encoded.hole_length > 0 {
+                    bimg_info |= BKPIMAGE_HAS_HOLE;
+                }
+                header.extend_from_slice(&(encoded.image.len() as u16).to_le_bytes());
+                header.extend_from_slice(&encoded.hole_offset.to_le_bytes());
+                header.push(bimg_info);
+            }
+            if !same_rel {
+                header.extend_from_slice(&encoded.tag.rel.spc_oid.to_le_bytes());
+                header.extend_from_slice(&encoded.tag.rel.db_oid.to_le_bytes());
+                header.extend_from_slice(&encoded.tag.rel.rel_number.to_le_bytes());
+            }
+            header.extend_from_slice(&encoded.tag.block.to_le_bytes());
+
+            if !encoded.image.is_empty() {
+                payload.extend_from_slice(&encoded.image);
+                guard.pages_with_image.insert(encoded.tag);
+            }
+            if !encoded.data.is_empty() {
+                payload.extend_from_slice(&encoded.data);
+            }
         }
 
-        let prev_lsn = guard.insert_lsn;
-        let end_lsn = prev_lsn + total_len as Lsn;
+        if main_data_len > 0 {
+            if main_data_len < 256 {
+                header.push(XLR_BLOCK_ID_DATA_SHORT);
+                header.push(main_data_len as u8);
+            } else {
+                header.push(XLR_BLOCK_ID_DATA_LONG);
+                header.extend_from_slice(&(main_data_len as u32).to_le_bytes());
+            }
+            payload.extend_from_slice(&record.main_data);
+        }
+
+        let total_len = XLOG_RECORD_HEADER + header.len() + payload.len();
+        let start_lsn = align_up(guard.insert_lsn, WAL_RECORD_ALIGN);
+        let padding_len = (start_lsn - guard.insert_lsn) as usize;
+        let prev_ptr = guard.last_record_ptr;
+        let end_lsn = start_lsn + total_len as Lsn;
 
         let mut raw = vec![0u8; total_len];
         raw[0..4].copy_from_slice(&(total_len as u32).to_le_bytes());
         raw[4..8].copy_from_slice(&xid.to_le_bytes());
-        raw[8..16].copy_from_slice(&prev_lsn.to_le_bytes());
-        raw[16..20].copy_from_slice(&(main_data_len as u32).to_le_bytes());
-        raw[20] = encoded_blocks.len() as u8;
-        raw[21] = rmid;
-        raw[22] = info;
-        raw[23] = 0;
-
-        let mut offset = XLOG_RECORD_HEADER;
-        for block in encoded_blocks {
-            let mut flags = 0u8;
-            if !block.image.is_empty() {
-                flags |= BKPBLOCK_HAS_IMAGE;
-            }
-            if !block.data.is_empty() {
-                flags |= BKPBLOCK_HAS_DATA;
-            }
-            if block.reg_flags & REGBUF_WILL_INIT != 0 {
-                flags |= BKPBLOCK_WILL_INIT;
-            }
-            if block.reg_flags & REGBUF_STANDARD != 0 {
-                flags |= BKPBLOCK_STANDARD;
-            }
-            raw[offset] = block.block_id;
-            raw[offset + 1] = flags;
-            raw[offset + 2] = block.tag.fork.as_u8();
-            raw[offset + 4..offset + 8].copy_from_slice(&block.tag.rel.spc_oid.to_le_bytes());
-            raw[offset + 8..offset + 12].copy_from_slice(&block.tag.rel.db_oid.to_le_bytes());
-            raw[offset + 12..offset + 16]
-                .copy_from_slice(&block.tag.rel.rel_number.to_le_bytes());
-            raw[offset + 16..offset + 20].copy_from_slice(&block.tag.block.to_le_bytes());
-            raw[offset + 20..offset + 24].copy_from_slice(&(block.data.len() as u32).to_le_bytes());
-            raw[offset + 24..offset + 28]
-                .copy_from_slice(&(block.image.len() as u32).to_le_bytes());
-            raw[offset + 28..offset + 30].copy_from_slice(&block.hole_offset.to_le_bytes());
-            raw[offset + 30..offset + 32].copy_from_slice(&block.hole_length.to_le_bytes());
-            offset += XLOG_BLOCK_HEADER;
-
-            if !block.image.is_empty() {
-                raw[offset..offset + block.image.len()].copy_from_slice(&block.image);
-                offset += block.image.len();
-            }
-            if !block.data.is_empty() {
-                raw[offset..offset + block.data.len()].copy_from_slice(&block.data);
-                offset += block.data.len();
-            }
-            if !block.image.is_empty() {
-                guard.pages_with_image.insert(block.tag);
-            }
-        }
-
-        raw[offset..offset + main_data_len].copy_from_slice(&record.main_data);
+        raw[8..16].copy_from_slice(&prev_ptr.to_le_bytes());
+        raw[16] = info;
+        raw[17] = rmid;
+        raw[18..20].fill(0);
+        let header_end = XLOG_RECORD_HEADER + header.len();
+        raw[XLOG_RECORD_HEADER..header_end].copy_from_slice(&header);
+        raw[header_end..].copy_from_slice(&payload);
         let crc = crc32c::crc32c(&raw);
         raw[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_le_bytes());
 
+        if padding_len > 0 {
+            guard.file.write_all(&vec![0u8; padding_len])?;
+        }
         guard.file.write_all(&raw)?;
+        guard.last_record_ptr = start_lsn;
         guard.insert_lsn = end_lsn;
         Ok(end_lsn)
     }
