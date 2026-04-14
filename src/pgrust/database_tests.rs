@@ -1808,6 +1808,84 @@ fn left_join_rhs_boundary_stays_legal() {
 }
 
 #[test]
+fn explain_left_join_can_reassociate_strict_rhs() {
+    let base = temp_dir("left_join_reassociate_strict_rhs");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table a (id int4 not null)").unwrap();
+    db.execute(1, "create table b (id int4 not null)").unwrap();
+    db.execute(1, "create table c (id int4 not null)").unwrap();
+
+    for id in 0..16 {
+        db.execute(1, &format!("insert into a values ({id})")).unwrap();
+    }
+    for id in 0..4 {
+        db.execute(1, &format!("insert into b values ({id})")).unwrap();
+    }
+    for id in 0..64 {
+        db.execute(1, &format!("insert into c values ({id})")).unwrap();
+    }
+
+    db.execute(1, "analyze a").unwrap();
+    db.execute(1, "analyze b").unwrap();
+    db.execute(1, "analyze c").unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "select a.id, b.id, c.id \
+         from a left join (b left join c on b.id = c.id) on a.id = b.id",
+    );
+    let a_rel = relfilenode_for(&db, 1, "a");
+    let b_rel = relfilenode_for(&db, 1, "b");
+    let c_rel = relfilenode_for(&db, 1, "c");
+    let a_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {a_rel}")))
+        .unwrap();
+    let b_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {b_rel}")))
+        .unwrap();
+    let c_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {c_rel}")))
+        .unwrap();
+    assert!(
+        a_pos < c_pos && b_pos < c_pos,
+        "expected planner to join a/b before c when LEFT JOIN identity 3 is legal, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.id, b.id, c.id \
+             from a left join (b left join c on b.id = c.id) on a.id = b.id \
+             order by 1, 2, 3",
+        ),
+        vec![
+            vec![Value::Int32(0), Value::Int32(0), Value::Int32(0)],
+            vec![Value::Int32(1), Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(2), Value::Int32(2)],
+            vec![Value::Int32(3), Value::Int32(3), Value::Int32(3)],
+            vec![Value::Int32(4), Value::Null, Value::Null],
+            vec![Value::Int32(5), Value::Null, Value::Null],
+            vec![Value::Int32(6), Value::Null, Value::Null],
+            vec![Value::Int32(7), Value::Null, Value::Null],
+            vec![Value::Int32(8), Value::Null, Value::Null],
+            vec![Value::Int32(9), Value::Null, Value::Null],
+            vec![Value::Int32(10), Value::Null, Value::Null],
+            vec![Value::Int32(11), Value::Null, Value::Null],
+            vec![Value::Int32(12), Value::Null, Value::Null],
+            vec![Value::Int32(13), Value::Null, Value::Null],
+            vec![Value::Int32(14), Value::Null, Value::Null],
+            vec![Value::Int32(15), Value::Null, Value::Null],
+        ]
+    );
+}
+
+#[test]
 fn create_index_builds_multilevel_btree_root() {
     let base = temp_dir("btree_multilevel_root");
     let db = Database::open(&base, 16).unwrap();

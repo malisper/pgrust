@@ -5,8 +5,9 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
-    SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var,
+    AggAccum, BoolExprType, Expr, ExprArraySubscript, JoinType, OrderByEntry, ProjectSetTarget,
+    QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef,
+    Var,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +107,7 @@ pub struct SpecialJoinInfo {
     pub min_righthand: Vec<usize>,
     pub syn_lefthand: Vec<usize>,
     pub syn_righthand: Vec<usize>,
+    pub lhs_strict: bool,
     pub join_quals: Expr,
 }
 
@@ -206,7 +208,7 @@ impl PlannerInfo {
         let final_target = PathTarget::from_target_list(&parse.target_list);
         let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause);
         let simple_rel_array = build_simple_rel_array(&parse.rtable);
-        let join_info_list = build_special_join_info(parse.jointree.as_ref());
+        let join_info_list = build_special_join_info(&parse);
         Self {
             processed_tlist: parse.target_list.clone(),
             final_target,
@@ -243,10 +245,19 @@ fn build_simple_rel_array(rtable: &[RangeTblEntry]) -> Vec<Option<RelOptInfo>> {
     simple_rel_array
 }
 
-fn build_special_join_info(jointree: Option<&JoinTreeNode>) -> Vec<SpecialJoinInfo> {
-    fn walk(node: &JoinTreeNode, joins: &mut Vec<SpecialJoinInfo>) -> Vec<usize> {
+fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
+    #[derive(Debug, Clone)]
+    struct JoinTreeInfo {
+        relids: Vec<usize>,
+        inner_join_relids: Vec<usize>,
+    }
+
+    fn walk(query: &Query, node: &JoinTreeNode, joins: &mut Vec<SpecialJoinInfo>) -> JoinTreeInfo {
         match node {
-            JoinTreeNode::RangeTblRef(rtindex) => vec![*rtindex],
+            JoinTreeNode::RangeTblRef(rtindex) => JoinTreeInfo {
+                relids: vec![*rtindex],
+                inner_join_relids: Vec::new(),
+            },
             JoinTreeNode::JoinExpr {
                 left,
                 right,
@@ -254,33 +265,303 @@ fn build_special_join_info(jointree: Option<&JoinTreeNode>) -> Vec<SpecialJoinIn
                 rtindex,
                 quals,
             } => {
-                let left_relids = walk(left, joins);
-                let right_relids = walk(right, joins);
+                let left_info = walk(query, left, joins);
+                let right_info = walk(query, right, joins);
+                let left_relids = left_info.relids.clone();
+                let right_relids = right_info.relids.clone();
+                let relids = relids_union(&left_relids, &right_relids);
+                let inner_join_relids = if matches!(kind, JoinType::Inner | JoinType::Cross) {
+                    relids_union(&relids_union(&left_info.inner_join_relids, &right_info.inner_join_relids), &relids)
+                } else {
+                    relids_union(&left_info.inner_join_relids, &right_info.inner_join_relids)
+                };
                 if !matches!(kind, JoinType::Inner | JoinType::Cross) {
+                    let expanded_quals = expand_join_rte_vars(query, quals.clone());
+                    let clause_relids = expr_relids(&expanded_quals);
+                    let strict_relids = strict_relids(&expanded_quals);
+                    let lhs_strict = relids_overlap(&strict_relids, &left_relids);
+                    let mut min_lefthand = if matches!(kind, JoinType::Full) {
+                        left_relids.clone()
+                    } else {
+                        relids_intersection(&clause_relids, &left_relids)
+                    };
+                    let mut min_righthand = if matches!(kind, JoinType::Full) {
+                        right_relids.clone()
+                    } else {
+                        relids_intersection(
+                            &relids_union(&clause_relids, &right_info.inner_join_relids),
+                            &right_relids,
+                        )
+                    };
+
+                    if !matches!(kind, JoinType::Full) {
+                        for other in joins.iter() {
+                            if relids_overlap(&left_relids, &other.syn_righthand)
+                                && relids_overlap(&clause_relids, &other.syn_righthand)
+                                && !relids_overlap(&strict_relids, &other.min_righthand)
+                            {
+                                min_lefthand = relids_union(&min_lefthand, &other.syn_lefthand);
+                                min_lefthand = relids_union(&min_lefthand, &other.syn_righthand);
+                            }
+
+                            if relids_overlap(&right_relids, &other.syn_righthand)
+                                && (relids_overlap(&clause_relids, &other.syn_righthand)
+                                    || !relids_overlap(&clause_relids, &other.min_lefthand)
+                                    || !other.lhs_strict)
+                            {
+                                min_righthand = relids_union(&min_righthand, &other.syn_lefthand);
+                                min_righthand =
+                                    relids_union(&min_righthand, &other.syn_righthand);
+                            }
+                        }
+                    }
+
                     joins.push(SpecialJoinInfo {
                         jointype: *kind,
                         rtindex: *rtindex,
-                        min_lefthand: left_relids.clone(),
-                        min_righthand: right_relids.clone(),
+                        min_lefthand,
+                        min_righthand,
                         syn_lefthand: left_relids.clone(),
                         syn_righthand: right_relids.clone(),
-                        join_quals: quals.clone(),
+                        lhs_strict,
+                        join_quals: expanded_quals,
                     });
                 }
-                let mut relids = left_relids;
-                relids.extend(right_relids);
-                relids.sort_unstable();
-                relids.dedup();
-                relids
+                JoinTreeInfo {
+                    relids,
+                    inner_join_relids,
+                }
             }
         }
     }
 
     let mut joins = Vec::new();
-    if let Some(jointree) = jointree {
-        walk(jointree, &mut joins);
+    if let Some(jointree) = query.jointree.as_ref() {
+        walk(query, jointree, &mut joins);
     }
     joins
+}
+
+fn relids_union(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut relids = left.to_vec();
+    relids.extend(right);
+    relids.sort_unstable();
+    relids.dedup();
+    relids
+}
+
+fn relids_intersection(left: &[usize], right: &[usize]) -> Vec<usize> {
+    left.iter()
+        .copied()
+        .filter(|relid| right.contains(relid))
+        .collect()
+}
+
+fn relids_overlap(left: &[usize], right: &[usize]) -> bool {
+    left.iter().any(|relid| right.contains(relid))
+}
+
+fn expand_join_rte_vars(query: &Query, expr: Expr) -> Expr {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => {
+            let Some(rte) = query.rtable.get(var.varno.saturating_sub(1)) else {
+                return Expr::Var(var);
+            };
+            let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
+                return Expr::Var(var);
+            };
+            joinaliasvars
+                .get(var.varattno.saturating_sub(1))
+                .cloned()
+                .map(|expr| expand_join_rte_vars(query, expr))
+                .unwrap_or(Expr::Var(var))
+        }
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| expand_join_rte_vars(query, arg))
+                .collect(),
+            ..*aggref
+        })),
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| expand_join_rte_vars(query, arg))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| expand_join_rte_vars(query, arg))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| expand_join_rte_vars(query, arg))
+                .collect(),
+            ..*func
+        })),
+        Expr::SubLink(sublink) => {
+            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
+                testexpr: sublink
+                    .testexpr
+                    .map(|expr| Box::new(expand_join_rte_vars(query, *expr))),
+                ..*sublink
+            }))
+        }
+        Expr::SubPlan(subplan) => {
+            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| Box::new(expand_join_rte_vars(query, *expr))),
+                ..*subplan
+            }))
+        }
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(expand_join_rte_vars(query, *saop.left)),
+                right: Box::new(expand_join_rte_vars(query, *saop.right)),
+                ..*saop
+            },
+        )),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(expand_join_rte_vars(query, *inner)), ty),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(expand_join_rte_vars(query, *expr)),
+            pattern: Box::new(expand_join_rte_vars(query, *pattern)),
+            escape: escape.map(|expr| Box::new(expand_join_rte_vars(query, *expr))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(expand_join_rte_vars(query, *expr)),
+            pattern: Box::new(expand_join_rte_vars(query, *pattern)),
+            escape: escape.map(|expr| Box::new(expand_join_rte_vars(query, *expr))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(expand_join_rte_vars(query, *inner))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(expand_join_rte_vars(query, *inner))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(expand_join_rte_vars(query, *left)),
+            Box::new(expand_join_rte_vars(query, *right)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(expand_join_rte_vars(query, *left)),
+            Box::new(expand_join_rte_vars(query, *right)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| expand_join_rte_vars(query, element))
+                .collect(),
+            array_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(expand_join_rte_vars(query, *left)),
+            Box::new(expand_join_rte_vars(query, *right)),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(expand_join_rte_vars(query, *array)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| expand_join_rte_vars(query, expr)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| expand_join_rte_vars(query, expr)),
+                })
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn strict_relids(expr: &Expr) -> Vec<usize> {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => vec![var.varno],
+        Expr::Aggref(aggref) => strict_relids_union(&aggref.args),
+        Expr::Op(op) => strict_relids_union(&op.args),
+        Expr::Bool(bool_expr) => match bool_expr.boolop {
+            BoolExprType::And => strict_relids_union(&bool_expr.args),
+            BoolExprType::Or => {
+                let mut iter = bool_expr.args.iter();
+                let Some(first) = iter.next() else {
+                    return Vec::new();
+                };
+                iter.fold(strict_relids(first), |acc, arg| {
+                    relids_intersection(&acc, &strict_relids(arg))
+                })
+            }
+            BoolExprType::Not => bool_expr
+                .args
+                .first()
+                .map(strict_relids)
+                .unwrap_or_default(),
+        },
+        Expr::Func(func) => strict_relids_union(&func.args),
+        Expr::ScalarArrayOp(saop) => {
+            relids_union(&strict_relids(&saop.left), &strict_relids(&saop.right))
+        }
+        Expr::Cast(inner, _) => strict_relids(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            let mut relids = relids_union(&strict_relids(expr), &strict_relids(pattern));
+            if let Some(escape) = escape.as_deref() {
+                relids = relids_union(&relids, &strict_relids(escape));
+            }
+            relids
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            let mut relids = strict_relids(array);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    relids = relids_union(&relids, &strict_relids(lower));
+                }
+                if let Some(upper) = &subscript.upper {
+                    relids = relids_union(&relids, &strict_relids(upper));
+                }
+            }
+            relids
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn strict_relids_union(args: &[Expr]) -> Vec<usize> {
+    args.iter().fold(Vec::new(), |acc, arg| relids_union(&acc, &strict_relids(arg)))
 }
 
 fn expr_relids(expr: &Expr) -> Vec<usize> {
