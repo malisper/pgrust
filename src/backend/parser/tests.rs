@@ -2286,6 +2286,46 @@ fn build_plan_with_aggregate() {
 }
 
 #[test]
+fn analyze_grouped_query_keeps_semantic_group_refs() {
+    let stmt = parse_select(
+        "select name, count(*) from people group by name having name is not null order by name",
+    )
+    .unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+        .unwrap();
+
+    let name_var = Expr::Var(Var {
+        varno: 1,
+        varattno: 2,
+        varlevelsup: 0,
+        vartype: SqlType::new(SqlTypeKind::Text),
+    });
+
+    assert_eq!(query.group_by, vec![name_var.clone()]);
+    assert_eq!(query.target_list[0].expr, name_var);
+    assert!(matches!(query.target_list[1].expr, Expr::Aggref(_)));
+    assert_eq!(
+        query.having_qual,
+        Some(Expr::IsNotNull(Box::new(Expr::Var(Var {
+            varno: 1,
+            varattno: 2,
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Text),
+        }))))
+    );
+    assert_eq!(query.sort_clause.len(), 1);
+    assert_eq!(
+        query.sort_clause[0].expr,
+        Expr::Var(Var {
+            varno: 1,
+            varattno: 2,
+            varlevelsup: 0,
+            vartype: SqlType::new(SqlTypeKind::Text),
+        })
+    );
+}
+
+#[test]
 fn ungrouped_column_rejected_at_plan_time() {
     let stmt = parse_select("select name, count(*) from people").unwrap();
     assert!(matches!(

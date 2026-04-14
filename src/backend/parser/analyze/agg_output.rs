@@ -5,6 +5,7 @@ use crate::include::nodes::primnodes::OpExprKind;
 pub(super) fn bind_agg_output_expr(
     expr: &SqlExpr,
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -16,6 +17,7 @@ pub(super) fn bind_agg_output_expr(
         expr,
         UngroupedColumnClause::Other,
         group_by_exprs,
+        group_key_exprs,
         input_scope,
         catalog,
         outer_scopes,
@@ -29,6 +31,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
     expr: &SqlExpr,
     clause: UngroupedColumnClause,
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -38,7 +41,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
         if gk == expr {
-            return Ok(Expr::Column(i));
+            return Ok(group_key_exprs
+                .get(i)
+                .cloned()
+                .unwrap_or(Expr::Column(i)));
         }
     }
 
@@ -123,7 +129,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     && let Ok(gk_index) = resolve_column(input_scope, gk_name)
                     && gk_index == col_index
                 {
-                    return Ok(Expr::Column(i));
+                    return Ok(group_key_exprs
+                        .get(i)
+                        .cloned()
+                        .unwrap_or(Expr::Column(i)));
                 }
             }
             Err(build_ungrouped_column_error(
@@ -147,6 +156,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     l,
                     clause.clone(),
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -158,6 +168,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     r,
                     clause,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -173,6 +184,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -183,6 +195,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -198,6 +211,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -208,6 +222,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -223,6 +238,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -233,6 +249,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -248,6 +265,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -258,6 +276,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -273,6 +292,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -283,6 +303,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -298,6 +319,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -308,6 +330,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -323,6 +346,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -333,6 +357,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -348,6 +373,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -358,6 +384,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -373,6 +400,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -383,6 +411,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -396,6 +425,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             l,
             r,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -408,6 +438,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             vec![bind_agg_output_expr(
                 inner,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -421,6 +452,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             vec![bind_agg_output_expr(
                 inner,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -434,6 +466,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             vec![bind_agg_output_expr(
                 inner,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -451,6 +484,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             bind_agg_output_expr(
                                 element,
                                 group_by_exprs,
+                                group_key_exprs,
                                 input_scope,
                                 catalog,
                                 outer_scopes,
@@ -466,6 +500,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     inner,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -482,6 +517,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -492,6 +528,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -507,6 +544,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -517,6 +555,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -532,6 +571,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -542,6 +582,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -557,6 +598,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -567,6 +609,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -582,6 +625,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -592,6 +636,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -607,6 +652,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -617,6 +663,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -632,6 +679,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -642,6 +690,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -661,6 +710,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             expr: Box::new(bind_agg_output_expr(
                 expr,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -671,6 +721,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             pattern: Box::new(bind_agg_output_expr(
                 pattern,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -682,6 +733,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 Some(value) => Some(Box::new(bind_agg_output_expr(
                     value,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -703,6 +755,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             expr: Box::new(bind_agg_output_expr(
                 expr,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -713,6 +766,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             pattern: Box::new(bind_agg_output_expr(
                 pattern,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -724,6 +778,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 Some(value) => Some(Box::new(bind_agg_output_expr(
                     value,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -739,6 +794,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             bind_agg_output_expr(
                 l,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -749,6 +805,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             bind_agg_output_expr(
                 r,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -761,6 +818,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             bind_agg_output_expr(
                 l,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -771,6 +829,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             bind_agg_output_expr(
                 r,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -782,6 +841,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::Not(inner) => Ok(Expr::not(bind_agg_output_expr(
             inner,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -792,6 +852,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::IsNull(inner) => Ok(Expr::IsNull(Box::new(bind_agg_output_expr(
             inner,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -802,6 +863,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::IsNotNull(inner) => Ok(Expr::IsNotNull(Box::new(bind_agg_output_expr(
             inner,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -813,6 +875,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             Box::new(bind_agg_output_expr(
                 l,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -823,6 +886,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             Box::new(bind_agg_output_expr(
                 r,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -835,6 +899,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             Box::new(bind_agg_output_expr(
                 l,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -845,6 +910,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             Box::new(bind_agg_output_expr(
                 r,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -856,6 +922,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
         SqlExpr::ArrayLiteral(elements) => bind_grouped_array_literal(
             elements,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -883,6 +950,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             let left = bind_agg_output_expr(
                 l,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -893,6 +961,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             let right = bind_agg_output_expr(
                 r,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -932,6 +1001,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -942,6 +1012,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -957,6 +1028,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -967,6 +1039,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -982,6 +1055,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -992,6 +1066,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1007,6 +1082,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1017,6 +1093,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1032,6 +1109,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1042,6 +1120,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1057,6 +1136,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1067,6 +1147,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1082,6 +1163,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1092,6 +1174,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1115,6 +1198,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         bind_agg_output_expr(
                             l,
                             group_by_exprs,
+                            group_key_exprs,
                             input_scope,
                             catalog,
                             outer_scopes,
@@ -1125,6 +1209,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         bind_agg_output_expr(
                             r,
                             group_by_exprs,
+                            group_key_exprs,
                             input_scope,
                             catalog,
                             outer_scopes,
@@ -1141,6 +1226,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         bind_agg_output_expr(
                             l,
                             group_by_exprs,
+                            group_key_exprs,
                             input_scope,
                             catalog,
                             outer_scopes,
@@ -1151,6 +1237,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         bind_agg_output_expr(
                             r,
                             group_by_exprs,
+                            group_key_exprs,
                             input_scope,
                             catalog,
                             outer_scopes,
@@ -1168,6 +1255,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1178,6 +1266,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1193,6 +1282,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1203,6 +1293,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1218,6 +1309,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     l,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1228,6 +1320,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     r,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1252,6 +1345,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             subquery,
             *negated,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -1270,6 +1364,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             *is_all,
             subquery,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -1288,6 +1383,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             *is_all,
             array,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -1299,6 +1395,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             array: Box::new(bind_agg_output_expr(
                 array,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -1318,6 +1415,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                                 bind_agg_output_expr(
                                     expr,
                                     group_by_exprs,
+                                    group_key_exprs,
                                     input_scope,
                                     catalog,
                                     outer_scopes,
@@ -1334,6 +1432,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                                 bind_agg_output_expr(
                                     expr,
                                     group_by_exprs,
+                                    group_key_exprs,
                                     input_scope,
                                     catalog,
                                     outer_scopes,
@@ -1352,6 +1451,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             name,
             args,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -1383,6 +1483,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 vec![bind_agg_output_expr(
                     expr,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1405,6 +1506,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             vec![bind_agg_output_expr(
                 expr,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -1436,6 +1538,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     left,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
@@ -1446,6 +1549,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_agg_output_expr(
                     right,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,

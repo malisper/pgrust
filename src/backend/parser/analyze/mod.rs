@@ -820,6 +820,11 @@ fn bind_select_query_with_outer(
                 )
             })
             .collect::<Result<_, _>>()?;
+        let rewritten_group_keys = group_keys
+            .iter()
+            .cloned()
+            .map(|expr| rewrite_expr_columns(expr, &base.output_exprs))
+            .collect::<Vec<_>>();
 
         let accumulators: Vec<AggAccum> = aggs
             .iter()
@@ -918,6 +923,7 @@ fn bind_select_query_with_outer(
                     e,
                     UngroupedColumnClause::Having,
                     &stmt.group_by,
+                    &group_keys,
                     &scope,
                     catalog,
                     outer_scopes,
@@ -926,7 +932,8 @@ fn bind_select_query_with_outer(
                     n_keys,
                 )
             })
-            .transpose()?;
+            .transpose()?
+            .map(|expr| rewrite_expr_columns(expr, &base.output_exprs));
 
         let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
             && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
@@ -935,7 +942,7 @@ fn bind_select_query_with_outer(
             for (i, name) in output_columns.iter().enumerate().take(n_keys) {
                 targets.push(TargetEntry::new(
                     name.name.clone(),
-                    Expr::Column(i),
+                    group_keys.get(i).cloned().unwrap_or(Expr::Column(i)),
                     name.sql_type,
                     i + 1,
                 ));
@@ -973,6 +980,7 @@ fn bind_select_query_with_outer(
                             &item.expr,
                             UngroupedColumnClause::SelectTarget,
                             &stmt.group_by,
+                            &group_keys,
                             &scope,
                             catalog,
                             outer_scopes,
@@ -1002,6 +1010,7 @@ fn bind_select_query_with_outer(
                     expr,
                     UngroupedColumnClause::SelectTarget,
                     &stmt.group_by,
+                    &group_keys,
                     &scope,
                     catalog,
                     outer_scopes,
@@ -1011,6 +1020,8 @@ fn bind_select_query_with_outer(
                 )
             })?
         };
+        let targets = rewrite_target_entries(targets, &base.output_exprs);
+        let sort_inputs = rewrite_order_by_entries(sort_inputs, &base.output_exprs);
 
         Ok((
             Query {
@@ -1019,10 +1030,7 @@ fn bind_select_query_with_outer(
                 jointree: base.jointree,
                 target_list: normalize_target_list(targets),
                 where_qual,
-                group_by: group_keys
-                    .into_iter()
-                    .map(|expr| rewrite_expr_columns(expr, &base.output_exprs))
-                    .collect(),
+                group_by: rewritten_group_keys,
                 accumulators: rewrite_agg_accums(accumulators, &base.output_exprs),
                 having_qual: having,
                 sort_clause: sort_inputs
