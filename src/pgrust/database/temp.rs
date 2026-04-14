@@ -29,6 +29,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<TempNamespace, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         if let Some(namespace) = self.owned_temp_namespace(client_id) {
             return Ok(namespace);
         }
@@ -48,6 +49,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts,
         };
         let effect = self
             .catalog
@@ -103,6 +105,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<CreatedTempRelation, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let normalized = normalize_temp_lookup_name(&table_name);
         let namespace =
             self.ensure_temp_namespace(client_id, xid, cid, catalog_effects, temp_effects)?;
@@ -117,6 +120,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts,
         };
         let (created, effect) = self
             .catalog
@@ -181,6 +185,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<RelCacheEntry, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let normalized = normalize_temp_lookup_name(table_name);
         let removed = {
             let mut namespaces = self.temp_relations.write();
@@ -200,6 +205,7 @@ impl Database {
             cid,
             client_id,
             waiter: Some(self.txn_waiter.clone()),
+            interrupts,
         };
         let effect = self
             .catalog
@@ -228,6 +234,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<RelCacheEntry, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let normalized_new = normalize_temp_lookup_name(new_table_name);
         let old_name = {
             let namespaces = self.temp_relations.read();
@@ -262,6 +269,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts,
         };
         let effect = self
             .catalog
@@ -378,6 +386,7 @@ impl Database {
             cid: 0,
             client_id,
             waiter: None,
+            interrupts: self.interrupt_state(client_id),
         };
         let mut effects = Vec::new();
         if let Ok(effect) =

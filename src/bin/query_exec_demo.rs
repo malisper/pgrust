@@ -7,6 +7,7 @@ use pgrust::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc};
 use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionManager};
 use pgrust::backend::catalog::catalog::column_desc;
 use pgrust::backend::storage::smgr::MdStorageManager;
+use pgrust::backend::utils::misc::interrupts::InterruptState;
 use pgrust::executor::{
     ExecError, ExecutorContext, Expr, Plan, RelationDesc, TargetEntry, Value, exec_next,
     executor_start,
@@ -157,10 +158,12 @@ fn main() -> Result<(), ExecError> {
     };
 
     let mut state = executor_start(plan);
+    let interrupts = Arc::new(InterruptState::new());
     let mut ctx = ExecutorContext {
         pool: std::sync::Arc::clone(&pool),
         txns: txns.clone(),
         txn_waiter: None,
+        interrupts,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
         next_command_id: 0,

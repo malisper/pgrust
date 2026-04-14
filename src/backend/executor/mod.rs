@@ -76,6 +76,10 @@ use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
     pg_plan_values_query,
 };
+use crate::backend::storage::lmgr::TableLockError;
+use crate::backend::utils::misc::interrupts::{
+    InterruptReason, InterruptState, check_for_interrupts,
+};
 use crate::include::access::htup::TupleError;
 use crate::pgrust::database::TransactionWaiter;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -87,6 +91,7 @@ pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
+    pub interrupts: std::sync::Arc<InterruptState>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
     pub next_command_id: CommandId,
@@ -94,6 +99,12 @@ pub struct ExecutorContext {
     pub subplans: Vec<Plan>,
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,
+}
+
+impl ExecutorContext {
+    pub fn check_for_interrupts(&self) -> Result<(), ExecError> {
+        check_for_interrupts(&self.interrupts).map_err(ExecError::Interrupted)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,11 +221,15 @@ pub enum ExecError {
     OidOutOfRange,
     NumericFieldOverflow,
     RequestedLengthTooLarge,
+    Interrupted(InterruptReason),
 }
 
 impl From<HeapError> for ExecError {
     fn from(value: HeapError) -> Self {
-        Self::Heap(value)
+        match value {
+            HeapError::Interrupted(reason) => Self::Interrupted(reason),
+            other => Self::Heap(other),
+        }
     }
 }
 
@@ -234,10 +249,19 @@ impl From<CatalogError> for ExecError {
     fn from(value: CatalogError) -> Self {
         match value {
             CatalogError::UniqueViolation(constraint) => Self::UniqueViolation { constraint },
+            CatalogError::Interrupted(reason) => Self::Interrupted(reason),
             other => Self::Parse(ParseError::UnexpectedToken {
                 expected: "catalog operation",
                 actual: format!("{other:?}"),
             }),
+        }
+    }
+}
+
+impl From<TableLockError> for ExecError {
+    fn from(value: TableLockError) -> Self {
+        match value {
+            TableLockError::Interrupted(reason) => Self::Interrupted(reason),
         }
     }
 }

@@ -102,6 +102,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::OidOutOfRange => "OID out of range".to_string(),
         ExecError::NumericFieldOverflow => "numeric field overflow".to_string(),
         ExecError::RequestedLengthTooLarge => "requested length too large".to_string(),
+        ExecError::Interrupted(reason) => reason.message().to_string(),
         ExecError::DivisionByZero(_) => "division by zero".to_string(),
         ExecError::GenerateSeriesZeroStep => "step size cannot equal zero".to_string(),
         ExecError::GenerateSeriesInvalidArg(arg, issue) => {

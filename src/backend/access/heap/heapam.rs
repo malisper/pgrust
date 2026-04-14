@@ -9,6 +9,7 @@ use crate::backend::storage::page::bufpage::{
     page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
+use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::access::htup::{
     HeapTuple, ItemPointerData, TupleError, heap_page_add_tuple, heap_page_get_ctid,
     heap_page_get_tuple, heap_page_init, heap_page_replace_tuple,
@@ -31,6 +32,7 @@ pub enum HeapError {
     TupleAlreadyModified(ItemPointerData),
     TupleUpdated(ItemPointerData, ItemPointerData),
     DeadlockDetected,
+    Interrupted(InterruptReason),
 }
 
 /// Result of a heap modification that encountered a concurrent modification.
@@ -699,7 +701,11 @@ pub fn heap_delete_with_waiter(
     xid: TransactionId,
     tid: ItemPointerData,
     snapshot: &Snapshot,
-    waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
 ) -> Result<(), HeapError> {
     loop {
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
@@ -732,11 +738,16 @@ pub fn heap_delete_with_waiter(
 
         match xmax_status {
             Some(TransactionStatus::InProgress) | None => {
-                if let Some((txns_lock, txn_waiter)) = waiter {
-                    if txn_waiter.wait_for(txns_lock, xmax) {
-                        continue;
+                if let Some((txns_lock, txn_waiter, interrupts)) = waiter {
+                    match txn_waiter.wait_for(txns_lock, xmax, interrupts) {
+                        crate::backend::storage::lmgr::WaitOutcome::Completed => continue,
+                        crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
+                            return Err(HeapError::DeadlockDetected);
+                        }
+                        crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
+                            return Err(HeapError::Interrupted(reason));
+                        }
                     }
-                    return Err(HeapError::DeadlockDetected);
                 }
                 return Err(HeapError::TupleAlreadyModified(tid));
             }
@@ -924,7 +935,11 @@ pub fn heap_update_with_waiter(
     cid: CommandId,
     tid: ItemPointerData,
     replacement: &HeapTuple,
-    waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
 ) -> Result<ItemPointerData, HeapError> {
     loop {
         let (result, _) = try_claim_tuple(pool, client_id, rel, txns, xid, tid)?;
@@ -946,11 +961,16 @@ pub fn heap_update_with_waiter(
                 return Ok(new_tid);
             }
             ClaimResult::WaitFor(xwait) => {
-                if let Some((txns_lock, txn_waiter)) = waiter {
-                    if txn_waiter.wait_for(txns_lock, xwait) {
-                        continue;
+                if let Some((txns_lock, txn_waiter, interrupts)) = waiter {
+                    match txn_waiter.wait_for(txns_lock, xwait, interrupts) {
+                        crate::backend::storage::lmgr::WaitOutcome::Completed => continue,
+                        crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
+                            return Err(HeapError::DeadlockDetected);
+                        }
+                        crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
+                            return Err(HeapError::Interrupted(reason));
+                        }
                     }
-                    return Err(HeapError::DeadlockDetected);
                 }
                 return Err(HeapError::TupleAlreadyModified(tid));
             }

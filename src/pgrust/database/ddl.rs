@@ -176,6 +176,7 @@ pub(super) fn map_catalog_error(err: CatalogError) -> ExecError {
         CatalogError::UnknownColumn(name) => ExecError::Parse(ParseError::UnknownColumn(name)),
         CatalogError::UnknownType(name) => ExecError::Parse(ParseError::UnsupportedType(name)),
         CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation { constraint },
+        CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
         CatalogError::Io(_) | CatalogError::Corrupt(_) => {
             ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "valid catalog state",

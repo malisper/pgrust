@@ -93,6 +93,7 @@ impl PlanNode for SeqScanState {
         };
 
         loop {
+            ctx.check_for_interrupts()?;
             let scan = self.scan.as_mut().unwrap();
             if scan.has_page_tuples() {
                 let buffer_id = scan.pinned_buffer_id().expect("buffer must be pinned");
@@ -206,6 +207,7 @@ impl PlanNode for IndexScanState {
         };
 
         loop {
+            ctx.check_for_interrupts()?;
             let has_tuple = {
                 let scan = self.scan.as_mut().expect("index scan must exist");
                 indexam::index_getnext(scan, self.am_oid).map_err(|err| {
@@ -398,6 +400,7 @@ impl PlanNode for FilterState {
             None
         };
         loop {
+            ctx.check_for_interrupts()?;
             let slot = match self.input.exec_proc_node(ctx)? {
                 Some(s) => s,
                 None => {
@@ -454,6 +457,7 @@ impl PlanNode for NestedLoopJoinState {
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.right.exec_proc_node(ctx)? {
+                ctx.check_for_interrupts()?;
                 let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                 Value::materialize_all(&mut values);
                 rows.push(TupleSlot::virtual_row(values));
@@ -463,6 +467,7 @@ impl PlanNode for NestedLoopJoinState {
         }
 
         loop {
+            ctx.check_for_interrupts()?;
             if self.current_left.is_none() {
                 match self.left.exec_proc_node(ctx)? {
                     Some(slot) => {
@@ -570,6 +575,7 @@ fn exec_cross_join<'a>(
     if state.left_rows.is_none() {
         let mut rows = Vec::new();
         while let Some(slot) = state.left.exec_proc_node(ctx)? {
+            ctx.check_for_interrupts()?;
             let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
             Value::materialize_all(&mut values);
             rows.push(TupleSlot::virtual_row(values));
@@ -578,6 +584,7 @@ fn exec_cross_join<'a>(
     }
 
     loop {
+        ctx.check_for_interrupts()?;
         if state.current_right.is_none() {
             match state.right.exec_proc_node(ctx)? {
                 Some(slot) => {
@@ -624,6 +631,7 @@ impl PlanNode for OrderByState {
         if self.rows.is_none() {
             let mut rows = Vec::new();
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
+                ctx.check_for_interrupts()?;
                 let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                 Value::materialize_all(&mut values);
                 rows.push(TupleSlot::virtual_row(values));
@@ -631,6 +639,7 @@ impl PlanNode for OrderByState {
 
             let mut keyed_rows = Vec::with_capacity(rows.len());
             for mut row in rows {
+                ctx.check_for_interrupts()?;
                 let mut keys = Vec::with_capacity(self.items.len());
                 for item in &self.items {
                     keys.push(eval_expr(&item.expr, &mut row, ctx)?);
@@ -690,6 +699,7 @@ impl PlanNode for LimitState {
         }
 
         while self.skipped < self.offset {
+            ctx.check_for_interrupts()?;
             if self.input.exec_proc_node(ctx)?.is_none() {
                 return Ok(None);
             }
@@ -779,6 +789,7 @@ impl PlanNode for AggregateState {
             let mut groups: Vec<AggGroup> = Vec::new();
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
+                ctx.check_for_interrupts()?;
                 self.key_buffer.clear();
                 for expr in &self.group_by {
                     self.key_buffer.push(eval_expr(expr, slot, ctx)?);
@@ -843,6 +854,7 @@ impl PlanNode for AggregateState {
 
             let mut result_rows = Vec::new();
             for group in &groups {
+                ctx.check_for_interrupts()?;
                 let mut row_values = group.key_values.clone();
                 for accum_state in &group.accum_states {
                     row_values.push(accum_state.finalize());
@@ -998,6 +1010,7 @@ impl PlanNode for ProjectSetState {
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
         loop {
+            ctx.check_for_interrupts()?;
             if self.current_input.is_none() || self.next_index >= self.current_row_count {
                 let Some(input_slot) = self.input.exec_proc_node(ctx)? else {
                     return Ok(None);
