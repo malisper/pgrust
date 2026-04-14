@@ -415,6 +415,8 @@ impl Database {
                     outer_rows: Vec::new(),
                     subplans: Vec::new(),
                     timed: false,
+                    datetime_config:
+                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                 };
                 let result = execute_vacuum(vacuum_stmt.clone(), &catalog, &mut ctx);
                 drop(ctx);

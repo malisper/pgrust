@@ -743,6 +743,16 @@ fn read_relation_fork_block(
     page
 }
 
+fn relation_fork_nblocks(
+    db: &Database,
+    rel: crate::RelFileLocator,
+    fork: crate::backend::storage::smgr::ForkNumber,
+) -> u32 {
+    db.pool
+        .with_storage_mut(|storage| storage.smgr.nblocks(rel, fork))
+        .unwrap()
+}
+
 fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
     let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
@@ -3388,6 +3398,55 @@ fn vacuum_records_recyclable_btree_pages_in_fsm() {
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items where id >= 900"),
         vec![vec![Value::Int64(600)]]
+    );
+}
+
+#[test]
+fn vacuum_reused_btree_pages_prevent_relation_growth() {
+    let base = temp_dir("vacuum_reused_btree_pages_prevent_relation_growth");
+    let db = Database::open(&base, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null, note text)")
+        .unwrap();
+    for i in 0..1800 {
+        session
+            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
+            .unwrap();
+    }
+    session
+        .execute(&db, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    let index_rel = relation_locator_for(&db, 1, "items_id_idx");
+    for i in 0..1200 {
+        session
+            .execute(&db, &format!("delete from items where id = {i}"))
+            .unwrap();
+    }
+    session.execute(&db, "vacuum items").unwrap();
+
+    let blocks_after_vacuum = relation_fork_nblocks(
+        &db,
+        index_rel,
+        crate::backend::storage::smgr::ForkNumber::Main,
+    );
+
+    for i in 2000..2600 {
+        session
+            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
+            .unwrap();
+    }
+
+    let blocks_after_reinsert = relation_fork_nblocks(
+        &db,
+        index_rel,
+        crate::backend::storage::smgr::ForkNumber::Main,
+    );
+    assert_eq!(
+        blocks_after_reinsert, blocks_after_vacuum,
+        "expected post-vacuum inserts to reuse deleted btree pages before extending the index"
     );
 }
 
