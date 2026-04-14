@@ -54,14 +54,21 @@ fn parse_statement_with_options_inner(
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
-        if matches!(stmt, Statement::Unsupported(UnsupportedStatement { feature: "ROLE management", .. })) {
+        if matches!(
+            stmt,
+            Statement::Unsupported(UnsupportedStatement {
+                feature: "ROLE management",
+                ..
+            })
+        ) {
             return Ok(stmt);
         }
     }
     match SqlParser::parse(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
-        Err(err) => try_parse_unsupported_statement(&sql)
-            .ok_or_else(|| map_pest_error("statement", err)),
+        Err(err) => {
+            try_parse_unsupported_statement(&sql).ok_or_else(|| map_pest_error("statement", err))
+        }
     }
 }
 
@@ -348,16 +355,31 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
             build_alter_table_add_column(inner)?,
         )),
+        Rule::alter_table_add_constraint_stmt => Ok(Statement::AlterTableAddConstraint(
+            build_alter_table_add_constraint(inner)?,
+        )),
         Rule::alter_table_drop_column_stmt => Ok(Statement::AlterTableDropColumn(
             build_alter_table_drop_column(inner)?,
+        )),
+        Rule::alter_table_drop_constraint_stmt => Ok(Statement::AlterTableDropConstraint(
+            build_alter_table_drop_constraint(inner)?,
         )),
         Rule::alter_table_rename_column_stmt => Ok(Statement::AlterTableRenameColumn(
             build_alter_table_rename_column(inner)?,
         )),
-        Rule::alter_table_rename_stmt => {
-            Ok(Statement::AlterTableRename(build_alter_table_rename(inner)?))
-        }
+        Rule::alter_table_rename_stmt => Ok(Statement::AlterTableRename(build_alter_table_rename(
+            inner,
+        )?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
+            build_alter_table_set_not_null(inner)?,
+        )),
+        Rule::alter_table_drop_not_null_stmt => Ok(Statement::AlterTableDropNotNull(
+            build_alter_table_drop_not_null(inner)?,
+        )),
+        Rule::alter_table_validate_constraint_stmt => Ok(Statement::AlterTableValidateConstraint(
+            build_alter_table_validate_constraint(inner)?,
+        )),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
@@ -1250,29 +1272,187 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
 
 fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-    match inner.as_rule() {
-        Rule::named_table_constraint => Err(ParseError::UnexpectedToken {
-            expected: "unnamed PRIMARY KEY or UNIQUE table constraint",
-            actual: inner.as_str().to_string(),
-        }),
-        Rule::primary_key_table_constraint => Ok(TableConstraint::PrimaryKey {
-            columns: inner
+    build_table_constraint_inner(inner)
+}
+
+fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
+    let rule = pair.as_rule();
+    if rule == Rule::named_table_constraint {
+        let mut name = None;
+        let mut constraint = None;
+        for part in pair.into_inner() {
+            match part.as_rule() {
+                Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+                Rule::primary_key_table_constraint
+                | Rule::unique_table_constraint
+                | Rule::check_table_constraint
+                | Rule::not_null_table_constraint => {
+                    constraint = Some(build_table_constraint_inner(part)?)
+                }
+                _ => {}
+            }
+        }
+        let mut constraint = constraint.ok_or(ParseError::UnexpectedEof)?;
+        set_table_constraint_name(&mut constraint, name.ok_or(ParseError::UnexpectedEof)?);
+        return Ok(constraint);
+    }
+
+    let attributes = build_constraint_attributes(pair.clone());
+    match rule {
+        Rule::primary_key_table_constraint => {
+            let body = pair
                 .into_inner()
-                .find(|part| part.as_rule() == Rule::ident_list)
-                .map(|part| part.into_inner().map(build_identifier).collect())
-                .unwrap_or_default(),
-        }),
-        Rule::unique_table_constraint => Ok(TableConstraint::Unique {
-            columns: inner
+                .find(|part| part.as_rule() == Rule::primary_key_table_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(TableConstraint::PrimaryKey {
+                attributes,
+                columns: body
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::ident_list)
+                    .map(|part| part.into_inner().map(build_identifier).collect())
+                    .unwrap_or_default(),
+            })
+        }
+        Rule::unique_table_constraint => {
+            let body = pair
                 .into_inner()
-                .find(|part| part.as_rule() == Rule::ident_list)
-                .map(|part| part.into_inner().map(build_identifier).collect())
-                .unwrap_or_default(),
-        }),
+                .find(|part| part.as_rule() == Rule::unique_table_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(TableConstraint::Unique {
+                attributes,
+                columns: body
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::ident_list)
+                    .map(|part| part.into_inner().map(build_identifier).collect())
+                    .unwrap_or_default(),
+            })
+        }
+        Rule::check_table_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::check_table_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let expr_sql = body
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::expr)
+                .map(|part| part.as_str().trim().to_string())
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(TableConstraint::Check {
+                attributes,
+                expr_sql,
+            })
+        }
+        Rule::not_null_table_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::not_null_table_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let column = body
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::identifier)
+                .map(build_identifier)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(TableConstraint::NotNull { attributes, column })
+        }
         _ => Err(ParseError::UnexpectedToken {
-            expected: "PRIMARY KEY or UNIQUE table constraint",
-            actual: inner.as_str().to_string(),
+            expected: "table constraint",
+            actual: pair.as_str().to_string(),
         }),
+    }
+}
+
+fn build_constraint_attributes(pair: Pair<'_, Rule>) -> ConstraintAttributes {
+    let mut attributes = ConstraintAttributes::default();
+    for part in pair.into_inner() {
+        if part.as_rule() != Rule::constraint_attribute {
+            continue;
+        }
+        let attr = part
+            .into_inner()
+            .next()
+            .expect("constraint attribute inner");
+        match attr.as_rule() {
+            Rule::not_valid_constraint_attribute => attributes.not_valid = true,
+            Rule::deferrable_constraint_attribute => attributes.deferrable = Some(true),
+            Rule::not_deferrable_constraint_attribute => attributes.deferrable = Some(false),
+            Rule::initially_deferred_constraint_attribute => {
+                attributes.initially_deferred = Some(true)
+            }
+            Rule::initially_immediate_constraint_attribute => {
+                attributes.initially_deferred = Some(false)
+            }
+            Rule::enforced_constraint_attribute => attributes.enforced = Some(true),
+            Rule::not_enforced_constraint_attribute => attributes.enforced = Some(false),
+            _ => {}
+        }
+    }
+    attributes
+}
+
+fn set_table_constraint_name(constraint: &mut TableConstraint, name: String) {
+    match constraint {
+        TableConstraint::NotNull { attributes, .. }
+        | TableConstraint::Check { attributes, .. }
+        | TableConstraint::PrimaryKey { attributes, .. }
+        | TableConstraint::Unique { attributes, .. } => attributes.name = Some(name),
+    }
+}
+
+fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, ParseError> {
+    let rule = pair.as_rule();
+    if rule == Rule::named_column_constraint {
+        let mut name = None;
+        let mut constraint = None;
+        for part in pair.into_inner() {
+            match part.as_rule() {
+                Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
+                Rule::not_null_column_constraint
+                | Rule::check_column_constraint
+                | Rule::primary_key_column_constraint
+                | Rule::unique_column_constraint => {
+                    constraint = Some(build_column_constraint(part)?)
+                }
+                _ => {}
+            }
+        }
+        let mut constraint = constraint.ok_or(ParseError::UnexpectedEof)?;
+        set_column_constraint_name(&mut constraint, name.ok_or(ParseError::UnexpectedEof)?);
+        return Ok(constraint);
+    }
+
+    let attributes = build_constraint_attributes(pair.clone());
+    match rule {
+        Rule::not_null_column_constraint => Ok(ColumnConstraint::NotNull { attributes }),
+        Rule::check_column_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::check_column_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let expr_sql = body
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::expr)
+                .map(|part| part.as_str().trim().to_string())
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(ColumnConstraint::Check {
+                attributes,
+                expr_sql,
+            })
+        }
+        Rule::primary_key_column_constraint => Ok(ColumnConstraint::PrimaryKey { attributes }),
+        Rule::unique_column_constraint => Ok(ColumnConstraint::Unique { attributes }),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "column constraint",
+            actual: pair.as_str().to_string(),
+        }),
+    }
+}
+
+fn set_column_constraint_name(constraint: &mut ColumnConstraint, name: String) {
+    match constraint {
+        ColumnConstraint::NotNull { attributes }
+        | ColumnConstraint::Check { attributes, .. }
+        | ColumnConstraint::PrimaryKey { attributes }
+        | ColumnConstraint::Unique { attributes } => attributes.name = Some(name),
     }
 }
 
@@ -1852,9 +2032,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let mut default_expr = None;
-    let mut nullable = true;
-    let mut primary_key = false;
-    let mut unique = false;
+    let mut constraints = Vec::new();
     for flag in inner {
         let Some(flag) = (match flag.as_rule() {
             Rule::column_modifier => flag.into_inner().next(),
@@ -1869,15 +2047,12 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                     .find(|part| part.as_rule() == Rule::expr)
                     .map(|expr| expr.as_str().to_string());
             }
-            Rule::nullability => {
-                nullable = flag
-                    .into_inner()
-                    .next()
-                    .map(|inner| inner.as_rule() == Rule::nullable)
-                    .unwrap_or(true);
-            }
-            Rule::primary_key_column_constraint => primary_key = true,
-            Rule::unique_column_constraint => unique = true,
+            Rule::nullable => {}
+            Rule::named_column_constraint
+            | Rule::not_null_column_constraint
+            | Rule::check_column_constraint
+            | Rule::primary_key_column_constraint
+            | Rule::unique_column_constraint => constraints.push(build_column_constraint(flag)?),
             _ => {}
         }
     }
@@ -1885,9 +2060,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         name,
         ty,
         default_expr,
-        nullable,
-        primary_key,
-        unique,
+        constraints,
     })
 }
 
@@ -1909,6 +2082,24 @@ fn build_alter_table_add_column(
     })
 }
 
+fn build_alter_table_add_constraint(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAddConstraintStatement, ParseError> {
+    let mut table_name = None;
+    let mut constraint = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::named_table_constraint => constraint = Some(build_table_constraint_inner(part)?),
+            _ => {}
+        }
+    }
+    Ok(AlterTableAddConstraintStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        constraint: constraint.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_alter_table_drop_column(
     pair: Pair<'_, Rule>,
 ) -> Result<AlterTableDropColumnStatement, ParseError> {
@@ -1919,6 +2110,19 @@ fn build_alter_table_drop_column(
     Ok(AlterTableDropColumnStatement {
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_drop_constraint(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableDropConstraintStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterTableDropConstraintStatement {
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -1947,6 +2151,45 @@ fn build_alter_table_rename_column(
     })
 }
 
+fn build_alter_table_set_not_null(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableSetNotNullStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterTableSetNotNullStatement {
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_drop_not_null(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableDropNotNullStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterTableDropNotNullStatement {
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_validate_constraint(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableValidateConstraintStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterTableValidateConstraintStatement {
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        constraint_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
     match pair.as_rule() {
         Rule::type_name | Rule::known_type_name => {
@@ -1962,9 +2205,9 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
             }
             ty
         }
-        Rule::known_base_type_name => build_type_name(
-            pair.into_inner().next().expect("base_type_name inner"),
-        ),
+        Rule::known_base_type_name => {
+            build_type_name(pair.into_inner().next().expect("base_type_name inner"))
+        }
         Rule::qualified_known_base_type_name => {
             let mut inner = pair.into_inner();
             inner.next().expect("qualified_type_name schema");
@@ -2044,10 +2287,9 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 [precision] => {
                     RawTypeName::Builtin(SqlType::with_numeric_precision_scale(*precision, 0))
                 }
-                [precision, scale] => RawTypeName::Builtin(SqlType::with_numeric_precision_scale(
-                    *precision,
-                    *scale,
-                )),
+                [precision, scale] => {
+                    RawTypeName::Builtin(SqlType::with_numeric_precision_scale(*precision, *scale))
+                }
                 _ => unreachable!("unexpected numeric typmod arity"),
             }
         }
@@ -2059,9 +2301,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
         Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
-        Rule::kw_regdictionary => {
-            RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary))
-        }
+        Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
         Rule::date_type | Rule::kw_date => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Date)),
         Rule::time_type => {

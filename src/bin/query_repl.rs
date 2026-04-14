@@ -462,25 +462,30 @@ fn run_statement(
         | Statement::Reset(_)
         | Statement::CopyFrom(_)
         | Statement::AlterTableSet(_)
-        | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
-        Statement::AlterTableRenameColumn(stmt) => Err(ExecError::Parse(
-            ParseError::FeatureNotSupported(format!(
+        | Statement::AlterTableAddColumn(_)
+        | Statement::AlterTableAddConstraint(_)
+        | Statement::AlterTableDropConstraint(_)
+        | Statement::AlterTableSetNotNull(_)
+        | Statement::AlterTableDropNotNull(_)
+        | Statement::AlterTableValidateConstraint(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::AlterTableRenameColumn(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE RENAME COLUMN in query_repl: {}.{} -> {}",
                 stmt.table_name, stmt.column_name, stmt.new_column_name
-            )),
-        )),
-        Statement::AlterTableRename(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            format!(
+            ))))
+        }
+        Statement::AlterTableRename(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE RENAME in query_repl: {} -> {}",
                 stmt.table_name, stmt.new_table_name
-            ),
-        ))),
-        Statement::AlterTableDropColumn(stmt) => Err(ExecError::Parse(
-            ParseError::FeatureNotSupported(format!(
+            ))))
+        }
+        Statement::AlterTableDropColumn(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "ALTER TABLE DROP COLUMN in query_repl: {}.{}",
                 stmt.table_name, stmt.column_name
-            )),
-        )),
+            ))))
+        }
         Statement::Unsupported(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("{}: {}", stmt.feature, stmt.sql),
         ))),
