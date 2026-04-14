@@ -8,7 +8,7 @@ use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     PathTarget, PlannerGlobal, PlannerInfo, PlannerPath, RelOptInfo, RelOptKind, RestrictInfo,
 };
@@ -1027,15 +1027,6 @@ fn build_join_qual(
     and_exprs(clauses).unwrap_or(Expr::Const(Value::Bool(true)))
 }
 
-fn join_rte_requires_alias_projection(rte: &RangeTblEntry) -> bool {
-    match &rte.kind {
-        RangeTblEntryKind::Join {
-            joinmergedcols, ..
-        } => *joinmergedcols > 0,
-        _ => false,
-    }
-}
-
 fn maybe_project_join_alias(
     rtindex: usize,
     input: PlannerPath,
@@ -1045,9 +1036,6 @@ fn maybe_project_join_alias(
     let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
         return input;
     };
-    if !join_rte_requires_alias_projection(rte) {
-        return input;
-    }
     let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
         return input;
     };
@@ -1071,7 +1059,7 @@ fn top_join_rtindex(root: &PlannerInfo) -> Option<usize> {
             .parse
             .rtable
             .get(rtindex.saturating_sub(1))
-            .filter(|rte| join_rte_requires_alias_projection(rte))
+            .filter(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. }))
             .map(|_| *rtindex),
         _ => None,
     }
@@ -1126,7 +1114,7 @@ fn join_reltarget(
 ) -> PathTarget {
     if let Some(info) = join_infos.iter().find(|info| info.relids == relids) {
         if let Some(rte) = root.parse.rtable.get(info.rtindex.saturating_sub(1)) {
-            if join_rte_requires_alias_projection(rte) {
+            if matches!(rte.kind, RangeTblEntryKind::Join { .. }) {
                 return PathTarget::from_rte(info.rtindex, rte);
             }
         }
@@ -1136,23 +1124,12 @@ fn join_reltarget(
     PathTarget::new(exprs)
 }
 
-fn join_spec_for_relids(
-    root: &PlannerInfo,
+fn exact_join_spec(
     join_infos: &[JoinNodeInfo],
     left_relids: &[usize],
     right_relids: &[usize],
 ) -> Option<JoinBuildSpec> {
     let joinrelids = relids_union(left_relids, right_relids);
-    for sjinfo in &root.join_info_list {
-        let full_relids = relids_union(&sjinfo.min_lefthand, &sjinfo.min_righthand);
-        if relids_overlap(&joinrelids, &sjinfo.min_righthand)
-            && !relids_subset(&joinrelids, &sjinfo.min_righthand)
-            && joinrelids != full_relids
-        {
-            return None;
-        }
-    }
-
     if let Some(info) = join_infos.iter().find(|info| info.relids == joinrelids) {
         if relids_subset(left_relids, &info.left_relids) && relids_subset(right_relids, &info.right_relids)
         {
@@ -1176,11 +1153,117 @@ fn join_spec_for_relids(
         }
     }
 
-    Some(JoinBuildSpec {
+    None
+}
+
+fn join_spec_for_special_join(
+    root: &PlannerInfo,
+    join_infos: &[JoinNodeInfo],
+    rtindex: usize,
+    reversed: bool,
+) -> JoinBuildSpec {
+    if let Some(info) = join_infos.iter().find(|info| info.rtindex == rtindex) {
+        let explicit_qual =
+            (!matches!(info.kind, JoinType::Inner | JoinType::Cross)).then(|| info.quals.clone());
+        return JoinBuildSpec {
+            kind: if reversed {
+                reverse_join_type(info.kind)
+            } else {
+                info.kind
+            },
+            rtindex: Some(info.rtindex),
+            explicit_qual,
+        };
+    }
+    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
+        panic!("special join rtindex {rtindex} missing from rangetable");
+    };
+    let RangeTblEntryKind::Join { jointype, .. } = rte.kind else {
+        panic!("special join rtindex {rtindex} does not reference a join RTE");
+    };
+    JoinBuildSpec {
+        kind: if reversed {
+            reverse_join_type(jointype)
+        } else {
+            jointype
+        },
+        rtindex: Some(rtindex),
+        explicit_qual: None,
+    }
+}
+
+fn join_is_legal(
+    root: &PlannerInfo,
+    join_infos: &[JoinNodeInfo],
+    left_rel: &RelOptInfo,
+    right_rel: &RelOptInfo,
+) -> Option<JoinBuildSpec> {
+    let joinrelids = relids_union(&left_rel.relids, &right_rel.relids);
+    let exact_spec = exact_join_spec(join_infos, &left_rel.relids, &right_rel.relids);
+    let mut matched_sj: Option<(usize, bool)> = None;
+
+    for sjinfo in &root.join_info_list {
+        if !relids_overlap(&sjinfo.min_righthand, &joinrelids) {
+            continue;
+        }
+        if relids_subset(&joinrelids, &sjinfo.min_righthand) {
+            continue;
+        }
+        if relids_subset(&sjinfo.min_lefthand, &left_rel.relids)
+            && relids_subset(&sjinfo.min_righthand, &left_rel.relids)
+        {
+            continue;
+        }
+        if relids_subset(&sjinfo.min_lefthand, &right_rel.relids)
+            && relids_subset(&sjinfo.min_righthand, &right_rel.relids)
+        {
+            continue;
+        }
+
+        if relids_subset(&sjinfo.min_lefthand, &left_rel.relids)
+            && relids_subset(&sjinfo.min_righthand, &right_rel.relids)
+        {
+            if matched_sj.is_some() {
+                return None;
+            }
+            matched_sj = Some((sjinfo.rtindex, false));
+            continue;
+        }
+        if relids_subset(&sjinfo.min_lefthand, &right_rel.relids)
+            && relids_subset(&sjinfo.min_righthand, &left_rel.relids)
+        {
+            if matched_sj.is_some() {
+                return None;
+            }
+            matched_sj = Some((sjinfo.rtindex, true));
+            continue;
+        }
+
+        if relids_overlap(&left_rel.relids, &sjinfo.min_righthand)
+            && relids_overlap(&right_rel.relids, &sjinfo.min_righthand)
+        {
+            continue;
+        }
+
+        return None;
+    }
+
+    if let Some((rtindex, reversed)) = matched_sj {
+        return Some(join_spec_for_special_join(root, join_infos, rtindex, reversed));
+    }
+
+    if exact_spec
+        .as_ref()
+        .is_some_and(|spec| !matches!(spec.kind, JoinType::Inner | JoinType::Cross))
+    {
+        return None;
+    }
+
+    Some(exact_spec.unwrap_or(JoinBuildSpec {
         kind: JoinType::Inner,
         rtindex: None,
         explicit_qual: None,
-    })
+    }))
 }
 
 fn make_join_rel(
@@ -1195,7 +1278,7 @@ fn make_join_rel(
         return None;
     }
     let relids = relids_union(&left_rel.relids, &right_rel.relids);
-    let spec = join_spec_for_relids(root, join_infos, &left_rel.relids, &right_rel.relids)?;
+    let spec = join_is_legal(root, join_infos, left_rel, right_rel)?;
     let reltarget = join_reltarget(root, join_infos, &relids, left_rel, right_rel);
     let join_qual = build_join_qual(
         spec.kind,

@@ -1776,6 +1776,38 @@ fn explain_three_way_inner_join_can_build_smaller_join_first() {
 }
 
 #[test]
+fn left_join_rhs_boundary_stays_legal() {
+    let base = temp_dir("left_join_rhs_boundary");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table a (id int4 not null)").unwrap();
+    db.execute(1, "create table b (id int4 not null)").unwrap();
+    db.execute(1, "create table c (id int4 not null)").unwrap();
+
+    db.execute(1, "insert into a values (1), (2)").unwrap();
+    db.execute(1, "insert into b values (1), (2)").unwrap();
+    db.execute(1, "insert into c values (1)").unwrap();
+
+    db.execute(1, "analyze a").unwrap();
+    db.execute(1, "analyze b").unwrap();
+    db.execute(1, "analyze c").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a.id, b.id, c.id \
+             from a left join (b join c on b.id = c.id) on a.id = b.id \
+             order by 1, 2, 3",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Int32(1), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Null, Value::Null],
+        ]
+    );
+}
+
+#[test]
 fn create_index_builds_multilevel_btree_root() {
     let base = temp_dir("btree_multilevel_root");
     let db = Database::open(&base, 16).unwrap();
