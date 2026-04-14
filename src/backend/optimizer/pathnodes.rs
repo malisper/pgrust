@@ -11,6 +11,10 @@ use crate::include::nodes::plannodes::{AggAccum, ExprArraySubscript, JoinType, S
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerJoinExpr {
     InputColumn(usize),
+    BaseColumn {
+        relation_oid: u32,
+        index: usize,
+    },
     LeftColumn(usize),
     RightColumn(usize),
     OuterColumn {
@@ -922,9 +926,291 @@ impl PlannerJoinExpr {
         }
     }
 
+    pub fn from_base_input_expr(expr: &Expr, relation_oid: u32) -> Self {
+        match expr {
+            Expr::Column(index) => Self::BaseColumn {
+                relation_oid,
+                index: *index,
+            },
+            Expr::OuterColumn { depth, index } => Self::OuterColumn {
+                depth: *depth,
+                index: *index,
+            },
+            Expr::Const(value) => Self::Const(value.clone()),
+            Expr::Add(left, right) => Self::Add(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Sub(left, right) => Self::Sub(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::BitAnd(left, right) => Self::BitAnd(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::BitOr(left, right) => Self::BitOr(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::BitXor(left, right) => Self::BitXor(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Shl(left, right) => Self::Shl(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Shr(left, right) => Self::Shr(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Mul(left, right) => Self::Mul(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Div(left, right) => Self::Div(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Mod(left, right) => Self::Mod(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Concat(left, right) => Self::Concat(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::UnaryPlus(inner) => {
+                Self::UnaryPlus(Box::new(Self::from_base_input_expr(inner, relation_oid)))
+            }
+            Expr::Negate(inner) => {
+                Self::Negate(Box::new(Self::from_base_input_expr(inner, relation_oid)))
+            }
+            Expr::BitNot(inner) => {
+                Self::BitNot(Box::new(Self::from_base_input_expr(inner, relation_oid)))
+            }
+            Expr::Cast(inner, sql_type) => Self::Cast(
+                Box::new(Self::from_base_input_expr(inner, relation_oid)),
+                *sql_type,
+            ),
+            Expr::Eq(left, right) => Self::Eq(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::NotEq(left, right) => Self::NotEq(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Lt(left, right) => Self::Lt(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::LtEq(left, right) => Self::LtEq(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Gt(left, right) => Self::Gt(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::GtEq(left, right) => Self::GtEq(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::RegexMatch(left, right) => Self::RegexMatch(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Like {
+                expr,
+                pattern,
+                escape,
+                case_insensitive,
+                negated,
+            } => Self::Like {
+                expr: Box::new(Self::from_base_input_expr(expr, relation_oid)),
+                pattern: Box::new(Self::from_base_input_expr(pattern, relation_oid)),
+                escape: escape.as_ref().map(|inner| {
+                    Box::new(Self::from_base_input_expr(inner, relation_oid))
+                }),
+                case_insensitive: *case_insensitive,
+                negated: *negated,
+            },
+            Expr::Similar {
+                expr,
+                pattern,
+                escape,
+                negated,
+            } => Self::Similar {
+                expr: Box::new(Self::from_base_input_expr(expr, relation_oid)),
+                pattern: Box::new(Self::from_base_input_expr(pattern, relation_oid)),
+                escape: escape.as_ref().map(|inner| {
+                    Box::new(Self::from_base_input_expr(inner, relation_oid))
+                }),
+                negated: *negated,
+            },
+            Expr::And(left, right) => Self::And(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Or(left, right) => Self::Or(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::Not(inner) => {
+                Self::Not(Box::new(Self::from_base_input_expr(inner, relation_oid)))
+            }
+            Expr::IsNull(inner) => {
+                Self::IsNull(Box::new(Self::from_base_input_expr(inner, relation_oid)))
+            }
+            Expr::IsNotNull(inner) => {
+                Self::IsNotNull(Box::new(Self::from_base_input_expr(inner, relation_oid)))
+            }
+            Expr::IsDistinctFrom(left, right) => Self::IsDistinctFrom(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::IsNotDistinctFrom(left, right) => Self::IsNotDistinctFrom(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::ArrayLiteral {
+                elements,
+                array_type,
+            } => Self::ArrayLiteral {
+                elements: elements
+                    .iter()
+                    .map(|element| Self::from_base_input_expr(element, relation_oid))
+                    .collect(),
+                array_type: *array_type,
+            },
+            Expr::ArrayOverlap(left, right) => Self::ArrayOverlap(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonbContains(left, right) => Self::JsonbContains(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonbContained(left, right) => Self::JsonbContained(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonbExists(left, right) => Self::JsonbExists(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonbExistsAny(left, right) => Self::JsonbExistsAny(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonbExistsAll(left, right) => Self::JsonbExistsAll(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonbPathExists(left, right) => Self::JsonbPathExists(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonbPathMatch(left, right) => Self::JsonbPathMatch(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::ScalarSubquery(plan) => Self::ScalarSubquery(plan.clone()),
+            Expr::ExistsSubquery(plan) => Self::ExistsSubquery(plan.clone()),
+            Expr::Coalesce(left, right) => Self::Coalesce(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::AnySubquery { left, op, subquery } => Self::AnySubquery {
+                left: Box::new(Self::from_base_input_expr(left, relation_oid)),
+                op: *op,
+                subquery: subquery.clone(),
+            },
+            Expr::AllSubquery { left, op, subquery } => Self::AllSubquery {
+                left: Box::new(Self::from_base_input_expr(left, relation_oid)),
+                op: *op,
+                subquery: subquery.clone(),
+            },
+            Expr::AnyArray { left, op, right } => Self::AnyArray {
+                left: Box::new(Self::from_base_input_expr(left, relation_oid)),
+                op: *op,
+                right: Box::new(Self::from_base_input_expr(right, relation_oid)),
+            },
+            Expr::AllArray { left, op, right } => Self::AllArray {
+                left: Box::new(Self::from_base_input_expr(left, relation_oid)),
+                op: *op,
+                right: Box::new(Self::from_base_input_expr(right, relation_oid)),
+            },
+            Expr::ArraySubscript { array, subscripts } => Self::ArraySubscript {
+                array: Box::new(Self::from_base_input_expr(array, relation_oid)),
+                subscripts: subscripts
+                    .iter()
+                    .map(|subscript| PlannerJoinArraySubscript {
+                        is_slice: subscript.is_slice,
+                        lower: subscript
+                            .lower
+                            .as_ref()
+                            .map(|expr| Self::from_base_input_expr(expr, relation_oid)),
+                        upper: subscript
+                            .upper
+                            .as_ref()
+                            .map(|expr| Self::from_base_input_expr(expr, relation_oid)),
+                    })
+                    .collect(),
+            },
+            Expr::Random => Self::Random,
+            Expr::JsonGet(left, right) => Self::JsonGet(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonGetText(left, right) => Self::JsonGetText(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonPath(left, right) => Self::JsonPath(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::JsonPathText(left, right) => Self::JsonPathText(
+                Box::new(Self::from_base_input_expr(left, relation_oid)),
+                Box::new(Self::from_base_input_expr(right, relation_oid)),
+            ),
+            Expr::FuncCall {
+                func_oid,
+                func,
+                args,
+                func_variadic,
+            } => Self::FuncCall {
+                func_oid: *func_oid,
+                func: *func,
+                args: args
+                    .iter()
+                    .map(|arg| Self::from_base_input_expr(arg, relation_oid))
+                    .collect(),
+                func_variadic: *func_variadic,
+            },
+            Expr::CurrentDate => Self::CurrentDate,
+            Expr::CurrentTime { precision } => Self::CurrentTime {
+                precision: *precision,
+            },
+            Expr::CurrentTimestamp { precision } => Self::CurrentTimestamp {
+                precision: *precision,
+            },
+            Expr::LocalTime { precision } => Self::LocalTime {
+                precision: *precision,
+            },
+            Expr::LocalTimestamp { precision } => Self::LocalTimestamp {
+                precision: *precision,
+            },
+        }
+    }
+
     pub fn into_input_expr(self) -> Expr {
         match self {
             Self::InputColumn(index) => Expr::Column(index),
+            Self::BaseColumn { index, .. } => Expr::Column(index),
             Self::LeftColumn(index) => Expr::Column(index),
             Self::RightColumn(index) => Expr::Column(index),
             Self::OuterColumn { depth, index } => Expr::OuterColumn { depth, index },
@@ -1429,6 +1715,7 @@ impl PlannerJoinExpr {
     pub fn into_expr(self, left_width: usize) -> Expr {
         match self {
             Self::InputColumn(index) => Expr::Column(index),
+            Self::BaseColumn { index, .. } => Expr::Column(index),
             Self::LeftColumn(index) => Expr::Column(index),
             Self::RightColumn(index) => Expr::Column(left_width + index),
             Self::OuterColumn { depth, index } => Expr::OuterColumn { depth, index },
@@ -1670,6 +1957,10 @@ impl PlannerJoinExpr {
     pub fn swap_inputs(&self) -> Self {
         match self {
             Self::InputColumn(index) => Self::InputColumn(*index),
+            Self::BaseColumn { relation_oid, index } => Self::BaseColumn {
+                relation_oid: *relation_oid,
+                index: *index,
+            },
             Self::LeftColumn(index) => Self::RightColumn(*index),
             Self::RightColumn(index) => Self::LeftColumn(*index),
             Self::OuterColumn { depth, index } => Self::OuterColumn {
