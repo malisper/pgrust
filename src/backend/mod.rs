@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod commands;
 pub mod executor;
 pub mod libpq;
+pub mod optimizer;
 pub mod parser;
 pub mod storage;
 pub mod tcop;

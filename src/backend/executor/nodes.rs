@@ -24,13 +24,15 @@ fn slot_toast_context(
     relation: Option<ToastRelationRef>,
     ctx: &ExecutorContext,
 ) -> Option<crate::include::nodes::execnodes::ToastFetchContext> {
-    relation.map(|relation| crate::include::nodes::execnodes::ToastFetchContext {
-        relation,
-        pool: ctx.pool.clone(),
-        txns: ctx.txns.clone(),
-        snapshot: ctx.snapshot.clone(),
-        client_id: ctx.client_id,
-    })
+    relation.map(
+        |relation| crate::include::nodes::execnodes::ToastFetchContext {
+            relation,
+            pool: ctx.pool.clone(),
+            txns: ctx.txns.clone(),
+            snapshot: ctx.snapshot.clone(),
+            client_id: ctx.client_id,
+        },
+    )
 }
 
 impl PlanNode for ResultState {
@@ -59,6 +61,9 @@ impl PlanNode for ResultState {
     }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
     }
     fn node_label(&self) -> String {
         "Result".into()
@@ -149,6 +154,9 @@ impl PlanNode for SeqScanState {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
     }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
     fn node_label(&self) -> String {
         format!("Seq Scan on {}", self.relation_name)
     }
@@ -227,14 +235,14 @@ impl PlanNode for IndexScanState {
                 .as_ref()
                 .and_then(|scan| scan.xs_heaptid)
                 .expect("index scan tuple must set heap tid");
-                let visible = heap_fetch_visible_with_txns(
-                    &ctx.pool,
-                    ctx.client_id,
-                    self.rel,
-                    tid,
-                    &ctx.txns,
-                    &ctx.snapshot,
-                )?;
+            let visible = heap_fetch_visible_with_txns(
+                &ctx.pool,
+                ctx.client_id,
+                self.rel,
+                tid,
+                &ctx.txns,
+                &ctx.snapshot,
+            )?;
             let Some(tuple) = visible else {
                 continue;
             };
@@ -268,6 +276,9 @@ impl PlanNode for IndexScanState {
     }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
     }
     fn node_label(&self) -> String {
         format!(
@@ -410,6 +421,9 @@ impl PlanNode for FilterState {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
     }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
     fn node_label(&self) -> String {
         "Filter".into()
     }
@@ -459,8 +473,7 @@ impl PlanNode for NestedLoopJoinState {
                                     continue;
                                 }
                                 let mut combined_values = vec![Value::Null; self.left_width];
-                                combined_values
-                                    .extend(right_rows[ri].tts_values.iter().cloned());
+                                combined_values.extend(right_rows[ri].tts_values.iter().cloned());
                                 self.slot.tts_values = combined_values;
                                 self.slot.tts_nvalid = self.left_width + self.right_width;
                                 self.slot.kind = SlotKind::Virtual;
@@ -527,6 +540,9 @@ impl PlanNode for NestedLoopJoinState {
     }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
     }
     fn node_label(&self) -> String {
         "Nested Loop".into()
@@ -641,6 +657,9 @@ impl PlanNode for OrderByState {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
     }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
     fn node_label(&self) -> String {
         "Sort".into()
     }
@@ -685,6 +704,9 @@ impl PlanNode for LimitState {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
     }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
     fn node_label(&self) -> String {
         "Limit".into()
     }
@@ -726,6 +748,9 @@ impl PlanNode for ProjectionState {
     }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
     }
     fn node_label(&self) -> String {
         "Projection".into()
@@ -833,6 +858,9 @@ impl PlanNode for AggregateState {
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
     }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
     fn node_label(&self) -> String {
         "Aggregate".into()
     }
@@ -873,6 +901,9 @@ impl PlanNode for FunctionScanState {
     }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
     }
     fn node_label(&self) -> String {
         format!("Function Scan on {}", set_returning_call_label(&self.call))
@@ -923,6 +954,9 @@ impl PlanNode for ValuesState {
     }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
     }
     fn node_label(&self) -> String {
         "Values Scan".into()
@@ -1021,6 +1055,9 @@ impl PlanNode for ProjectSetState {
     }
     fn node_stats_mut(&mut self) -> &mut NodeExecStats {
         &mut self.stats
+    }
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
     }
     fn node_label(&self) -> String {
         "ProjectSet".into()

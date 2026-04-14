@@ -182,6 +182,7 @@ pub(super) fn bind_values_rows(
     };
     Ok((
         Plan::Values {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             rows: bound_rows,
             output_columns,
         },
@@ -354,6 +355,7 @@ pub(super) fn bind_from_item_with_ctes(
             let desc = entry.desc.clone();
             Ok((
                 Plan::SeqScan {
+                    plan_info: crate::backend::executor::PlanEstimate::default(),
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
                     toast: entry.toast,
@@ -461,6 +463,7 @@ pub(super) fn bind_from_item_with_ctes(
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
                         Plan::FunctionScan {
+                            plan_info: crate::backend::executor::PlanEstimate::default(),
                             call: SetReturningCall::GenerateSeries {
                                 func_oid: resolved_proc_oid,
                                 func_variadic: resolved_func_variadic,
@@ -531,6 +534,7 @@ pub(super) fn bind_from_item_with_ctes(
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
                         Plan::FunctionScan {
+                            plan_info: crate::backend::executor::PlanEstimate::default(),
                             call: SetReturningCall::Unnest {
                                 func_oid: resolved_proc_oid,
                                 func_variadic: resolved_func_variadic,
@@ -601,7 +605,10 @@ pub(super) fn bind_from_item_with_ctes(
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
                         Plan::Projection {
-                            input: Box::new(Plan::Result),
+                            plan_info: crate::backend::executor::PlanEstimate::default(),
+                            input: Box::new(Plan::Result {
+                                plan_info: crate::backend::executor::PlanEstimate::default(),
+                            }),
                             targets: vec![
                                 TargetEntry {
                                     name: "message".into(),
@@ -718,6 +725,7 @@ pub(super) fn bind_from_item_with_ctes(
                         let scope = scope_for_relation(Some(name), &desc);
                         Ok((
                             Plan::FunctionScan {
+                                plan_info: crate::backend::executor::PlanEstimate::default(),
                                 call: SetReturningCall::JsonTableFunction {
                                     func_oid: resolved_proc_oid,
                                     func_variadic: resolved_func_variadic,
@@ -762,6 +770,7 @@ pub(super) fn bind_from_item_with_ctes(
                         let scope = scope_for_relation(Some(name), &desc);
                         Ok((
                             Plan::FunctionScan {
+                                plan_info: crate::backend::executor::PlanEstimate::default(),
                                 call: SetReturningCall::RegexTableFunction {
                                     func_oid: resolved_proc_oid,
                                     func_variadic: resolved_func_variadic,
@@ -789,24 +798,22 @@ pub(super) fn bind_from_item_with_ctes(
             kind,
             constraint,
         } => {
-            let (left_plan, left_scope) =
-                bind_from_item_with_ctes(
-                    left,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                    expanded_views,
-                )?;
-            let (right_plan, right_scope) =
-                bind_from_item_with_ctes(
-                    right,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                    expanded_views,
-                )?;
+            let (left_plan, left_scope) = bind_from_item_with_ctes(
+                left,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                expanded_views,
+            )?;
+            let (right_plan, right_scope) = bind_from_item_with_ctes(
+                right,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                expanded_views,
+            )?;
             let raw_scope = combine_scopes(&left_scope, &right_scope);
             let (on, projection) = bind_join_constraint_with_ctes(
                 kind,
@@ -820,6 +827,7 @@ pub(super) fn bind_from_item_with_ctes(
                 ctes,
             )?;
             let plan = Plan::NestedLoopJoin {
+                plan_info: crate::backend::executor::PlanEstimate::default(),
                 left: Box::new(left_plan),
                 right: Box::new(right_plan),
                 kind: plan_join_type(*kind),
@@ -828,6 +836,7 @@ pub(super) fn bind_from_item_with_ctes(
             if let Some((targets, scope)) = projection {
                 Ok((
                     Plan::Projection {
+                        plan_info: crate::backend::executor::PlanEstimate::default(),
                         input: Box::new(plan),
                         targets,
                     },
@@ -843,15 +852,14 @@ pub(super) fn bind_from_item_with_ctes(
             column_aliases,
             preserve_source_names,
         } => {
-            let (plan, scope) =
-                bind_from_item_with_ctes(
-                    source,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                    expanded_views,
-                )?;
+            let (plan, scope) = bind_from_item_with_ctes(
+                source,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                expanded_views,
+            )?;
             apply_relation_alias(
                 plan,
                 scope,
@@ -947,7 +955,9 @@ fn bind_join_constraint_with_ctes(
             )?,
             None,
         )),
-        JoinConstraint::Using(columns) => bind_join_using_projection(columns, left_scope, right_scope),
+        JoinConstraint::Using(columns) => {
+            bind_join_using_projection(columns, left_scope, right_scope)
+        }
         JoinConstraint::Natural => {
             let columns = natural_join_columns(left_scope, right_scope);
             bind_join_using_projection(&columns, left_scope, right_scope)
@@ -984,14 +994,19 @@ fn bind_join_using_projection(
         using_pairs.push((name.clone(), left_index, right_index));
     }
 
-    let on = using_pairs.iter().fold(Expr::Const(Value::Bool(true)), |expr, (_, left, right)| {
-        let right_index = left_scope.columns.len() + *right;
-        let predicate = Expr::Eq(Box::new(Expr::Column(*left)), Box::new(Expr::Column(right_index)));
-        match expr {
-            Expr::Const(Value::Bool(true)) => predicate,
-            other => Expr::And(Box::new(other), Box::new(predicate)),
-        }
-    });
+    let on = using_pairs
+        .iter()
+        .fold(Expr::Const(Value::Bool(true)), |expr, (_, left, right)| {
+            let right_index = left_scope.columns.len() + *right;
+            let predicate = Expr::Eq(
+                Box::new(Expr::Column(*left)),
+                Box::new(Expr::Column(right_index)),
+            );
+            match expr {
+                Expr::Const(Value::Bool(true)) => predicate,
+                other => Expr::And(Box::new(other), Box::new(predicate)),
+            }
+        });
 
     let mut targets = Vec::new();
     let mut desc_columns = Vec::new();
@@ -1108,7 +1123,9 @@ fn apply_relation_alias(
     }
 
     if preserve_source_names {
-        let alias_only_anonymous = columns.iter().any(|column| column.relation_names.is_empty());
+        let alias_only_anonymous = columns
+            .iter()
+            .any(|column| column.relation_names.is_empty());
         for column in &mut columns {
             if alias_only_anonymous && !column.relation_names.is_empty() {
                 continue;
@@ -1151,6 +1168,7 @@ fn apply_relation_alias(
 
     if renamed {
         plan = Plan::Projection {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(plan),
             targets: columns
                 .iter()

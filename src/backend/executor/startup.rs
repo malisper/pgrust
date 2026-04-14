@@ -11,12 +11,14 @@ use std::rc::Rc;
 
 pub fn executor_start(plan: Plan) -> PlanState {
     match plan {
-        Plan::Result => Box::new(ResultState {
+        Plan::Result { plan_info } => Box::new(ResultState {
             emitted: false,
             slot: TupleSlot::empty(0),
+            plan_info,
             stats: NodeExecStats::default(),
         }),
         Plan::SeqScan {
+            plan_info,
             rel,
             relation_oid,
             toast,
@@ -43,10 +45,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 slot,
                 qual: None,
                 qual_expr: None,
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }
         Plan::IndexScan {
+            plan_info,
             rel,
             index_rel,
             am_oid,
@@ -79,10 +83,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 direction,
                 scan: None,
                 slot,
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }
         Plan::NestedLoopJoin {
+            plan_info,
             left,
             right,
             kind,
@@ -124,16 +130,23 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_width,
                 unmatched_right_index: 0,
                 slot: TupleSlot::empty(ncols),
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::Filter { input, predicate } if matches!(&*input, Plan::SeqScan { .. }) => {
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } if matches!(&*input, Plan::SeqScan { .. }) => {
             let Plan::SeqScan {
+                plan_info: _,
                 rel,
                 relation_oid,
                 toast,
                 desc,
-            } = *input else {
+            } = *input
+            else {
                 unreachable!()
             };
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
@@ -158,26 +171,38 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 slot,
                 qual: Some(qual),
                 qual_expr: Some(predicate),
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::Filter { input, predicate } => {
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } => {
             let compiled_predicate = expr::compile_predicate(&predicate);
             Box::new(FilterState {
                 input: executor_start(*input),
                 predicate,
                 compiled_predicate,
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::OrderBy { input, items } => Box::new(OrderByState {
+        Plan::OrderBy {
+            plan_info,
+            input,
+            items,
+        } => Box::new(OrderByState {
             input: executor_start(*input),
             items,
             rows: None,
             next_index: 0,
+            plan_info,
             stats: NodeExecStats::default(),
         }),
         Plan::Limit {
+            plan_info,
             input,
             limit,
             offset,
@@ -187,9 +212,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
             offset,
             skipped: 0,
             returned: 0,
+            plan_info,
             stats: NodeExecStats::default(),
         }),
-        Plan::Projection { input, targets } => {
+        Plan::Projection {
+            plan_info,
+            input,
+            targets,
+        } => {
             let column_names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
             let ncols = column_names.len();
             Box::new(ProjectionState {
@@ -197,10 +227,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 targets,
                 column_names,
                 slot: TupleSlot::empty(ncols),
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }
         Plan::Aggregate {
+            plan_info,
             input,
             group_by,
             accumulators,
@@ -223,10 +255,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 next_index: 0,
                 key_buffer,
                 trans_fns,
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }
-        Plan::FunctionScan { call } => Box::new(FunctionScanState {
+        Plan::FunctionScan { plan_info, call } => Box::new(FunctionScanState {
             output_columns: call
                 .output_columns()
                 .iter()
@@ -235,9 +268,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             call,
             rows: None,
             next_index: 0,
+            plan_info,
             stats: NodeExecStats::default(),
         }),
         Plan::Values {
+            plan_info,
             rows,
             output_columns,
         } => Box::new(ValuesState {
@@ -245,9 +280,14 @@ pub fn executor_start(plan: Plan) -> PlanState {
             output_columns: output_columns.into_iter().map(|c| c.name).collect(),
             result_rows: None,
             next_index: 0,
+            plan_info,
             stats: NodeExecStats::default(),
         }),
-        Plan::ProjectSet { input, targets } => {
+        Plan::ProjectSet {
+            plan_info,
+            input,
+            targets,
+        } => {
             let column_names = targets
                 .iter()
                 .map(|target| match target {
@@ -268,6 +308,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 current_row_count: 0,
                 next_index: 0,
                 slot: TupleSlot::empty(column_names.len()),
+                plan_info,
                 stats: NodeExecStats::default(),
             })
         }

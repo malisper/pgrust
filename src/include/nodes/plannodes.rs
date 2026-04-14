@@ -586,16 +586,56 @@ pub struct ExprArraySubscript {
     pub upper: Option<Expr>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EstimateValue(pub f64);
+
+impl EstimateValue {
+    pub fn as_f64(self) -> f64 {
+        self.0
+    }
+}
+
+impl PartialEq for EstimateValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for EstimateValue {}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlanEstimate {
+    pub startup_cost: EstimateValue,
+    pub total_cost: EstimateValue,
+    pub plan_rows: EstimateValue,
+    pub plan_width: usize,
+}
+
+impl PlanEstimate {
+    pub fn new(startup_cost: f64, total_cost: f64, plan_rows: f64, plan_width: usize) -> Self {
+        Self {
+            startup_cost: EstimateValue(startup_cost),
+            total_cost: EstimateValue(total_cost),
+            plan_rows: EstimateValue(plan_rows),
+            plan_width,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
-    Result,
+    Result {
+        plan_info: PlanEstimate,
+    },
     SeqScan {
+        plan_info: PlanEstimate,
         rel: RelFileLocator,
         relation_oid: u32,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
     },
     IndexScan {
+        plan_info: PlanEstimate,
         rel: RelFileLocator,
         index_rel: RelFileLocator,
         am_oid: u32,
@@ -606,29 +646,35 @@ pub enum Plan {
         direction: ScanDirection,
     },
     NestedLoopJoin {
+        plan_info: PlanEstimate,
         left: Box<Plan>,
         right: Box<Plan>,
         kind: JoinType,
         on: Expr,
     },
     Filter {
+        plan_info: PlanEstimate,
         input: Box<Plan>,
         predicate: Expr,
     },
     OrderBy {
+        plan_info: PlanEstimate,
         input: Box<Plan>,
         items: Vec<OrderByEntry>,
     },
     Limit {
+        plan_info: PlanEstimate,
         input: Box<Plan>,
         limit: Option<usize>,
         offset: usize,
     },
     Projection {
+        plan_info: PlanEstimate,
         input: Box<Plan>,
         targets: Vec<TargetEntry>,
     },
     Aggregate {
+        plan_info: PlanEstimate,
         input: Box<Plan>,
         group_by: Vec<Expr>,
         accumulators: Vec<AggAccum>,
@@ -636,22 +682,59 @@ pub enum Plan {
         output_columns: Vec<QueryColumn>,
     },
     FunctionScan {
+        plan_info: PlanEstimate,
         call: SetReturningCall,
     },
     Values {
+        plan_info: PlanEstimate,
         rows: Vec<Vec<Expr>>,
         output_columns: Vec<QueryColumn>,
     },
     ProjectSet {
+        plan_info: PlanEstimate,
         input: Box<Plan>,
         targets: Vec<ProjectSetTarget>,
     },
 }
 
 impl Plan {
+    pub fn plan_info(&self) -> PlanEstimate {
+        match self {
+            Plan::Result { plan_info }
+            | Plan::SeqScan { plan_info, .. }
+            | Plan::IndexScan { plan_info, .. }
+            | Plan::NestedLoopJoin { plan_info, .. }
+            | Plan::Filter { plan_info, .. }
+            | Plan::OrderBy { plan_info, .. }
+            | Plan::Limit { plan_info, .. }
+            | Plan::Projection { plan_info, .. }
+            | Plan::Aggregate { plan_info, .. }
+            | Plan::FunctionScan { plan_info, .. }
+            | Plan::Values { plan_info, .. }
+            | Plan::ProjectSet { plan_info, .. } => *plan_info,
+        }
+    }
+
+    pub fn set_plan_info(&mut self, value: PlanEstimate) {
+        match self {
+            Plan::Result { plan_info }
+            | Plan::SeqScan { plan_info, .. }
+            | Plan::IndexScan { plan_info, .. }
+            | Plan::NestedLoopJoin { plan_info, .. }
+            | Plan::Filter { plan_info, .. }
+            | Plan::OrderBy { plan_info, .. }
+            | Plan::Limit { plan_info, .. }
+            | Plan::Projection { plan_info, .. }
+            | Plan::Aggregate { plan_info, .. }
+            | Plan::FunctionScan { plan_info, .. }
+            | Plan::Values { plan_info, .. }
+            | Plan::ProjectSet { plan_info, .. } => *plan_info = value,
+        }
+    }
+
     pub fn columns(&self) -> Vec<QueryColumn> {
         match self {
-            Plan::Result => vec![],
+            Plan::Result { .. } => vec![],
             Plan::SeqScan { desc, .. } => desc
                 .columns
                 .iter()
@@ -684,7 +767,7 @@ impl Plan {
                 cols.extend(right.columns());
                 cols
             }
-            Plan::FunctionScan { call } => call.output_columns().to_vec(),
+            Plan::FunctionScan { call, .. } => call.output_columns().to_vec(),
             Plan::Values { output_columns, .. } => output_columns.clone(),
             Plan::ProjectSet { targets, .. } => targets
                 .iter()

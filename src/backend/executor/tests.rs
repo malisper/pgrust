@@ -156,9 +156,11 @@ fn multidimensional_array_catalog() -> Catalog {
             RelationDesc {
                 columns: vec![crate::backend::catalog::catalog::column_desc(
                     "a",
-                    crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
-                        crate::backend::parser::SqlTypeKind::Int4,
-                    )),
+                    crate::backend::parser::SqlType::array_of(
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        ),
+                    ),
                     true,
                 )],
             },
@@ -181,16 +183,20 @@ fn array_subscript_catalog() -> Catalog {
                 columns: vec![
                     crate::backend::catalog::catalog::column_desc(
                         "a",
-                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
-                            crate::backend::parser::SqlTypeKind::Int4,
-                        )),
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::new(
+                                crate::backend::parser::SqlTypeKind::Int4,
+                            ),
+                        ),
                         true,
                     ),
                     crate::backend::catalog::catalog::column_desc(
                         "b",
-                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
-                            crate::backend::parser::SqlTypeKind::Int4,
-                        )),
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::new(
+                                crate::backend::parser::SqlTypeKind::Int4,
+                            ),
+                        ),
                         true,
                     ),
                 ],
@@ -214,9 +220,11 @@ fn array_assignment_catalog() -> Catalog {
                 columns: vec![
                     crate::backend::catalog::catalog::column_desc(
                         "a",
-                        crate::backend::parser::SqlType::array_of(crate::backend::parser::SqlType::new(
-                            crate::backend::parser::SqlTypeKind::Int4,
-                        )),
+                        crate::backend::parser::SqlType::array_of(
+                            crate::backend::parser::SqlType::new(
+                                crate::backend::parser::SqlTypeKind::Int4,
+                            ),
+                        ),
                         true,
                     ),
                     crate::backend::catalog::catalog::column_desc(
@@ -700,8 +708,11 @@ fn seqscan_filter_projection_returns_expected_rows() {
     }
     drop(pool);
     let plan = Plan::Projection {
+        plan_info: crate::backend::executor::PlanEstimate::default(),
         input: Box::new(Plan::Filter {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(Plan::SeqScan {
+                plan_info: crate::backend::executor::PlanEstimate::default(),
                 rel: rel(),
                 relation_oid: 0,
                 toast: None,
@@ -778,6 +789,7 @@ fn seqscan_skips_superseded_versions() {
     }
     drop(pool);
     let plan = Plan::SeqScan {
+        plan_info: crate::backend::executor::PlanEstimate::default(),
         rel: rel(),
         relation_oid: 0,
         toast: None,
@@ -2380,22 +2392,26 @@ fn array_subscript_select_and_update_work() {
             assert_eq!(
                 rows,
                 vec![vec![
-                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
-                        vec![crate::include::nodes::datum::ArrayDimension {
-                            lower_bound: 1,
-                            length: 3,
-                        }],
-                        vec![Value::Int32(1), Value::Int32(22), Value::Int32(3)],
-                    )
-                    .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID)),
-                    Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
-                        vec![crate::include::nodes::datum::ArrayDimension {
-                            lower_bound: 1,
-                            length: 3,
-                        }],
-                        vec![Value::Int32(4), Value::Int32(50), Value::Int32(60)],
-                    )
-                    .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID)),
+                    Value::PgArray(
+                        crate::include::nodes::datum::ArrayValue::from_dimensions(
+                            vec![crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 3,
+                            }],
+                            vec![Value::Int32(1), Value::Int32(22), Value::Int32(3)],
+                        )
+                        .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID)
+                    ),
+                    Value::PgArray(
+                        crate::include::nodes::datum::ArrayValue::from_dimensions(
+                            vec![crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 3,
+                            }],
+                            vec![Value::Int32(4), Value::Int32(50), Value::Int32(60)],
+                        )
+                        .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID)
+                    ),
                 ]]
             );
         }
@@ -4845,7 +4861,11 @@ fn unknown_string_literals_coerce_to_array_types_in_comparisons() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]]
+                vec![vec![
+                    Value::Bool(false),
+                    Value::Bool(true),
+                    Value::Bool(true)
+                ]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -4857,14 +4877,26 @@ fn malformed_array_literals_report_array_input_errors() {
     let base = temp_dir("array_malformed_input");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '{1,}'::text[]").unwrap_err();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '{1,}'::text[]",
+    )
+    .unwrap_err();
+    assert_eq!(format_exec_error(&err), "malformed array literal: \"{1,}\"");
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '[2]={1}'::int[]",
+    )
+    .unwrap_err();
     assert_eq!(
         format_exec_error(&err),
-        "malformed array literal: \"{1,}\""
+        "malformed array literal: \"[2]={1}\""
     );
-
-    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '[2]={1}'::int[]").unwrap_err();
-    assert_eq!(format_exec_error(&err), "malformed array literal: \"[2]={1}\"");
 }
 
 #[test]
@@ -4882,7 +4914,9 @@ fn typed_empty_array_selects_as_empty_value() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::PgArray(crate::include::nodes::datum::ArrayValue::empty())]]
+                vec![vec![Value::PgArray(
+                    crate::include::nodes::datum::ArrayValue::empty()
+                )]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -6746,14 +6780,25 @@ fn jsonb_delete_and_set_lax_report_postgres_style_errors() {
     let base = temp_dir("jsonb_delete_set_lax_errors");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '\"a\"'::jsonb - 'a'")
-        .unwrap_err();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '\"a\"'::jsonb - 'a'",
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         ExecError::InvalidStorageValue { details, .. } if details == "cannot delete from scalar"
     ));
 
-    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select '{}'::jsonb - 1").unwrap_err();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '{}'::jsonb - 1",
+    )
+    .unwrap_err();
     assert!(matches!(
         err,
         ExecError::InvalidStorageValue { details, .. }

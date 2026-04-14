@@ -4,8 +4,9 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
-    PgCastRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgTypeRow,
-    bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]
@@ -151,6 +152,25 @@ impl CatalogLookup for VisibleCatalog {
         self.catcache
             .as_ref()
             .map(|catcache| catcache.rewrite_rows_for_relation(relation_oid))
+            .unwrap_or_default()
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| catcache.class_by_oid(relation_oid).cloned())
+    }
+
+    fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| {
+                catcache
+                    .statistic_rows()
+                    .into_iter()
+                    .filter(|row| row.starelid == relation_oid)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

@@ -135,8 +135,11 @@ fn main() -> Result<(), ExecError> {
     println!("  SEQSCAN rel {}", rel().rel_number);
 
     let plan = Plan::Projection {
+        plan_info: pgrust::backend::executor::PlanEstimate::default(),
         input: Box::new(Plan::Filter {
+            plan_info: pgrust::backend::executor::PlanEstimate::default(),
             input: Box::new(Plan::SeqScan {
+                plan_info: pgrust::backend::executor::PlanEstimate::default(),
                 rel: rel(),
                 relation_oid: 0,
                 toast: None,

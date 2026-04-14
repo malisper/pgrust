@@ -124,32 +124,31 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
 
 pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLocator>) {
     match plan {
-        Plan::Result => {}
+        Plan::Result { .. } => {}
         Plan::SeqScan { rel, .. } | Plan::IndexScan { rel, .. } => {
             rels.insert(*rel);
         }
         Plan::NestedLoopJoin {
-            left,
-            right,
-            on,
-            ..
+            left, right, on, ..
         } => {
             collect_rels_from_plan(left, rels);
             collect_rels_from_plan(right, rels);
             collect_rels_from_expr(on, rels);
         }
-        Plan::Filter { input, predicate } => {
+        Plan::Filter {
+            input, predicate, ..
+        } => {
             collect_rels_from_plan(input, rels);
             collect_rels_from_expr(predicate, rels);
         }
-        Plan::OrderBy { input, items } => {
+        Plan::OrderBy { input, items, .. } => {
             collect_rels_from_plan(input, rels);
             for item in items {
                 collect_rels_from_expr(&item.expr, rels);
             }
         }
         Plan::Limit { input, .. } => collect_rels_from_plan(input, rels),
-        Plan::Projection { input, targets } => {
+        Plan::Projection { input, targets, .. } => {
             collect_rels_from_plan(input, rels);
             for target in targets {
                 collect_rels_from_expr(&target.expr, rels);
@@ -175,7 +174,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(expr, rels);
             }
         }
-        Plan::FunctionScan { call } => match call {
+        Plan::FunctionScan { call, .. } => match call {
             crate::include::nodes::plannodes::SetReturningCall::GenerateSeries {
                 start,
                 stop,
@@ -194,7 +193,8 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 args, ..
             }
             | crate::include::nodes::plannodes::SetReturningCall::TextSearchTableFunction {
-                args, ..
+                args,
+                ..
             } => {
                 for arg in args {
                     collect_rels_from_expr(arg, rels);
@@ -208,7 +208,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         }
-        Plan::ProjectSet { input, targets } => {
+        Plan::ProjectSet { input, targets, .. } => {
             collect_rels_from_plan(input, rels);
             for target in targets {
                 match target {

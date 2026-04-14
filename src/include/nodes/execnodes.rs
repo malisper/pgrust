@@ -5,10 +5,11 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::nodes::plannodes::PlanEstimate;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
-use std::sync::Arc;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::executor::{AccumState, ExecError, ExecutorContext};
@@ -16,8 +17,8 @@ pub use crate::include::nodes::datum::{NumericValue, Value};
 pub use crate::include::nodes::parsenodes::SqlType;
 pub use crate::include::nodes::plannodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
-    OrderByEntry, Plan, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType,
-    SetReturningCall, TargetEntry, ToastRelationRef,
+    OrderByEntry, Plan, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall,
+    TargetEntry, ToastRelationRef,
 };
 
 pub struct TupleSlot {
@@ -185,6 +186,7 @@ pub trait PlanNode: std::fmt::Debug {
 
     fn node_stats(&self) -> &NodeExecStats;
     fn node_stats_mut(&mut self) -> &mut NodeExecStats;
+    fn plan_info(&self) -> PlanEstimate;
     fn node_label(&self) -> String;
 
     /// Format children for EXPLAIN output. The node itself is formatted by
@@ -199,6 +201,7 @@ pub type PlanState = Box<dyn PlanNode>;
 pub struct ResultState {
     pub(crate) emitted: bool,
     pub(crate) slot: TupleSlot,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -219,6 +222,7 @@ pub struct SeqScanState {
     /// Avoids a separate FilterState and its per-tuple vtable dispatch.
     pub(crate) qual: Option<crate::backend::executor::expr::CompiledPredicate>,
     pub(crate) qual_expr: Option<Expr>,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -245,6 +249,7 @@ pub struct IndexScanState {
     pub(crate) direction: ScanDirection,
     pub(crate) scan: Option<IndexScanDesc>,
     pub(crate) slot: TupleSlot,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -262,6 +267,7 @@ pub struct FilterState {
     pub(crate) input: PlanState,
     pub(crate) predicate: Expr,
     pub(crate) compiled_predicate: crate::backend::executor::expr::CompiledPredicate,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -293,6 +299,7 @@ pub struct NestedLoopJoinState {
     pub(crate) right_width: usize,
     pub(crate) unmatched_right_index: usize,
     pub(crate) slot: TupleSlot,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -302,6 +309,7 @@ pub struct ProjectionState {
     pub(crate) targets: Vec<TargetEntry>,
     pub(crate) column_names: Vec<String>,
     pub(crate) slot: TupleSlot,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -311,6 +319,7 @@ pub struct OrderByState {
     pub(crate) items: Vec<OrderByEntry>,
     pub(crate) rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -321,6 +330,7 @@ pub struct LimitState {
     pub(crate) offset: usize,
     pub(crate) skipped: usize,
     pub(crate) returned: usize,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -338,6 +348,7 @@ pub struct AggregateState {
     /// Compiled transition functions resolved at plan time, like PG's
     /// aggregate transfn pointers. Avoids per-tuple enum dispatch.
     pub(crate) trans_fns: Vec<fn(&mut AccumState, &[Value])>,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -347,6 +358,7 @@ pub struct ValuesState {
     pub(crate) output_columns: Vec<String>,
     pub(crate) result_rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -356,6 +368,7 @@ pub struct FunctionScanState {
     pub(crate) output_columns: Vec<String>,
     pub(crate) rows: Option<Vec<TupleSlot>>,
     pub(crate) next_index: usize,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 
@@ -369,6 +382,7 @@ pub struct ProjectSetState {
     pub(crate) current_row_count: usize,
     pub(crate) next_index: usize,
     pub(crate) slot: TupleSlot,
+    pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }
 

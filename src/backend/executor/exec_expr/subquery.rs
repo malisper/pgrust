@@ -120,6 +120,7 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
     let Plan::Projection {
         input: outer_filter,
         targets: outer_targets,
+        ..
     } = plan
     else {
         return false;
@@ -133,6 +134,7 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
     let Plan::Filter {
         input: join_projection,
         predicate,
+        ..
     } = outer_filter.as_ref()
     else {
         return false;
@@ -148,6 +150,7 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
     let Plan::Projection {
         input: join_plan,
         targets,
+        ..
     } = join_projection.as_ref()
     else {
         return false;
@@ -167,6 +170,7 @@ fn is_pathological_regress_join_in_subquery(plan: &Plan) -> bool {
         right,
         kind,
         on,
+        ..
     } = join_plan.as_ref()
     else {
         return false;
