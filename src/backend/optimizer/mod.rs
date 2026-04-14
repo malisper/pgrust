@@ -1221,6 +1221,7 @@ fn join_is_legal(
     let joinrelids = relids_union(&left_rel.relids, &right_rel.relids);
     let exact_spec = exact_inner_join_spec(root, &left_rel.relids, &right_rel.relids);
     let mut matched_sj: Option<(&crate::include::nodes::pathnodes::SpecialJoinInfo, bool)> = None;
+    let mut must_be_leftjoin = false;
 
     for sjinfo in &root.join_info_list {
         if !relids_overlap(&sjinfo.min_righthand, &joinrelids) {
@@ -1264,7 +1265,15 @@ fn join_is_legal(
         {
             continue;
         }
+        if sjinfo.jointype != JoinType::Left || relids_overlap(&joinrelids, &sjinfo.min_lefthand) {
+            return None;
+        }
+        must_be_leftjoin = true;
+    }
 
+    if must_be_leftjoin
+        && !matched_sj.is_some_and(|(sjinfo, _)| sjinfo.jointype == JoinType::Left && sjinfo.lhs_strict)
+    {
         return None;
     }
 
