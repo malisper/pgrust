@@ -132,10 +132,25 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidBooleanInput { value } => value.as_str(),
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
+        ExecError::DetailedError { message, .. } => {
+            if let Some(value) = extract_quoted_error_value(message) {
+                value
+            } else {
+                return None;
+            }
+        }
         _ => return None,
     };
     let needle = format!("'{}'", value.replace('\'', "''"));
     sql.rfind(&needle).map(|index| index + 1)
+}
+
+fn extract_quoted_error_value(message: &str) -> Option<&str> {
+    let prefix = "value \"";
+    let start = message.find(prefix)? + prefix.len();
+    let rest = &message[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
 
 struct ExecErrorResponse {
