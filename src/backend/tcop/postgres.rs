@@ -51,6 +51,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
             "42704"
         }
         ExecError::Parse(crate::backend::parser::ParseError::NoSchemaSelectedForCreate) => "3F000",
+        ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupported(_)) => "0A000",
         ExecError::Parse(crate::backend::parser::ParseError::ActiveSqlTransaction(_)) => "25001",
         ExecError::IntegerOutOfRange { .. }
         | ExecError::Int2OutOfRange

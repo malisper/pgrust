@@ -506,6 +506,12 @@ impl Session {
                 )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::Unsupported(ref unsupported_stmt) => {
+                Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                    "{}: {}",
+                    unsupported_stmt.feature, unsupported_stmt.sql
+                ))))
+            }
             Statement::CommentOnTable(ref comment_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
