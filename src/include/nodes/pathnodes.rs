@@ -231,12 +231,10 @@ impl PlannerInfo {
 
 fn build_simple_rel_array(rtable: &[RangeTblEntry]) -> Vec<Option<RelOptInfo>> {
     let mut simple_rel_array = vec![None];
-    simple_rel_array.extend(
-        rtable
-            .iter()
-            .enumerate()
-            .map(|(index, rte)| Some(RelOptInfo::from_rte(index + 1, rte))),
-    );
+    simple_rel_array.extend(rtable.iter().enumerate().map(|(index, rte)| match &rte.kind {
+        RangeTblEntryKind::Join { .. } => None,
+        _ => Some(RelOptInfo::from_rte(index + 1, rte)),
+    }));
     simple_rel_array
 }
 
