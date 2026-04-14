@@ -12,7 +12,7 @@ use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlType
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::plannodes::JoinType;
-use pathnodes::PlannerPath;
+use pathnodes::{PlannerJoinExpr, PlannerPath};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -565,7 +565,7 @@ fn choose_join_plan(
     left: PlannerPath,
     right: PlannerPath,
     kind: JoinType,
-    on: Expr,
+    on: PlannerJoinExpr,
 ) -> PlannerPath {
     let original = estimate_nested_loop_join(left.clone(), right.clone(), kind, on.clone());
     if !matches!(kind, JoinType::Inner | JoinType::Cross) {
@@ -574,14 +574,7 @@ fn choose_join_plan(
 
     let left_columns = left.columns();
     let right_columns = right.columns();
-    let remapped_on = remap_expr_columns(&on, &|column| {
-        if column < left_columns.len() {
-            right_columns.len() + column
-        } else {
-            column - left_columns.len()
-        }
-    });
-    let swapped_join = estimate_nested_loop_join(right, left, kind, remapped_on);
+    let swapped_join = estimate_nested_loop_join(right, left, kind, on.swap_inputs());
     let swapped = restore_join_output_order(swapped_join, &left_columns, &right_columns);
     if swapped.plan_info().total_cost.as_f64() < original.plan_info().total_cost.as_f64() {
         swapped
@@ -594,18 +587,19 @@ fn estimate_nested_loop_join(
     left: PlannerPath,
     right: PlannerPath,
     kind: JoinType,
-    on: Expr,
+    on: PlannerJoinExpr,
 ) -> PlannerPath {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let join_sel = clause_selectivity(&on, None, left_info.plan_rows.as_f64());
+    let on_expr = on.clone().into_expr(left.columns().len());
+    let join_sel = clause_selectivity(&on_expr, None, left_info.plan_rows.as_f64());
     let rows =
         clamp_rows(left_info.plan_rows.as_f64() * right_info.plan_rows.as_f64() * join_sel);
     let total = left_info.total_cost.as_f64()
         + left_info.plan_rows.as_f64() * right_info.total_cost.as_f64()
         + left_info.plan_rows.as_f64()
             * right_info.plan_rows.as_f64()
-            * predicate_cost(&on)
+            * predicate_cost(&on_expr)
             * CPU_OPERATOR_COST;
     PlannerPath::NestedLoopJoin {
         plan_info: PlanEstimate::new(
@@ -656,265 +650,6 @@ fn restore_join_output_order(
         ),
         input: Box::new(join),
         targets,
-    }
-}
-
-fn remap_expr_columns(expr: &Expr, map: &impl Fn(usize) -> usize) -> Expr {
-    match expr {
-        Expr::Column(index) => Expr::Column(map(*index)),
-        Expr::OuterColumn { depth, index } => Expr::OuterColumn {
-            depth: *depth,
-            index: *index,
-        },
-        Expr::Const(value) => Expr::Const(value.clone()),
-        Expr::Add(left, right) => Expr::Add(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Sub(left, right) => Expr::Sub(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::BitAnd(left, right) => Expr::BitAnd(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::BitOr(left, right) => Expr::BitOr(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::BitXor(left, right) => Expr::BitXor(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Shl(left, right) => Expr::Shl(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Shr(left, right) => Expr::Shr(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Mul(left, right) => Expr::Mul(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Div(left, right) => Expr::Div(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Mod(left, right) => Expr::Mod(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Concat(left, right) => Expr::Concat(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(remap_expr_columns(inner, map))),
-        Expr::Negate(inner) => Expr::Negate(Box::new(remap_expr_columns(inner, map))),
-        Expr::BitNot(inner) => Expr::BitNot(Box::new(remap_expr_columns(inner, map))),
-        Expr::Cast(inner, sql_type) => {
-            Expr::Cast(Box::new(remap_expr_columns(inner, map)), *sql_type)
-        }
-        Expr::Eq(left, right) => Expr::Eq(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::NotEq(left, right) => Expr::NotEq(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Lt(left, right) => Expr::Lt(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::LtEq(left, right) => Expr::LtEq(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Gt(left, right) => Expr::Gt(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::GtEq(left, right) => Expr::GtEq(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::RegexMatch(left, right) => Expr::RegexMatch(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(remap_expr_columns(expr, map)),
-            pattern: Box::new(remap_expr_columns(pattern, map)),
-            escape: escape
-                .as_ref()
-                .map(|inner| Box::new(remap_expr_columns(inner, map))),
-            case_insensitive: *case_insensitive,
-            negated: *negated,
-        },
-        Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            negated,
-        } => Expr::Similar {
-            expr: Box::new(remap_expr_columns(expr, map)),
-            pattern: Box::new(remap_expr_columns(pattern, map)),
-            escape: escape
-                .as_ref()
-                .map(|inner| Box::new(remap_expr_columns(inner, map))),
-            negated: *negated,
-        },
-        Expr::And(left, right) => Expr::And(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Or(left, right) => Expr::Or(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::Not(inner) => Expr::Not(Box::new(remap_expr_columns(inner, map))),
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(remap_expr_columns(inner, map))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(remap_expr_columns(inner, map))),
-        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::ArrayLiteral {
-            elements,
-            array_type,
-        } => Expr::ArrayLiteral {
-            elements: elements.iter().map(|element| remap_expr_columns(element, map)).collect(),
-            array_type: *array_type,
-        },
-        Expr::ArrayOverlap(left, right) => Expr::ArrayOverlap(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonbContains(left, right) => Expr::JsonbContains(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonbContained(left, right) => Expr::JsonbContained(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonbExists(left, right) => Expr::JsonbExists(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonbExistsAny(left, right) => Expr::JsonbExistsAny(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonbPathExists(left, right) => Expr::JsonbPathExists(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::ScalarSubquery(plan) => Expr::ScalarSubquery(plan.clone()),
-        Expr::ExistsSubquery(plan) => Expr::ExistsSubquery(plan.clone()),
-        Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::AnySubquery { left, op, subquery } => Expr::AnySubquery {
-            left: Box::new(remap_expr_columns(left, map)),
-            op: *op,
-            subquery: subquery.clone(),
-        },
-        Expr::AllSubquery { left, op, subquery } => Expr::AllSubquery {
-            left: Box::new(remap_expr_columns(left, map)),
-            op: *op,
-            subquery: subquery.clone(),
-        },
-        Expr::AnyArray { left, op, right } => Expr::AnyArray {
-            left: Box::new(remap_expr_columns(left, map)),
-            op: *op,
-            right: Box::new(remap_expr_columns(right, map)),
-        },
-        Expr::AllArray { left, op, right } => Expr::AllArray {
-            left: Box::new(remap_expr_columns(left, map)),
-            op: *op,
-            right: Box::new(remap_expr_columns(right, map)),
-        },
-        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(remap_expr_columns(array, map)),
-            subscripts: subscripts
-                .iter()
-                .map(|subscript| crate::include::nodes::plannodes::ExprArraySubscript {
-                    is_slice: subscript.is_slice,
-                    lower: subscript
-                        .lower
-                        .as_ref()
-                        .map(|expr| remap_expr_columns(expr, map)),
-                    upper: subscript
-                        .upper
-                        .as_ref()
-                        .map(|expr| remap_expr_columns(expr, map)),
-                })
-                .collect(),
-        },
-        Expr::Random => Expr::Random,
-        Expr::JsonGet(left, right) => Expr::JsonGet(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonGetText(left, right) => Expr::JsonGetText(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonPath(left, right) => Expr::JsonPath(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::JsonPathText(left, right) => Expr::JsonPathText(
-            Box::new(remap_expr_columns(left, map)),
-            Box::new(remap_expr_columns(right, map)),
-        ),
-        Expr::FuncCall {
-            func_oid,
-            func,
-            args,
-            func_variadic,
-        } => Expr::FuncCall {
-            func_oid: *func_oid,
-            func: *func,
-            args: args.iter().map(|arg| remap_expr_columns(arg, map)).collect(),
-            func_variadic: *func_variadic,
-        },
-        Expr::CurrentDate => Expr::CurrentDate,
-        Expr::CurrentTime { precision } => Expr::CurrentTime {
-            precision: *precision,
-        },
-        Expr::CurrentTimestamp { precision } => Expr::CurrentTimestamp {
-            precision: *precision,
-        },
-        Expr::LocalTime { precision } => Expr::LocalTime {
-            precision: *precision,
-        },
-        Expr::LocalTimestamp { precision } => Expr::LocalTimestamp {
-            precision: *precision,
-        },
     }
 }
 
