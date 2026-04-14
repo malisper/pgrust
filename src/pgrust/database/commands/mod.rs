@@ -1,3 +1,4 @@
+mod alter_column_type;
 mod create;
 mod drop;
 mod drop_column;
