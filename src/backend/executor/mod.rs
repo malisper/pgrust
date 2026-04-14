@@ -5,6 +5,7 @@ pub(crate) mod exec_tuples;
 mod expr_bit;
 mod expr_bool;
 mod expr_casts;
+mod expr_date;
 mod expr_compile;
 mod expr_datetime;
 mod expr_format;
