@@ -213,9 +213,16 @@ pub enum Statement {
     CommentOnTable(CommentOnTableStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CreateDomain(CreateDomainStatement),
+    CommentOnRole(CommentOnRoleStatement),
     DropTable(DropTableStatement),
     DropDomain(DropDomainStatement),
     DropView(DropViewStatement),
+    CreateRole(CreateRoleStatement),
+    AlterRole(AlterRoleStatement),
+    DropRole(DropRoleStatement),
+    SetSessionAuthorization(SetSessionAuthorizationStatement),
+    ResetSessionAuthorization(ResetSessionAuthorizationStatement),
+    ReassignOwned(ReassignOwnedStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
     Insert(InsertStatement),
@@ -667,6 +674,69 @@ pub struct CommentOnTableStatement {
 pub struct CommentOnDomainStatement {
     pub domain_name: String,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateRoleStatement {
+    pub role_name: String,
+    pub is_user: bool,
+    pub options: Vec<RoleOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterRoleStatement {
+    pub role_name: String,
+    pub action: AlterRoleAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterRoleAction {
+    Rename { new_name: String },
+    Options(Vec<RoleOption>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropRoleStatement {
+    pub if_exists: bool,
+    pub role_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetSessionAuthorizationStatement {
+    pub role_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetSessionAuthorizationStatement;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnRoleStatement {
+    pub role_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReassignOwnedStatement {
+    pub old_roles: Vec<String>,
+    pub new_role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleOption {
+    Superuser(bool),
+    CreateDb(bool),
+    CreateRole(bool),
+    Inherit(bool),
+    Login(bool),
+    Replication(bool),
+    BypassRls(bool),
+    ConnectionLimit(i32),
+    Password(Option<String>),
+    EncryptedPassword(String),
+    InRole(Vec<String>),
+    Role(Vec<String>),
+    Admin(Vec<String>),
+    Sysid(i32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

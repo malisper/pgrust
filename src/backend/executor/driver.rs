@@ -147,6 +147,15 @@ fn execute_statement_with_source(
             expected: "COMMENT ON DOMAIN handled by database/session layer",
             actual: "COMMENT ON DOMAIN".into(),
         })),
+        Statement::CommentOnRole(_)
+        | Statement::CreateRole(_)
+        | Statement::AlterRole(_)
+        | Statement::DropRole(_)
+        | Statement::SetSessionAuthorization(_)
+        | Statement::ResetSessionAuthorization(_)
+        | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "role management".into(),
+        ))),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
         Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE DOMAIN handled by database/session layer",
