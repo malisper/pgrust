@@ -22,7 +22,7 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::include::catalog::{
     PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
     bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function,
+    proc_oid_for_builtin_aggregate_function, RECORD_TYPE_OID,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -300,7 +300,7 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
         },
         SqlExpr::Cast(inner, ty) => {
             let inner = literal_sql_expr_value(inner)?;
-            cast_value(inner, *ty).ok()
+            cast_value(inner, raw_type_name_hint(ty)).ok()
         }
         SqlExpr::ArrayLiteral(items) => {
             let mut values = Vec::with_capacity(items.len());
@@ -310,6 +310,14 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
             Some(Value::Array(values))
         }
         _ => None,
+    }
+}
+
+pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
+    match raw {
+        RawTypeName::Builtin(ty) => *ty,
+        RawTypeName::Named { .. } => SqlType::new(SqlTypeKind::Composite),
+        RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
     }
 }
 

@@ -459,6 +459,12 @@ fn array_element_layout(
                 details: "anyarray cannot be used as a concrete array element type".into(),
             });
         }
+        SqlTypeKind::Record | SqlTypeKind::Composite => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "record cannot be used as a concrete array element type".into(),
+            });
+        }
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
@@ -688,6 +694,10 @@ fn decode_array_element_value(
         SqlTypeKind::AnyArray => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "anyarray cannot be used as a concrete array element type".into(),
+        }),
+        SqlTypeKind::Record | SqlTypeKind::Composite => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: "record cannot be used as a concrete array element type".into(),
         }),
         SqlTypeKind::Int2 => {
             if bytes.len() != 2 {

@@ -1,5 +1,6 @@
 use super::functions::resolve_scalar_function;
 use super::*;
+use crate::include::catalog::RECORD_TYPE_OID;
 
 pub(super) fn infer_sql_expr_type(
     expr: &SqlExpr,
@@ -53,6 +54,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),
         SqlExpr::Const(Value::Bytea(_)) => SqlType::new(SqlTypeKind::Bytea),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
+        SqlExpr::Row(_) => SqlType::record(RECORD_TYPE_OID),
         SqlExpr::Const(Value::Numeric(_)) => SqlType::new(SqlTypeKind::Numeric),
         SqlExpr::Const(Value::Json(_)) => SqlType::new(SqlTypeKind::Json),
         SqlExpr::Const(Value::Jsonb(_)) => SqlType::new(SqlTypeKind::Jsonb),
@@ -162,7 +164,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 ctes,
             ),
         },
-        SqlExpr::Cast(_, ty) => *ty,
+        SqlExpr::Cast(_, ty) => raw_type_name_hint(ty),
         SqlExpr::FieldSelect { .. } => SqlType::new(SqlTypeKind::Text),
         SqlExpr::Eq(_, _)
         | SqlExpr::NotEq(_, _)

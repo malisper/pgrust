@@ -86,7 +86,7 @@ impl CompiledTupleDecoder {
                     continue;
                 } else if attr.attlen == -1 {
                     let step = match &column.ty {
-                        ScalarType::Text => DecodeStep::VarlenText {
+                        ScalarType::Text | ScalarType::Record => DecodeStep::VarlenText {
                             align: attr.attalign,
                         },
                         _ => DecodeStep::Generic {
@@ -397,7 +397,7 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
-                            ScalarType::Text => {
+                            ScalarType::Text | ScalarType::Record => {
                                 values.push(Value::Null);
                                 continue;
                             }
@@ -488,7 +488,7 @@ impl CompiledTupleDecoder {
                             ScalarType::Bytea => {
                                 values.push(Value::Bytea(bytes_slice.to_vec()));
                             }
-                            ScalarType::Text => {
+                            ScalarType::Text | ScalarType::Record => {
                                 values.push(Value::TextRef(
                                     bytes_slice.as_ptr(),
                                     bytes_slice.len() as u32,
@@ -578,7 +578,7 @@ impl CompiledTupleDecoder {
                             ScalarType::Bytea => {
                                 values.push(Value::Bytea(bytes.to_vec()));
                             }
-                            ScalarType::Text => {
+                            ScalarType::Text | ScalarType::Record => {
                                 values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));
                             }
                             ScalarType::Path => {

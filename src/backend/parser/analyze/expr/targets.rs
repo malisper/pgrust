@@ -303,7 +303,7 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
             visit_nested_srfs(left, info);
             visit_nested_srfs(right, info);
         }
-        SqlExpr::ArrayLiteral(items) => {
+        SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => {
             for item in items {
                 visit_nested_srfs(item, info);
             }

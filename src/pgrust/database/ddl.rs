@@ -146,7 +146,16 @@ pub(super) fn validate_alter_table_add_column(
         }));
     }
 
-    let mut desc = column_desc(column.name.clone(), column.ty, true);
+    let sql_type = match &column.ty {
+        crate::backend::parser::RawTypeName::Builtin(sql_type) => *sql_type,
+        crate::backend::parser::RawTypeName::Record => {
+            return Err(ExecError::Parse(ParseError::UnsupportedType("record".into())));
+        }
+        crate::backend::parser::RawTypeName::Named { name } => {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(name.clone())));
+        }
+    };
+    let mut desc = column_desc(column.name.clone(), sql_type, true);
     desc.default_expr = column.default_expr.clone();
     if let Some(sql) = desc.default_expr.as_deref() {
         desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);

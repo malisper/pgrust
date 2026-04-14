@@ -1125,6 +1125,13 @@ impl Session {
                             ),
                             ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
                             ScalarType::Text => Value::Text(raw.clone().into()),
+                            ScalarType::Record => {
+                                return Err(ExecError::UnsupportedStorageType {
+                                    column: column.name.clone(),
+                                    ty: column.ty.clone(),
+                                    attlen: column.storage.attlen,
+                                });
+                            }
                             ScalarType::Bool => match raw.as_str() {
                                 "t" | "true" | "1" => Value::Bool(true),
                                 "f" | "false" | "0" => Value::Bool(false),

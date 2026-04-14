@@ -231,6 +231,9 @@ pub(crate) fn send_row_description(w: &mut impl Write, columns: &[QueryColumn]) 
 }
 
 fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
+    if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
+        return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
+    }
     if col.sql_type.is_array {
         let oid = match col.sql_type.kind {
             SqlTypeKind::Int2 => 1005,
@@ -272,11 +275,17 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
+            SqlTypeKind::Record | SqlTypeKind::Composite => {
+                unreachable!("record arrays are unsupported")
+            }
         };
         return (oid, -1, -1);
     }
     match col.sql_type.kind {
         SqlTypeKind::AnyArray => (2277, -1, -1),
+        SqlTypeKind::Record | SqlTypeKind::Composite => {
+            (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
+        }
         SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),

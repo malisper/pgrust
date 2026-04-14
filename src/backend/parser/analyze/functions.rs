@@ -888,7 +888,7 @@ fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
         NamedArgDefault::Text(value) => SqlExpr::Const(Value::Text(value.into())),
         NamedArgDefault::JsonbEmptyObject => SqlExpr::Cast(
             Box::new(SqlExpr::Const(Value::Text("{}".into()))),
-            SqlType::new(SqlTypeKind::Jsonb),
+            RawTypeName::Builtin(SqlType::new(SqlTypeKind::Jsonb)),
         ),
     }
 }
