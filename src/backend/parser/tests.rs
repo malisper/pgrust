@@ -6,10 +6,7 @@ use crate::include::catalog::{
     sort_pg_rewrite_rows,
 };
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
-use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, JSON_TYPE_OID, PgProcRow, PgRewriteRow,
-    PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
-};
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID};
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
@@ -611,6 +608,7 @@ fn parse_alter_table_drop_column_statement() {
     );
 }
 
+#[test]
 fn parse_drop_role_statement() {
     let stmt = parse_statement("drop role if exists regress_alter_table_user1").unwrap();
     assert_eq!(
