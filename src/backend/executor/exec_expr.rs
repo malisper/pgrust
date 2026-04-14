@@ -269,6 +269,12 @@ pub fn eval_expr(
         Expr::Op(op) => eval_op_expr(op, slot, ctx),
         Expr::Bool(bool_expr) => eval_bool_expr(bool_expr, slot, ctx),
         Expr::Func(func) => eval_func_expr(func, slot, ctx),
+        Expr::Aggref(_) => Err(ExecError::DetailedError {
+            message: "aggregate reference reached executor outside aggregate lowering".into(),
+            detail: Some("the planner should have lowered Aggref nodes to aggregate output references before execution".into()),
+            hint: None,
+            sqlstate: "XX000",
+        }),
         Expr::ScalarArrayOp(saop) => eval_scalar_array_op_expr(saop, slot, ctx),
         Expr::SubLink(_) => Err(ExecError::DetailedError {
             message: "unplanned subquery reached executor".into(),

@@ -1,5 +1,5 @@
 use super::*;
-use crate::include::nodes::primnodes::{BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink};
+use crate::include::nodes::primnodes::{Aggref, BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink};
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
@@ -372,6 +372,14 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             ..*func
         })),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| shift_expr_rtindexes(arg, offset))
+                .collect(),
+            ..*aggref
+        })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(shift_expr_rtindexes(*saop.left, offset)),
             right: Box::new(shift_expr_rtindexes(*saop.right, offset)),
@@ -678,6 +686,14 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
                 .map(|arg| rewrite_expr_columns(arg, output_exprs))
                 .collect(),
             ..*func
+        })),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| rewrite_expr_columns(arg, output_exprs))
+                .collect(),
+            ..*aggref
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             left: Box::new(rewrite_expr_columns(*saop.left, output_exprs)),

@@ -56,7 +56,53 @@ pub(super) fn bind_agg_output_expr_in_clause(
             let entry = (*func, args.clone(), *distinct, *func_variadic);
             for (i, agg) in agg_list.iter().enumerate() {
                 if *agg == entry {
-                    return Ok(Expr::Column(n_keys + i));
+                    let arg_values: Vec<SqlExpr> = args.iter().map(|arg| arg.value.clone()).collect();
+                    let arg_types = arg_values
+                        .iter()
+                        .map(|e| {
+                            infer_sql_expr_type_with_ctes(
+                                e,
+                                input_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                &[],
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let resolved =
+                        resolve_function_call(catalog, func.name(), &arg_types, *func_variadic)
+                            .ok();
+                    let aggfnoid = resolved
+                        .as_ref()
+                        .map(|call| call.proc_oid)
+                        .or_else(|| proc_oid_for_builtin_aggregate_function(*func))
+                        .unwrap_or(0);
+                    let agg_variadic = resolved
+                        .as_ref()
+                        .map(|call| call.func_variadic)
+                        .unwrap_or(*func_variadic);
+                    let bound_args = arg_values
+                        .iter()
+                        .map(|arg| {
+                            bind_expr_with_outer_and_ctes(
+                                arg,
+                                input_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                &[],
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(Expr::aggref(
+                        aggfnoid,
+                        aggregate_sql_type(*func, arg_types.first().copied()),
+                        agg_variadic,
+                        *distinct,
+                        bound_args,
+                        i,
+                    ));
                 }
             }
             Err(ParseError::UnexpectedToken {

@@ -278,6 +278,11 @@ fn expr_relids(expr: &Expr) -> Vec<usize> {
 fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
     match expr {
         Expr::Var(var) if var.varlevelsup == 0 => relids.push(var.varno),
+        Expr::Aggref(aggref) => {
+            for arg in &aggref.args {
+                collect_expr_relids(arg, relids);
+            }
+        }
         Expr::Op(op) => {
             for arg in &op.args {
                 collect_expr_relids(arg, relids);

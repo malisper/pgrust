@@ -8,6 +8,11 @@ use crate::include::nodes::plannodes::PlannedStmt;
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
+        Expr::Aggref(aggref) => {
+            for arg in &aggref.args {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
         Expr::Op(op) => {
             for arg in &op.args {
                 collect_rels_from_expr(arg, rels);
