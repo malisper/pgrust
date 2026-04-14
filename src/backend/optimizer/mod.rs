@@ -17,6 +17,7 @@ use crate::include::nodes::plannodes::{
 };
 use pathnodes::{
     PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget, PlannerTargetEntry,
+    next_synthetic_slot_id,
 };
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
@@ -528,6 +529,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 plan_info: PlanEstimate::new(0.0, 0.0, 1.0, 0),
             },
             PlannerPath::SeqScan {
+                source_id,
                 rel,
                 relation_oid,
                 toast,
@@ -538,6 +540,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 let base = seq_scan_estimate(&stats);
                 PlannerPath::SeqScan {
                     plan_info: base,
+                    source_id,
                     rel,
                     relation_oid,
                     toast,
@@ -545,6 +548,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 }
             }
             PlannerPath::IndexScan {
+                source_id,
                 rel,
                 index_rel,
                 am_oid,
@@ -569,6 +573,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 );
                 PlannerPath::IndexScan {
                     plan_info,
+                    source_id,
                     rel,
                     index_rel,
                     am_oid,
@@ -652,7 +657,12 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                     offset,
                 }
             }
-            PlannerPath::Projection { input, targets, .. } => {
+            PlannerPath::Projection {
+                input,
+                targets,
+                slot_id,
+                ..
+            } => {
                 let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let width = targets
@@ -667,6 +677,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                         input_info.plan_rows.as_f64(),
                         width,
                     ),
+                    slot_id,
                     input: Box::new(input),
                     targets,
                 }
@@ -677,6 +688,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 accumulators,
                 having,
                 output_columns,
+                slot_id,
                 ..
             } => {
                 let input = optimize_path(*input, catalog);
@@ -696,6 +708,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                         * CPU_OPERATOR_COST;
                 PlannerPath::Aggregate {
                     plan_info: PlanEstimate::new(total, total, rows, width),
+                    slot_id,
                     input: Box::new(input),
                     group_by,
                     accumulators,
@@ -714,7 +727,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 let right = optimize_path(*right, catalog);
                 choose_join_plan(left, right, kind, on)
             }
-            PlannerPath::FunctionScan { call, .. } => {
+            PlannerPath::FunctionScan { call, slot_id, .. } => {
                 let output_columns = call.output_columns();
                 let width = output_columns
                     .iter()
@@ -722,12 +735,14 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                     .sum();
                 PlannerPath::FunctionScan {
                     plan_info: PlanEstimate::new(0.0, 10.0, 1000.0, width),
+                    slot_id,
                     call,
                 }
             }
             PlannerPath::Values {
                 rows,
                 output_columns,
+                slot_id,
                 ..
             } => {
                 let width = output_columns
@@ -737,11 +752,17 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 let row_count = rows.len().max(1) as f64;
                 PlannerPath::Values {
                     plan_info: PlanEstimate::new(0.0, row_count * CPU_TUPLE_COST, row_count, width),
+                    slot_id,
                     rows,
                     output_columns,
                 }
             }
-            PlannerPath::ProjectSet { input, targets, .. } => {
+            PlannerPath::ProjectSet {
+                input,
+                targets,
+                slot_id,
+                ..
+            } => {
                 let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let rows = clamp_rows(input_info.plan_rows.as_f64() * 10.0);
@@ -764,6 +785,7 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                         rows,
                         width,
                     ),
+                    slot_id,
                     input: Box::new(input),
                     targets,
                 }
@@ -776,24 +798,26 @@ fn try_optimize_access_subtree(
     plan: PlannerPath,
     catalog: &dyn CatalogLookup,
 ) -> Result<PlannerPath, PlannerPath> {
-    let (rel, relation_oid, toast, desc, filter, order_items) = match plan {
+    let (source_id, rel, relation_oid, toast, desc, filter, order_items) = match plan {
         PlannerPath::SeqScan {
+            source_id,
             rel,
             relation_oid,
             toast,
             desc,
             ..
-        } => (rel, relation_oid, toast, desc, None, None),
+        } => (source_id, rel, relation_oid, toast, desc, None, None),
         PlannerPath::Filter {
             input, predicate, ..
         } => match *input {
             PlannerPath::SeqScan {
+                source_id,
                 rel,
                 relation_oid,
                 toast,
                 desc,
                 ..
-            } => (rel, relation_oid, toast, desc, Some(predicate), None),
+            } => (source_id, rel, relation_oid, toast, desc, Some(predicate), None),
             other => {
                 return Err(PlannerPath::Filter {
                     plan_info: PlanEstimate::default(),
@@ -804,22 +828,32 @@ fn try_optimize_access_subtree(
         },
         PlannerPath::OrderBy { input, items, .. } => match *input {
             PlannerPath::SeqScan {
+                source_id,
                 rel,
                 relation_oid,
                 toast,
                 desc,
                 ..
-            } => (rel, relation_oid, toast, desc, None, Some(items)),
+            } => (source_id, rel, relation_oid, toast, desc, None, Some(items)),
             PlannerPath::Filter {
                 input, predicate, ..
             } => match *input {
                 PlannerPath::SeqScan {
+                    source_id,
                     rel,
                     relation_oid,
                     toast,
                     desc,
                     ..
-                } => (rel, relation_oid, toast, desc, Some(predicate), Some(items)),
+                } => (
+                    source_id,
+                    rel,
+                    relation_oid,
+                    toast,
+                    desc,
+                    Some(predicate),
+                    Some(items),
+                ),
                 other => {
                     return Err(PlannerPath::OrderBy {
                         plan_info: PlanEstimate::default(),
@@ -843,24 +877,12 @@ fn try_optimize_access_subtree(
         other => return Err(other),
     };
 
-    let filter = filter
-        .map(|expr| PlannerJoinExpr::from_base_input_expr(&expr.into_input_expr(), relation_oid));
-    let order_items = order_items.map(|items| {
-        items
-            .into_iter()
-            .map(|item| PlannerOrderByEntry {
-                expr: PlannerJoinExpr::from_base_input_expr(
-                    &item.expr.into_input_expr(),
-                    relation_oid,
-                ),
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-            })
-            .collect::<Vec<_>>()
-    });
+    let filter = filter;
+    let order_items = order_items;
 
     let stats = relation_stats(catalog, relation_oid, &desc);
     let mut best = estimate_seqscan_candidate(
+        source_id,
         rel,
         relation_oid,
         toast,
@@ -881,6 +903,7 @@ fn try_optimize_access_subtree(
             continue;
         };
         let candidate = estimate_index_candidate(
+            source_id,
             rel,
             toast,
             desc.clone(),
@@ -930,6 +953,7 @@ fn relation_stats(
 }
 
 fn estimate_seqscan_candidate(
+    source_id: usize,
     rel: RelFileLocator,
     relation_oid: u32,
     toast: Option<ToastRelationRef>,
@@ -942,6 +966,7 @@ fn estimate_seqscan_candidate(
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut plan = PlannerPath::SeqScan {
         plan_info: scan_info,
+        source_id,
         rel,
         relation_oid,
         toast,
@@ -984,6 +1009,7 @@ fn estimate_seqscan_candidate(
 }
 
 fn estimate_index_candidate(
+    source_id: usize,
     rel: RelFileLocator,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
@@ -1013,6 +1039,7 @@ fn estimate_index_candidate(
     let mut current_rows = scan_info.plan_rows.as_f64();
     let mut plan = PlannerPath::IndexScan {
         plan_info: scan_info,
+        source_id,
         rel,
         index_rel: spec.index.rel,
         am_oid: spec.index.index_meta.am_oid,
@@ -1077,8 +1104,16 @@ fn choose_join_plan(
 
     let left_columns = left.columns();
     let right_columns = right.columns();
-    let swapped_join = estimate_nested_loop_join(right, left, kind, on.swap_inputs());
-    let swapped = restore_join_output_order(swapped_join, &left_columns, &right_columns);
+    let left_vars = left.output_vars();
+    let right_vars = right.output_vars();
+    let swapped_join = estimate_nested_loop_join(right, left, kind, on.clone());
+    let swapped = restore_join_output_order(
+        swapped_join,
+        &left_columns,
+        &right_columns,
+        &left_vars,
+        &right_vars,
+    );
     if swapped.plan_info().total_cost.as_f64() < original.plan_info().total_cost.as_f64() {
         swapped
     } else {
@@ -1094,7 +1129,9 @@ fn estimate_nested_loop_join(
 ) -> PlannerPath {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let on_expr = on.clone().into_expr(left.columns().len());
+    let mut join_layout = left.output_vars();
+    join_layout.extend(right.output_vars());
+    let on_expr = on.clone().into_input_expr_with_layout(&join_layout);
     let join_sel = clause_selectivity(&on_expr, None, left_info.plan_rows.as_f64());
     let rows = clamp_rows(left_info.plan_rows.as_f64() * right_info.plan_rows.as_f64() * join_sel);
     let total = left_info.total_cost.as_f64()
@@ -1121,21 +1158,22 @@ fn restore_join_output_order(
     join: PlannerPath,
     left_columns: &[QueryColumn],
     right_columns: &[QueryColumn],
+    left_vars: &[PlannerJoinExpr],
+    right_vars: &[PlannerJoinExpr],
 ) -> PlannerPath {
     let join_info = join.plan_info();
-    let right_width = right_columns.len();
     let mut targets = Vec::with_capacity(left_columns.len() + right_columns.len());
-    for (idx, column) in left_columns.iter().enumerate() {
+    for (column, expr) in left_columns.iter().zip(left_vars.iter()) {
         targets.push(PlannerTargetEntry {
             name: column.name.clone(),
-            expr: PlannerJoinExpr::InputColumn(right_width + idx),
+            expr: expr.clone(),
             sql_type: column.sql_type,
         });
     }
-    for (idx, column) in right_columns.iter().enumerate() {
+    for (column, expr) in right_columns.iter().zip(right_vars.iter()) {
         targets.push(PlannerTargetEntry {
             name: column.name.clone(),
-            expr: PlannerJoinExpr::InputColumn(idx),
+            expr: expr.clone(),
             sql_type: column.sql_type,
         });
     }
@@ -1150,6 +1188,7 @@ fn restore_join_output_order(
             join_info.plan_rows.as_f64(),
             width,
         ),
+        slot_id: next_synthetic_slot_id(),
         input: Box::new(join),
         targets,
     }
