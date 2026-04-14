@@ -471,6 +471,7 @@ pub fn relation_entry_by_oid(
             desc.storage.attalign = attr.attalign;
             desc.storage.attstorage = attr.attstorage;
             desc.storage.attcompression = attr.attcompression;
+            desc.dropped = attr.attisdropped;
             if let Some(attrdef) = attrdefs
                 .iter()
                 .find(|attrdef| attrdef.adrelid == relation_oid && attrdef.adnum == attr.attnum)

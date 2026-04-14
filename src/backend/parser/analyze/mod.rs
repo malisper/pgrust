@@ -377,6 +377,7 @@ pub(crate) fn bind_scalar_expr_in_scope(
             .iter()
             .map(|(name, _)| ScopeColumn {
                 output_name: name.clone(),
+                hidden: false,
                 relation_names: vec![],
                 hidden_invalid_relation_names: vec![],
                 hidden_missing_relation_names: vec![],

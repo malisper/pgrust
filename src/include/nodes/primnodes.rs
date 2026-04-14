@@ -44,6 +44,7 @@ pub struct ColumnDesc {
     pub storage: AttributeDesc,
     pub ty: ScalarType,
     pub sql_type: SqlType,
+    pub dropped: bool,
     pub attstattarget: i16,
     pub not_null_constraint_oid: Option<u32>,
     pub attrdef_oid: Option<u32>,
@@ -74,6 +75,14 @@ impl QueryColumn {
 impl RelationDesc {
     pub fn attribute_descs(&self) -> Vec<AttributeDesc> {
         self.columns.iter().map(|c| c.storage.clone()).collect()
+    }
+
+    pub fn visible_column_indexes(&self) -> Vec<usize> {
+        self.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| (!column.dropped).then_some(index))
+            .collect()
     }
 }
 
