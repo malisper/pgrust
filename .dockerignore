@@ -1,0 +1,5 @@
+.git
+.gitignore
+target
+tmp
+regression_test_output.txt
