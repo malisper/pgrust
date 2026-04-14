@@ -293,7 +293,34 @@ mod tests {
     #[test]
     fn bootstrap_pg_attribute_rows_cover_core_catalog_columns() {
         let rows = bootstrap_pg_attribute_rows();
-        assert_eq!(rows.len(), 215);
+        let expected = [
+            pg_namespace_desc().columns.len(),
+            pg_type_desc().columns.len(),
+            pg_proc_desc().columns.len(),
+            pg_language_desc().columns.len(),
+            pg_operator_desc().columns.len(),
+            pg_attribute_desc().columns.len(),
+            pg_class_desc().columns.len(),
+            pg_authid_desc().columns.len(),
+            pg_auth_members_desc().columns.len(),
+            pg_collation_desc().columns.len(),
+            pg_database_desc().columns.len(),
+            pg_tablespace_desc().columns.len(),
+            pg_am_desc().columns.len(),
+            pg_amop_desc().columns.len(),
+            pg_amproc_desc().columns.len(),
+            pg_attrdef_desc().columns.len(),
+            pg_cast_desc().columns.len(),
+            pg_constraint_desc().columns.len(),
+            pg_depend_desc().columns.len(),
+            pg_index_desc().columns.len(),
+            pg_rewrite_desc().columns.len(),
+            pg_opclass_desc().columns.len(),
+            pg_opfamily_desc().columns.len(),
+        ]
+        .into_iter()
+        .sum::<usize>();
+        assert_eq!(rows.len(), expected);
         assert!(rows.iter().any(|row| {
             row.attrelid == PG_CLASS_RELATION_OID
                 && row.attname == "relkind"

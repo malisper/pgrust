@@ -1572,20 +1572,30 @@ fn make_ordered_rel(root: &mut PlannerInfo, input_rel: RelOptInfo, catalog: &dyn
     if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
         return root.upper_rels[upper_rel_index].rel.clone();
     }
-    let required_pathkeys = lower_pathkeys_for_rel(root, &input_rel, &root.query_pathkeys);
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    if let Some(path) = bestpath::get_cheapest_path_for_pathkeys(
-        &input_rel,
-        &required_pathkeys,
-        bestpath::CostSelector::Total,
-    ) {
+    let cheapest_presorted = input_rel
+        .pathlist
+        .iter()
+        .filter(|path| {
+            let required = lower_pathkeys_for_path(root, path, &root.query_pathkeys);
+            bestpath::pathkeys_satisfy(&path.pathkeys(), &required)
+        })
+        .min_by(|left, right| {
+            left.plan_info()
+                .total_cost
+                .as_f64()
+                .partial_cmp(&right.plan_info().total_cost.as_f64())
+                .unwrap_or(Ordering::Equal)
+        });
+    if let Some(path) = cheapest_presorted {
         rel.add_path(path.clone());
     }
     if let Some(path) = input_rel.cheapest_total_path() {
+        let required_pathkeys = lower_pathkeys_for_path(root, path, &root.query_pathkeys);
         if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
             rel.add_path(optimize_path(
                 Path::OrderBy {
