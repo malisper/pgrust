@@ -1,5 +1,5 @@
-use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::backend::parser::analyze::analyze_view_rule_sql;
+use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SortGroupClause,
@@ -310,16 +310,14 @@ fn rewrite_semantic_expr(
                 .collect::<Result<Vec<_>, _>>()?,
             ..*op
         })),
-        Expr::Bool(bool_expr) => {
-            Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-                args: bool_expr
-                    .args
-                    .into_iter()
-                    .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
-                    .collect::<Result<Vec<_>, _>>()?,
-                ..*bool_expr
-            }))
-        }
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_semantic_expr(arg, catalog, expanded_views))
+                .collect::<Result<Vec<_>, _>>()?,
+            ..*bool_expr
+        })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -349,25 +347,29 @@ fn rewrite_semantic_expr(
             return Err(ParseError::UnexpectedToken {
                 expected: "semantic query expression before planning",
                 actual: "SubPlan".into(),
-            })
+            });
         }
-        Expr::ScalarArrayOp(saop) => {
-            Expr::ScalarArrayOp(Box::new(crate::include::nodes::primnodes::ScalarArrayOpExpr {
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(rewrite_semantic_expr(*saop.left, catalog, expanded_views)?),
                 right: Box::new(rewrite_semantic_expr(*saop.right, catalog, expanded_views)?),
                 ..*saop
-            }))
-        }
+            },
+        )),
         Expr::Cast(inner, ty) => Expr::Cast(
             Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?),
             ty,
         ),
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?))
-        }
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(rewrite_semantic_expr(*inner, catalog, expanded_views)?))
-        }
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_semantic_expr(
+            *inner,
+            catalog,
+            expanded_views,
+        )?)),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_semantic_expr(
+            *inner,
+            catalog,
+            expanded_views,
+        )?)),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
             Box::new(rewrite_semantic_expr(*left, catalog, expanded_views)?),
             Box::new(rewrite_semantic_expr(*right, catalog, expanded_views)?),

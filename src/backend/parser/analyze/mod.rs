@@ -49,17 +49,17 @@ pub use modify::{
     bind_insert, bind_insert_prepared, bind_update,
 };
 pub use paths::BoundModifyRowSource;
-pub(crate) use query::analyze_select_query_with_outer;
 use paths::bind_order_by_items;
+pub(crate) use query::analyze_select_query_with_outer;
 use query::{
-    AnalyzedFrom, analyze_values_query_with_outer,
-    identity_target_list, normalize_target_list, rewrite_agg_accums, rewrite_expr_columns,
-    rewrite_order_by_entries, rewrite_project_set_targets, rewrite_target_entries,
+    AnalyzedFrom, analyze_values_query_with_outer, identity_target_list, normalize_target_list,
+    rewrite_agg_accums, rewrite_expr_columns, rewrite_order_by_entries,
+    rewrite_project_set_targets, rewrite_target_entries,
 };
 pub use scope::BoundRelation;
-pub(crate) use views::analyze_view_rule_sql;
 use scope::*;
 use system_views::*;
+pub(crate) use views::analyze_view_rule_sql;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundIndexRelation {
@@ -1082,7 +1082,10 @@ fn bind_select_query_with_outer(
                             && t.name == base.output_columns[i].name
                     });
                 let target_list = if is_identity {
-                    normalize_target_list(identity_target_list(&base.output_columns, &base.output_exprs))
+                    normalize_target_list(identity_target_list(
+                        &base.output_columns,
+                        &base.output_exprs,
+                    ))
                 } else {
                     normalize_target_list(rewrite_target_entries(targets, &base.output_exprs))
                 };

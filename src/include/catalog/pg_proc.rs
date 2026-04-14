@@ -1340,7 +1340,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("jsonb_strip_nulls", BuiltinScalarFunction::JsonbStripNulls),
         ("jsonb_pretty", BuiltinScalarFunction::JsonbPretty),
         ("jsonb_build_array", BuiltinScalarFunction::JsonbBuildArray),
-        ("jsonb_build_object", BuiltinScalarFunction::JsonbBuildObject),
+        (
+            "jsonb_build_object",
+            BuiltinScalarFunction::JsonbBuildObject,
+        ),
         ("jsonb_delete", BuiltinScalarFunction::JsonbDelete),
         ("jsonb_delete_path", BuiltinScalarFunction::JsonbDeletePath),
         ("jsonb_set", BuiltinScalarFunction::JsonbSet),
@@ -1563,7 +1566,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_input_error_detail",
             BuiltinScalarFunction::PgInputErrorDetail,
         ),
-        ("pg_input_error_hint", BuiltinScalarFunction::PgInputErrorHint),
+        (
+            "pg_input_error_hint",
+            BuiltinScalarFunction::PgInputErrorHint,
+        ),
         (
             "pg_input_error_sqlstate",
             BuiltinScalarFunction::PgInputErrorSqlState,

@@ -245,8 +245,8 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let trans_fns: Vec<fn(&mut AccumState, &[super::Value])> = accumulators
                 .iter()
                 .map(|a| {
-                    let func = builtin_aggregate_function_for_proc_oid(a.aggfnoid)
-                        .unwrap_or_else(|| {
+                    let func =
+                        builtin_aggregate_function_for_proc_oid(a.aggfnoid).unwrap_or_else(|| {
                             panic!(
                                 "aggregate {:?} lacks builtin implementation mapping",
                                 a.aggfnoid

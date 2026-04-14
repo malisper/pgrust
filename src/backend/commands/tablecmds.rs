@@ -16,7 +16,6 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::optimizer::{finalize_expr_subqueries, planner};
-use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
@@ -24,6 +23,7 @@ use crate::backend::parser::{
     ExplainStatement, MaintenanceTarget, ParseError, Statement, TruncateTableStatement,
     VacuumStatement, bind_create_table,
 };
+use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
 use crate::pgrust::database::TransactionWaiter;
@@ -33,8 +33,8 @@ use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_e
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
-    create_query_desc, executor_start,
+    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, create_query_desc,
+    executor_start,
 };
 use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
 use crate::include::access::detoast::is_ondisk_toast_pointer;
@@ -650,7 +650,6 @@ pub fn execute_insert(
     let stmt = finalize_bound_insert(stmt, catalog);
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
-
         fn eval_insert_defaults(
             defaults: &[crate::backend::executor::Expr],
             width: usize,
@@ -664,13 +663,32 @@ pub fn execute_insert(
         }
 
         let values = match &stmt.source {
-        BoundInsertSource::Values(rows) => rows
-            .iter()
-            .map(|row| {
+            BoundInsertSource::Values(rows) => rows
+                .iter()
+                .map(|row| {
+                    let mut slot =
+                        TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
+                    let mut values =
+                        eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
+                    for (target, expr) in stmt.target_columns.iter().zip(row.iter()) {
+                        let value = eval_expr(expr, &mut slot, ctx)?;
+                        apply_assignment_target(
+                            &stmt.desc,
+                            &mut values,
+                            target,
+                            value,
+                            &mut slot,
+                            ctx,
+                        )?;
+                    }
+                    Ok(values)
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?,
+            BoundInsertSource::DefaultValues(defaults) => {
                 let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
                 let mut values =
                     eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-                for (target, expr) in stmt.target_columns.iter().zip(row.iter()) {
+                for (target, expr) in stmt.target_columns.iter().zip(defaults.iter()) {
                     let value = eval_expr(expr, &mut slot, ctx)?;
                     apply_assignment_target(
                         &stmt.desc,
@@ -681,44 +699,45 @@ pub fn execute_insert(
                         ctx,
                     )?;
                 }
-                Ok(values)
-            })
-            .collect::<Result<Vec<_>, ExecError>>()?,
-        BoundInsertSource::DefaultValues(defaults) => {
-            let mut slot = TupleSlot::virtual_row(vec![Value::Null; stmt.desc.columns.len()]);
-            let mut values =
-                eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-            for (target, expr) in stmt.target_columns.iter().zip(defaults.iter()) {
-                let value = eval_expr(expr, &mut slot, ctx)?;
-                apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
+                vec![values]
             }
-            vec![values]
-        }
-        BoundInsertSource::Select(query) => {
-            let [query] = pg_rewrite_query((**query).clone(), catalog)
-                .map_err(ExecError::Parse)?
-                .try_into()
-                .expect("insert-select rewrite should return a single query");
-            let planned = planner(query, catalog);
-            let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
-                let saved_subplans =
-                    std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
-                let mut state = executor_start(planned.plan_tree.clone());
-                let mut rows = Vec::new();
-                while let Some(slot) = state.exec_proc_node(ctx)? {
-                    let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                    let mut values =
-                        eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-                    for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
-                        apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
+            BoundInsertSource::Select(query) => {
+                let [query] = pg_rewrite_query((**query).clone(), catalog)
+                    .map_err(ExecError::Parse)?
+                    .try_into()
+                    .expect("insert-select rewrite should return a single query");
+                let planned = planner(query, catalog);
+                let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
+                    let saved_subplans =
+                        std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
+                    let mut state = executor_start(planned.plan_tree.clone());
+                    let mut rows = Vec::new();
+                    while let Some(slot) = state.exec_proc_node(ctx)? {
+                        let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                        let mut values = eval_insert_defaults(
+                            &stmt.column_defaults,
+                            stmt.desc.columns.len(),
+                            ctx,
+                        )?;
+                        for (target, value) in
+                            stmt.target_columns.iter().zip(row_values.into_iter())
+                        {
+                            apply_assignment_target(
+                                &stmt.desc,
+                                &mut values,
+                                target,
+                                value,
+                                slot,
+                                ctx,
+                            )?;
+                        }
+                        rows.push(values);
                     }
-                    rows.push(values);
-                }
-                ctx.subplans = saved_subplans;
-                Ok(rows)
-            })();
-            result?
-        }
+                    ctx.subplans = saved_subplans;
+                    Ok(rows)
+                })();
+                result?
+            }
         };
 
         let inserted = execute_insert_values(
@@ -1072,141 +1091,141 @@ pub fn execute_update_with_waiter(
     let stmt = finalize_bound_update(stmt, catalog);
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
-    let mut affected_rows = 0;
+        let mut affected_rows = 0;
 
-    let desc = Rc::new(stmt.desc.clone());
-    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
-    let qual = stmt
-        .predicate
-        .as_ref()
-        .map(|p| compile_predicate_with_decoder(p, &decoder));
-    let target_rows = match &stmt.row_source {
-        BoundModifyRowSource::Heap => collect_matching_rows_heap(
-            stmt.rel,
-            &stmt.desc,
-            stmt.toast,
-            stmt.predicate.as_ref(),
-            ctx,
-        )?,
-        BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
-            stmt.rel,
-            &stmt.desc,
-            stmt.toast,
-            index,
-            keys,
-            stmt.predicate.as_ref(),
-            ctx,
-        )?,
-    };
-
-    for (tid, original_values) in target_rows {
-        let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
-        let mut values = original_values;
-        for assignment in &stmt.assignments {
-            let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
-            apply_assignment_target(
-                &stmt.desc,
-                &mut values,
-                &BoundAssignmentTarget {
-                    column_index: assignment.column_index,
-                    subscripts: assignment.subscripts.clone(),
-                },
-                value,
-                &mut eval_slot,
-                ctx,
-            )?;
-        }
-
-        let mut current_tid = tid;
-        let mut current_values = values;
-        loop {
-            let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, current_tid)?;
-            let (current_replacement, toasted) = toast_tuple_for_write(
-                &stmt.desc,
-                &current_values,
-                stmt.toast,
-                stmt.toast_index.as_ref(),
-                ctx,
-                xid,
-                cid,
-            )?;
-            match heap_update_with_waiter(
-                &*ctx.pool,
-                ctx.client_id,
+        let desc = Rc::new(stmt.desc.clone());
+        let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+        let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+        let qual = stmt
+            .predicate
+            .as_ref()
+            .map(|p| compile_predicate_with_decoder(p, &decoder));
+        let target_rows = match &stmt.row_source {
+            BoundModifyRowSource::Heap => collect_matching_rows_heap(
                 stmt.rel,
-                &ctx.txns,
-                xid,
-                cid,
-                current_tid,
-                &current_replacement,
-                waiter,
-            ) {
-                Ok(new_tid) => {
-                    if let Some(toast) = stmt.toast {
-                        delete_external_from_tuple(ctx, toast, &stmt.desc, &old_tuple, xid)?;
-                    }
-                    maintain_indexes_for_row(
-                        stmt.rel,
-                        &stmt.desc,
-                        &stmt.indexes,
-                        &current_values,
-                        new_tid,
-                        ctx,
-                    )?;
-                    affected_rows += 1;
-                    break;
-                }
-                Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
-                    cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
-                    let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
-                    let mut new_slot = TupleSlot::from_heap_tuple(
-                        Rc::clone(&desc),
-                        Rc::clone(&attr_descs),
-                        new_ctid,
-                        new_tuple,
-                    );
-                    new_slot.toast = slot_toast_context(stmt.toast, ctx);
-                    let passes = match &qual {
-                        Some(q) => q(&mut new_slot, ctx)?,
-                        None => true,
-                    };
-                    if !passes {
-                        break;
-                    }
-                    let new_values_base = new_slot.into_values()?;
-                    let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
-                    let mut new_values = new_values_base;
-                    for assignment in &stmt.assignments {
-                        let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
-                        apply_assignment_target(
+                &stmt.desc,
+                stmt.toast,
+                stmt.predicate.as_ref(),
+                ctx,
+            )?,
+            BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
+                stmt.rel,
+                &stmt.desc,
+                stmt.toast,
+                index,
+                keys,
+                stmt.predicate.as_ref(),
+                ctx,
+            )?,
+        };
+
+        for (tid, original_values) in target_rows {
+            let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
+            let mut values = original_values;
+            for assignment in &stmt.assignments {
+                let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+                apply_assignment_target(
+                    &stmt.desc,
+                    &mut values,
+                    &BoundAssignmentTarget {
+                        column_index: assignment.column_index,
+                        subscripts: assignment.subscripts.clone(),
+                    },
+                    value,
+                    &mut eval_slot,
+                    ctx,
+                )?;
+            }
+
+            let mut current_tid = tid;
+            let mut current_values = values;
+            loop {
+                let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, current_tid)?;
+                let (current_replacement, toasted) = toast_tuple_for_write(
+                    &stmt.desc,
+                    &current_values,
+                    stmt.toast,
+                    stmt.toast_index.as_ref(),
+                    ctx,
+                    xid,
+                    cid,
+                )?;
+                match heap_update_with_waiter(
+                    &*ctx.pool,
+                    ctx.client_id,
+                    stmt.rel,
+                    &ctx.txns,
+                    xid,
+                    cid,
+                    current_tid,
+                    &current_replacement,
+                    waiter,
+                ) {
+                    Ok(new_tid) => {
+                        if let Some(toast) = stmt.toast {
+                            delete_external_from_tuple(ctx, toast, &stmt.desc, &old_tuple, xid)?;
+                        }
+                        maintain_indexes_for_row(
+                            stmt.rel,
                             &stmt.desc,
-                            &mut new_values,
-                            &BoundAssignmentTarget {
-                                column_index: assignment.column_index,
-                                subscripts: assignment.subscripts.clone(),
-                            },
-                            value,
-                            &mut eval_slot,
+                            &stmt.indexes,
+                            &current_values,
+                            new_tid,
                             ctx,
                         )?;
+                        affected_rows += 1;
+                        break;
                     }
-                    current_values = new_values.clone();
-                    current_tid = new_ctid;
-                }
-                Err(HeapError::TupleAlreadyModified(_)) => {
-                    cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
-                    break;
-                }
-                Err(e) => {
-                    cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
-                    return Err(e.into());
+                    Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                        cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+                        let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                        let mut new_slot = TupleSlot::from_heap_tuple(
+                            Rc::clone(&desc),
+                            Rc::clone(&attr_descs),
+                            new_ctid,
+                            new_tuple,
+                        );
+                        new_slot.toast = slot_toast_context(stmt.toast, ctx);
+                        let passes = match &qual {
+                            Some(q) => q(&mut new_slot, ctx)?,
+                            None => true,
+                        };
+                        if !passes {
+                            break;
+                        }
+                        let new_values_base = new_slot.into_values()?;
+                        let mut eval_slot = TupleSlot::virtual_row(new_values_base.clone());
+                        let mut new_values = new_values_base;
+                        for assignment in &stmt.assignments {
+                            let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+                            apply_assignment_target(
+                                &stmt.desc,
+                                &mut new_values,
+                                &BoundAssignmentTarget {
+                                    column_index: assignment.column_index,
+                                    subscripts: assignment.subscripts.clone(),
+                                },
+                                value,
+                                &mut eval_slot,
+                                ctx,
+                            )?;
+                        }
+                        current_values = new_values.clone();
+                        current_tid = new_ctid;
+                    }
+                    Err(HeapError::TupleAlreadyModified(_)) => {
+                        cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+                        break;
+                    }
+                    Err(e) => {
+                        cleanup_toast_attempt(stmt.toast, &toasted, ctx, xid)?;
+                        return Err(e.into());
+                    }
                 }
             }
         }
-    }
 
-    Ok(StatementResult::AffectedRows(affected_rows))
+        Ok(StatementResult::AffectedRows(affected_rows))
     })();
     ctx.subplans = saved_subplans;
     result
@@ -1231,102 +1250,102 @@ pub fn execute_delete_with_waiter(
     let stmt = finalize_bound_delete(stmt, catalog);
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
-    let desc = Rc::new(stmt.desc.clone());
-    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
-    let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
-    let qual = stmt
-        .predicate
-        .as_ref()
-        .map(|p| compile_predicate_with_decoder(p, &decoder));
-    let targets = match &stmt.row_source {
-        BoundModifyRowSource::Heap => collect_matching_rows_heap(
-            stmt.rel,
-            &stmt.desc,
-            stmt.toast,
-            stmt.predicate.as_ref(),
-            ctx,
-        )?
-        .into_iter()
-        .map(|(tid, _)| tid)
-        .collect::<Vec<_>>(),
-        BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
-            stmt.rel,
-            &stmt.desc,
-            stmt.toast,
-            index,
-            keys,
-            stmt.predicate.as_ref(),
-            ctx,
-        )?
-        .into_iter()
-        .map(|(tid, _)| tid)
-        .collect::<Vec<_>>(),
-    };
-    let snapshot = ctx.snapshot.clone();
+        let desc = Rc::new(stmt.desc.clone());
+        let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+        let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
+        let qual = stmt
+            .predicate
+            .as_ref()
+            .map(|p| compile_predicate_with_decoder(p, &decoder));
+        let targets = match &stmt.row_source {
+            BoundModifyRowSource::Heap => collect_matching_rows_heap(
+                stmt.rel,
+                &stmt.desc,
+                stmt.toast,
+                stmt.predicate.as_ref(),
+                ctx,
+            )?
+            .into_iter()
+            .map(|(tid, _)| tid)
+            .collect::<Vec<_>>(),
+            BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
+                stmt.rel,
+                &stmt.desc,
+                stmt.toast,
+                index,
+                keys,
+                stmt.predicate.as_ref(),
+                ctx,
+            )?
+            .into_iter()
+            .map(|(tid, _)| tid)
+            .collect::<Vec<_>>(),
+        };
+        let snapshot = ctx.snapshot.clone();
 
-    let mut affected_rows = 0;
-    for tid in &targets {
-        let mut current_tid = *tid;
-        loop {
-            let old_tuple = if stmt.toast.is_some() {
-                Some(heap_fetch(
+        let mut affected_rows = 0;
+        for tid in &targets {
+            let mut current_tid = *tid;
+            loop {
+                let old_tuple = if stmt.toast.is_some() {
+                    Some(heap_fetch(
+                        &*ctx.pool,
+                        ctx.client_id,
+                        stmt.rel,
+                        current_tid,
+                    )?)
+                } else {
+                    None
+                };
+                match heap_delete_with_waiter(
                     &*ctx.pool,
                     ctx.client_id,
                     stmt.rel,
+                    &ctx.txns,
+                    xid,
                     current_tid,
-                )?)
-            } else {
-                None
-            };
-            match heap_delete_with_waiter(
-                &*ctx.pool,
-                ctx.client_id,
-                stmt.rel,
-                &ctx.txns,
-                xid,
-                current_tid,
-                &snapshot,
-                waiter,
-            ) {
-                Ok(()) => {
-                    if let (Some(toast), Some(old_tuple)) = (stmt.toast, old_tuple.as_ref()) {
-                        delete_external_from_tuple(ctx, toast, &stmt.desc, old_tuple, xid)?;
-                    }
-                    affected_rows += 1;
-                    break;
-                }
-                // Row was concurrently deleted — skip it.
-                Err(HeapError::TupleAlreadyModified(_)) => {
-                    break;
-                }
-                // Row was concurrently updated — follow ctid chain, recheck
-                // predicate, and retry. Matches PostgreSQL's ExecDelete.
-                Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
-                    let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
-                    let mut new_slot = TupleSlot::from_heap_tuple(
-                        Rc::clone(&desc),
-                        Rc::clone(&attr_descs),
-                        new_ctid,
-                        new_tuple,
-                    );
-                    new_slot.toast = slot_toast_context(stmt.toast, ctx);
-                    let passes = match &qual {
-                        Some(q) => q(&mut new_slot, ctx)?,
-                        None => true,
-                    };
-                    if !passes {
-                        // Concurrent update changed the row so it no longer
-                        // matches our WHERE — skip it.
+                    &snapshot,
+                    waiter,
+                ) {
+                    Ok(()) => {
+                        if let (Some(toast), Some(old_tuple)) = (stmt.toast, old_tuple.as_ref()) {
+                            delete_external_from_tuple(ctx, toast, &stmt.desc, old_tuple, xid)?;
+                        }
+                        affected_rows += 1;
                         break;
                     }
-                    current_tid = new_ctid;
+                    // Row was concurrently deleted — skip it.
+                    Err(HeapError::TupleAlreadyModified(_)) => {
+                        break;
+                    }
+                    // Row was concurrently updated — follow ctid chain, recheck
+                    // predicate, and retry. Matches PostgreSQL's ExecDelete.
+                    Err(HeapError::TupleUpdated(_old_tid, new_ctid)) => {
+                        let new_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, new_ctid)?;
+                        let mut new_slot = TupleSlot::from_heap_tuple(
+                            Rc::clone(&desc),
+                            Rc::clone(&attr_descs),
+                            new_ctid,
+                            new_tuple,
+                        );
+                        new_slot.toast = slot_toast_context(stmt.toast, ctx);
+                        let passes = match &qual {
+                            Some(q) => q(&mut new_slot, ctx)?,
+                            None => true,
+                        };
+                        if !passes {
+                            // Concurrent update changed the row so it no longer
+                            // matches our WHERE — skip it.
+                            break;
+                        }
+                        current_tid = new_ctid;
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) => return Err(e.into()),
             }
         }
-    }
 
-    Ok(StatementResult::AffectedRows(affected_rows))
+        Ok(StatementResult::AffectedRows(affected_rows))
     })();
     ctx.subplans = saved_subplans;
     result

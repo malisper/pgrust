@@ -2291,8 +2291,8 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
         "select name, count(*) from people group by name having name is not null order by name",
     )
     .unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
-        .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
 
     let name_var = Expr::Var(Var {
         varno: 1,

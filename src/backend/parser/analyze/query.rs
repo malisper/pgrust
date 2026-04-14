@@ -1,7 +1,9 @@
 use super::*;
-use crate::include::nodes::primnodes::{Aggref, BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink};
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
+use crate::include::nodes::primnodes::{
+    Aggref, BoolExpr, FuncExpr, OpExpr, ScalarArrayOpExpr, SubLink,
+};
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
 #[derive(Debug, Clone)]
@@ -260,7 +262,9 @@ impl AnalyzedFrom {
                 .into_iter()
                 .map(|entry| shift_rte_rtindexes(entry, offset))
                 .collect(),
-            jointree: self.jointree.map(|node| shift_jointree_rtindexes(node, offset)),
+            jointree: self
+                .jointree
+                .map(|node| shift_jointree_rtindexes(node, offset)),
             output_columns: self.output_columns,
             output_exprs: self
                 .output_exprs
@@ -391,9 +395,7 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             }
             Expr::Var(var)
         }
-        expr @ (Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random) => {
-            expr
-        }
+        expr @ (Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random) => expr,
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(shift_expr_rtindexes(*inner, offset)), ty),
         Expr::Like {
             expr,
@@ -462,8 +464,8 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                     upper: subscript
                         .upper
                         .map(|expr| shift_expr_rtindexes(expr, offset)),
-                    })
-                    .collect(),
+                })
+                .collect(),
         },
         expr @ (Expr::CurrentDate
         | Expr::CurrentTime { .. }
@@ -473,7 +475,10 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
     }
 }
 
-pub(super) fn identity_target_list(columns: &[QueryColumn], output_exprs: &[Expr]) -> Vec<TargetEntry> {
+pub(super) fn identity_target_list(
+    columns: &[QueryColumn],
+    output_exprs: &[Expr],
+) -> Vec<TargetEntry> {
     columns
         .iter()
         .enumerate()
@@ -779,8 +784,8 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
                     upper: subscript
                         .upper
                         .map(|expr| rewrite_expr_columns(expr, output_exprs)),
-                    })
-                    .collect(),
+                })
+                .collect(),
         },
         expr @ (Expr::CurrentDate
         | Expr::CurrentTime { .. }

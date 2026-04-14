@@ -159,10 +159,6 @@ pub(super) fn bind_quantified_array_expr(
         raw_left_type,
         left_type,
     );
-    let right = coerce_bound_expr(
-        bound_array,
-        raw_array_type,
-        target_array_type,
-    );
+    let right = coerce_bound_expr(bound_array, raw_array_type, target_array_type);
     Ok(Expr::scalar_array_op(op, !is_all, left, right))
 }

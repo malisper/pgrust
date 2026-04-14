@@ -41,10 +41,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
         if gk == expr {
-            return Ok(group_key_exprs
-                .get(i)
-                .cloned()
-                .unwrap_or(Expr::Column(i)));
+            return Ok(group_key_exprs.get(i).cloned().unwrap_or(Expr::Column(i)));
         }
     }
 
@@ -62,7 +59,8 @@ pub(super) fn bind_agg_output_expr_in_clause(
             let entry = (*func, args.clone(), *distinct, *func_variadic);
             for (i, agg) in agg_list.iter().enumerate() {
                 if *agg == entry {
-                    let arg_values: Vec<SqlExpr> = args.iter().map(|arg| arg.value.clone()).collect();
+                    let arg_values: Vec<SqlExpr> =
+                        args.iter().map(|arg| arg.value.clone()).collect();
                     let arg_types = arg_values
                         .iter()
                         .map(|e| {
@@ -129,10 +127,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     && let Ok(gk_index) = resolve_column(input_scope, gk_name)
                     && gk_index == col_index
                 {
-                    return Ok(group_key_exprs
-                        .get(i)
-                        .cloned()
-                        .unwrap_or(Expr::Column(i)));
+                    return Ok(group_key_exprs.get(i).cloned().unwrap_or(Expr::Column(i)));
                 }
             }
             Err(build_ungrouped_column_error(

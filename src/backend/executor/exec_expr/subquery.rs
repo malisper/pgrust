@@ -10,7 +10,8 @@ fn planned_subquery_plan(
         .ok_or(ExecError::DetailedError {
             message: "unplanned subquery reached executor".into(),
             detail: Some(
-                "the planner should have lowered SubLink nodes into valid SubPlan references".into(),
+                "the planner should have lowered SubLink nodes into valid SubPlan references"
+                    .into(),
             ),
             hint: None,
             sqlstate: "XX000",

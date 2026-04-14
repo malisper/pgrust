@@ -53,9 +53,9 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => {}
-        Expr::Cast(inner, _)
-        | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            collect_rels_from_expr(inner, rels)
+        }
         Expr::Coalesce(left, right)
         | Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right) => {

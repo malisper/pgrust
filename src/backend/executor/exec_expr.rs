@@ -61,8 +61,8 @@ use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
-use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
+use crate::include::catalog::builtin_scalar_function_for_proc_oid;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, OpExpr, OpExprKind, ScalarArrayOpExpr, SubLinkType,
@@ -203,9 +203,7 @@ fn eval_op_expr(
         (OpExprKind::JsonGet, [left, right]) => eval_json_get(left, right, false, slot, ctx),
         (OpExprKind::JsonGetText, [left, right]) => eval_json_get(left, right, true, slot, ctx),
         (OpExprKind::JsonPath, [left, right]) => eval_json_path(left, right, false, slot, ctx),
-        (OpExprKind::JsonPathText, [left, right]) => {
-            eval_json_path(left, right, true, slot, ctx)
-        }
+        (OpExprKind::JsonPathText, [left, right]) => eval_json_path(left, right, true, slot, ctx),
         _ => Err(malformed_expr_error("operator")),
     }
 }
