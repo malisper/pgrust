@@ -30,6 +30,7 @@ use crate::backend::utils::misc::guc_datetime::{
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
 use crate::include::nodes::execnodes::ScalarType;
+use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
@@ -68,6 +69,7 @@ pub struct Session {
     gucs: HashMap<String, String>,
     datetime_config: DateTimeConfig,
     interrupts: Arc<InterruptState>,
+    auth: AuthState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +88,7 @@ impl Session {
             gucs: HashMap::new(),
             datetime_config: DateTimeConfig::default(),
             interrupts: Arc::new(InterruptState::new()),
+            auth: AuthState::default(),
         }
     }
 
@@ -180,6 +183,26 @@ impl Session {
             .map(|txn| (txn.xid, txn.next_command_id))
     }
 
+    pub fn session_user_oid(&self) -> u32 {
+        self.auth.session_user_oid()
+    }
+
+    pub fn current_user_oid(&self) -> u32 {
+        self.auth.current_user_oid()
+    }
+
+    pub(crate) fn auth_state(&self) -> &AuthState {
+        &self.auth
+    }
+
+    pub(crate) fn set_session_authorization_oid(&mut self, role_oid: u32) {
+        self.auth.set_session_authorization(role_oid);
+    }
+
+    pub(crate) fn reset_session_authorization(&mut self) {
+        self.auth.reset_session_authorization();
+    }
+
     pub(crate) fn configured_search_path(&self) -> Option<Vec<String>> {
         let value = self.gucs.get("search_path")?;
         if value.trim().eq_ignore_ascii_case("default") {
@@ -244,6 +267,7 @@ impl Session {
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let _interrupt_guard = self.statement_interrupt_guard()?;
+        db.install_auth_state(self.client_id, self.auth.clone());
         self.execute_internal(db, sql)
     }
 
