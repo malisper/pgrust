@@ -127,6 +127,10 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
     }
 
+    pub fn wal_writer(&self) -> Option<Arc<WalWriter>> {
+        self.wal.as_ref().map(Arc::clone)
+    }
+
     pub fn capacity(&self) -> usize {
         self.frames.len()
     }
@@ -590,13 +594,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         offset_number: u16,
         tuple_data: &[u8],
     ) -> Result<(), Error> {
-        let tag = {
-            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-            if !frame.state.is_valid() {
-                return Err(Error::InvalidBuffer);
-            }
-            frame.tag.lock().ok_or(Error::UnknownBuffer)?
-        };
+        let tag = self.buffer_tag(buffer_id)?;
 
         let mut page_to_store = *page;
 
@@ -634,13 +632,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         guard: &mut RwLockWriteGuard<'_, Page>,
         rmid: u8,
     ) -> Result<(), Error> {
-        let tag = {
-            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-            if !frame.state.is_valid() {
-                return Err(Error::InvalidBuffer);
-            }
-            frame.tag.lock().ok_or(Error::UnknownBuffer)?
-        };
+        let tag = self.buffer_tag(buffer_id)?;
 
         let mut page_to_store = *page;
 
@@ -696,13 +688,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         xid: u32,
         page: &Page,
     ) -> Result<(), Error> {
-        let tag = {
-            let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
-            if !frame.state.is_valid() {
-                return Err(Error::InvalidBuffer);
-            }
-            frame.tag.lock().ok_or(Error::UnknownBuffer)?
-        };
+        let tag = self.buffer_tag(buffer_id)?;
 
         // Determine the page image to store. If WAL is available, stamp pd_lsn.
         let mut page_to_store = *page;
@@ -741,6 +727,33 @@ impl<S: StorageBackend + Send> BufferPool<S> {
                 let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
                 frame.state.clear_dirty();
             }
+        }
+
+        Ok(())
+    }
+
+    pub fn install_page_image_locked(
+        &self,
+        buffer_id: BufferId,
+        page: &Page,
+        lsn: Lsn,
+        guard: &mut RwLockWriteGuard<'_, Page>,
+    ) -> Result<(), Error> {
+        let tag = self.buffer_tag(buffer_id)?;
+        let mut page_to_store = *page;
+        page_to_store[0..8].copy_from_slice(&lsn.to_le_bytes());
+        **guard = page_to_store;
+
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        frame.state.set_dirty();
+
+        if self.wal.is_none() {
+            let mut storage = self.storage.lock();
+            storage
+                .write_page(tag, &page_to_store, false)
+                .map_err(Error::Storage)?;
+            self.stats_written.fetch_add(1, Ordering::Relaxed);
+            frame.state.clear_dirty();
         }
 
         Ok(())
@@ -978,6 +991,16 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         }
 
         None
+    }
+}
+
+impl<S: StorageBackend + Send> BufferPool<S> {
+    fn buffer_tag(&self, buffer_id: BufferId) -> Result<BufferTag, Error> {
+        let frame = self.frames.get(buffer_id).ok_or(Error::UnknownBuffer)?;
+        if !frame.state.is_valid() {
+            return Err(Error::InvalidBuffer);
+        }
+        frame.tag.lock().ok_or(Error::UnknownBuffer)
     }
 }
 

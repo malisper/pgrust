@@ -4,13 +4,17 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::backend::access::nbtree::nbtxlog::btree_redo;
 use crate::BLCKSZ;
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::storage::page::bufpage::page_add_item;
 use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 
-use super::{WalError, WalReader, WalRecord};
+use super::{
+    RM_BTREE_ID, RM_HEAP_ID, RM_XACT_ID, WalError, WalReader, XLOG_FPI, XLOG_HEAP_INSERT,
+    XLOG_XACT_COMMIT,
+};
 
 /// Statistics from WAL recovery, printed at startup.
 pub struct RecoveryStats {
@@ -41,45 +45,54 @@ pub fn perform_wal_recovery(
     let mut seen_xids: HashSet<u32> = HashSet::new();
     let mut committed_xids: HashSet<u32> = HashSet::new();
 
-    while let Some((record_lsn, record)) = reader.next_record()? {
+    while let Some(record) = reader.next_decoded_record()? {
+        let record_lsn = record.end_lsn;
         stats.records_replayed += 1;
+        if record.xid != 0 {
+            seen_xids.insert(record.xid);
+        }
 
-        match record {
-            WalRecord::FullPageImage { xid, tag, mut page } => {
-                stats.fpis += 1;
-                seen_xids.insert(xid);
-
-                // Ensure the relation file is large enough.
-                ensure_block_exists(smgr, tag.rel, tag.fork, tag.block)?;
-
-                // Always apply FPIs unconditionally — the on-disk page could
-                // be a torn page (partially written before crash) even if its
-                // LSN field appears higher.  The FPI is the only known-good
-                // copy of the page.  This matches PostgreSQL's RestoreBlockImage
-                // which applies FPIs regardless of page LSN.
+        match (record.rmid, record.info) {
+            (RM_HEAP_ID, XLOG_FPI) => {
+                stats.fpis += record.blocks.len() as u64;
+                let block = record
+                    .blocks
+                    .first()
+                    .ok_or_else(|| WalError::Corrupt("heap FPI missing block ref".into()))?;
+                let mut page = block
+                    .image
+                    .as_ref()
+                    .ok_or_else(|| WalError::Corrupt("heap FPI missing page image".into()))?
+                    .clone();
+                ensure_block_exists(smgr, block.tag.rel, block.tag.fork, block.tag.block)?;
                 page[0..8].copy_from_slice(&record_lsn.to_le_bytes());
-                smgr.write_block(tag.rel, tag.fork, tag.block, &*page, true)
+                smgr.write_block(block.tag.rel, block.tag.fork, block.tag.block, &*page, true)
                     .map_err(smgr_to_wal)?;
             }
-
-            WalRecord::BtreePageImage { xid, tag, mut page } => {
-                stats.fpis += 1;
-                seen_xids.insert(xid);
-
-                ensure_block_exists(smgr, tag.rel, tag.fork, tag.block)?;
-                page[0..8].copy_from_slice(&record_lsn.to_le_bytes());
-                smgr.write_block(tag.rel, tag.fork, tag.block, &*page, true)
-                    .map_err(smgr_to_wal)?;
+            (RM_BTREE_ID, _) => {
+                stats.fpis += record
+                    .blocks
+                    .iter()
+                    .filter(|block| block.image.is_some())
+                    .count() as u64;
+                btree_redo(smgr, record_lsn, &record)?;
             }
-
-            WalRecord::HeapInsert {
-                xid,
-                tag,
-                offset_number,
-                tuple_data,
-            } => {
+            (RM_HEAP_ID, XLOG_HEAP_INSERT) => {
+                let block = record
+                    .block_ref(0)
+                    .or_else(|| record.blocks.first())
+                    .ok_or_else(|| WalError::Corrupt("heap insert missing block ref".into()))?;
+                if block.data.len() < 4 {
+                    return Err(WalError::Corrupt("heap insert block data too short".into()));
+                }
+                let tag = block.tag;
+                let offset_number = u16::from_le_bytes(block.data[0..2].try_into().unwrap());
+                let tuple_len = u16::from_le_bytes(block.data[2..4].try_into().unwrap()) as usize;
+                if block.data.len() < 4 + tuple_len {
+                    return Err(WalError::Corrupt("heap insert tuple data truncated".into()));
+                }
+                let tuple_data = block.data[4..4 + tuple_len].to_vec();
                 stats.inserts += 1;
-                seen_xids.insert(xid);
 
                 ensure_block_exists(smgr, tag.rel, tag.fork, tag.block)?;
 
@@ -105,17 +118,20 @@ pub fn perform_wal_recovery(
                      (rel={}, block={}, page_lsn={page_lsn}, record_lsn={record_lsn})",
                     tag.rel.rel_number, tag.block,
                 );
-
-                // Stamp LSN and write back.
                 page[0..8].copy_from_slice(&record_lsn.to_le_bytes());
                 smgr.write_block(tag.rel, tag.fork, tag.block, &page, true)
                     .map_err(smgr_to_wal)?;
             }
-
-            WalRecord::XactCommit { xid } => {
+            (RM_XACT_ID, XLOG_XACT_COMMIT) => {
                 stats.commits += 1;
-                committed_xids.insert(xid);
-                txns.replay_commit(xid);
+                committed_xids.insert(record.xid);
+                txns.replay_commit(record.xid);
+            }
+            _ => {
+                return Err(WalError::Corrupt(format!(
+                    "unknown WAL record during recovery: rmid={} info={}",
+                    record.rmid, record.info
+                )));
             }
         }
     }
@@ -844,13 +860,7 @@ mod tests {
         // Truncate the file to lose the second FPI + commit.
         let path = wal_dir.join("wal.log");
         let data = fs::read(&path).unwrap();
-        // Keep only the first FPI + commit (roughly first half).
-        let _first_commit_end = super::super::XLOG_RECORD_HEADER
-            + super::super::BLOCK_HEADER
-            + super::super::FPI_HOLE_META
-            + PAGE_SIZE // approximate FPI size (no hole compression for zero page)
-            + super::super::XLOG_RECORD_HEADER; // commit record
-        // Actually, just keep less than half to be safe.
+        // Keep less than half the file so the tail record is truncated.
         let truncate_at = data.len() / 2;
         fs::write(&path, &data[..truncate_at]).unwrap();
 

@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::backend::access::heap::heapam::{
     heap_fetch, heap_scan_begin_visible, heap_scan_next_visible,
@@ -9,9 +8,14 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
 use crate::backend::access::nbtree::nbtsplitloc::choose_split_index;
+use crate::backend::access::nbtree::nbtxlog::log_btree_record;
 use crate::backend::access::nbtree::nbtutils::BtSortTuple;
 use crate::backend::access::transam::xact::{
     INVALID_TRANSACTION_ID, TransactionId, TransactionStatus,
+};
+use crate::backend::access::transam::xlog::{
+    INVALID_LSN, XLOG_BTREE_INSERT_LEAF, XLOG_BTREE_INSERT_META, XLOG_BTREE_INSERT_UPPER,
+    XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L, XLOG_BTREE_SPLIT_R, XLOG_FPI,
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::render_datetime_value_text;
@@ -27,8 +31,8 @@ use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::access::nbtree::{
     BTP_LEAF, BTP_ROOT, BTREE_DEFAULT_FILLFACTOR, BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR, P_NONE,
-    bt_init_meta_page, bt_page_append_tuple, bt_page_get_meta, bt_page_get_opaque, bt_page_init,
-    bt_page_items, bt_page_set_opaque,
+    bt_init_meta_page, bt_page_append_tuple, bt_page_data_items, bt_page_get_meta,
+    bt_page_get_opaque, bt_page_init, bt_page_items, bt_page_set_opaque,
 };
 use crate::include::access::relscan::{
     BtIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
@@ -37,8 +41,6 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::{BufferPool, ClientId, OwnedBufferPin, PinnedBuffer, SmgrStorageBackend};
-
-type WriteLockMap = parking_lot::Mutex<HashMap<RelFileLocator, Arc<parking_lot::Mutex<()>>>>;
 
 fn check_catalog_interrupts(
     interrupts: &crate::backend::utils::misc::interrupts::InterruptState,
@@ -321,20 +323,6 @@ fn group_sorted_tuples_into_pages(
     Ok(pages)
 }
 
-fn btree_write_locks() -> &'static WriteLockMap {
-    static LOCKS: OnceLock<WriteLockMap> = OnceLock::new();
-    LOCKS.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
-}
-
-fn btree_relation_write_lock(rel: RelFileLocator) -> Arc<parking_lot::Mutex<()>> {
-    let mut locks = btree_write_locks().lock();
-    Arc::clone(
-        locks
-            .entry(rel)
-            .or_insert_with(|| Arc::new(parking_lot::Mutex::new(()))),
-    )
-}
-
 fn pin_btree_block<'a>(
     pool: &'a BufferPool<SmgrStorageBackend>,
     client_id: ClientId,
@@ -368,6 +356,7 @@ fn write_buffered_btree_page(
     rel: RelFileLocator,
     block: u32,
     page: &[u8; crate::backend::storage::smgr::BLCKSZ],
+    wal_info: u8,
 ) -> Result<(), CatalogError> {
     pool.ensure_block_exists(rel, ForkNumber::Main, block)
         .map_err(|err| CatalogError::Io(format!("btree extend failed: {err:?}")))?;
@@ -375,7 +364,29 @@ fn write_buffered_btree_page(
     let mut guard = pool
         .lock_buffer_exclusive(pin.buffer_id())
         .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
-    pool.write_btree_page_image_locked(pin.buffer_id(), xid, page, &mut guard)
+    let lsn = if let Some(wal) = pool.wal_writer() {
+        log_btree_record(
+            &wal,
+            xid,
+            wal_info,
+            &[crate::backend::access::nbtree::nbtxlog::LoggedBtreeBlock {
+                block_id: 0,
+                tag: crate::backend::storage::buffer::BufferTag {
+                    rel,
+                    fork: ForkNumber::Main,
+                    block,
+                },
+                page,
+                will_init: false,
+                data: &[],
+            }],
+            &[],
+        )
+        .map_err(|err| CatalogError::Io(format!("btree WAL log failed: {err}")))?
+    } else {
+        INVALID_LSN
+    };
+    pool.install_page_image_locked(pin.buffer_id(), page, lsn, &mut guard)
         .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
     Ok(())
 }
@@ -392,7 +403,11 @@ fn truncate_relation(
     pool: &BufferPool<SmgrStorageBackend>,
     rel: RelFileLocator,
 ) -> Result<(), CatalogError> {
-    pool.with_storage_mut(|storage| storage.smgr.truncate(rel, ForkNumber::Main, 0))
+    pool.with_storage_mut(|storage| {
+        storage.smgr.truncate(rel, ForkNumber::Main, 0)?;
+        let _ = storage.smgr.truncate(rel, ForkNumber::Fsm, 0);
+        Ok::<(), crate::backend::storage::smgr::SmgrError>(())
+    })
         .map_err(|err| CatalogError::Io(err.to_string()))
 }
 
@@ -423,7 +438,15 @@ fn write_meta_page(
     let mut metapage = [0u8; crate::backend::storage::smgr::BLCKSZ];
     bt_init_meta_page(&mut metapage, root, level, false)
         .map_err(|err| CatalogError::Io(format!("btree metapage init failed: {err:?}")))?;
-    write_buffered_btree_page(pool, client_id, xid, rel, BTREE_METAPAGE, &metapage)
+    write_buffered_btree_page(
+        pool,
+        client_id,
+        xid,
+        rel,
+        BTREE_METAPAGE,
+        &metapage,
+        XLOG_BTREE_INSERT_META,
+    )
 }
 
 fn page_lower_bound(
@@ -433,7 +456,7 @@ fn page_lower_bound(
     block: u32,
 ) -> Result<Vec<Value>, CatalogError> {
     let page = read_page(pool, rel, block)?;
-    let items = bt_page_items(&page)
+    let items = bt_page_data_items(&page)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
     let tuple = items
         .first()
@@ -453,7 +476,7 @@ fn ensure_empty_btree(
     let mut root = [0u8; crate::backend::storage::smgr::BLCKSZ];
     bt_page_init(&mut root, BTP_LEAF | BTP_ROOT, 0)
         .map_err(|err| CatalogError::Io(format!("btree root init failed: {err:?}")))?;
-    write_buffered_btree_page(pool, client_id, xid, rel, 1, &root)?;
+    write_buffered_btree_page(pool, client_id, xid, rel, 1, &root, XLOG_FPI)?;
     Ok(())
 }
 
@@ -516,6 +539,7 @@ fn build_leaf_pages(
             ctx.index_relation,
             block,
             &page,
+            XLOG_FPI,
         )?;
         built.push(BuiltPageRef {
             block,
@@ -545,6 +569,7 @@ fn build_leaf_pages(
             ctx.index_relation,
             prev_block,
             &prev_page,
+            XLOG_FPI,
         )?;
     }
 
@@ -595,6 +620,7 @@ fn build_internal_level(
             ctx.index_relation,
             block,
             &page,
+            XLOG_FPI,
         )?;
         built.push(BuiltPageRef {
             block,
@@ -624,6 +650,7 @@ fn build_internal_level(
             ctx.index_relation,
             prev_block,
             &prev_page,
+            XLOG_FPI,
         )?;
     }
 
@@ -643,7 +670,7 @@ fn mark_root_block(
     opaque.btpo_flags |= BTP_ROOT;
     bt_page_set_opaque(&mut page, opaque)
         .map_err(|err| CatalogError::Io(format!("btree opaque write failed: {err:?}")))?;
-    write_buffered_btree_page(pool, client_id, xid, rel, block, &page)
+    write_buffered_btree_page(pool, client_id, xid, rel, block, &page, XLOG_FPI)
 }
 
 fn build_btree_pages(
@@ -672,6 +699,7 @@ fn build_btree_pages(
             ctx.index_relation,
             1,
             &root,
+            XLOG_FPI,
         )?;
         return Ok(IndexBuildResult::default());
     }
@@ -719,9 +747,6 @@ fn check_unique_build(index_name: &str, tuples: &[BtSortTuple]) -> Result<(), Ca
 }
 
 fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
-    let write_lock = btree_relation_write_lock(ctx.index_relation);
-    let _guard = write_lock.lock();
-
     let mut scan = heap_scan_begin_visible(
         &ctx.pool,
         ctx.client_id,
@@ -847,7 +872,7 @@ fn read_page_items(
     let page = read_page(pool, rel, block)?;
     let opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
-    let items = bt_page_items(&page)
+    let items = bt_page_data_items(&page)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
     Ok((items, opaque))
 }
@@ -971,7 +996,7 @@ fn load_leaf_items(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
         .map_err(|err| CatalogError::Io(format!("btree scan shared lock failed: {err:?}")))?;
     let opaque = bt_page_get_opaque(&guard)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
-    let items = bt_page_items(&guard)
+    let items = bt_page_data_items(&guard)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
     drop(guard);
     let filtered = items
@@ -1179,6 +1204,7 @@ fn write_split_pages(
         ctx.index_relation,
         new_block,
         &right_page,
+        XLOG_BTREE_SPLIT_R,
     )?;
     if old_opaque.btpo_next != P_NONE {
         let mut next_page = read_page(&ctx.pool, ctx.index_relation, old_opaque.btpo_next)?;
@@ -1194,6 +1220,7 @@ fn write_split_pages(
             ctx.index_relation,
             old_opaque.btpo_next,
             &next_page,
+            XLOG_BTREE_SPLIT_R,
         )?;
     }
     // Publish the new sibling only after its page image is initialized and any
@@ -1205,6 +1232,7 @@ fn write_split_pages(
         ctx.index_relation,
         block,
         &left_page,
+        XLOG_BTREE_SPLIT_L,
     )?;
 
     Ok(PageSplitResult {
@@ -1221,7 +1249,12 @@ fn write_split_pages(
 }
 
 fn clear_incomplete_split(ctx: &IndexInsertContext, block: u32) -> Result<(), CatalogError> {
-    let mut page = read_page(&ctx.pool, ctx.index_relation, block)?;
+    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
+    let mut guard = ctx
+        .pool
+        .lock_buffer_exclusive(pin.buffer_id())
+        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
+    let mut page = *guard;
     let mut opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
     if opaque.btpo_flags & crate::include::access::nbtree::BTP_INCOMPLETE_SPLIT == 0 {
@@ -1230,14 +1263,31 @@ fn clear_incomplete_split(ctx: &IndexInsertContext, block: u32) -> Result<(), Ca
     opaque.btpo_flags &= !crate::include::access::nbtree::BTP_INCOMPLETE_SPLIT;
     bt_page_set_opaque(&mut page, opaque)
         .map_err(|err| CatalogError::Io(format!("btree opaque write failed: {err:?}")))?;
-    write_buffered_btree_page(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.snapshot.current_xid,
-        ctx.index_relation,
-        block,
-        &page,
-    )
+    let lsn = if let Some(wal) = ctx.pool.wal_writer() {
+        log_btree_record(
+            &wal,
+            ctx.snapshot.current_xid,
+            XLOG_BTREE_INSERT_UPPER,
+            &[crate::backend::access::nbtree::nbtxlog::LoggedBtreeBlock {
+                block_id: 0,
+                tag: crate::backend::storage::buffer::BufferTag {
+                    rel: ctx.index_relation,
+                    fork: ForkNumber::Main,
+                    block,
+                },
+                page: &page,
+                will_init: false,
+                data: &[],
+            }],
+            &[],
+        )
+        .map_err(|err| CatalogError::Io(format!("btree WAL log failed: {err}")))?
+    } else {
+        INVALID_LSN
+    };
+    ctx.pool
+        .install_page_image_locked(pin.buffer_id(), &page, lsn, &mut guard)
+        .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))
 }
 
 fn insert_tuple_into_page(
@@ -1247,7 +1297,12 @@ fn insert_tuple_into_page(
     key_values: &[Value],
     is_leaf: bool,
 ) -> Result<Option<PageSplitResult>, CatalogError> {
-    let page = read_page(&ctx.pool, ctx.index_relation, block)?;
+    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
+    let mut guard = ctx
+        .pool
+        .lock_buffer_exclusive(pin.buffer_id())
+        .map_err(|err| CatalogError::Io(format!("btree exclusive lock failed: {err:?}")))?;
+    let page = *guard;
     let old_opaque = bt_page_get_opaque(&page)
         .map_err(|err| CatalogError::Io(format!("btree opaque read failed: {err:?}")))?;
     let mut items = bt_page_items(&page)
@@ -1281,6 +1336,8 @@ fn insert_tuple_into_page(
         .map_err(|err| CatalogError::Io(format!("btree opaque write failed: {err:?}")))?;
     for tuple in &items {
         if bt_page_append_tuple(&mut rebuilt, tuple).is_err() {
+            drop(guard);
+            drop(pin);
             let split = choose_split_index(&items, None);
             let right_items = items.split_off(split);
             let left_items = items;
@@ -1288,14 +1345,36 @@ fn insert_tuple_into_page(
                 .map(Some);
         }
     }
-    write_buffered_btree_page(
-        &ctx.pool,
-        ctx.client_id,
-        ctx.snapshot.current_xid,
-        ctx.index_relation,
-        block,
-        &rebuilt,
-    )?;
+    let wal_info = if is_leaf {
+        XLOG_BTREE_INSERT_LEAF
+    } else {
+        XLOG_BTREE_INSERT_UPPER
+    };
+    let lsn = if let Some(wal) = ctx.pool.wal_writer() {
+        log_btree_record(
+            &wal,
+            ctx.snapshot.current_xid,
+            wal_info,
+            &[crate::backend::access::nbtree::nbtxlog::LoggedBtreeBlock {
+                block_id: 0,
+                tag: crate::backend::storage::buffer::BufferTag {
+                    rel: ctx.index_relation,
+                    fork: ForkNumber::Main,
+                    block,
+                },
+                page: &rebuilt,
+                will_init: false,
+                data: &[],
+            }],
+            &[],
+        )
+        .map_err(|err| CatalogError::Io(format!("btree WAL log failed: {err}")))?
+    } else {
+        INVALID_LSN
+    };
+    ctx.pool
+        .install_page_image_locked(pin.buffer_id(), &rebuilt, lsn, &mut guard)
+        .map_err(|err| CatalogError::Io(format!("btree buffered write failed: {err:?}")))?;
     Ok(None)
 }
 
@@ -1326,6 +1405,7 @@ fn create_new_root(
         ctx.index_relation,
         root_block,
         &root,
+        XLOG_BTREE_NEWROOT,
     )?;
     write_meta_page(
         &ctx.pool,
@@ -1444,9 +1524,6 @@ fn classify_unique_candidate(
 }
 
 fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
-    let write_lock = btree_relation_write_lock(ctx.index_relation);
-    let _guard = write_lock.lock();
-
     if relation_nblocks(&ctx.pool, ctx.index_relation)? <= 1 {
         ensure_empty_btree(
             &ctx.pool,
@@ -1501,8 +1578,6 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
 }
 
 fn btbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
-    let write_lock = btree_relation_write_lock(ctx.index_relation);
-    let _guard = write_lock.lock();
     ensure_empty_btree(&ctx.pool, ctx.client_id, ctx.xid, ctx.index_relation)
 }
 
@@ -1530,5 +1605,7 @@ pub fn btree_am_handler() -> IndexAmRoutine {
         amrescan: Some(btrescan),
         amgettuple: Some(btgettuple),
         amendscan: Some(btendscan),
+        ambulkdelete: Some(crate::backend::access::nbtree::nbtvacuum::btbulkdelete),
+        amvacuumcleanup: Some(crate::backend::access::nbtree::nbtvacuum::btvacuumcleanup),
     }
 }
