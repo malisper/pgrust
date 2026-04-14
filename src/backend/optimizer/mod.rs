@@ -421,13 +421,20 @@ fn lower_targets_for_path(
         None => targets
             .iter()
             .cloned()
-            .map(|target| TargetEntry {
-                expr: rewrite_semantic_expr_for_path(
-                    expand_join_rte_vars(root, target.expr),
-                    path,
-                    &layout,
-                ),
-                ..target
+            .map(|target| {
+                let original_expr = target.expr.clone();
+                let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
+                let expr = if rewritten == original_expr && !layout.contains(&rewritten) {
+                    let expanded = expand_join_rte_vars(root, original_expr.clone());
+                    if expanded != original_expr {
+                        rewrite_semantic_expr_for_path(expanded, path, &layout)
+                    } else {
+                        rewritten
+                    }
+                } else {
+                    rewritten
+                };
+                TargetEntry { expr, ..target }
             })
             .collect(),
     }
@@ -452,14 +459,24 @@ fn lower_pathkeys_for_path(root: &PlannerInfo, path: &Path, pathkeys: &[PathKey]
         None => pathkeys
             .iter()
             .cloned()
-            .map(|key| PathKey {
-                expr: rewrite_semantic_expr_for_path(
-                    expand_join_rte_vars(root, key.expr),
-                    path,
-                    &layout,
-                ),
-                descending: key.descending,
-                nulls_first: key.nulls_first,
+            .map(|key| {
+                let original_expr = key.expr.clone();
+                let rewritten = rewrite_semantic_expr_for_path(original_expr.clone(), path, &layout);
+                let expr = if rewritten == original_expr && !layout.contains(&rewritten) {
+                    let expanded = expand_join_rte_vars(root, original_expr.clone());
+                    if expanded != original_expr {
+                        rewrite_semantic_expr_for_path(expanded, path, &layout)
+                    } else {
+                        rewritten
+                    }
+                } else {
+                    rewritten
+                };
+                PathKey {
+                    expr,
+                    descending: key.descending,
+                    nulls_first: key.nulls_first,
+                }
             })
             .collect(),
     }
@@ -490,6 +507,15 @@ fn projection_slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
     })
 }
 
+fn projection_is_passthrough_boundary(input: &Path, targets: &[TargetEntry]) -> bool {
+    let input_layout = input.output_vars();
+    targets.len() == input_layout.len()
+        && targets
+            .iter()
+            .zip(input_layout.iter())
+            .all(|(target, expr)| target.expr == *expr)
+}
+
 fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
     match path {
         Path::Projection {
@@ -505,6 +531,15 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
             {
                 projection_slot_var(*slot_id, index + 1, target.sql_type)
             } else {
+                // :HACK: Passthrough projections can mark a query boundary, such as subquery
+                // normalization from an inner synthetic slot onto an outer rtindex. Do not chase
+                // plain Vars through those opaque boundaries until slot identity is separated
+                // cleanly from parse-time Var identity.
+                if matches!(expr, Expr::Var(_) | Expr::Column(_))
+                    && projection_is_passthrough_boundary(input, targets)
+                {
+                    return rewrite_expr_against_layout(expr, layout);
+                }
                 let rewritten_input_expr =
                     rewrite_expr_for_path(expr.clone(), input, &input.output_vars());
                 if let Some((index, target)) = targets
@@ -539,11 +574,12 @@ fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
 }
 
 fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
-    let rewritten = rewrite_expr_for_path(expr.clone(), path, layout);
-    if rewritten != expr {
+    let original = expr;
+    let rewritten = rewrite_expr_for_path(original.clone(), path, layout);
+    if rewritten != original {
         return rewritten;
     }
-    match expr {
+    let rebuilt = match original.clone() {
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
             args: aggref
                 .args
@@ -673,6 +709,12 @@ fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) -> E
                 .collect(),
         },
         other => other,
+    };
+    let rewritten = rewrite_expr_for_path(rebuilt.clone(), path, layout);
+    if rewritten != rebuilt {
+        rewritten
+    } else {
+        rebuilt
     }
 }
 
@@ -928,7 +970,6 @@ fn maybe_project_join_alias(
     let target_exprs = joinaliasvars
         .iter()
         .cloned()
-        .map(|expr| expand_join_rte_vars(root, expr))
         .map(|expr| rewrite_semantic_expr_for_path(expr, &input, &layout))
         .collect::<Vec<_>>();
     if layout == desired_layout {
@@ -3137,24 +3178,22 @@ fn rewrite_semantic_expr_for_join_inputs(
     right: &Path,
     join_layout: &[Expr],
 ) -> Expr {
-    if let Some(index) = join_layout.iter().position(|candidate| *candidate == expr) {
+    let original = expr;
+    if let Some(index) = join_layout.iter().position(|candidate| *candidate == original) {
         return join_layout[index].clone();
     }
     let left_layout = left.output_vars();
+    let rewritten_left = rewrite_semantic_expr_for_path(original.clone(), left, &left_layout);
+    if rewritten_left != original || left_layout.contains(&original) {
+        return rewritten_left;
+    }
     let right_layout = right.output_vars();
-    match expr {
-        Expr::Var(_) | Expr::Column(_) => {
-            let rewritten_left = rewrite_semantic_expr_for_path(expr.clone(), left, &left_layout);
-            if rewritten_left != expr || left_layout.contains(&expr) {
-                return rewritten_left;
-            }
-            let rewritten_right =
-                rewrite_semantic_expr_for_path(expr.clone(), right, &right_layout);
-            if rewritten_right != expr || right_layout.contains(&expr) {
-                return rewritten_right;
-            }
-            expr
-        }
+    let rewritten_right = rewrite_semantic_expr_for_path(original.clone(), right, &right_layout);
+    if rewritten_right != original || right_layout.contains(&original) {
+        return rewritten_right;
+    }
+    let rebuilt = match original.clone() {
+        Expr::Var(_) | Expr::Column(_) => original,
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
             args: aggref
                 .args
@@ -3384,7 +3423,19 @@ fn rewrite_semantic_expr_for_join_inputs(
                 .collect(),
         },
         other => other,
+    };
+    if let Some(index) = join_layout.iter().position(|candidate| *candidate == rebuilt) {
+        return join_layout[index].clone();
     }
+    let rewritten_left = rewrite_semantic_expr_for_path(rebuilt.clone(), left, &left_layout);
+    if rewritten_left != rebuilt || left_layout.contains(&rebuilt) {
+        return rewritten_left;
+    }
+    let rewritten_right = rewrite_semantic_expr_for_path(rebuilt.clone(), right, &right_layout);
+    if rewritten_right != rebuilt || right_layout.contains(&rebuilt) {
+        return rewritten_right;
+    }
+    rebuilt
 }
 
 fn estimate_nested_loop_join(left: Path, right: Path, kind: JoinType, on: Expr) -> Path {
