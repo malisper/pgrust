@@ -77,7 +77,7 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
                     crate::backend::parser::RawTypeName::Record => {
                         return Err(ParseError::UnsupportedType("record".into()));
                     }
-                    crate::backend::parser::RawTypeName::Named { name } => {
+                    crate::backend::parser::RawTypeName::Named { name, .. } => {
                         return Err(ParseError::UnsupportedType(name));
                     }
                 });
