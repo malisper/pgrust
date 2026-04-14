@@ -1244,6 +1244,10 @@ impl Session {
                                         ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
                                     })?
                                 }
+                                ScalarType::Money => {
+                                    crate::backend::executor::money_parse_text(raw)
+                                        .map(Value::Money)?
+                                }
                                 ScalarType::Date
                                 | ScalarType::Time
                                 | ScalarType::TimeTz

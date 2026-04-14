@@ -11,6 +11,10 @@ use super::expr_bit::{
 };
 use super::expr_bool::order_bool_values;
 use super::expr_casts::cast_value;
+use super::expr_money::{
+    money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
+    money_mul_int, money_sub,
+};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
@@ -78,6 +82,7 @@ pub(crate) fn compare_order_values(
         (Value::Bit(a), Value::Bit(b)) => compare_bit_strings(a, b),
         (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
+        (Value::Money(a), Value::Money(b)) => money_cmp(*a, *b),
         (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
             parsed_numeric_value(a)
                 .and_then(|left| parsed_numeric_value(b).map(|right| left.cmp(&right)))
@@ -153,6 +158,7 @@ pub(crate) fn compare_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(l == r)),
+        (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(l == r)),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(l == r)),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(l == r)),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),
@@ -213,6 +219,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int32(r)) => *l != (*r as i64),
         (Value::Int64(l), Value::Int64(r)) => l != r,
+        (Value::Money(l), Value::Money(r)) => l != r,
         (Value::Date(l), Value::Date(r)) => l != r,
         (Value::Time(l), Value::Time(r)) => l != r,
         (Value::TimeTz(l), Value::TimeTz(r)) => l != r,
@@ -260,6 +267,7 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_add_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_add_i64(*l, *r)?)),
+        (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_add(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l + r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.add(rv)), "+")
@@ -286,6 +294,7 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_sub_i64(*l, *r)?)),
+        (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_sub(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
             exact_numeric_binary(l, r, |lv, rv| Some(lv.sub(rv)), "-")
@@ -312,6 +321,14 @@ pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_mul_i64(*l, *r)?)),
+        (Value::Money(l), Value::Int16(r)) => Ok(Value::Money(money_mul_int(*l, i64::from(*r))?)),
+        (Value::Money(l), Value::Int32(r)) => Ok(Value::Money(money_mul_int(*l, i64::from(*r))?)),
+        (Value::Money(l), Value::Int64(r)) => Ok(Value::Money(money_mul_int(*l, *r)?)),
+        (Value::Int16(l), Value::Money(r)) => Ok(Value::Money(money_mul_int(*r, i64::from(*l))?)),
+        (Value::Int32(l), Value::Money(r)) => Ok(Value::Money(money_mul_int(*r, i64::from(*l))?)),
+        (Value::Int64(l), Value::Money(r)) => Ok(Value::Money(money_mul_int(*r, *l)?)),
+        (Value::Money(l), Value::Float64(r)) => Ok(Value::Money(money_mul_float(*l, *r)?)),
+        (Value::Float64(l), Value::Money(r)) => Ok(Value::Money(money_mul_float(*r, *l)?)),
         (Value::Float64(l), Value::Float64(r)) => {
             let product = l * r;
             if l.is_finite() && r.is_finite() && *l != 0.0 && *r != 0.0 && product.is_infinite() {
@@ -452,6 +469,7 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
         Value::Int32(v) => *v == 0,
         Value::Int64(v) => *v == 0,
         Value::Float64(v) => *v == 0.0,
+        Value::Money(v) => *v == 0,
         _ => false,
     };
     if zero {
@@ -467,6 +485,11 @@ pub(crate) fn div_values(left: Value, right: Value) -> Result<Value, ExecError> 
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Int64(checked_div_i64(*l, *r as i64)?)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(checked_div_i64(*l, *r)?)),
+        (Value::Money(l), Value::Money(r)) => Ok(Value::Float64(money_cash_div(*l, *r)?)),
+        (Value::Money(l), Value::Int16(r)) => Ok(Value::Money(money_div_int(*l, i64::from(*r))?)),
+        (Value::Money(l), Value::Int32(r)) => Ok(Value::Money(money_div_int(*l, i64::from(*r))?)),
+        (Value::Money(l), Value::Int64(r)) => Ok(Value::Money(money_div_int(*l, *r)?)),
+        (Value::Money(l), Value::Float64(r)) => Ok(Value::Money(money_div_float(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l / r)),
         _ => Err(ExecError::TypeMismatch {
             op: "/",
@@ -609,6 +632,7 @@ pub(crate) fn negate_value(value: Value) -> Result<Value, ExecError> {
         Value::Int16(v) => Ok(Value::Int16(checked_neg_i16(v)?)),
         Value::Int32(v) => Ok(Value::Int32(checked_neg_i32(v)?)),
         Value::Int64(v) => Ok(Value::Int64(checked_neg_i64(v)?)),
+        Value::Money(v) => Ok(Value::Money(checked_neg_i64(v)?)),
         Value::Float64(v) => Ok(Value::Float64(-v)),
         Value::Numeric(v) => Ok(Value::Numeric(v.negate())),
         other => Err(ExecError::TypeMismatch {
@@ -637,6 +661,7 @@ pub(crate) fn order_values(
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Money(l), Value::Money(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Bit(l), Value::Bit(r)) => {
             let ordering = compare_bit_strings(l, r);
             Ok(Value::Bool(match op {

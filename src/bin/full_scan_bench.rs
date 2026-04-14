@@ -269,6 +269,7 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Int16(v) => *v as i64,
         Value::Int32(v) => *v as i64,
         Value::Int64(v) => *v,
+        Value::Money(v) => *v,
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)

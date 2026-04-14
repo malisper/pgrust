@@ -164,6 +164,7 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::Int16(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
         Value::Int32(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
         Value::Int64(v) => JsonbValue::Numeric(NumericValue::from_i64(*v)),
+        Value::Money(v) => JsonbValue::String(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => JsonbValue::Numeric({
             let numeric = crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
                 .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?;
@@ -426,6 +427,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
         Value::Int64(v) => Ok(v.to_string()),
+        Value::Money(v) => Ok(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),

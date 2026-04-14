@@ -693,6 +693,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
         Value::Int64(v) => Ok(v.to_string()),
+        Value::Money(v) => Ok(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
@@ -1781,6 +1782,7 @@ fn value_to_json_serde(value: &Value) -> SerdeJsonValue {
         Value::Int16(v) => SerdeJsonValue::from(*v),
         Value::Int32(v) => SerdeJsonValue::from(*v),
         Value::Int64(v) => SerdeJsonValue::from(*v),
+        Value::Money(v) => SerdeJsonValue::String(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => serde_json::Number::from_f64(*v)
             .map(SerdeJsonValue::Number)
             .unwrap_or(SerdeJsonValue::Null),

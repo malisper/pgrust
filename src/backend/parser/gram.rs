@@ -1749,6 +1749,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::VarBit => "varbit",
         SqlTypeKind::Float4 => "float4",
         SqlTypeKind::Float8 => "float8",
+        SqlTypeKind::Money => "money",
         SqlTypeKind::Numeric => "numeric",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
@@ -1985,6 +1986,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 "text" => SqlType::new(SqlTypeKind::Text),
                 "bool" | "boolean" => SqlType::new(SqlTypeKind::Bool),
                 "bytea" => SqlType::new(SqlTypeKind::Bytea),
+                "money" => SqlType::new(SqlTypeKind::Money),
                 "float4" | "real" => SqlType::new(SqlTypeKind::Float4),
                 "float8" => SqlType::new(SqlTypeKind::Float8),
                 "timestamp" => SqlType::new(SqlTypeKind::Timestamp),
@@ -2028,6 +2030,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
             }
         }
         Rule::kw_bytea => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+        Rule::kw_money => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Money)),
         Rule::kw_float4 | Rule::kw_real => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float4)),
         Rule::kw_float8 | Rule::double_precision_type => {
             RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8))
