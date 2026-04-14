@@ -605,6 +605,10 @@ fn run_statement(
             expected: "CREATE TABLE AS through Database/session path",
             actual: "CREATE TABLE AS".into(),
         })),
+        Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE VIEW through Database/session path",
+            actual: "CREATE VIEW".into(),
+        })),
         Statement::DropTable(stmt) => {
             let mut dropped = 0;
             for table_name in stmt.table_names {
@@ -631,6 +635,10 @@ fn run_statement(
             }
             Ok(StatementResult::AffectedRows(dropped))
         }
+        Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP VIEW through Database/session path",
+            actual: "DROP VIEW".into(),
+        })),
         Statement::TruncateTable(stmt) => {
             let mut ctx = ExecutorContext {
                 pool: std::sync::Arc::clone(pool),

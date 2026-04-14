@@ -8,6 +8,8 @@ mod functions;
 mod geometry;
 mod infer;
 mod scope;
+mod system_views;
+mod views;
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
@@ -17,7 +19,7 @@ use crate::backend::executor::{
     Value, cast_value,
 };
 use crate::include::catalog::{
-    PgCastRow, PgOperatorRow, PgProcRow, PgTypeRow, bootstrap_pg_cast_rows,
+    PgCastRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgTypeRow, bootstrap_pg_cast_rows,
     bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
@@ -34,6 +36,8 @@ use geometry::*;
 use infer::*;
 pub use scope::BoundRelation;
 use scope::*;
+use system_views::*;
+use views::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundIndexRelation {
@@ -118,6 +122,14 @@ pub trait CatalogLookup {
         }
         fallback
     }
+
+    fn rewrite_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgRewriteRow> {
+        Vec::new()
+    }
+
+    fn pg_views_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
 }
 
 impl CatalogLookup for Catalog {
@@ -147,6 +159,36 @@ impl CatalogLookup for Catalog {
                     desc: entry.desc.clone(),
                     index_meta: index_meta.clone(),
                 })
+            })
+            .collect()
+    }
+
+    fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
+        self.rewrite_rows_for_relation(relation_oid).to_vec()
+    }
+
+    fn pg_views_rows(&self) -> Vec<Vec<Value>> {
+        self.entries()
+            .filter(|(_, entry)| entry.relkind == 'v')
+            .filter_map(|(name, entry)| {
+                let definition = self
+                    .rewrite_rows_for_relation(entry.relation_oid)
+                    .iter()
+                    .find(|row| row.rulename == "_RETURN")?
+                    .ev_action
+                    .clone();
+                let viewname = name.rsplit('.').next().unwrap_or(name).to_string();
+                let schemaname = match entry.namespace_oid {
+                    crate::include::catalog::PG_CATALOG_NAMESPACE_OID => "pg_catalog".to_string(),
+                    crate::include::catalog::PUBLIC_NAMESPACE_OID => "public".to_string(),
+                    _ => "public".to_string(),
+                };
+                Some(vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(viewname.into()),
+                    Value::Text("postgres".into()),
+                    Value::Text(definition.into()),
+                ])
             })
             .collect()
     }
@@ -373,6 +415,16 @@ pub fn normalize_create_table_as_name(
     )
 }
 
+pub fn normalize_create_view_name(stmt: &CreateViewStatement) -> Result<String, ParseError> {
+    normalize_create_table_name_parts(
+        stmt.schema_name.as_deref(),
+        &stmt.view_name,
+        TablePersistence::Permanent,
+        OnCommitAction::PreserveRows,
+    )
+    .map(|(name, _)| name)
+}
+
 fn relation_desc_from_plan(plan: &Plan) -> RelationDesc {
     RelationDesc {
         columns: plan
@@ -437,6 +489,7 @@ fn bind_ctes(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
+    expanded_views: &[u32],
 ) -> Result<Vec<BoundCte>, ParseError> {
     let mut bound = Vec::with_capacity(ctes.len());
     for cte in ctes {
@@ -450,6 +503,7 @@ fn bind_ctes(
                     outer_scopes,
                     grouped_outer.clone(),
                     &visible,
+                    expanded_views,
                 )?;
                 let desc = relation_desc_from_plan(&plan);
                 apply_cte_column_names(plan, desc, &cte.column_names)?
@@ -461,6 +515,7 @@ fn bind_ctes(
                     outer_scopes,
                     grouped_outer.clone(),
                     &visible,
+                    expanded_views,
                 )?;
                 let desc = relation_desc_from_plan(&plan);
                 apply_cte_column_names(plan, desc, &cte.column_names)?
@@ -513,14 +568,14 @@ pub fn bind_create_table(
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
-    build_plan_with_outer(stmt, catalog, &[], None, &[])
+    build_plan_with_outer(stmt, catalog, &[], None, &[], &[])
 }
 
 pub fn build_values_plan(
     stmt: &ValuesStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<Plan, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, &[], None, &[])
+    build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[])
 }
 
 fn build_values_plan_with_outer(
@@ -529,6 +584,7 @@ fn build_values_plan_with_outer(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
+    expanded_views: &[u32],
 ) -> Result<Plan, ParseError> {
     let local_ctes = bind_ctes(
         &stmt.with,
@@ -536,6 +592,7 @@ fn build_values_plan_with_outer(
         outer_scopes,
         grouped_outer.clone(),
         outer_ctes,
+        expanded_views,
     )?;
     let mut visible_ctes = local_ctes;
     visible_ctes.extend_from_slice(outer_ctes);
@@ -599,6 +656,7 @@ fn build_plan_with_outer(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
+    expanded_views: &[u32],
 ) -> Result<Plan, ParseError> {
     let local_ctes = bind_ctes(
         &stmt.with,
@@ -606,6 +664,7 @@ fn build_plan_with_outer(
         outer_scopes,
         grouped_outer.clone(),
         outer_ctes,
+        expanded_views,
     )?;
     let mut visible_ctes = local_ctes;
     visible_ctes.extend_from_slice(outer_ctes);
@@ -621,6 +680,7 @@ fn build_plan_with_outer(
             outer_scopes,
             grouped_outer.as_ref(),
             &visible_ctes,
+            expanded_views,
         )?
     } else {
         (Plan::Result, empty_scope())
@@ -1558,7 +1618,7 @@ pub fn bind_insert(
     stmt: &InsertStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundInsertStatement, ParseError> {
-    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
+    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
@@ -1624,7 +1684,7 @@ pub fn bind_insert(
             BoundInsertSource::DefaultValues(column_defaults.clone()),
         ),
         InsertSource::Select(select) => {
-            let plan = build_plan_with_outer(select, catalog, &[], None, &local_ctes)?;
+            let plan = build_plan_with_outer(select, catalog, &[], None, &local_ctes, &[])?;
             let actual = plan.columns().len();
             let target_columns = if let Some(columns) = &stmt.columns {
                 columns
@@ -1673,7 +1733,7 @@ pub fn bind_update(
     stmt: &UpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateStatement, ParseError> {
-    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
+    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let indexes = catalog.index_relations_for_heap(entry.relation_oid);
@@ -1760,7 +1820,7 @@ pub fn bind_delete(
     stmt: &DeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundDeleteStatement, ParseError> {
-    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[])?;
+    let local_ctes = bind_ctes(&stmt.with, catalog, &[], None, &[], &[])?;
     let entry = lookup_relation(catalog, &stmt.table_name)?;
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt

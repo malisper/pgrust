@@ -100,9 +100,20 @@ fn validate_maintenance_targets(
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
     for target in targets {
-        let entry = catalog
-            .lookup_relation(&target.table_name)
-            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.table_name.clone())))?;
+        let entry = match catalog.lookup_any_relation(&target.table_name) {
+            Some(entry) if entry.relkind == 'r' => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: target.table_name.clone(),
+                    expected: "table",
+                }));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    target.table_name.clone(),
+                )));
+            }
+        };
         for column in &target.columns {
             if !entry
                 .desc
@@ -504,9 +515,18 @@ pub fn execute_truncate_table(
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
     for table_name in stmt.table_names {
-        let entry = catalog
-            .lookup_relation(&table_name)
-            .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(table_name.clone())))?;
+        let entry = match catalog.lookup_any_relation(&table_name) {
+            Some(entry) if entry.relkind == 'r' => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: table_name.clone(),
+                    expected: "table",
+                }));
+            }
+            None => {
+                return Err(ExecError::Parse(ParseError::UnknownTable(table_name.clone())));
+            }
+        };
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
         let _ = ctx.pool.invalidate_relation(entry.rel);
         ctx.pool

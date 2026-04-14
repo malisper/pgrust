@@ -2,8 +2,8 @@ use super::{
     pg_am_desc, pg_amop_desc, pg_amproc_desc, pg_attrdef_desc, pg_auth_members_desc,
     pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc, pg_constraint_desc,
     pg_database_desc, pg_depend_desc, pg_index_desc, pg_language_desc, pg_namespace_desc,
-    pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc, pg_tablespace_desc,
-    pg_type_desc,
+    pg_opclass_desc, pg_operator_desc, pg_opfamily_desc, pg_proc_desc, pg_rewrite_desc,
+    pg_tablespace_desc, pg_type_desc,
 };
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
@@ -27,7 +27,8 @@ use crate::include::catalog::{
     PG_DATABASE_RELATION_OID, PG_DEPEND_RELATION_OID, PG_INDEX_RELATION_OID,
     PG_LANGUAGE_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TABLESPACE_RELATION_OID, PG_TYPE_RELATION_OID, POINT_TYPE_OID,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TABLESPACE_RELATION_OID,
+    PG_TYPE_RELATION_OID, POINT_TYPE_OID,
     POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
     REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
     TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIME_ARRAY_TYPE_OID,
@@ -154,6 +155,10 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
         &pg_index_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
+        PG_REWRITE_RELATION_OID,
+        &pg_rewrite_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
         PG_OPCLASS_RELATION_OID,
         &pg_opclass_desc(),
     ));
@@ -276,7 +281,7 @@ mod tests {
     #[test]
     fn bootstrap_pg_attribute_rows_cover_core_catalog_columns() {
         let rows = bootstrap_pg_attribute_rows();
-        assert_eq!(rows.len(), 204);
+        assert_eq!(rows.len(), 212);
         assert!(rows.iter().any(|row| {
             row.attrelid == PG_CLASS_RELATION_OID
                 && row.attname == "relkind"

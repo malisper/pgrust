@@ -228,7 +228,14 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         )
         .unwrap_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
         SqlExpr::ScalarSubquery(select) => {
-            build_plan_with_outer(select, catalog, outer_scopes, grouped_outer.cloned(), ctes)
+            build_plan_with_outer(
+                select,
+                catalog,
+                outer_scopes,
+                grouped_outer.cloned(),
+                ctes,
+                &[],
+            )
                 .ok()
                 .and_then(|plan| {
                     let cols = plan.columns();

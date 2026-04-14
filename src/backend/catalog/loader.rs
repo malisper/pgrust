@@ -21,7 +21,7 @@ use crate::backend::catalog::rowcodec::{
     pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
     pg_index_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
     pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
-    pg_statistic_row_from_values,
+    pg_rewrite_row_from_values, pg_statistic_row_from_values,
     pg_tablespace_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
     pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
     pg_type_row_from_values,
@@ -68,6 +68,7 @@ pub(crate) fn catalog_from_physical_rows(
     let attribute_rows = rows.attributes;
     let attrdef_rows = rows.attrdefs;
     let depend_rows = rows.depends;
+    let rewrite_rows = rows.rewrites;
     let index_rows = rows.indexes;
     let _description_rows = rows.descriptions;
     let _am_rows = rows.ams;
@@ -142,6 +143,13 @@ pub(crate) fn catalog_from_physical_rows(
                 }),
         )
         .max(
+            rewrite_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
+        )
+        .max(
             constraint_rows
                 .iter()
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
@@ -152,6 +160,7 @@ pub(crate) fn catalog_from_physical_rows(
         tables: BTreeMap::new(),
         constraints: Vec::new(),
         depends: Vec::new(),
+        rewrites: Vec::new(),
         next_rel_number: DEFAULT_FIRST_REL_NUMBER,
         next_oid,
     };
@@ -258,6 +267,8 @@ pub(crate) fn catalog_from_physical_rows(
     }
     catalog.constraints = constraint_rows;
     catalog.depends = depend_rows;
+    catalog.rewrites = rewrite_rows;
+    crate::include::catalog::sort_pg_rewrite_rows(&mut catalog.rewrites);
     Ok(catalog)
 }
 
@@ -356,6 +367,7 @@ pub(crate) fn load_physical_catalog_rows(
     let mut missing_collation = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
+    let mut missing_rewrite = false;
     let mut missing_statistic = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
@@ -442,6 +454,10 @@ pub(crate) fn load_physical_catalog_rows(
             }
             if kind == BootstrapCatalogKind::PgTablespace {
                 missing_tablespace = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgRewrite {
+                missing_rewrite = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgStatistic {
@@ -728,6 +744,18 @@ pub(crate) fn load_physical_catalog_rows(
         .map(pg_tablespace_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let rewrite_rows = if missing_rewrite {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgRewrite],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgRewrite),
+        )?
+        .into_iter()
+        .map(pg_rewrite_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let statistic_rows = if missing_statistic {
         Vec::new()
     } else {
@@ -749,6 +777,7 @@ pub(crate) fn load_physical_catalog_rows(
         depends: depend_rows,
         descriptions: description_rows,
         indexes: index_rows,
+        rewrites: rewrite_rows,
         ams: am_rows,
         amops: Vec::new(),
         amprocs: Vec::new(),
@@ -810,6 +839,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
     let mut missing_collation = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
+    let mut missing_rewrite = false;
     let mut missing_statistic = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
@@ -896,6 +926,10 @@ pub(crate) fn load_physical_catalog_rows_visible(
             }
             if kind == BootstrapCatalogKind::PgTablespace {
                 missing_tablespace = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgRewrite {
+                missing_rewrite = true;
                 continue;
             }
             if kind == BootstrapCatalogKind::PgStatistic {
@@ -1253,6 +1287,21 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .map(pg_tablespace_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let rewrite_rows = if missing_rewrite {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgRewrite],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgRewrite),
+        )?
+        .into_iter()
+        .map(pg_rewrite_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
     let statistic_rows = if missing_statistic {
         Vec::new()
     } else {
@@ -1277,6 +1326,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
         depends: depend_rows,
         descriptions: description_rows,
         indexes: index_rows,
+        rewrites: rewrite_rows,
         ams: am_rows,
         amops: Vec::new(),
         amprocs: Vec::new(),
@@ -1446,6 +1496,46 @@ pub(crate) fn load_visible_constraint_rows(
     )?
     .into_iter()
     .map(pg_constraint_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_depend_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<crate::include::catalog::PgDependRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgDepend,
+    )?
+    .into_iter()
+    .map(pg_depend_row_from_values)
+    .collect()
+}
+
+pub(crate) fn load_visible_rewrite_rows(
+    base_dir: &Path,
+    pool: &BufferPool<SmgrStorageBackend>,
+    txns: &TransactionManager,
+    snapshot: &Snapshot,
+    client_id: crate::ClientId,
+) -> Result<Vec<crate::include::catalog::PgRewriteRow>, CatalogError> {
+    load_visible_catalog_kind(
+        base_dir,
+        pool,
+        txns,
+        snapshot,
+        client_id,
+        BootstrapCatalogKind::PgRewrite,
+    )?
+    .into_iter()
+    .map(pg_rewrite_row_from_values)
     .collect()
 }
 

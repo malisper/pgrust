@@ -3,7 +3,7 @@ use crate::backend::executor::RelationDesc;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgDependRow,
+    PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
 };
 
 pub fn sort_pg_depend_rows(rows: &mut [PgDependRow]) {
@@ -121,5 +121,32 @@ pub fn derived_relation_depend_rows(
             deptype: DEPENDENCY_AUTO,
         })
     }));
+    rows
+}
+
+pub fn view_rewrite_depend_rows(
+    rewrite_oid: u32,
+    view_relation_oid: u32,
+    referenced_relation_oids: &[u32],
+) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_REWRITE_RELATION_OID,
+        objid: rewrite_oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: view_relation_oid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_INTERNAL,
+    }];
+    rows.extend(referenced_relation_oids.iter().copied().map(|relation_oid| PgDependRow {
+        classid: PG_REWRITE_RELATION_OID,
+        objid: rewrite_oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: relation_oid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }));
+    sort_pg_depend_rows(&mut rows);
     rows
 }

@@ -978,7 +978,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
             child_outer.push(scope.clone());
             child_outer.extend_from_slice(outer_scopes);
-            let plan = build_plan_with_outer(select, catalog, &child_outer, None, ctes)?;
+            let plan = build_plan_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
             ensure_single_column_subquery(&plan)?;
             Expr::ScalarSubquery(Box::new(plan))
         }
@@ -992,6 +992,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 &child_outer,
                 None,
                 ctes,
+                &[],
             )?))
         }
         SqlExpr::InSubquery {
@@ -1002,7 +1003,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
             child_outer.push(scope.clone());
             child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None, ctes)?;
+            let subquery_plan =
+                build_plan_with_outer(subquery, catalog, &child_outer, None, ctes, &[])?;
             ensure_single_column_subquery(&subquery_plan)?;
             let any_expr = Expr::AnySubquery {
                 left: Box::new(bind_expr_with_outer_and_ctes(
@@ -1031,7 +1033,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
             child_outer.push(scope.clone());
             child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None, ctes)?;
+            let subquery_plan =
+                build_plan_with_outer(subquery, catalog, &child_outer, None, ctes, &[])?;
             ensure_single_column_subquery(&subquery_plan)?;
             if *is_all {
                 Expr::AllSubquery {
