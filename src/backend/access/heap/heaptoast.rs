@@ -95,6 +95,7 @@ pub(crate) fn store_external_value(
                     txns: ctx.txns.clone(),
                     txn_waiter: ctx.txn_waiter.clone(),
                     client_id: ctx.client_id,
+                    interrupts: ctx.interrupts.clone(),
                     snapshot: ctx.snapshot.clone(),
                     heap_relation: toast.rel,
                     heap_desc: desc.clone(),
@@ -142,7 +143,9 @@ pub(crate) fn cleanup_new_toast_value(
             xid,
             *tid,
             &ctx.snapshot,
-            ctx.txn_waiter.as_deref().map(|waiter| (&*ctx.txns, waiter)),
+            ctx.txn_waiter
+                .as_deref()
+                .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref())),
         ) {
             Ok(()) | Err(HeapError::TupleAlreadyModified(_)) => {}
             Err(HeapError::TupleUpdated(_, _)) => {}

@@ -93,6 +93,40 @@ mod tests {
         send_typed_message(stream, b'Q', &body);
     }
 
+    fn send_parse(stream: &mut impl Write, statement_name: &str, sql: &str) {
+        let mut body = Vec::new();
+        body.extend_from_slice(statement_name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(sql.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0i16.to_be_bytes());
+        send_typed_message(stream, b'P', &body);
+    }
+
+    fn send_bind(stream: &mut impl Write, portal_name: &str, statement_name: &str) {
+        let mut body = Vec::new();
+        body.extend_from_slice(portal_name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(statement_name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        body.extend_from_slice(&0i16.to_be_bytes());
+        send_typed_message(stream, b'B', &body);
+    }
+
+    fn send_execute(stream: &mut impl Write, portal_name: &str) {
+        let mut body = Vec::new();
+        body.extend_from_slice(portal_name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0i32.to_be_bytes());
+        send_typed_message(stream, b'E', &body);
+    }
+
+    fn send_sync(stream: &mut impl Write) {
+        send_typed_message(stream, b'S', &[]);
+    }
+
     fn send_copy_data(stream: &mut impl Write, data: &[u8]) {
         send_typed_message(stream, b'd', data);
     }
@@ -627,6 +661,96 @@ mod tests {
                 .iter()
                 .any(|(code, value)| *code == b'M'
                     && value == "operator does not exist: real % real")
+        );
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn simple_query_statement_timeout_returns_57014_and_ready() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "set statement_timeout = '5ms'");
+        let _ = read_until_ready(&mut stream, "set_timeout");
+
+        send_query(&mut stream, "select * from generate_series(1, 1000000000)");
+        let response = read_until_ready(&mut stream, "statement_timeout_simple");
+        let error = response
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .map(|(_, body)| error_fields(body))
+            .expect("timeout should return an error");
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "57014")
+        );
+        assert!(error.iter().any(|(code, value)| {
+            *code == b'M' && value == "canceling statement due to statement timeout"
+        }));
+        assert!(matches!(response.last(), Some((b'Z', _))));
+
+        send_query(&mut stream, "select 1");
+        let after = read_until_ready(&mut stream, "after_statement_timeout");
+        assert_eq!(
+            after
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("SELECT 1".to_string())
+        );
+
+        stream.shutdown(Shutdown::Both).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn extended_protocol_execute_statement_timeout_returns_57014() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_query(&mut stream, "set statement_timeout = '5ms'");
+        let _ = read_until_ready(&mut stream, "set_timeout");
+
+        send_parse(
+            &mut stream,
+            "timeout_stmt",
+            "select * from generate_series(1, 1000000000)",
+        );
+        send_bind(&mut stream, "", "timeout_stmt");
+        send_execute(&mut stream, "");
+        send_sync(&mut stream);
+
+        let response = read_until_ready(&mut stream, "statement_timeout_extended");
+        assert!(response.iter().any(|(kind, _)| *kind == b'1'));
+        assert!(response.iter().any(|(kind, _)| *kind == b'2'));
+        let error = response
+            .iter()
+            .find(|(kind, _)| *kind == b'E')
+            .map(|(_, body)| error_fields(body))
+            .expect("timeout should return an error");
+        assert!(
+            error
+                .iter()
+                .any(|(code, value)| *code == b'C' && value == "57014")
+        );
+        assert!(error.iter().any(|(code, value)| {
+            *code == b'M' && value == "canceling statement due to statement timeout"
+        }));
+        assert!(matches!(response.last(), Some((b'Z', _))));
+
+        send_query(&mut stream, "select 1");
+        let after = read_until_ready(&mut stream, "after_extended_timeout");
+        assert_eq!(
+            after
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("SELECT 1".to_string())
         );
 
         stream.shutdown(Shutdown::Both).unwrap();

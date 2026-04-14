@@ -7,10 +7,15 @@ impl Database {
         comment_stmt: &CommentOnTableStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
-        self.table_locks
-            .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -34,10 +39,15 @@ impl Database {
         alter_stmt: &AlterTableAddColumnStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
-        self.table_locks
-            .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -61,6 +71,7 @@ impl Database {
         analyze_stmt: &AnalyzeStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let relation_names = analyze_stmt
             .targets
             .iter()
@@ -71,10 +82,14 @@ impl Database {
             .iter()
             .map(|name| lookup_heap_relation_for_ddl(&catalog, name))
             .collect::<Result<Vec<_>, _>>()?;
-        for rel in &rels {
-            self.table_locks
-                .lock_table(rel.rel, TableLockMode::AccessExclusive, client_id);
-        }
+        let rel_locs = rels.iter().map(|rel| rel.rel).collect::<Vec<_>>();
+        lock_tables_interruptible(
+            &self.table_locks,
+            client_id,
+            &rel_locs,
+            TableLockMode::AccessExclusive,
+            interrupts.as_ref(),
+        )?;
 
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -89,8 +104,8 @@ impl Database {
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
         guard.disarm();
-        for rel in &rels {
-            self.table_locks.unlock_table(rel.rel, client_id);
+        for rel in rel_locs {
+            self.table_locks.unlock_table(rel, client_id);
         }
         result
     }
@@ -104,12 +119,14 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            interrupts: Arc::clone(&interrupts),
             snapshot,
             client_id,
             next_command_id: cid,
@@ -127,6 +144,7 @@ impl Database {
             cid,
             client_id,
             waiter: Some(self.txn_waiter.clone()),
+            interrupts: Arc::clone(&interrupts),
         };
         let mut store = self.catalog.write();
         for result in analyzed {
@@ -160,6 +178,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
         if relation.relpersistence == 't' {
@@ -176,6 +195,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts: Arc::clone(&interrupts),
         };
         let effect = self
             .catalog
@@ -195,6 +215,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
         if relation.relpersistence == 't' {
@@ -218,6 +239,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts,
         };
         let effect = self
             .catalog

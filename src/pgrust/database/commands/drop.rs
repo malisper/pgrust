@@ -11,16 +11,20 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let rels = drop_stmt
             .table_names
             .iter()
             .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
             .collect::<Vec<_>>();
-        for rel in &rels {
-            self.table_locks
-                .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
-        }
+        lock_tables_interruptible(
+            &self.table_locks,
+            client_id,
+            &rels,
+            TableLockMode::AccessExclusive,
+            interrupts.as_ref(),
+        )?;
 
         let mut dropped = 0usize;
         let mut result = Ok(StatementResult::AffectedRows(0));
@@ -83,6 +87,7 @@ impl Database {
                 cid,
                 client_id,
                 waiter: Some(self.txn_waiter.clone()),
+                interrupts: Arc::clone(&interrupts),
             };
             match catalog_guard.drop_relation_by_oid_mvcc(relation_oid, &ctx) {
                 Ok((entries, effect)) => {
@@ -129,16 +134,20 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let rels = drop_stmt
             .view_names
             .iter()
             .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
             .collect::<Vec<_>>();
-        for rel in &rels {
-            self.table_locks
-                .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
-        }
+        lock_tables_interruptible(
+            &self.table_locks,
+            client_id,
+            &rels,
+            TableLockMode::AccessExclusive,
+            interrupts.as_ref(),
+        )?;
 
         let mut dropped = 0usize;
         let mut result = Ok(StatementResult::AffectedRows(0));
@@ -178,6 +187,7 @@ impl Database {
                 cid,
                 client_id,
                 waiter: Some(self.txn_waiter.clone()),
+                interrupts: Arc::clone(&interrupts),
             };
             match self
                 .catalog

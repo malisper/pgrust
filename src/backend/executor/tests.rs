@@ -498,6 +498,9 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pool: test_pool(base),
         txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
         txn_waiter: None,
+        interrupts: std::sync::Arc::new(
+            crate::backend::utils::misc::interrupts::InterruptState::new(),
+        ),
         snapshot,
         client_id: 1,
         next_command_id: 0,
@@ -519,6 +522,9 @@ fn run_plan(
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        interrupts: std::sync::Arc::new(
+            crate::backend::utils::misc::interrupts::InterruptState::new(),
+        ),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 42,
         next_command_id: 0,
@@ -578,6 +584,9 @@ fn run_sql_with_catalog(
             pool,
             txns: txns_arc,
             txn_waiter: None,
+            interrupts: std::sync::Arc::new(
+                crate::backend::utils::misc::interrupts::InterruptState::new(),
+            ),
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
             next_command_id: 0,
@@ -4470,6 +4479,9 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        interrupts: std::sync::Arc::new(
+            crate::backend::utils::misc::interrupts::InterruptState::new(),
+        ),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 77,
         next_command_id: 0,

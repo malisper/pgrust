@@ -38,7 +38,8 @@ use crate::backend::parser::{
     bind_delete, bind_insert, bind_update, create_relation_desc, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
-    TableLockManager, TableLockMode, lock_relations, unlock_relations,
+    TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
+    unlock_relations,
 };
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::cache::inval::{
@@ -56,6 +57,7 @@ use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     SessionCatalogState, invalidate_session_catalog_state,
 };
+use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::catalog::PgConstraintRow;
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -99,6 +101,7 @@ pub struct Database {
     pub table_locks: Arc<TableLockManager>,
     pub plan_cache: Arc<PlanCache>,
     pub(crate) session_catalog_states: Arc<RwLock<HashMap<ClientId, SessionCatalogState>>>,
+    pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
     _wal_bg_writer: Arc<WalBgWriter>,
 }
@@ -220,9 +223,32 @@ impl Database {
             table_locks: Arc::new(TableLockManager::new()),
             plan_cache: Arc::new(PlanCache::new()),
             session_catalog_states: Arc::new(RwLock::new(HashMap::new())),
+            session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
             _wal_bg_writer: Arc::new(wal_bg_writer),
         })
+    }
+
+    pub(crate) fn install_interrupt_state(
+        &self,
+        client_id: ClientId,
+        interrupts: Arc<InterruptState>,
+    ) {
+        self.session_interrupt_states
+            .write()
+            .insert(client_id, interrupts);
+    }
+
+    pub(crate) fn interrupt_state(&self, client_id: ClientId) -> Arc<InterruptState> {
+        self.session_interrupt_states
+            .read()
+            .get(&client_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(InterruptState::new()))
+    }
+
+    pub(crate) fn clear_interrupt_state(&self, client_id: ClientId) {
+        self.session_interrupt_states.write().remove(&client_id);
     }
 }
 

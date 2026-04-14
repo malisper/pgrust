@@ -18,6 +18,7 @@ use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::storage::page::bufpage::page_header;
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
+use crate::backend::utils::misc::interrupts::check_for_interrupts;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexInsertContext, IndexUniqueCheck,
@@ -38,6 +39,12 @@ use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::{BufferPool, ClientId, OwnedBufferPin, PinnedBuffer, SmgrStorageBackend};
 
 type WriteLockMap = parking_lot::Mutex<HashMap<RelFileLocator, Arc<parking_lot::Mutex<()>>>>;
+
+fn check_catalog_interrupts(
+    interrupts: &crate::backend::utils::misc::interrupts::InterruptState,
+) -> Result<(), CatalogError> {
+    check_for_interrupts(interrupts).map_err(CatalogError::Interrupted)
+}
 
 const BT_DESC_FLAG: i16 = 0x0001;
 
@@ -486,6 +493,7 @@ fn build_leaf_pages(
 
     let mut built = Vec::with_capacity(pages.len());
     for (idx, items) in pages.into_iter().enumerate() {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         let block = *next_block;
         *next_block += 1;
         let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
@@ -522,6 +530,7 @@ fn build_leaf_pages(
     }
 
     for built_page in built.iter().skip(1) {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         let prev_block = built_page.block - 1;
         let mut prev_page = read_page(&ctx.pool, ctx.index_relation, prev_block)?;
         let mut prev_opaque = bt_page_get_opaque(&prev_page)
@@ -563,6 +572,7 @@ fn build_internal_level(
 
     let mut built = Vec::with_capacity(pages.len());
     for (idx, items) in pages.into_iter().enumerate() {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         let block = *next_block;
         *next_block += 1;
         let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
@@ -599,6 +609,7 @@ fn build_internal_level(
     }
 
     for built_page in built.iter().skip(1) {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         let prev_block = built_page.block - 1;
         let mut prev_page = read_page(&ctx.pool, ctx.index_relation, prev_block)?;
         let mut prev_opaque = bt_page_get_opaque(&prev_page)
@@ -668,6 +679,7 @@ fn build_btree_pages(
     let mut next_block = 1u32;
     let mut current = build_leaf_pages(ctx, tuples, &mut next_block)?;
     while current.len() > 1 {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         current = build_internal_level(ctx, current, &mut next_block)?;
     }
     let root = current
@@ -723,6 +735,7 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
     let mut approx_bytes = 0usize;
 
     loop {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         let next = {
             let txns = ctx.txns.read();
             heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)
@@ -1374,10 +1387,16 @@ fn bt_check_unique(ctx: &IndexInsertContext, key_values: &[Value]) -> Result<(),
         let waiter = ctx.txn_waiter.as_ref().ok_or_else(|| {
             CatalogError::Io("btree unique check missing transaction waiter".into())
         })?;
-        if !waiter.wait_for(&ctx.txns, xid) {
-            return Err(CatalogError::Io(format!(
-                "btree unique check timed out waiting for transaction {xid}"
-            )));
+        match waiter.wait_for(&ctx.txns, xid, ctx.interrupts.as_ref()) {
+            crate::backend::storage::lmgr::WaitOutcome::Completed => {}
+            crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
+                return Err(CatalogError::Io(format!(
+                    "btree unique check timed out waiting for transaction {xid}"
+                )));
+            }
+            crate::backend::storage::lmgr::WaitOutcome::Interrupted(reason) => {
+                return Err(CatalogError::Interrupted(reason));
+            }
         }
     }
 }
@@ -1451,6 +1470,7 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
 
     let mut split = insert_tuple_into_page(ctx, leaf_block, new_tuple, &key_values, true)?;
     while let Some(result) = split {
+        check_catalog_interrupts(ctx.interrupts.as_ref())?;
         let right_pivot = pivot_tuple(
             &ctx.index_desc,
             result.right_block,

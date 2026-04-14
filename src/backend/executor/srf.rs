@@ -170,6 +170,7 @@ fn eval_generate_series(
         let mut current = start;
         let mut rows = Vec::new();
         loop {
+            ctx.check_for_interrupts()?;
             let done = match step_cmp {
                 Ordering::Greater => current.cmp(&stop) == Ordering::Greater,
                 Ordering::Less => current.cmp(&stop) == Ordering::Less,
@@ -205,6 +206,7 @@ fn eval_generate_series(
     }
     let mut rows = Vec::new();
     loop {
+        ctx.check_for_interrupts()?;
         let done = if step > 0 {
             current > end
         } else {
@@ -253,6 +255,7 @@ fn eval_unnest(
 
     let mut rows = Vec::with_capacity(max_len);
     for idx in 0..max_len {
+        ctx.check_for_interrupts()?;
         let mut row = Vec::with_capacity(arrays.len());
         for array in &arrays {
             match array {

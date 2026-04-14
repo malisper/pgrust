@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::mem;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::catalog::store::CatalogMutationEffect;
@@ -27,6 +28,9 @@ use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
     parse_timezone,
 };
+use crate::backend::utils::misc::interrupts::{
+    InterruptState, StatementInterruptGuard,
+};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
@@ -40,6 +44,7 @@ pub struct SelectGuard<'a> {
     pub(crate) rels: Vec<RelFileLocator>,
     pub(crate) table_locks: &'a TableLockManager,
     pub(crate) client_id: ClientId,
+    pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
 }
 
 impl Drop for SelectGuard<'_> {
@@ -64,6 +69,7 @@ pub struct Session {
     active_txn: Option<ActiveTransaction>,
     gucs: HashMap<String, String>,
     datetime_config: DateTimeConfig,
+    interrupts: Arc<InterruptState>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +87,7 @@ impl Session {
             active_txn: None,
             gucs: HashMap::new(),
             datetime_config: DateTimeConfig::default(),
+            interrupts: Arc::new(InterruptState::new()),
         }
     }
 
@@ -234,11 +241,18 @@ impl Session {
     }
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
+        let _interrupt_guard = self.statement_interrupt_guard()?;
+        self.execute_internal(db, sql)
+    }
+
+    fn execute_internal(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
+        db.install_interrupt_state(self.client_id, self.interrupts());
         // :HACK: Support simple file-backed COPY FROM on the normal SQL path
         // until COPY is modeled as a real parsed/bound statement.
         if let Some((table_name, columns, file_path)) = parse_copy_from_file(sql) {
             let rows = read_copy_from_file(&file_path)?;
-            let inserted = self.copy_from_rows_into(db, &table_name, columns.as_deref(), &rows)?;
+            let inserted =
+                self.copy_from_rows_into_internal(db, &table_name, columns.as_deref(), &rows)?;
             return Ok(StatementResult::AffectedRows(inserted));
         }
         let stmt = if self.standard_conforming_strings() {
@@ -432,11 +446,49 @@ impl Session {
         }
     }
 
+    fn statement_timeout_duration(&self) -> Result<Option<Duration>, ExecError> {
+        let Some(value) = self.gucs.get("statement_timeout") else {
+            return Ok(None);
+        };
+        parse_statement_timeout(value)
+    }
+
+    fn statement_interrupt_guard(&self) -> Result<StatementInterruptGuard, ExecError> {
+        Ok(self
+            .interrupts
+            .statement_interrupt_guard(self.statement_timeout_duration()?))
+    }
+
+    pub(crate) fn interrupts(&self) -> Arc<InterruptState> {
+        Arc::clone(&self.interrupts)
+    }
+
+    fn lock_table_if_needed(
+        &mut self,
+        db: &Database,
+        rel: RelFileLocator,
+        mode: TableLockMode,
+    ) -> Result<(), ExecError> {
+        let Some(txn) = self.active_txn.as_mut() else {
+            db.table_locks
+                .lock_table_interruptible(rel, mode, self.client_id, self.interrupts.as_ref())?;
+            return Ok(());
+        };
+        if !txn.held_table_locks.contains(&rel) {
+            db.table_locks
+                .lock_table_interruptible(rel, mode, self.client_id, self.interrupts.as_ref())?;
+            txn.held_table_locks.push(rel);
+        }
+        Ok(())
+    }
+
     pub fn execute_streaming<'a>(
         &mut self,
         db: &'a Database,
         select_stmt: &SelectStatement,
     ) -> Result<SelectGuard<'a>, ExecError> {
+        let interrupt_guard = self.statement_interrupt_guard()?;
+        db.install_interrupt_state(self.client_id, self.interrupts());
         let txn_ctx = if let Some(ref mut txn) = self.active_txn {
             let xid = txn.xid;
             let cid = txn.next_command_id;
@@ -446,12 +498,14 @@ impl Session {
             None
         };
         let search_path = self.configured_search_path();
-        db.execute_streaming_with_search_path(
+        let mut guard = db.execute_streaming_with_search_path(
             self.client_id,
             select_stmt,
             txn_ctx,
             search_path.as_deref(),
-        )
+        )?;
+        guard.interrupt_guard = Some(interrupt_guard);
+        Ok(guard)
     }
 
     fn execute_in_transaction(
@@ -502,15 +556,11 @@ impl Session {
                             rename_stmt.table_name.clone(),
                         ))
                     })?;
-                let txn = self.active_txn.as_mut().unwrap();
-                if !txn.held_table_locks.contains(&relation.rel) {
-                    db.table_locks.lock_table(
-                        relation.rel,
-                        TableLockMode::AccessExclusive,
-                        client_id,
-                    );
-                    txn.held_table_locks.push(relation.rel);
-                }
+                self.lock_table_if_needed(
+                    db,
+                    relation.rel,
+                    TableLockMode::AccessExclusive,
+                )?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_rename_stmt_in_transaction_with_search_path(
@@ -533,15 +583,11 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                let txn = self.active_txn.as_mut().unwrap();
-                if !txn.held_table_locks.contains(&relation.rel) {
-                    db.table_locks.lock_table(
-                        relation.rel,
-                        TableLockMode::AccessExclusive,
-                        client_id,
-                    );
-                    txn.held_table_locks.push(relation.rel);
-                }
+                self.lock_table_if_needed(
+                    db,
+                    relation.rel,
+                    TableLockMode::AccessExclusive,
+                )?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
@@ -569,15 +615,11 @@ impl Session {
                             comment_stmt.table_name.clone(),
                         ))
                     })?;
-                let txn = self.active_txn.as_mut().unwrap();
-                if !txn.held_table_locks.contains(&relation.rel) {
-                    db.table_locks.lock_table(
-                        relation.rel,
-                        TableLockMode::AccessExclusive,
-                        client_id,
-                    );
-                    txn.held_table_locks.push(relation.rel);
-                }
+                self.lock_table_if_needed(
+                    db,
+                    relation.rel,
+                    TableLockMode::AccessExclusive,
+                )?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_table_stmt_in_transaction_with_search_path(
@@ -613,6 +655,7 @@ impl Session {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    interrupts: self.interrupts(),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -626,17 +669,14 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_insert(insert_stmt, &catalog)?;
                 let rel = bound.rel;
-                let txn = self.active_txn.as_mut().unwrap();
-                if !txn.held_table_locks.contains(&rel) {
-                    db.table_locks
-                        .lock_table(rel, TableLockMode::RowExclusive, client_id);
-                    txn.held_table_locks.push(rel);
-                }
+                self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    interrupts,
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -650,17 +690,14 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_update(update_stmt, &catalog)?;
                 let rel = bound.rel;
-                let txn = self.active_txn.as_mut().unwrap();
-                if !txn.held_table_locks.contains(&rel) {
-                    db.table_locks
-                        .lock_table(rel, TableLockMode::RowExclusive, client_id);
-                    txn.held_table_locks.push(rel);
-                }
+                self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -674,24 +711,21 @@ impl Session {
                     &mut ctx,
                     xid,
                     cid,
-                    Some((&db.txns, &db.txn_waiter)),
+                    Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
                 )
             }
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = bind_delete(delete_stmt, &catalog)?;
                 let rel = bound.rel;
-                let txn = self.active_txn.as_mut().unwrap();
-                if !txn.held_table_locks.contains(&rel) {
-                    db.table_locks
-                        .lock_table(rel, TableLockMode::RowExclusive, client_id);
-                    txn.held_table_locks.push(rel);
-                }
+                self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let interrupts = self.interrupts();
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -704,7 +738,7 @@ impl Session {
                     &catalog,
                     &mut ctx,
                     xid,
-                    Some((&db.txns, &db.txn_waiter)),
+                    Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
                 )
             }
             Statement::CreateTable(ref create_stmt) => {
@@ -755,12 +789,7 @@ impl Session {
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
-                    let txn = self.active_txn.as_mut().unwrap();
-                    if !txn.held_table_locks.contains(&rel) {
-                        db.table_locks
-                            .lock_table(rel, TableLockMode::AccessExclusive, client_id);
-                        txn.held_table_locks.push(rel);
-                    }
+                    self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
                 }
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -783,12 +812,7 @@ impl Session {
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
-                    let txn = self.active_txn.as_mut().unwrap();
-                    if !txn.held_table_locks.contains(&rel) {
-                        db.table_locks
-                            .lock_table(rel, TableLockMode::AccessExclusive, client_id);
-                        txn.held_table_locks.push(rel);
-                    }
+                    self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
                 }
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -812,18 +836,14 @@ impl Session {
                         .collect::<Vec<_>>()
                 };
                 for rel in rels {
-                    let txn = self.active_txn.as_mut().unwrap();
-                    if !txn.held_table_locks.contains(&rel) {
-                        db.table_locks
-                            .lock_table(rel, TableLockMode::AccessExclusive, client_id);
-                        txn.held_table_locks.push(rel);
-                    }
+                    self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
                 }
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let mut ctx = ExecutorContext {
                     pool: Arc::clone(&db.pool),
                     txns: db.txns.clone(),
                     txn_waiter: Some(db.txn_waiter.clone()),
+                    interrupts: self.interrupts(),
                     snapshot,
                     client_id,
                     next_command_id: cid,
@@ -872,6 +892,9 @@ impl Session {
                     )));
                 };
                 self.datetime_config.time_zone = time_zone;
+            }
+            "statement_timeout" => {
+                parse_statement_timeout(&stmt.value)?;
             }
             _ => {}
         }
@@ -994,18 +1017,15 @@ impl Session {
         let client_id = self.client_id;
 
         let rel = prepared.rel;
-        let txn = self.active_txn.as_mut().unwrap();
-        if !txn.held_table_locks.contains(&rel) {
-            db.table_locks
-                .lock_table(rel, TableLockMode::RowExclusive, client_id);
-            txn.held_table_locks.push(rel);
-        }
+        self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
 
         let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let interrupts = self.interrupts();
         let mut ctx = ExecutorContext {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
+            interrupts,
             snapshot,
             client_id,
             next_command_id: cid,
@@ -1022,7 +1042,8 @@ impl Session {
         table_name: &str,
         rows: &[Vec<String>],
     ) -> Result<usize, ExecError> {
-        self.copy_from_rows_into(db, table_name, None, rows)
+        let _interrupt_guard = self.statement_interrupt_guard()?;
+        self.copy_from_rows_into_internal(db, table_name, None, rows)
     }
 
     pub fn copy_from_rows_into(
@@ -1032,6 +1053,18 @@ impl Session {
         target_columns: Option<&[String]>,
         rows: &[Vec<String>],
     ) -> Result<usize, ExecError> {
+        let _interrupt_guard = self.statement_interrupt_guard()?;
+        self.copy_from_rows_into_internal(db, table_name, target_columns, rows)
+    }
+
+    fn copy_from_rows_into_internal(
+        &mut self,
+        db: &Database,
+        table_name: &str,
+        target_columns: Option<&[String]>,
+        rows: &[Vec<String>],
+    ) -> Result<usize, ExecError> {
+        db.install_interrupt_state(self.client_id, self.interrupts());
         let started_txn = if self.active_txn.is_none() {
             let xid = db.txns.write().begin();
             self.active_txn = Some(ActiveTransaction {
@@ -1090,12 +1123,7 @@ impl Session {
             (0..desc.columns.len()).collect()
         };
 
-        let txn = self.active_txn.as_mut().unwrap();
-        if !txn.held_table_locks.contains(&rel) {
-            db.table_locks
-                .lock_table(rel, TableLockMode::RowExclusive, self.client_id);
-            txn.held_table_locks.push(rel);
-        }
+        self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
 
         let parsed_rows = rows
             .iter()
@@ -1198,10 +1226,12 @@ impl Session {
 
         let result = parsed_rows.and_then(|parsed_rows| {
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+            let interrupts = self.interrupts();
             let mut ctx = ExecutorContext {
                 pool: Arc::clone(&db.pool),
                 txns: db.txns.clone(),
                 txn_waiter: Some(db.txn_waiter.clone()),
+                interrupts,
                 snapshot,
                 client_id: self.client_id,
                 next_command_id: cid,
@@ -1286,10 +1316,64 @@ impl Session {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let count =
-            self.copy_from_rows_into(db, &stmt.table_name, stmt.columns.as_deref(), &rows)?;
+        let count = self.copy_from_rows_into_internal(
+            db,
+            &stmt.table_name,
+            stmt.columns.as_deref(),
+            &rows,
+        )?;
         Ok(StatementResult::AffectedRows(count))
     }
+}
+
+fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+
+    let split_at = trimmed
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    if number.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    let amount = number.parse::<f64>().map_err(|_| {
+        ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+    })?;
+    if !amount.is_finite() || amount < 0.0 {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    if amount == 0.0 {
+        return Ok(None);
+    }
+
+    let multiplier_ms = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => 1.0,
+        "s" | "sec" | "secs" | "second" | "seconds" => 1_000.0,
+        "min" | "mins" | "minute" | "minutes" => 60_000.0,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000.0,
+        "d" | "day" | "days" => 86_400_000.0,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+    };
+    let millis = amount * multiplier_ms;
+    if !millis.is_finite() || millis > u64::MAX as f64 {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    Ok(Some(Duration::from_millis(millis.ceil() as u64)))
 }
 
 fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, String)> {
@@ -1327,6 +1411,49 @@ fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, Strin
         None
     } else {
         Some((target.to_string(), None, file_path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_statement_timeout;
+    use crate::backend::executor::ExecError;
+    use crate::backend::parser::ParseError;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_statement_timeout_accepts_postgres_units() {
+        assert_eq!(parse_statement_timeout("0").unwrap(), None);
+        assert_eq!(
+            parse_statement_timeout("15").unwrap(),
+            Some(Duration::from_millis(15))
+        );
+        assert_eq!(
+            parse_statement_timeout("1.5s").unwrap(),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            parse_statement_timeout("2 min").unwrap(),
+            Some(Duration::from_millis(120_000))
+        );
+        assert_eq!(
+            parse_statement_timeout("1h").unwrap(),
+            Some(Duration::from_millis(3_600_000))
+        );
+        assert_eq!(
+            parse_statement_timeout("1d").unwrap(),
+            Some(Duration::from_millis(86_400_000))
+        );
+    }
+
+    #[test]
+    fn parse_statement_timeout_rejects_invalid_values() {
+        for value in ["", "-1", "abc", "10fortnights"] {
+            assert!(matches!(
+                parse_statement_timeout(value),
+                Err(ExecError::Parse(ParseError::UnrecognizedParameter(_)))
+            ));
+        }
     }
 }
 
