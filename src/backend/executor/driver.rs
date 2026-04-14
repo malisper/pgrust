@@ -115,6 +115,10 @@ fn execute_statement_with_source(
             expected: "COPY handled by session layer",
             actual: "COPY".into(),
         })),
+        Statement::AlterTableRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TABLE RENAME handled by database/session layer",
+            actual: "ALTER TABLE RENAME".into(),
+        })),
         Statement::AlterTableAddColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
             actual: "ALTER TABLE ADD COLUMN".into(),
@@ -175,6 +179,7 @@ pub fn execute_readonly_statement(
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

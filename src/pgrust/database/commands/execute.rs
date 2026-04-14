@@ -41,6 +41,12 @@ impl Database {
                     configured_search_path,
                     65_536,
                 ),
+            Statement::AlterTableRename(ref rename_stmt) => self
+                .execute_alter_table_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableAddColumn(ref alter_stmt) => self
                 .execute_alter_table_add_column_stmt_with_search_path(
                     client_id,
