@@ -143,19 +143,15 @@ pub(crate) fn finalize_expr_subqueries(
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
             ..*op
-        }))
-        .into_legacy_shape(),
-        Expr::Bool(bool_expr) => {
-            Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-                args: bool_expr
-                    .args
-                    .into_iter()
-                    .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
-                    .collect(),
-                ..*bool_expr
-            }))
-            .into_legacy_shape()
-        }
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            ..*bool_expr
+        })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -163,8 +159,7 @@ pub(crate) fn finalize_expr_subqueries(
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
             ..*func
-        }))
-        .into_legacy_shape(),
+        })),
         Expr::SubLink(sublink) => lower_sublink_to_subplan(*sublink, catalog, subplans),
         Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
             testexpr: subplan
@@ -178,7 +173,6 @@ pub(crate) fn finalize_expr_subqueries(
                 right: Box::new(finalize_expr_subqueries(*saop.right, catalog, subplans)),
                 ..*saop
             }))
-            .into_legacy_shape()
         }
         Expr::UnaryPlus(inner) => {
             Expr::UnaryPlus(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)))
@@ -262,7 +256,7 @@ pub(crate) fn finalize_expr_subqueries(
                 .collect(),
         },
         Expr::FuncCall { .. } => unreachable!("semantic finalization should not see legacy FuncCall"),
-        other => other.into_legacy_shape(),
+        other => other,
     }
 }
 
@@ -404,19 +398,15 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             ..*op
-        }))
-        .into_legacy_shape(),
-        Expr::Bool(bool_expr) => {
-            Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-                args: bool_expr
-                    .args
-                    .into_iter()
-                    .map(|arg| rebase_expr_subplan_ids(arg, base))
-                    .collect(),
-                ..*bool_expr
-            }))
-            .into_legacy_shape()
-        }
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            ..*bool_expr
+        })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -424,8 +414,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             ..*func
-        }))
-        .into_legacy_shape(),
+        })),
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr
@@ -446,7 +435,6 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 right: Box::new(rebase_expr_subplan_ids(*saop.right, base)),
                 ..*saop
             }))
-            .into_legacy_shape()
         }
         Expr::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::Negate(inner) => Expr::Negate(Box::new(rebase_expr_subplan_ids(*inner, base))),
@@ -519,7 +507,7 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .collect(),
         },
         Expr::FuncCall { .. } => unreachable!("planned expressions should not contain FuncCall"),
-        other => other.into_legacy_shape(),
+        other => other,
     }
 }
 

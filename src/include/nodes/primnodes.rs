@@ -725,6 +725,40 @@ impl Expr {
         }))
     }
 
+    pub fn op_auto(op: OpExprKind, args: Vec<Expr>) -> Self {
+        let opresulttype = match op {
+            OpExprKind::Eq
+            | OpExprKind::NotEq
+            | OpExprKind::Lt
+            | OpExprKind::LtEq
+            | OpExprKind::Gt
+            | OpExprKind::GtEq
+            | OpExprKind::RegexMatch
+            | OpExprKind::ArrayOverlap
+            | OpExprKind::JsonbContains
+            | OpExprKind::JsonbContained
+            | OpExprKind::JsonbExists
+            | OpExprKind::JsonbExistsAny
+            | OpExprKind::JsonbExistsAll
+            | OpExprKind::JsonbPathExists
+            | OpExprKind::JsonbPathMatch => SqlType::new(SqlTypeKind::Bool),
+            OpExprKind::Concat | OpExprKind::JsonGetText | OpExprKind::JsonPathText => {
+                SqlType::new(SqlTypeKind::Text)
+            }
+            _ => {
+                let left = args.first();
+                let right = args.get(1).or(left);
+                match (left, right) {
+                    (Some(left), Some(right)) => binary_result_type(left, right),
+                    (Some(inner), None) => expr_sql_type_hint(inner)
+                        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    _ => SqlType::new(SqlTypeKind::Text),
+                }
+            }
+        };
+        Self::op(op, opresulttype, args)
+    }
+
     pub fn unary_op(op: OpExprKind, opresulttype: SqlType, arg: Expr) -> Self {
         Self::op(op, opresulttype, vec![arg])
     }
