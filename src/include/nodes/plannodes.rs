@@ -1,6 +1,7 @@
 use crate::RelFileLocator;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::parsenodes::Query;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 pub use crate::include::nodes::pathnodes::{
@@ -10,8 +11,8 @@ pub use crate::include::nodes::pathnodes::{
 pub use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, ExprArraySubscript, JoinType,
     JsonTableFunction, OrderByEntry, ProjectSetTarget, QueryColumn, RegexTableFunction,
-    RelationDesc, ScalarType, SetReturningCall, TargetEntry, TextSearchTableFunction,
-    ToastRelationRef,
+    RelationDesc, ScalarType, SetReturningCall, SortGroupClause, TargetEntry,
+    TextSearchTableFunction, ToastRelationRef, Var,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -143,7 +144,7 @@ pub enum Plan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeferredSelectPlan {
-    Bound(Box<BoundSelectPlan>),
+    Bound(Box<Query>),
     Planned(Box<Plan>),
 }
 
@@ -206,7 +207,7 @@ pub enum BoundFromPlan {
         input: Box<BoundFromPlan>,
         targets: Vec<TargetEntry>,
     },
-    Subquery(Box<BoundSelectPlan>),
+    Subquery(Box<Query>),
 }
 
 impl Plan {

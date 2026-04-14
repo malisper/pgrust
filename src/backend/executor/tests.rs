@@ -724,20 +724,18 @@ fn seqscan_filter_projection_returns_expected_rows() {
             ),
         }),
         targets: vec![
-            TargetEntry {
-                name: "name".into(),
-                expr: Expr::Column(1),
-                sql_type: crate::backend::parser::SqlType::new(
-                    crate::backend::parser::SqlTypeKind::Text,
-                ),
-            },
-            TargetEntry {
-                name: "note_is_null".into(),
-                expr: Expr::IsNull(Box::new(Expr::Column(2))),
-                sql_type: crate::backend::parser::SqlType::new(
-                    crate::backend::parser::SqlTypeKind::Bool,
-                ),
-            },
+            TargetEntry::new(
+                "name",
+                Expr::Column(1),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text),
+                1,
+            ),
+            TargetEntry::new(
+                "note_is_null",
+                Expr::IsNull(Box::new(Expr::Column(2))),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Bool),
+                2,
+            ),
         ],
     };
     let rows = run_plan(&base, &txns, plan).unwrap();

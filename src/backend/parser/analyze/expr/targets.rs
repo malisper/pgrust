@@ -44,11 +44,12 @@ pub(crate) fn bind_select_targets(
         .iter()
         .enumerate()
         .map(|(index, column)| {
-            ProjectSetTarget::Scalar(TargetEntry {
-                name: column.output_name.clone(),
-                expr: Expr::Column(index),
-                sql_type: scope.desc.columns[index].sql_type,
-            })
+            ProjectSetTarget::Scalar(TargetEntry::new(
+                column.output_name.clone(),
+                Expr::Column(index),
+                scope.desc.columns[index].sql_type,
+                index + 1,
+            ))
         })
         .collect::<Vec<_>>();
 
@@ -75,18 +76,19 @@ pub(crate) fn bind_select_targets(
                 sql_type,
                 column_index: 0,
             });
-            final_targets.push(TargetEntry {
-                name: output_name,
-                expr: Expr::Column(base_width + srf_index),
+            final_targets.push(TargetEntry::new(
+                output_name,
+                Expr::Column(base_width + srf_index),
                 sql_type,
-            });
+                final_targets.len() + 1,
+            ));
             srf_index += 1;
             continue;
         }
 
-        final_targets.push(TargetEntry {
-            name: item.output_name.clone(),
-            expr: bind_expr_with_outer_and_ctes(
+        final_targets.push(TargetEntry::new(
+            item.output_name.clone(),
+            bind_expr_with_outer_and_ctes(
                 &item.expr,
                 scope,
                 catalog,
@@ -94,7 +96,7 @@ pub(crate) fn bind_select_targets(
                 grouped_outer,
                 ctes,
             )?,
-            sql_type: infer_sql_expr_type_with_ctes(
+            infer_sql_expr_type_with_ctes(
                 &item.expr,
                 scope,
                 catalog,
@@ -102,7 +104,8 @@ pub(crate) fn bind_select_targets(
                 grouped_outer,
                 ctes,
             ),
-        });
+            final_targets.len() + 1,
+        ));
     }
 
     Ok(BoundSelectTargets::WithProjectSet {
@@ -138,9 +141,9 @@ fn bind_plain_select_targets(
             }
         }
 
-        entries.push(TargetEntry {
-            name: item.output_name.clone(),
-            expr: bind_expr_with_outer_and_ctes(
+        entries.push(TargetEntry::new(
+            item.output_name.clone(),
+            bind_expr_with_outer_and_ctes(
                 &item.expr,
                 scope,
                 catalog,
@@ -148,7 +151,7 @@ fn bind_plain_select_targets(
                 grouped_outer,
                 ctes,
             )?,
-            sql_type: infer_sql_expr_type_with_ctes(
+            infer_sql_expr_type_with_ctes(
                 &item.expr,
                 scope,
                 catalog,
@@ -156,7 +159,8 @@ fn bind_plain_select_targets(
                 grouped_outer,
                 ctes,
             ),
-        });
+            entries.len() + 1,
+        ));
     }
     Ok(entries)
 }
@@ -654,10 +658,13 @@ fn expand_star_targets(
                     .any(|visible| visible.eq_ignore_ascii_case(relation_name))
             })
         })
-        .map(|(index, column)| TargetEntry {
-            name: column.output_name.clone(),
-            expr: Expr::Column(index),
-            sql_type: scope.desc.columns[index].sql_type,
+        .map(|(index, column)| {
+            TargetEntry::new(
+                column.output_name.clone(),
+                Expr::Column(index),
+                scope.desc.columns[index].sql_type,
+                index + 1,
+            )
         })
         .collect::<Vec<_>>();
 

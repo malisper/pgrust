@@ -80,11 +80,45 @@ pub struct TargetEntry {
     pub name: String,
     pub expr: Expr,
     pub sql_type: SqlType,
+    pub resno: usize,
+    pub ressortgroupref: usize,
+    pub resjunk: bool,
+}
+
+impl TargetEntry {
+    pub fn new(name: impl Into<String>, expr: Expr, sql_type: SqlType, resno: usize) -> Self {
+        Self {
+            name: name.into(),
+            expr,
+            sql_type,
+            resno,
+            ressortgroupref: 0,
+            resjunk: false,
+        }
+    }
+
+    pub fn with_sort_group_ref(mut self, ressortgroupref: usize) -> Self {
+        self.ressortgroupref = ressortgroupref;
+        self
+    }
+
+    pub fn as_resjunk(mut self) -> Self {
+        self.resjunk = true;
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderByEntry {
     pub expr: Expr,
+    pub descending: bool,
+    pub nulls_first: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortGroupClause {
+    pub expr: Expr,
+    pub tle_sort_group_ref: usize,
     pub descending: bool,
     pub nulls_first: Option<bool>,
 }
@@ -463,7 +497,16 @@ pub enum JoinType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Var {
+    pub varno: usize,
+    pub varattno: usize,
+    pub varlevelsup: usize,
+    pub vartype: SqlType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
+    Var(Var),
     Column(usize),
     OuterColumn {
         depth: usize,

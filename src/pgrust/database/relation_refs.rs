@@ -3,11 +3,13 @@ use std::collections::BTreeSet;
 use crate::RelFileLocator;
 use crate::backend::executor::{Expr, Plan};
 use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, DeferredSelectPlan};
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
-        Expr::Column(_)
+        Expr::Var(_)
+        | Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::Const(_)
         | Expr::Random
@@ -128,8 +130,69 @@ fn collect_rels_from_deferred_select_plan(
     rels: &mut BTreeSet<RelFileLocator>,
 ) {
     match plan {
-        DeferredSelectPlan::Bound(plan) => collect_rels_from_bound_select_plan(plan, rels),
+        DeferredSelectPlan::Bound(plan) => collect_rels_from_query(plan, rels),
         DeferredSelectPlan::Planned(plan) => collect_rels_from_plan(plan, rels),
+    }
+}
+
+fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
+    for rte in &query.rtable {
+        match &rte.kind {
+            RangeTblEntryKind::Result => {}
+            RangeTblEntryKind::Relation { rel, .. } => {
+                rels.insert(*rel);
+            }
+            RangeTblEntryKind::Values { rows, .. } => {
+                for row in rows {
+                    for expr in row {
+                        collect_rels_from_expr(expr, rels);
+                    }
+                }
+            }
+            RangeTblEntryKind::Function { call } => collect_rels_from_set_returning_call(call, rels),
+            RangeTblEntryKind::Subquery { query } => collect_rels_from_query(query, rels),
+        }
+    }
+    if let Some(expr) = &query.where_qual {
+        collect_rels_from_expr(expr, rels);
+    }
+    for expr in &query.group_by {
+        collect_rels_from_expr(expr, rels);
+    }
+    if let Some(expr) = &query.having_qual {
+        collect_rels_from_expr(expr, rels);
+    }
+    for item in &query.sort_clause {
+        collect_rels_from_expr(&item.expr, rels);
+    }
+    for target in &query.target_list {
+        collect_rels_from_expr(&target.expr, rels);
+    }
+    if let Some(targets) = &query.project_set {
+        for target in targets {
+            match target {
+                crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                    collect_rels_from_expr(&entry.expr, rels);
+                }
+                crate::include::nodes::plannodes::ProjectSetTarget::Set { call, .. } => {
+                    collect_rels_from_set_returning_call(call, rels);
+                }
+            }
+        }
+    }
+    if let Some(jointree) = &query.jointree {
+        collect_rels_from_jointree(jointree, rels);
+    }
+}
+
+fn collect_rels_from_jointree(jointree: &JoinTreeNode, rels: &mut BTreeSet<RelFileLocator>) {
+    match jointree {
+        JoinTreeNode::RangeTblRef(_) => {}
+        JoinTreeNode::JoinExpr { left, right, quals, .. } => {
+            collect_rels_from_jointree(left, rels);
+            collect_rels_from_jointree(right, rels);
+            collect_rels_from_expr(quals, rels);
+        }
     }
 }
 
@@ -219,7 +282,7 @@ fn collect_rels_from_bound_from_plan(plan: &BoundFromPlan, rels: &mut BTreeSet<R
                 collect_rels_from_expr(&target.expr, rels);
             }
         }
-        BoundFromPlan::Subquery(plan) => collect_rels_from_bound_select_plan(plan, rels),
+        BoundFromPlan::Subquery(plan) => collect_rels_from_query(plan, rels),
     }
 }
 

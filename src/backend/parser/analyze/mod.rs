@@ -9,6 +9,7 @@ mod geometry;
 mod infer;
 mod modify;
 mod paths;
+mod query;
 mod scope;
 mod system_views;
 mod views;
@@ -49,6 +50,7 @@ pub use modify::{
 };
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
+use query::{analyze_select_query_with_outer, analyze_values_query_with_outer};
 pub use scope::BoundRelation;
 use scope::*;
 use system_views::*;
@@ -451,12 +453,12 @@ fn relation_desc_from_bound_select_plan(plan: &BoundSelectPlan) -> RelationDesc 
 }
 
 fn apply_cte_column_names(
-    plan: BoundSelectPlan,
+    mut query: Query,
     desc: RelationDesc,
     column_names: &[String],
-) -> Result<(BoundSelectPlan, RelationDesc), ParseError> {
+) -> Result<(Query, RelationDesc), ParseError> {
     if column_names.is_empty() {
-        return Ok((plan, desc));
+        return Ok((query, desc));
     }
     if column_names.len() != desc.columns.len() {
         return Err(ParseError::UnexpectedToken {
@@ -481,20 +483,14 @@ fn apply_cte_column_names(
             })
             .collect(),
     };
-    let projection = BoundSelectPlan::Projection {
-        input: Box::new(plan),
-        targets: renamed_desc
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| TargetEntry {
-                name: column.name.clone(),
-                expr: Expr::Column(index),
-                sql_type: column.sql_type,
-            })
-            .collect(),
-    };
-    Ok((projection, renamed_desc))
+    for (index, column) in renamed_desc.columns.iter().enumerate() {
+        if let Some(target) = query.target_list.get_mut(index) {
+            target.name = column.name.clone();
+            target.sql_type = column.sql_type;
+            target.resno = index + 1;
+        }
+    }
+    Ok((query, renamed_desc))
 }
 
 fn bind_ctes(
@@ -511,7 +507,7 @@ fn bind_ctes(
         visible.extend_from_slice(outer_ctes);
         let (plan, desc) = match &cte.body {
             CteBody::Select(select) => {
-                let (plan, _) = bind_select_query_with_outer(
+                let (query, _) = analyze_select_query_with_outer(
                     select,
                     catalog,
                     outer_scopes,
@@ -519,11 +515,17 @@ fn bind_ctes(
                     &visible,
                     expanded_views,
                 )?;
-                let desc = relation_desc_from_bound_select_plan(&plan);
-                apply_cte_column_names(plan, desc, &cte.column_names)?
+                let desc = RelationDesc {
+                    columns: query
+                        .columns()
+                        .into_iter()
+                        .map(|col| column_desc(col.name, col.sql_type, true))
+                        .collect(),
+                };
+                apply_cte_column_names(query, desc, &cte.column_names)?
             }
             CteBody::Values(values) => {
-                let (plan, _) = bind_values_query_with_outer(
+                let (query, _) = analyze_values_query_with_outer(
                     values,
                     catalog,
                     outer_scopes,
@@ -531,8 +533,14 @@ fn bind_ctes(
                     &visible,
                     expanded_views,
                 )?;
-                let desc = relation_desc_from_bound_select_plan(&plan);
-                apply_cte_column_names(plan, desc, &cte.column_names)?
+                let desc = RelationDesc {
+                    columns: query
+                        .columns()
+                        .into_iter()
+                        .map(|col| column_desc(col.name, col.sql_type, true))
+                        .collect(),
+                };
+                apply_cte_column_names(query, desc, &cte.column_names)?
             }
         };
         bound.push(BoundCte {
@@ -637,10 +645,8 @@ fn bind_values_query_with_outer(
     let targets = output_columns
         .iter()
         .enumerate()
-        .map(|(index, column)| TargetEntry {
-            name: column.name.clone(),
-            expr: Expr::Column(index),
-            sql_type: column.sql_type,
+        .map(|(index, column)| {
+            TargetEntry::new(column.name.clone(), Expr::Column(index), column.sql_type, index + 1)
         })
         .collect::<Vec<_>>();
 
@@ -679,7 +685,7 @@ fn build_values_plan_with_outer(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<PlannedStmt, ParseError> {
-    let (plan, _) = bind_values_query_with_outer(
+    let (query, _) = analyze_values_query_with_outer(
         stmt,
         catalog,
         outer_scopes,
@@ -687,7 +693,7 @@ fn build_values_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    Ok(planner(plan, catalog))
+    Ok(planner(query, catalog))
 }
 
 fn bind_select_query_with_outer(
@@ -916,19 +922,18 @@ fn bind_select_query_with_outer(
             output_columns
                 .iter()
                 .enumerate()
-                .map(|(i, name)| TargetEntry {
-                    name: name.name.clone(),
-                    expr: Expr::Column(i),
-                    sql_type: name.sql_type,
+                .map(|(i, name)| {
+                    TargetEntry::new(name.name.clone(), Expr::Column(i), name.sql_type, i + 1)
                 })
                 .collect()
         } else {
             stmt.targets
                 .iter()
-                .map(|item| {
-                    Ok(TargetEntry {
-                        name: item.output_name.clone(),
-                        expr: bind_agg_output_expr_in_clause(
+                .enumerate()
+                .map(|(index, item)| {
+                    Ok(TargetEntry::new(
+                        item.output_name.clone(),
+                        bind_agg_output_expr_in_clause(
                             &item.expr,
                             UngroupedColumnClause::SelectTarget,
                             &stmt.group_by,
@@ -939,7 +944,7 @@ fn bind_select_query_with_outer(
                             &aggs,
                             n_keys,
                         )?,
-                        sql_type: infer_sql_expr_type_with_ctes(
+                        infer_sql_expr_type_with_ctes(
                             &item.expr,
                             &scope,
                             catalog,
@@ -947,7 +952,8 @@ fn bind_select_query_with_outer(
                             grouped_outer.as_ref(),
                             &visible_ctes,
                         ),
-                    })
+                        index + 1,
+                    ))
                 })
                 .collect::<Result<_, _>>()?
         };
@@ -1088,7 +1094,7 @@ fn build_plan_with_outer(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<PlannedStmt, ParseError> {
-    let (plan, _) = bind_select_query_with_outer(
+    let (query, _) = analyze_select_query_with_outer(
         stmt,
         catalog,
         outer_scopes,
@@ -1096,5 +1102,5 @@ fn build_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    Ok(planner(plan, catalog))
+    Ok(planner(query, catalog))
 }

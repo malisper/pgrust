@@ -15,8 +15,9 @@ fn bind_deferred_subquery(
     ctes: &[BoundCte],
 ) -> Result<DeferredSelectPlan, ParseError> {
     let child_outer = child_outer_scopes(scope, outer_scopes);
-    let (plan, _) = bind_select_query_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
-    Ok(DeferredSelectPlan::Bound(Box::new(plan)))
+    let (query, _) =
+        analyze_select_query_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
+    Ok(DeferredSelectPlan::Bound(Box::new(query)))
 }
 
 pub(super) fn bind_scalar_subquery_expr(

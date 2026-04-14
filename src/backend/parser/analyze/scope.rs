@@ -25,7 +25,7 @@ pub(crate) struct GroupedOuterScope {
 #[derive(Debug, Clone)]
 pub(crate) struct BoundCte {
     pub(crate) name: String,
-    pub(crate) plan: BoundSelectPlan,
+    pub(crate) plan: Query,
     pub(crate) desc: RelationDesc,
 }
 
@@ -606,46 +606,50 @@ pub(super) fn bind_from_item_with_ctes(
                         BoundFromPlan::Projection {
                             input: Box::new(BoundFromPlan::Result),
                             targets: vec![
-                                TargetEntry {
-                                    name: "message".into(),
-                                    expr: Expr::FuncCall {
+                                TargetEntry::new(
+                                    "message",
+                                    Expr::FuncCall {
                                         func_oid: 0,
                                         func: BuiltinScalarFunction::PgInputErrorMessage,
                                         args: vec![left.clone(), right.clone()],
                                         func_variadic: false,
                                     },
-                                    sql_type: text_type,
-                                },
-                                TargetEntry {
-                                    name: "detail".into(),
-                                    expr: Expr::FuncCall {
+                                    text_type,
+                                    1,
+                                ),
+                                TargetEntry::new(
+                                    "detail",
+                                    Expr::FuncCall {
                                         func_oid: 0,
                                         func: BuiltinScalarFunction::PgInputErrorDetail,
                                         args: vec![left.clone(), right.clone()],
                                         func_variadic: false,
                                     },
-                                    sql_type: text_type,
-                                },
-                                TargetEntry {
-                                    name: "hint".into(),
-                                    expr: Expr::FuncCall {
+                                    text_type,
+                                    2,
+                                ),
+                                TargetEntry::new(
+                                    "hint",
+                                    Expr::FuncCall {
                                         func_oid: 0,
                                         func: BuiltinScalarFunction::PgInputErrorHint,
                                         args: vec![left.clone(), right.clone()],
                                         func_variadic: false,
                                     },
-                                    sql_type: text_type,
-                                },
-                                TargetEntry {
-                                    name: "sql_error_code".into(),
-                                    expr: Expr::FuncCall {
+                                    text_type,
+                                    3,
+                                ),
+                                TargetEntry::new(
+                                    "sql_error_code",
+                                    Expr::FuncCall {
                                         func_oid: 0,
                                         func: BuiltinScalarFunction::PgInputErrorSqlState,
                                         args: vec![left, right],
                                         func_variadic: false,
                                     },
-                                    sql_type: text_type,
-                                },
+                                    text_type,
+                                    4,
+                                ),
                             ],
                         },
                         scope,
@@ -783,7 +787,7 @@ pub(super) fn bind_from_item_with_ctes(
         }
         FromItem::DerivedTable(select) => {
             let (plan, _) =
-                bind_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
+                analyze_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
             let bound = BoundFromPlan::Subquery(Box::new(plan));
             let desc = synthetic_desc_from_bound_from_plan(&bound);
             Ok((bound, scope_for_relation(None, &desc)))
@@ -1014,11 +1018,12 @@ fn bind_join_using_projection(
         let left_ty = left_scope.desc.columns[*left_index].sql_type;
         let left_expr = Expr::Column(*left_index);
         let right_expr = Expr::Column(left_scope.columns.len() + *right_index);
-        targets.push(TargetEntry {
-            name: name.clone(),
-            expr: Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
-            sql_type: left_ty,
-        });
+        targets.push(TargetEntry::new(
+            name.clone(),
+            Expr::Coalesce(Box::new(left_expr), Box::new(right_expr)),
+            left_ty,
+            targets.len() + 1,
+        ));
         desc_columns.push(column_desc(name.clone(), left_ty, true));
         scope_columns.push(ScopeColumn {
             output_name: name.clone(),
@@ -1032,11 +1037,12 @@ fn bind_join_using_projection(
         if used_left[index] {
             continue;
         }
-        targets.push(TargetEntry {
-            name: column.output_name.clone(),
-            expr: Expr::Column(index),
-            sql_type: left_scope.desc.columns[index].sql_type,
-        });
+        targets.push(TargetEntry::new(
+            column.output_name.clone(),
+            Expr::Column(index),
+            left_scope.desc.columns[index].sql_type,
+            targets.len() + 1,
+        ));
         desc_columns.push(left_scope.desc.columns[index].clone());
         scope_columns.push(column.clone());
     }
@@ -1046,11 +1052,12 @@ fn bind_join_using_projection(
             continue;
         }
         let raw_index = left_scope.columns.len() + index;
-        targets.push(TargetEntry {
-            name: column.output_name.clone(),
-            expr: Expr::Column(raw_index),
-            sql_type: right_scope.desc.columns[index].sql_type,
-        });
+        targets.push(TargetEntry::new(
+            column.output_name.clone(),
+            Expr::Column(raw_index),
+            right_scope.desc.columns[index].sql_type,
+            targets.len() + 1,
+        ));
         desc_columns.push(right_scope.desc.columns[index].clone());
         scope_columns.push(column.clone());
     }
@@ -1165,10 +1172,13 @@ fn apply_relation_alias(
             targets: columns
                 .iter()
                 .enumerate()
-                .map(|(index, column)| TargetEntry {
-                    name: column.output_name.clone(),
-                    expr: Expr::Column(index),
-                    sql_type: desc.columns[index].sql_type,
+                .map(|(index, column)| {
+                    TargetEntry::new(
+                        column.output_name.clone(),
+                        Expr::Column(index),
+                        desc.columns[index].sql_type,
+                        index + 1,
+                    )
                 })
                 .collect(),
         };

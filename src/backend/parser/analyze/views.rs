@@ -27,7 +27,7 @@ fn return_rule_sql(
 }
 
 fn validate_view_shape(
-    plan: &BoundSelectPlan,
+    plan: &Query,
     relation: &BoundRelation,
     display_name: &str,
 ) -> Result<(), ParseError> {
@@ -76,7 +76,7 @@ pub(super) fn bind_view_reference(
     };
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation.relation_oid);
-    let (plan, _) = bind_select_query_with_outer(
+    let (plan, _) = analyze_select_query_with_outer(
         &select,
         catalog,
         outer_scopes,
