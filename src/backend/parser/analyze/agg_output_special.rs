@@ -8,6 +8,7 @@ pub(super) fn bind_grouped_concat_expr(
     left: &SqlExpr,
     right: &SqlExpr,
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -18,6 +19,7 @@ pub(super) fn bind_grouped_concat_expr(
     let left_expr = bind_agg_output_expr(
         left,
         group_by_exprs,
+        group_key_exprs,
         input_scope,
         catalog,
         outer_scopes,
@@ -28,6 +30,7 @@ pub(super) fn bind_grouped_concat_expr(
     let right_expr = bind_agg_output_expr(
         right,
         group_by_exprs,
+        group_key_exprs,
         input_scope,
         catalog,
         outer_scopes,
@@ -82,6 +85,7 @@ pub(super) fn bind_grouped_in_subquery(
     subquery: &SelectStatement,
     negated: bool,
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -97,6 +101,7 @@ pub(super) fn bind_grouped_in_subquery(
         testexpr: Some(Box::new(bind_agg_output_expr(
             expr,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -122,6 +127,7 @@ pub(super) fn bind_grouped_quantified_subquery(
     is_all: bool,
     subquery: &SelectStatement,
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -135,6 +141,7 @@ pub(super) fn bind_grouped_quantified_subquery(
     let left = Box::new(bind_agg_output_expr(
         left,
         group_by_exprs,
+        group_key_exprs,
         input_scope,
         catalog,
         outer_scopes,
@@ -159,6 +166,7 @@ pub(super) fn bind_grouped_quantified_array(
     is_all: bool,
     array: &SqlExpr,
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -187,6 +195,7 @@ pub(super) fn bind_grouped_quantified_array(
         bind_agg_output_expr(
             left,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -201,6 +210,7 @@ pub(super) fn bind_grouped_quantified_array(
         bind_agg_output_expr(
             array,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -218,6 +228,7 @@ pub(super) fn bind_grouped_func_call(
     name: &str,
     args: &[SqlFunctionArg],
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -229,6 +240,7 @@ pub(super) fn bind_grouped_func_call(
         return bind_grouped_coalesce_call(
             args,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -249,6 +261,7 @@ pub(super) fn bind_grouped_func_call(
             bind_agg_output_expr(
                 arg,
                 group_by_exprs,
+                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
@@ -330,6 +343,7 @@ pub(super) fn bind_grouped_func_call(
 fn bind_grouped_coalesce_call(
     args: &[SqlFunctionArg],
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -365,6 +379,7 @@ fn bind_grouped_coalesce_call(
         let bound = bind_agg_output_expr(
             arg,
             group_by_exprs,
+            group_key_exprs,
             input_scope,
             catalog,
             outer_scopes,
@@ -385,6 +400,7 @@ fn bind_grouped_coalesce_call(
 pub(super) fn bind_grouped_array_literal(
     elements: &[SqlExpr],
     group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -399,6 +415,7 @@ pub(super) fn bind_grouped_array_literal(
                 bind_agg_output_expr(
                     element,
                     group_by_exprs,
+                    group_key_exprs,
                     input_scope,
                     catalog,
                     outer_scopes,
