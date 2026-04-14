@@ -10,9 +10,10 @@ use crate::backend::storage::fsm::{finalize_pending_index_pages, record_free_ind
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 use crate::include::access::amapi::{IndexBulkDeleteResult, IndexVacuumContext};
 use crate::include::access::nbtree::{
-    BTP_DELETED, BTP_HALF_DEAD, P_NONE, bt_page_data_items, bt_page_get_opaque, bt_page_init,
-    bt_page_is_recyclable, bt_page_items, bt_page_replace_items, bt_page_set_deleted,
-    bt_page_set_opaque,
+    BTP_DELETED, BTP_HALF_DEAD, BTREE_METAPAGE, bt_page_data_items, bt_page_get_meta,
+    bt_page_get_opaque, bt_page_high_key, bt_page_init, bt_page_is_recyclable, bt_page_items,
+    bt_page_replace_items, bt_page_set_deleted, bt_page_set_high_key, bt_page_set_meta,
+    bt_page_set_opaque, P_NONE,
 };
 use crate::{BufferPool, ClientId, PinnedBuffer, SmgrStorageBackend};
 
@@ -32,6 +33,49 @@ fn relation_nblocks(
 ) -> Result<u32, CatalogError> {
     pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::Main))
         .map_err(|err| CatalogError::Io(err.to_string()))
+}
+
+fn write_cleanup_info(
+    ctx: &IndexVacuumContext,
+    deleted_pages: u32,
+) -> Result<(), CatalogError> {
+    let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, BTREE_METAPAGE)?;
+    let mut guard = ctx
+        .pool
+        .lock_buffer_exclusive(pin.buffer_id())
+        .map_err(|err| CatalogError::Io(format!("btree meta lock failed: {err:?}")))?;
+    let mut page = *guard;
+    let mut meta = bt_page_get_meta(&page)
+        .map_err(|err| CatalogError::Io(format!("btree metapage read failed: {err:?}")))?;
+    meta.btm_last_cleanup_num_delpages = deleted_pages;
+    meta.btm_last_cleanup_num_heap_tuples = -1.0;
+    bt_page_set_meta(&mut page, meta)
+        .map_err(|err| CatalogError::Io(format!("btree metapage write failed: {err:?}")))?;
+    let lsn = if let Some(wal) = ctx.pool.wal_writer() {
+        log_btree_record(
+            &wal,
+            INVALID_TRANSACTION_ID,
+            XLOG_BTREE_VACUUM,
+            &[LoggedBtreeBlock {
+                block_id: 0,
+                tag: crate::backend::storage::buffer::BufferTag {
+                    rel: ctx.index_relation,
+                    fork: ForkNumber::Main,
+                    block: BTREE_METAPAGE,
+                },
+                page: &page,
+                will_init: false,
+                data: &[],
+            }],
+            &[],
+        )
+        .map_err(|err| CatalogError::Io(format!("btree WAL log failed: {err}")))?
+    } else {
+        INVALID_LSN
+    };
+    ctx.pool
+        .install_page_image_locked(pin.buffer_id(), &page, lsn, &mut guard)
+        .map_err(|err| CatalogError::Io(format!("btree metapage write failed: {err:?}")))
 }
 
 fn index_tuple_dead(
@@ -321,8 +365,10 @@ pub fn btbulkdelete(
         if opaque.is_meta() || !opaque.is_leaf() || opaque.btpo_flags & BTP_DELETED != 0 {
             continue;
         }
-        let items = bt_page_items(&page)
+        let items = bt_page_data_items(&page)
             .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
+        let high_key = bt_page_high_key(&page)
+            .map_err(|err| CatalogError::Io(format!("btree high-key read failed: {err:?}")))?;
         stats.num_pages += 1;
         stats.num_index_tuples += items.len() as u64;
 
@@ -350,8 +396,13 @@ pub fn btbulkdelete(
             continue;
         }
 
-        bt_page_replace_items(&mut page, &live, opaque)
-            .map_err(|err| CatalogError::Io(format!("btree vacuum rebuild failed: {err:?}")))?;
+        if let Some(high_key) = high_key.as_ref() {
+            bt_page_set_high_key(&mut page, high_key, live, opaque)
+                .map_err(|err| CatalogError::Io(format!("btree vacuum rebuild failed: {err:?}")))?;
+        } else {
+            bt_page_replace_items(&mut page, &live, opaque)
+                .map_err(|err| CatalogError::Io(format!("btree vacuum rebuild failed: {err:?}")))?;
+        }
         let lsn = if let Some(wal) = ctx.pool.wal_writer() {
             log_btree_record(
                 &wal,
@@ -404,5 +455,6 @@ pub fn btvacuumcleanup(
     finalize_pending_index_pages(&ctx.pool, ctx.index_relation, &recyclable)
         .map_err(CatalogError::Io)?;
     stats.num_deleted_pages += recyclable.len() as u64;
+    write_cleanup_info(ctx, recyclable.len() as u32)?;
     Ok(stats)
 }
