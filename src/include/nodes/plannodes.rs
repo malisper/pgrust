@@ -1,5 +1,6 @@
 use crate::RelFileLocator;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::include::executor::execdesc::CommandType;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 pub use crate::include::nodes::pathnodes::{
@@ -51,6 +52,7 @@ impl PlanEstimate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedStmt {
+    pub command_type: CommandType,
     pub plan_tree: Plan,
 }
 

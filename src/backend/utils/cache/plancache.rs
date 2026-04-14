@@ -4,6 +4,7 @@ use parking_lot::RwLock;
 
 use crate::backend::executor::ExecError;
 use crate::backend::parser::{CatalogLookup, Statement, parse_statement, pg_plan_query};
+use crate::include::executor::execdesc::{QueryDesc, create_query_desc};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 
 /// Query plan cache — caches parsed statements and can optionally retain
@@ -17,6 +18,7 @@ pub struct PlanCache {
 struct CachedEntry {
     statement: Statement,
     plan: Option<PlannedStmt>,
+    query_desc: Option<QueryDesc>,
 }
 
 impl PlanCache {
@@ -38,8 +40,36 @@ impl PlanCache {
         cache.entry(sql.to_string()).or_insert(CachedEntry {
             statement: stmt.clone(),
             plan: None,
+            query_desc: None,
         });
         Ok(stmt)
+    }
+
+    pub fn get_query_desc(
+        &self,
+        sql: &str,
+        catalog: &dyn CatalogLookup,
+    ) -> Result<QueryDesc, ExecError> {
+        {
+            let cache = self.cache.read();
+            if let Some(entry) = cache.get(sql) {
+                if let Some(ref query_desc) = entry.query_desc {
+                    return Ok(query_desc.clone());
+                }
+            }
+        }
+        let planned_stmt = self.get_planned_stmt(sql, catalog)?;
+        let query_desc = create_query_desc(planned_stmt, Some(sql.to_string()));
+        let mut cache = self.cache.write();
+        let entry = cache.entry(sql.to_string()).or_insert(CachedEntry {
+            statement: parse_statement(sql)?,
+            plan: None,
+            query_desc: None,
+        });
+        if entry.query_desc.is_none() {
+            entry.query_desc = Some(query_desc.clone());
+        }
+        Ok(query_desc)
     }
 
     pub fn get_planned_stmt(
@@ -71,6 +101,7 @@ impl PlanCache {
         let entry = cache.entry(sql.to_string()).or_insert(CachedEntry {
             statement: stmt,
             plan: None,
+            query_desc: None,
         });
         if plan.is_some() && entry.plan.is_none() {
             entry.plan = plan.clone();
@@ -79,7 +110,7 @@ impl PlanCache {
     }
 
     pub fn get_plan(&self, sql: &str, catalog: &dyn CatalogLookup) -> Result<Plan, ExecError> {
-        Ok(self.get_planned_stmt(sql, catalog)?.plan_tree)
+        Ok(self.get_query_desc(sql, catalog)?.planned_stmt.plan_tree)
     }
 
     pub fn invalidate_all(&self) {

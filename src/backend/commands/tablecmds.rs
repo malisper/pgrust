@@ -33,7 +33,7 @@ use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
     DeferredSelectPlan, ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
-    executor_start,
+    create_query_desc, executor_start,
 };
 use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
 use crate::include::access::detoast::is_ondisk_toast_pointer;
@@ -128,13 +128,13 @@ pub(crate) fn execute_explain(
     };
 
     let plan_start = std::time::Instant::now();
-    let planned_stmt = crate::backend::parser::pg_plan_query(&select, catalog)?;
-    let plan = planned_stmt.plan_tree;
+    let query_desc =
+        create_query_desc(crate::backend::parser::pg_plan_query(&select, catalog)?, None);
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
         ctx.timed = stmt.timing;
-        let mut state = executor_start(plan);
+        let mut state = executor_start(query_desc.planned_stmt.plan_tree.clone());
         let plan_elapsed = plan_start.elapsed();
         let mut row_count: u64 = 0;
         let started_at = std::time::Instant::now();
@@ -158,7 +158,7 @@ pub(crate) fn execute_explain(
         }
         lines.push(format!("Result Rows: {}", row_count));
     } else {
-        let state = executor_start(plan);
+        let state = executor_start(query_desc.planned_stmt.plan_tree);
         format_explain_lines(state.as_ref(), 0, false, &mut lines);
     }
 
