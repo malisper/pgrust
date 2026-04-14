@@ -7,3 +7,4 @@ mod index;
 mod maintenance;
 mod rename;
 mod role;
+mod session_auth;

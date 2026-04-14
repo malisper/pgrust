@@ -84,11 +84,17 @@ impl Database {
             }
             Statement::DropRole(ref drop_stmt) => self.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::CommentOnRole(_)
-            | Statement::SetSessionAuthorization(_)
-            | Statement::ResetSessionAuthorization(_)
             | Statement::ReassignOwned(_) => Err(ExecError::Parse(
                 ParseError::FeatureNotSupported("role management".into()),
             )),
+            Statement::SetSessionAuthorization(ref set_stmt) => {
+                self.execute_set_session_authorization_stmt(client_id, set_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::ResetSessionAuthorization(ref reset_stmt) => {
+                self.execute_reset_session_authorization_stmt(client_id, reset_stmt)?;
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Unsupported(ref unsupported_stmt) => {
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                     "{}: {}",
