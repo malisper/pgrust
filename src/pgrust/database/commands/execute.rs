@@ -86,6 +86,12 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnDomain(ref comment_stmt) => self
+                .execute_comment_on_domain_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let visible_catalog =
                     self.lazy_catalog_lookup(client_id, None, configured_search_path);
@@ -256,6 +262,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateDomain(ref create_stmt) => self
+                .execute_create_domain_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateView(ref create_stmt) => self
                 .execute_create_view_stmt_with_search_path(
                     client_id,
@@ -289,6 +301,12 @@ impl Database {
                 guard.disarm();
                 result
             }
+            Statement::DropDomain(ref drop_stmt) => self
+                .execute_drop_domain_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::DropView(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);

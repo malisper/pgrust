@@ -1,7 +1,8 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
-use crate::include::catalog::{PgRewriteRow, sort_pg_rewrite_rows};
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgRewriteRow, PgTypeRow, PUBLIC_NAMESPACE_OID, sort_pg_rewrite_rows};
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
@@ -19,6 +20,23 @@ fn desc() -> RelationDesc {
 
 fn builtin_type(ty: SqlType) -> RawTypeName {
     RawTypeName::Builtin(ty)
+}
+
+#[derive(Default)]
+struct TypeOnlyCatalog {
+    types: Vec<PgTypeRow>,
+}
+
+impl CatalogLookup for TypeOnlyCatalog {
+    fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+        None
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        let mut rows = crate::include::catalog::builtin_type_rows();
+        rows.extend(self.types.clone());
+        rows
+    }
 }
 
 fn assert_alias_names(spec: &AliasColumnSpec, expected: &[&str]) {
@@ -2165,7 +2183,7 @@ fn lower_create_table_rejects_invalid_key_constraints() {
         panic!("expected create table");
     };
     assert!(matches!(
-        lower_create_table(&ct),
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
         Err(ParseError::UnexpectedToken { expected, .. }) if expected == "at most one PRIMARY KEY"
     ));
 
@@ -2174,7 +2192,7 @@ fn lower_create_table_rejects_invalid_key_constraints() {
         panic!("expected create table");
     };
     assert!(matches!(
-        lower_create_table(&ct),
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
         Err(ParseError::UnexpectedToken { expected, actual })
             if expected == "unique column names in table constraint"
                 && actual == "duplicate column in constraint: id"
@@ -2186,7 +2204,7 @@ fn lower_create_table_rejects_invalid_key_constraints() {
         panic!("expected create table");
     };
     assert!(matches!(
-        lower_create_table(&ct),
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
         Err(ParseError::UnknownColumn(name)) if name == "missing"
     ));
 
@@ -2195,7 +2213,7 @@ fn lower_create_table_rejects_invalid_key_constraints() {
         panic!("expected create table");
     };
     assert!(matches!(
-        lower_create_table(&ct),
+        lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog),
         Err(ParseError::UnexpectedToken { expected, actual })
             if expected == "distinct PRIMARY KEY/UNIQUE definitions"
                 && actual == "duplicate key definition on (id)"
@@ -2205,6 +2223,56 @@ fn lower_create_table_rejects_invalid_key_constraints() {
         parse_statement("create table items (id int4, constraint named_pk primary key (id))")
             .is_err()
     );
+}
+
+#[test]
+fn parse_create_drop_and_comment_on_domain_statements() {
+    let Statement::CreateDomain(create) = parse_statement("create domain dom_int as int4").unwrap()
+    else {
+        panic!("expected create domain");
+    };
+    assert_eq!(create.domain_name, "dom_int");
+    assert_eq!(create.ty, RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)));
+
+    let Statement::DropDomain(drop_stmt) =
+        parse_statement("drop domain if exists dom_int cascade").unwrap()
+    else {
+        panic!("expected drop domain");
+    };
+    assert!(drop_stmt.if_exists);
+    assert!(drop_stmt.cascade);
+    assert_eq!(drop_stmt.domain_name, "dom_int");
+
+    let Statement::CommentOnDomain(comment) =
+        parse_statement("comment on domain dom_int is 'hello'").unwrap()
+    else {
+        panic!("expected comment on domain");
+    };
+    assert_eq!(comment.domain_name, "dom_int");
+    assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn lower_create_table_resolves_named_domain_types() {
+    let stmt = parse_statement("create table items (id dom_int)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let catalog = TypeOnlyCatalog {
+        types: vec![PgTypeRow {
+            oid: 50_000,
+            typname: "dom_int".into(),
+            typnamespace: PUBLIC_NAMESPACE_OID,
+            typowner: BOOTSTRAP_SUPERUSER_OID,
+            typlen: 4,
+            typalign: AttributeAlign::Int,
+            typstorage: AttributeStorage::Plain,
+            typrelid: 0,
+            sql_type: SqlType::new(SqlTypeKind::Int4),
+        }],
+    };
+    let lowered = lower_create_table(&ct, &catalog).unwrap();
+    assert_eq!(lowered.relation_desc.columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
 }
 
 #[test]
