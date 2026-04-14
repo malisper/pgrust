@@ -132,6 +132,14 @@ pub fn unix_days_from_postgres_date(pg_days: i32) -> i64 {
     pg_days as i64 + UNIX_EPOCH_TO_POSTGRES_EPOCH_DAYS
 }
 
+pub fn julian_day_from_postgres_date(pg_days: i32) -> i32 {
+    pg_days + POSTGRES_EPOCH_JDATE
+}
+
+pub fn postgres_date_from_julian_day(julian_day: i32) -> i32 {
+    julian_day - POSTGRES_EPOCH_JDATE
+}
+
 pub fn days_from_ymd(year: i32, month: u32, day: u32) -> Option<i32> {
     if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
         return None;
@@ -177,6 +185,55 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 
 pub fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+pub fn day_of_year(year: i32, month: u32, day: u32) -> u32 {
+    let mut total = 0;
+    for current_month in 1..month {
+        total += days_in_month(year, current_month);
+    }
+    total + day
+}
+
+pub fn day_of_week_from_julian_day(julian_day: i32) -> u32 {
+    julian_day.saturating_add(1).rem_euclid(7) as u32
+}
+
+pub fn iso_day_of_week_from_julian_day(julian_day: i32) -> u32 {
+    match day_of_week_from_julian_day(julian_day) {
+        0 => 7,
+        other => other,
+    }
+}
+
+pub fn iso_weeks_in_year(year: i32) -> u32 {
+    let jan1 = days_from_ymd(year, 1, 1).expect("january 1 must be valid");
+    let jan1_isodow = iso_day_of_week_from_julian_day(julian_day_from_postgres_date(jan1));
+    if jan1_isodow == 4 || (jan1_isodow == 3 && is_leap_year(year)) {
+        53
+    } else {
+        52
+    }
+}
+
+pub fn iso_week_and_year(year: i32, month: u32, day: u32) -> (i32, u32) {
+    let pg_days = days_from_ymd(year, month, day).expect("validated date components required");
+    let julian_day = julian_day_from_postgres_date(pg_days);
+    let ordinal = day_of_year(year, month, day) as i32;
+    let iso_dow = iso_day_of_week_from_julian_day(julian_day) as i32;
+    let mut week = (ordinal - iso_dow + 10).div_euclid(7);
+    let mut iso_year = year;
+    if week < 1 {
+        iso_year -= 1;
+        week = iso_weeks_in_year(iso_year) as i32;
+    } else {
+        let max_week = iso_weeks_in_year(year) as i32;
+        if week > max_week {
+            iso_year += 1;
+            week = 1;
+        }
+    }
+    (iso_year, week as u32)
 }
 
 pub fn parse_date_parts(text: &str) -> Option<(i32, u32, u32)> {

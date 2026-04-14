@@ -318,6 +318,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     SqlType::new(SqlTypeKind::TimestampTz)
                 }
                 Some(BuiltinScalarFunction::TimeOfDay) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)

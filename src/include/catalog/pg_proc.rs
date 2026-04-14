@@ -1446,6 +1446,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
+        ("date_part", BuiltinScalarFunction::DatePart),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
