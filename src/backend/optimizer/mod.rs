@@ -266,14 +266,16 @@ fn collect_join_node_infos(node: &JoinTreeNode, infos: &mut Vec<JoinNodeInfo>) -
             let left_relids = collect_join_node_infos(left, infos);
             let right_relids = collect_join_node_infos(right, infos);
             let relids = relids_union(&left_relids, &right_relids);
-            infos.push(JoinNodeInfo {
-                rtindex: *rtindex,
-                kind: *kind,
-                left_relids: left_relids.clone(),
-                right_relids: right_relids.clone(),
-                relids: relids.clone(),
-                quals: quals.clone(),
-            });
+            if matches!(kind, JoinType::Inner | JoinType::Cross) {
+                infos.push(JoinNodeInfo {
+                    rtindex: *rtindex,
+                    kind: *kind,
+                    left_relids: left_relids.clone(),
+                    right_relids: right_relids.clone(),
+                    relids: relids.clone(),
+                    quals: quals.clone(),
+                });
+            }
             relids
         }
     }
@@ -1112,6 +1114,15 @@ fn join_reltarget(
     left_rel: &RelOptInfo,
     right_rel: &RelOptInfo,
 ) -> PathTarget {
+    if let Some(sjinfo) = root.join_info_list.iter().find(|sjinfo| {
+        relids_union(&sjinfo.syn_lefthand, &sjinfo.syn_righthand) == relids
+    }) {
+        if let Some(rte) = root.parse.rtable.get(sjinfo.rtindex.saturating_sub(1)) {
+            if matches!(rte.kind, RangeTblEntryKind::Join { .. }) {
+                return PathTarget::from_rte(sjinfo.rtindex, rte);
+            }
+        }
+    }
     if let Some(info) = join_infos.iter().find(|info| info.relids == relids) {
         if let Some(rte) = root.parse.rtable.get(info.rtindex.saturating_sub(1)) {
             if matches!(rte.kind, RangeTblEntryKind::Join { .. }) {
@@ -1124,7 +1135,7 @@ fn join_reltarget(
     PathTarget::new(exprs)
 }
 
-fn exact_join_spec(
+fn exact_inner_join_spec(
     join_infos: &[JoinNodeInfo],
     left_relids: &[usize],
     right_relids: &[usize],
@@ -1157,38 +1168,17 @@ fn exact_join_spec(
 }
 
 fn join_spec_for_special_join(
-    root: &PlannerInfo,
-    join_infos: &[JoinNodeInfo],
-    rtindex: usize,
+    sjinfo: &crate::include::nodes::pathnodes::SpecialJoinInfo,
     reversed: bool,
 ) -> JoinBuildSpec {
-    if let Some(info) = join_infos.iter().find(|info| info.rtindex == rtindex) {
-        let explicit_qual =
-            (!matches!(info.kind, JoinType::Inner | JoinType::Cross)).then(|| info.quals.clone());
-        return JoinBuildSpec {
-            kind: if reversed {
-                reverse_join_type(info.kind)
-            } else {
-                info.kind
-            },
-            rtindex: Some(info.rtindex),
-            explicit_qual,
-        };
-    }
-    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
-        panic!("special join rtindex {rtindex} missing from rangetable");
-    };
-    let RangeTblEntryKind::Join { jointype, .. } = rte.kind else {
-        panic!("special join rtindex {rtindex} does not reference a join RTE");
-    };
     JoinBuildSpec {
         kind: if reversed {
-            reverse_join_type(jointype)
+            reverse_join_type(sjinfo.jointype)
         } else {
-            jointype
+            sjinfo.jointype
         },
-        rtindex: Some(rtindex),
-        explicit_qual: None,
+        rtindex: Some(sjinfo.rtindex),
+        explicit_qual: Some(sjinfo.join_quals.clone()),
     }
 }
 
@@ -1199,8 +1189,8 @@ fn join_is_legal(
     right_rel: &RelOptInfo,
 ) -> Option<JoinBuildSpec> {
     let joinrelids = relids_union(&left_rel.relids, &right_rel.relids);
-    let exact_spec = exact_join_spec(join_infos, &left_rel.relids, &right_rel.relids);
-    let mut matched_sj: Option<(usize, bool)> = None;
+    let exact_spec = exact_inner_join_spec(join_infos, &left_rel.relids, &right_rel.relids);
+    let mut matched_sj: Option<(&crate::include::nodes::pathnodes::SpecialJoinInfo, bool)> = None;
 
     for sjinfo in &root.join_info_list {
         if !relids_overlap(&sjinfo.min_righthand, &joinrelids) {
@@ -1226,7 +1216,7 @@ fn join_is_legal(
             if matched_sj.is_some() {
                 return None;
             }
-            matched_sj = Some((sjinfo.rtindex, false));
+            matched_sj = Some((sjinfo, false));
             continue;
         }
         if relids_subset(&sjinfo.min_lefthand, &right_rel.relids)
@@ -1235,7 +1225,7 @@ fn join_is_legal(
             if matched_sj.is_some() {
                 return None;
             }
-            matched_sj = Some((sjinfo.rtindex, true));
+            matched_sj = Some((sjinfo, true));
             continue;
         }
 
@@ -1248,15 +1238,8 @@ fn join_is_legal(
         return None;
     }
 
-    if let Some((rtindex, reversed)) = matched_sj {
-        return Some(join_spec_for_special_join(root, join_infos, rtindex, reversed));
-    }
-
-    if exact_spec
-        .as_ref()
-        .is_some_and(|spec| !matches!(spec.kind, JoinType::Inner | JoinType::Cross))
-    {
-        return None;
+    if let Some((sjinfo, reversed)) = matched_sj {
+        return Some(join_spec_for_special_join(sjinfo, reversed));
     }
 
     Some(exact_spec.unwrap_or(JoinBuildSpec {
