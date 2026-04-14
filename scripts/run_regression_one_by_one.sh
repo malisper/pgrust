@@ -5,15 +5,14 @@
 #
 # Usage:
 #   scripts/run_regression_one_by_one.sh [--port PORT] [--skip-build]
-#     [--skip-server] [--timeout SECS] [--test TESTNAME]
+#     [--skip-server] [--test TESTNAME]
 #     [--results-dir DIR] [--upstream-setup]
 #
 # This variant differs from scripts/run_regression.sh by:
 #   1. Splitting each .sql file into one-statement fragments
 #   2. Running them sequentially through \i in a single psql session
 #   3. Enabling \timing so every statement is timed
-#   4. Applying SET statement_timeout = '<timeout>s' so any single statement
-#      that runs too long is canceled by the server
+#   4. Applying statement_timeout = '5s' for every psql session
 
 set -euo pipefail
 
@@ -46,7 +45,6 @@ PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
-QUERY_TIMEOUT=5
 SINGLE_TEST=""
 RESULTS_DIR="/tmp/pgrust_regress_one_by_one"
 DATA_DIR="/tmp/pgrust_regress_one_by_one_data"
@@ -58,7 +56,6 @@ while [[ $# -gt 0 ]]; do
         --port) PORT="$2"; shift 2 ;;
         --skip-build) SKIP_BUILD=true; shift ;;
         --skip-server) SKIP_SERVER=true; shift ;;
-        --timeout) QUERY_TIMEOUT="$2"; shift 2 ;;
         --test) SINGLE_TEST="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
@@ -160,6 +157,7 @@ fi
 
 export PGPASSWORD="x"
 export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
 PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
 
 split_sql_statements() {
@@ -228,11 +226,9 @@ split_sql_statements() {
 build_driver_script() {
     local split_dir="$1"
     local driver_path="$2"
-    local timeout_secs="$3"
 
     {
         echo "\\timing on"
-        echo "SET statement_timeout = '${timeout_secs}s';"
         while IFS= read -r stmt_path; do
             stmt_name="$(basename "$stmt_path")"
             stmt_id="${stmt_name%.sql}"
@@ -298,7 +294,6 @@ extract_clean_output_and_timings() {
 
             next if $line =~ /^Time:\s+[0-9]+(?:\.[0-9]+)?\s+ms\b/;
             next if $line =~ /^\\timing on$/;
-            next if $line =~ /^SET statement_timeout = '\''[0-9]+s'\'';$/;
             next if $line =~ /^\\echo __PGRUST_QUERY_(?:BEGIN|END)__\s+\S+/;
             next if $line =~ /^__PGRUST_QUERY_(?:BEGIN|END)__\s+\S+/;
             next if $line =~ m{^\\i .*/(?:driver|[0-9]{5})\.sql$};
@@ -318,15 +313,14 @@ run_sql_one_by_one() {
     local clean_output="$2"
     local raw_output="$3"
     local timings_output="$4"
-    local timeout_secs="$5"
-    local split_dir="$6"
-    local on_error_stop="$7"
+    local split_dir="$5"
+    local on_error_stop="$6"
 
     local stmt_count
     stmt_count="$(split_sql_statements "$sql_path" "$split_dir")"
 
     local driver_path="$split_dir/driver.sql"
-    build_driver_script "$split_dir" "$driver_path" "$timeout_secs"
+    build_driver_script "$split_dir" "$driver_path"
 
     if [[ "$on_error_stop" == true ]]; then
         if ! psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q -f "$driver_path" > "$raw_output" 2>&1; then
@@ -360,7 +354,6 @@ if [[ "$USE_PGRUST_SETUP" == true ]]; then
         "$PGRUST_SETUP_OUT" \
         "$PGRUST_SETUP_RAW" \
         "$PGRUST_SETUP_TIMINGS" \
-        "$QUERY_TIMEOUT" \
         "$PGRUST_SETUP_TMP" \
         true >/dev/null; then
         :
@@ -421,7 +414,7 @@ error_list=()
 echo ""
 echo "Running ${#TEST_FILES[@]} regression tests one statement at a time..."
 echo "=================================================================="
-echo "Per-query timeout: ${QUERY_TIMEOUT}s"
+echo "Per-query statement_timeout: 5s"
 echo ""
 
 count_matching_queries() {
@@ -619,7 +612,6 @@ for sql_file in "${TEST_FILES[@]}"; do
         "$output_file" \
         "$raw_output_file" \
         "$timings_file" \
-        "$QUERY_TIMEOUT" \
         "$tmp_dir" \
         false)"
 

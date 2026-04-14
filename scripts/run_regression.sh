@@ -6,7 +6,7 @@
 # By default, this script:
 #   1. Builds pgrust_server in release mode
 #   2. Starts it on a fresh data directory
-#   3. Runs each .sql regression test via psql
+#   3. Runs each .sql regression test via psql with statement_timeout = '5s'
 #   4. Compares output against expected .out files
 #   5. Reports pass/fail/error statistics
 #
@@ -165,7 +165,10 @@ fi
 
 export PGPASSWORD="x"
 export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
 PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS")
+
+echo "Per-query statement_timeout: 5s"
 
 if [[ "$USE_PGRUST_SETUP" == true ]]; then
     PGRUST_SETUP_SQL="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
