@@ -1394,8 +1394,11 @@ mod tests {
     #[test]
     fn formats_numeric_fill_mode_and_literal_cases() {
         assert_eq!(
-            to_char_numeric(&NumericValue::from("0"), "FM9999999999999999.999999999999999")
-                .unwrap(),
+            to_char_numeric(
+                &NumericValue::from("0"),
+                "FM9999999999999999.999999999999999"
+            )
+            .unwrap(),
             "0."
         );
         assert_eq!(

@@ -20,9 +20,9 @@ use crate::backend::executor::{Value, cast_value};
 use crate::backend::optimizer::planner;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::include::catalog::{
-    PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
-    bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_type_rows, proc_oid_for_builtin_aggregate_function,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -80,6 +80,10 @@ pub trait CatalogLookup {
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
         self.lookup_any_relation(name)
             .filter(|entry| entry.relkind == 'r')
+    }
+
+    fn lookup_relation_by_oid(&self, _relation_oid: u32) -> Option<BoundRelation> {
+        None
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
@@ -160,15 +164,16 @@ pub trait CatalogLookup {
 impl CatalogLookup for Catalog {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         let relcache = RelCache::from_catalog(self);
-        relcache.get_by_name(name).map(|entry| BoundRelation {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            toast: toast_relation_from_cache(&relcache, entry),
-            namespace_oid: entry.namespace_oid,
-            relpersistence: entry.relpersistence,
-            relkind: entry.relkind,
-            desc: entry.desc.clone(),
-        })
+        relcache
+            .get_by_name(name)
+            .map(|entry| bound_relation_from_relcache_entry(&relcache, entry))
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        let relcache = RelCache::from_catalog(self);
+        relcache
+            .get_by_oid(relation_oid)
+            .map(|entry| bound_relation_from_relcache_entry(&relcache, entry))
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
@@ -186,6 +191,13 @@ impl CatalogLookup for Catalog {
                 })
             })
             .collect()
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        let relcache = RelCache::from_catalog(self);
+        let mut rows = builtin_type_rows();
+        rows.extend(composite_type_rows_from_relcache(&relcache));
+        rows
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
@@ -228,15 +240,13 @@ impl CatalogLookup for Catalog {
 
 impl CatalogLookup for RelCache {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
-        self.get_by_name(name).map(|entry| BoundRelation {
-            rel: entry.rel,
-            relation_oid: entry.relation_oid,
-            toast: toast_relation_from_cache(self, entry),
-            namespace_oid: entry.namespace_oid,
-            relpersistence: entry.relpersistence,
-            relkind: entry.relkind,
-            desc: entry.desc.clone(),
-        })
+        self.get_by_name(name)
+            .map(|entry| bound_relation_from_relcache_entry(self, entry))
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.get_by_oid(relation_oid)
+            .map(|entry| bound_relation_from_relcache_entry(self, entry))
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
@@ -252,6 +262,12 @@ impl CatalogLookup for RelCache {
                 })
             })
             .collect()
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        let mut rows = builtin_type_rows();
+        rows.extend(composite_type_rows_from_relcache(self));
+        rows
     }
 }
 
@@ -271,6 +287,40 @@ fn toast_relation_from_cache(
             rel: toast.rel,
             relation_oid: toast.relation_oid,
         })
+}
+
+fn bound_relation_from_relcache_entry(
+    relcache: &RelCache,
+    entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
+) -> BoundRelation {
+    BoundRelation {
+        rel: entry.rel,
+        relation_oid: entry.relation_oid,
+        toast: toast_relation_from_cache(relcache, entry),
+        namespace_oid: entry.namespace_oid,
+        relpersistence: entry.relpersistence,
+        relkind: entry.relkind,
+        desc: entry.desc.clone(),
+    }
+}
+
+fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
+    relcache
+        .entries()
+        .filter_map(|(name, entry)| {
+            (entry.row_type_oid != 0).then(|| PgTypeRow {
+                oid: entry.row_type_oid,
+                typname: name.rsplit('.').next().unwrap_or(name).to_string(),
+                typnamespace: entry.namespace_oid,
+                typowner: BOOTSTRAP_SUPERUSER_OID,
+                typlen: -1,
+                typalign: crate::include::access::htup::AttributeAlign::Double,
+                typstorage: crate::include::access::htup::AttributeStorage::Extended,
+                typrelid: entry.relation_oid,
+                sql_type: SqlType::named_composite(entry.row_type_oid, entry.relation_oid),
+            })
+        })
+        .collect()
 }
 
 #[derive(Default)]

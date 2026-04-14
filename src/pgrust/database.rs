@@ -62,7 +62,9 @@ use crate::backend::utils::cache::syscache::{
 };
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
-use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgConstraintRow, PgTypeRow, PUBLIC_NAMESPACE_OID};
+use crate::include::catalog::{
+    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgTypeRow,
+};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{

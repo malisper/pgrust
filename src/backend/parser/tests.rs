@@ -1,8 +1,15 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
+use crate::include::catalog::{
+    JSON_TYPE_OID, PgProcRow, PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows,
+    sort_pg_rewrite_rows,
+};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
-use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgRewriteRow, PgTypeRow, PUBLIC_NAMESPACE_OID, sort_pg_rewrite_rows};
+use crate::include::catalog::{
+    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, JSON_TYPE_OID, PgProcRow, PgRewriteRow,
+    PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+};
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
@@ -107,6 +114,65 @@ fn catalog() -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert("people", test_catalog_entry(15000, desc()));
     catalog
+}
+
+struct OverrideFunctionCatalog {
+    base: Catalog,
+    proc_rows: Vec<PgProcRow>,
+}
+
+impl CatalogLookup for OverrideFunctionCatalog {
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.base.lookup_any_relation(name)
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.base.lookup_relation_by_oid(relation_oid)
+    }
+
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        let normalized = name.strip_prefix("pg_catalog.").unwrap_or(name);
+        let matches = self
+            .proc_rows
+            .iter()
+            .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
+            .cloned()
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            self.base.proc_rows_by_name(name)
+        } else {
+            matches
+        }
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        self.base.type_rows()
+    }
+}
+
+fn json_each_proc_row() -> PgProcRow {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| row.proname == "json_each" && row.proargtypes == JSON_TYPE_OID.to_string())
+        .expect("json_each row")
+}
+
+fn query_column_names_and_types(query: &Query) -> Vec<(String, SqlType)> {
+    query
+        .columns()
+        .iter()
+        .map(|column| (column.name.clone(), column.sql_type))
+        .collect()
+}
+
+fn relation_row_type_oid(catalog: &Catalog, name: &str) -> u32 {
+    let relation = catalog.lookup_any_relation(name).expect("relation");
+    catalog
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typrelid == relation.relation_oid)
+        .map(|row| row.oid)
+        .expect("row type")
 }
 
 fn catalog_with_people_id_index() -> Catalog {
@@ -2780,6 +2846,155 @@ fn parse_srf_with_column_definitions() {
         }
         other => panic!("expected aliased function call, got {other:?}"),
     }
+}
+
+#[test]
+fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
+    let mut row = json_each_proc_row();
+    row.proargnames = Some(vec![String::new(), "left_key".into(), "payload".into()]);
+    let catalog = OverrideFunctionCatalog {
+        base: catalog(),
+        proc_rows: vec![row],
+    };
+
+    let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("left_key".into(), SqlType::new(SqlTypeKind::Text)),
+            ("payload".into(), SqlType::new(SqlTypeKind::Json)),
+        ]
+    );
+}
+
+#[test]
+fn analyze_json_each_rejects_typed_column_definitions_for_out_parameters() {
+    let stmt =
+        parse_select("select * from json_each('{\"a\":1}'::json) as j(key text, value json)")
+            .unwrap();
+    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        err,
+        "a column definition list is redundant for a function with OUT parameters"
+    );
+}
+
+#[test]
+fn analyze_record_returning_function_requires_column_definition_list() {
+    let mut row = json_each_proc_row();
+    row.prorettype = RECORD_TYPE_OID;
+    row.proallargtypes = None;
+    row.proargmodes = None;
+    row.proargnames = None;
+    let catalog = OverrideFunctionCatalog {
+        base: catalog(),
+        proc_rows: vec![row],
+    };
+
+    let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
+    let err = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[])
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        err,
+        "a column definition list is required for functions returning \"record\""
+    );
+}
+
+#[test]
+fn analyze_record_returning_function_accepts_column_definition_list() {
+    let mut row = json_each_proc_row();
+    row.prorettype = RECORD_TYPE_OID;
+    row.proallargtypes = None;
+    row.proargmodes = None;
+    row.proargnames = None;
+    let catalog = OverrideFunctionCatalog {
+        base: catalog(),
+        proc_rows: vec![row],
+    };
+
+    let stmt =
+        parse_select("select * from json_each('{\"a\":1}'::json) as j(a int4, b text)").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("a".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("b".into(), SqlType::new(SqlTypeKind::Text)),
+        ]
+    );
+}
+
+#[test]
+fn analyze_named_composite_returning_function_uses_relation_rowtype() {
+    let base = catalog();
+    let mut row = json_each_proc_row();
+    row.prorettype = relation_row_type_oid(&base, "people");
+    row.proallargtypes = None;
+    row.proargmodes = None;
+    row.proargnames = None;
+    let catalog = OverrideFunctionCatalog {
+        base,
+        proc_rows: vec![row],
+    };
+
+    let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("id".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("name".into(), SqlType::new(SqlTypeKind::Text)),
+            ("note".into(), SqlType::new(SqlTypeKind::Text)),
+        ]
+    );
+}
+
+#[test]
+fn analyze_named_composite_returning_function_rejects_typed_column_definitions() {
+    let base = catalog();
+    let mut row = json_each_proc_row();
+    row.prorettype = relation_row_type_oid(&base, "people");
+    row.proallargtypes = None;
+    row.proargmodes = None;
+    row.proargnames = None;
+    let catalog = OverrideFunctionCatalog {
+        base,
+        proc_rows: vec![row],
+    };
+
+    let stmt =
+        parse_select("select * from json_each('{\"a\":1}'::json) as j(key text, value json)")
+            .unwrap();
+    let err = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[])
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        err,
+        "a column definition list is redundant for a function returning a named composite type"
+    );
+}
+
+#[test]
+fn analyze_scalar_srf_rejects_typed_column_definitions() {
+    let stmt = parse_select("select * from generate_series(1, 3) as g(val int4)").unwrap();
+    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+        .unwrap_err()
+        .to_string();
+
+    assert_eq!(
+        err,
+        "a column definition list is only allowed for functions returning \"record\""
+    );
 }
 
 #[test]

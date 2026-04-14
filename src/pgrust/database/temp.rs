@@ -247,14 +247,16 @@ impl Database {
                 .find_map(|(name, entry)| {
                     (entry.entry.relation_oid == relation_oid).then(|| name.clone())
                 })
-                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string())))?
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+                })?
         };
 
         if old_name != normalized_new {
             let namespaces = self.temp_relations.read();
-            let namespace = namespaces.get(&client_id).ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone()))
-            })?;
+            let namespace = namespaces
+                .get(&client_id)
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone())))?;
             if namespace.tables.contains_key(&normalized_new) {
                 return Err(ExecError::Parse(ParseError::TableAlreadyExists(
                     normalized_new.clone(),
@@ -280,12 +282,13 @@ impl Database {
 
         let renamed = {
             let mut namespaces = self.temp_relations.write();
-            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone()))
-            })?;
-            let entry = namespace.tables.remove(&old_name).ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone()))
-            })?;
+            let namespace = namespaces
+                .get_mut(&client_id)
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone())))?;
+            let entry = namespace
+                .tables
+                .remove(&old_name)
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone())))?;
             let rel_entry = entry.entry.clone();
             namespace.tables.insert(normalized_new.clone(), entry);
             namespace.generation = namespace.generation.saturating_add(1);
