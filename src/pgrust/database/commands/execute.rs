@@ -145,6 +145,8 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    datetime_config:
+                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -177,6 +179,8 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    datetime_config:
+                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -210,6 +214,8 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    datetime_config:
+                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -250,6 +256,8 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    datetime_config:
+                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -358,6 +366,8 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    datetime_config:
+                        crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
                     interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
@@ -433,6 +443,7 @@ impl Database {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts,
             snapshot,
             client_id,

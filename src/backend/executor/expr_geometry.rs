@@ -481,7 +481,7 @@ fn render_number(value: f64, options: FloatFormatOptions) -> String {
 fn render_point(point: &GeoPoint, options: FloatFormatOptions) -> String {
     format!(
         "({},{})",
-        render_number(point.x, options),
+        render_number(point.x, options.clone()),
         render_number(point.y, options)
     )
 }
@@ -489,7 +489,7 @@ fn render_point(point: &GeoPoint, options: FloatFormatOptions) -> String {
 fn render_lseg(lseg: &GeoLseg, options: FloatFormatOptions) -> String {
     format!(
         "[{},{}]",
-        render_point(&lseg.p[0], options),
+        render_point(&lseg.p[0], options.clone()),
         render_point(&lseg.p[1], options)
     )
 }
@@ -501,7 +501,7 @@ fn render_path(path: &GeoPath, options: FloatFormatOptions) -> String {
         if idx > 0 {
             out.push(',');
         }
-        out.push_str(&render_point(point, options));
+        out.push_str(&render_point(point, options.clone()));
     }
     out.push(if path.closed { ')' } else { ']' });
     out
@@ -510,8 +510,8 @@ fn render_path(path: &GeoPath, options: FloatFormatOptions) -> String {
 fn render_line(line: &GeoLine, options: FloatFormatOptions) -> String {
     format!(
         "{{{},{},{}}}",
-        render_number(line.a, options),
-        render_number(line.b, options),
+        render_number(line.a, options.clone()),
+        render_number(line.b, options.clone()),
         render_number(line.c, options)
     )
 }
@@ -519,7 +519,7 @@ fn render_line(line: &GeoLine, options: FloatFormatOptions) -> String {
 fn render_box(geo_box: &GeoBox, options: FloatFormatOptions) -> String {
     format!(
         "{},{}",
-        render_point(&geo_box.high, options),
+        render_point(&geo_box.high, options.clone()),
         render_point(&geo_box.low, options)
     )
 }
@@ -530,7 +530,7 @@ fn render_polygon(poly: &GeoPolygon, options: FloatFormatOptions) -> String {
         if idx > 0 {
             out.push(',');
         }
-        out.push_str(&render_point(point, options));
+        out.push_str(&render_point(point, options.clone()));
     }
     out.push(')');
     out
@@ -539,7 +539,7 @@ fn render_polygon(poly: &GeoPolygon, options: FloatFormatOptions) -> String {
 fn render_circle(circle: &GeoCircle, options: FloatFormatOptions) -> String {
     format!(
         "<{},{}>",
-        render_point(&circle.center, options),
+        render_point(&circle.center, options.clone()),
         render_number(circle.radius, options)
     )
 }

@@ -164,6 +164,7 @@ fn main() -> Result<(), ExecError> {
         pool: std::sync::Arc::clone(&pool),
         txns: txns.clone(),
         txn_waiter: None,
+        datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,

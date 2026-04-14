@@ -55,7 +55,7 @@ pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_money::money_format_text;
 pub(crate) use expr_money::money_parse_text;
 pub use expr_casts::render_internal_char_text;
-pub use expr_datetime::render_datetime_value_text;
+pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
 pub use startup::executor_start;
@@ -80,6 +80,7 @@ use crate::backend::parser::{
     pg_plan_values_query,
 };
 use crate::backend::storage::lmgr::TableLockError;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
 };
@@ -94,6 +95,7 @@ pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
+    pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
