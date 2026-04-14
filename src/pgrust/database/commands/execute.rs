@@ -26,6 +26,7 @@ impl Database {
             execute_delete_with_waiter, execute_insert, execute_truncate_table,
             execute_update_with_waiter, execute_vacuum,
         };
+        let interrupts = self.interrupt_state(client_id);
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
@@ -105,13 +106,19 @@ impl Database {
                     (stmt, rels.into_iter().collect::<Vec<_>>())
                 };
 
-                lock_relations(&self.table_locks, client_id, &rels);
+                lock_relations_interruptible(
+                    &self.table_locks,
+                    client_id,
+                    &rels,
+                    interrupts.as_ref(),
+                )?;
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -129,8 +136,12 @@ impl Database {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_insert(insert_stmt, &catalog)?;
                 let rel = bound.rel;
-                self.table_locks
-                    .lock_table(rel, TableLockMode::RowExclusive, client_id);
+                self.table_locks.lock_table_interruptible(
+                    rel,
+                    TableLockMode::RowExclusive,
+                    client_id,
+                    interrupts.as_ref(),
+                )?;
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -139,6 +150,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -157,8 +169,12 @@ impl Database {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_update(update_stmt, &catalog)?;
                 let rel = bound.rel;
-                self.table_locks
-                    .lock_table(rel, TableLockMode::RowExclusive, client_id);
+                self.table_locks.lock_table_interruptible(
+                    rel,
+                    TableLockMode::RowExclusive,
+                    client_id,
+                    interrupts.as_ref(),
+                )?;
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -167,6 +183,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -180,7 +197,7 @@ impl Database {
                     &mut ctx,
                     xid,
                     0,
-                    Some((&self.txns, &self.txn_waiter)),
+                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
@@ -192,8 +209,12 @@ impl Database {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = bind_delete(delete_stmt, &catalog)?;
                 let rel = bound.rel;
-                self.table_locks
-                    .lock_table(rel, TableLockMode::RowExclusive, client_id);
+                self.table_locks.lock_table_interruptible(
+                    rel,
+                    TableLockMode::RowExclusive,
+                    client_id,
+                    interrupts.as_ref(),
+                )?;
 
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -202,6 +223,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -214,7 +236,7 @@ impl Database {
                     &catalog,
                     &mut ctx,
                     xid,
-                    Some((&self.txns, &self.txn_waiter)),
+                    Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
@@ -284,16 +306,20 @@ impl Database {
                     .iter()
                     .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
                     .collect::<Vec<_>>();
-                for rel in &rels {
-                    self.table_locks
-                        .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
-                }
+                lock_tables_interruptible(
+                    &self.table_locks,
+                    client_id,
+                    &rels,
+                    TableLockMode::AccessExclusive,
+                    interrupts.as_ref(),
+                )?;
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
                     snapshot,
                     client_id,
                     next_command_id: 0,
@@ -354,7 +380,13 @@ impl Database {
             (query_desc, rels.into_iter().collect::<Vec<_>>())
         };
 
-        lock_relations(&self.table_locks, client_id, &rels);
+        let interrupts = self.interrupt_state(client_id);
+        lock_relations_interruptible(
+            &self.table_locks,
+            client_id,
+            &rels,
+            interrupts.as_ref(),
+        )?;
 
         let (snapshot, command_id) = match txn_ctx {
             Some((xid, cid)) => (self.txns.read().snapshot_for_command(xid, cid)?, cid),
@@ -367,6 +399,7 @@ impl Database {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            interrupts,
             snapshot,
             client_id,
             next_command_id: command_id,
@@ -383,6 +416,7 @@ impl Database {
             rels,
             table_locks: &self.table_locks,
             client_id,
+            interrupt_guard: None,
         })
     }
 }

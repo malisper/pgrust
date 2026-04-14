@@ -14,6 +14,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::backend::utils::time::snapmgr::Snapshot;
 use crate::include::access::amapi::{
     IndexBeginScanContext, IndexBuildContext, IndexInsertContext, IndexUniqueCheck,
@@ -153,11 +154,13 @@ pub fn rebuild_system_catalog_indexes(base_dir: &Path) -> Result<(), CatalogErro
         .read()
         .snapshot(INVALID_TRANSACTION_ID)
         .map_err(|err| CatalogError::Io(format!("system catalog snapshot failed: {err:?}")))?;
+    let interrupts = Arc::new(InterruptState::new());
     for descriptor in system_catalog_indexes() {
         let build_ctx = IndexBuildContext {
             pool: Arc::clone(&pool),
             txns: Arc::clone(&txns),
             client_id: 0,
+            interrupts: Arc::clone(&interrupts),
             snapshot: snapshot.clone(),
             heap_relation: RelFileLocator {
                 spc_oid: 0,
@@ -202,6 +205,7 @@ pub fn maintain_catalog_indexes_for_insert(
             txns: ctx.txns.clone(),
             txn_waiter: ctx.waiter.clone(),
             client_id: ctx.client_id,
+            interrupts: ctx.interrupts.clone(),
             snapshot: snapshot.clone(),
             heap_relation: RelFileLocator {
                 spc_oid: 0,

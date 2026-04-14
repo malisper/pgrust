@@ -148,6 +148,7 @@ pub(crate) fn collect_analyze_stats(
 ) -> Result<Vec<AnalyzeRelationStats>, ExecError> {
     let mut out = Vec::with_capacity(targets.len());
     for target in targets {
+        ctx.check_for_interrupts()?;
         if target.only {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ANALYZE without ONLY",
@@ -222,6 +223,7 @@ fn sample_relation(
     });
 
     for block in &sampled_blocks {
+        ctx.check_for_interrupts()?;
         let pin = ctx
             .pool
             .pin_existing_block(ctx.client_id, relation.rel, ForkNumber::Main, *block)
@@ -235,6 +237,7 @@ fn sample_relation(
         let max_offset = page_get_max_offset_number(page)
             .map_err(crate::include::access::htup::TupleError::from)?;
         for off in 1..=max_offset {
+            ctx.check_for_interrupts()?;
             let item_id = page_get_item_id_unchecked(page, off);
             if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
                 continue;

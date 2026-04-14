@@ -62,6 +62,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::FloatOutOfRange { .. }
         | ExecError::FloatOverflow
         | ExecError::FloatUnderflow => "22003",
+        ExecError::Interrupted(reason) => reason.sqlstate(),
         ExecError::RequestedLengthTooLarge => "54000",
         ExecError::Heap(HeapError::Tuple(TupleError::Oversized { .. })) => "54000",
         ExecError::RaiseException(_) => "P0001",
@@ -567,6 +568,7 @@ where
         }
     };
     db.cleanup_client_temp_relations(client_id);
+    db.clear_interrupt_state(client_id);
     result
 }
 

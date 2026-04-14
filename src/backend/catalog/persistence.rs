@@ -217,7 +217,10 @@ fn catalog_tuple_update_matching(
         .ok_or(CatalogError::Corrupt("missing catalog tuple for update"))?;
     let replacement = tuple_from_values(desc, new_values)
         .map_err(|e| CatalogError::Io(format!("catalog tuple encode failed: {e:?}")))?;
-    let waiter = ctx.waiter.as_deref().map(|waiter| (&*ctx.txns, waiter));
+    let waiter = ctx
+        .waiter
+        .as_deref()
+        .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref()));
     heap_update_with_waiter(
         &ctx.pool,
         ctx.client_id,
@@ -243,7 +246,10 @@ fn catalog_tuple_delete_matching(
 ) -> Result<(), CatalogError> {
     let tid = find_catalog_tuple_tid(ctx, kind, rel, desc, values, snapshot)?
         .ok_or(CatalogError::Corrupt("missing catalog tuple for delete"))?;
-    let waiter = ctx.waiter.as_deref().map(|waiter| (&*ctx.txns, waiter));
+    let waiter = ctx
+        .waiter
+        .as_deref()
+        .map(|waiter| (&*ctx.txns, waiter, ctx.interrupts.as_ref()));
     heap_delete_with_waiter(
         &ctx.pool,
         ctx.client_id,

@@ -39,6 +39,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator};
+use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
@@ -81,6 +82,13 @@ pub struct CatalogWriteContext {
     pub cid: CommandId,
     pub client_id: crate::ClientId,
     pub waiter: Option<std::sync::Arc<TransactionWaiter>>,
+    pub interrupts: std::sync::Arc<InterruptState>,
+}
+
+impl CatalogWriteContext {
+    pub fn check_for_interrupts(&self) -> Result<(), CatalogError> {
+        check_for_interrupts(&self.interrupts).map_err(CatalogError::Interrupted)
+    }
 }
 
 const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
