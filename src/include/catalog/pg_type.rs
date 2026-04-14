@@ -4,7 +4,7 @@ use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
+    ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
     BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
     CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
     FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
@@ -56,6 +56,7 @@ pub fn pg_type_desc() -> RelationDesc {
 
 pub fn builtin_type_rows() -> Vec<PgTypeRow> {
     vec![
+        builtin_type_row("anyarray", ANYARRAYOID, SqlType::new(SqlTypeKind::AnyArray)),
         builtin_type_row("bool", BOOL_TYPE_OID, SqlType::new(SqlTypeKind::Bool)),
         builtin_type_row(
             "_bool",

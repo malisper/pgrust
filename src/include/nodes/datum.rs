@@ -20,6 +20,7 @@ pub struct ArrayDimension {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArrayValue {
+    pub element_type_oid: Option<u32>,
     pub dimensions: Vec<ArrayDimension>,
     pub elements: Vec<Value>,
 }
@@ -27,6 +28,7 @@ pub struct ArrayValue {
 impl ArrayValue {
     pub fn empty() -> Self {
         Self {
+            element_type_oid: None,
             dimensions: Vec::new(),
             elements: Vec::new(),
         }
@@ -37,6 +39,7 @@ impl ArrayValue {
             Self::empty()
         } else {
             Self {
+                element_type_oid: None,
                 dimensions: vec![ArrayDimension {
                     lower_bound: 1,
                     length: elements.len(),
@@ -48,9 +51,15 @@ impl ArrayValue {
 
     pub fn from_dimensions(dimensions: Vec<ArrayDimension>, elements: Vec<Value>) -> Self {
         Self {
+            element_type_oid: None,
             dimensions,
             elements,
         }
+    }
+
+    pub fn with_element_type_oid(mut self, element_type_oid: u32) -> Self {
+        self.element_type_oid = Some(element_type_oid);
+        self
     }
 
     pub fn ndim(&self) -> usize {
@@ -81,6 +90,7 @@ impl ArrayValue {
 
     pub fn to_owned_value(&self) -> Self {
         Self {
+            element_type_oid: self.element_type_oid,
             dimensions: self.dimensions.clone(),
             elements: self.elements.iter().map(Value::to_owned_value).collect(),
         }
@@ -105,6 +115,7 @@ impl ArrayValue {
             })
             .collect();
         Ok(Self {
+            element_type_oid: None,
             dimensions,
             elements,
         })
@@ -185,6 +196,7 @@ fn build_nested_values(array: &ArrayValue, depth: usize, offset: &mut usize) -> 
     let mut out = Vec::with_capacity(len);
     for _ in 0..len {
         let nested = ArrayValue {
+            element_type_oid: None,
             dimensions: array.dimensions[depth + 1..].to_vec(),
             elements: {
                 let start = *offset;

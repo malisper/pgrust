@@ -1563,6 +1563,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::TsQuery => "tsquery",
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
+        SqlTypeKind::AnyArray => "anyarray",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Bool => "bool",

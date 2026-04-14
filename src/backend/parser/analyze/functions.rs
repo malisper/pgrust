@@ -71,13 +71,15 @@ pub(super) fn resolve_function_call(
         else {
             continue;
         };
+        let Some(result_type) = resolve_proc_result_type(&row, &candidate) else {
+            continue;
+        };
 
         let resolved = ResolvedFunctionCall {
             proc_oid: row.oid,
             prokind: row.prokind,
             proretset: row.proretset,
-            result_type: builtin_sql_type_for_oid(row.prorettype)
-                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            result_type,
             declared_arg_types: candidate.declared_arg_types,
             nvargs: candidate.nvargs,
             vatype_oid: candidate.vatype_oid,
@@ -289,10 +291,67 @@ fn match_proc_arg_type(
         return Some((2, actual_type));
     }
     if declared_oid == ANYARRAYOID {
-        return actual_type.is_array.then_some((2, actual_type));
+        return (actual_type.is_array || actual_type.kind == SqlTypeKind::AnyArray)
+            .then_some((2, actual_type));
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
     arg_type_match_cost(actual_type, declared_type).map(|cost| (cost, declared_type))
+}
+
+fn resolve_proc_result_type(row: &crate::include::catalog::PgProcRow, candidate: &CandidateMatch) -> Option<SqlType> {
+    match row.prorettype {
+        ANYOID => resolve_anyelement_result_type(row, candidate),
+        ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
+        _ => builtin_sql_type_for_oid(row.prorettype),
+    }
+}
+
+fn resolve_anyelement_result_type(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<SqlType> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let mut resolved = None;
+    for (declared_oid, actual_type) in declared_oids.into_iter().zip(candidate.declared_arg_types.iter().copied()) {
+        let inferred = match declared_oid {
+            ANYOID => Some(actual_type),
+            ANYARRAYOID if actual_type.is_array => Some(actual_type.element_type()),
+            _ => None,
+        };
+        if let Some(inferred) = inferred {
+            match resolved {
+                None => resolved = Some(inferred),
+                Some(existing) if existing == inferred => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    resolved
+}
+
+fn resolve_anyarray_result_type(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<SqlType> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let mut resolved = None;
+    for (declared_oid, actual_type) in declared_oids.into_iter().zip(candidate.declared_arg_types.iter().copied()) {
+        let inferred = match declared_oid {
+            ANYARRAYOID if actual_type.is_array => Some(actual_type),
+            ANYOID if !actual_type.is_array && actual_type.kind != SqlTypeKind::AnyArray => {
+                Some(SqlType::array_of(actual_type))
+            }
+            _ => None,
+        };
+        if let Some(inferred) = inferred {
+            match resolved {
+                None => resolved = Some(inferred),
+                Some(existing) if existing == inferred => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    resolved
 }
 
 fn match_variadic_element_type(
@@ -1631,6 +1690,37 @@ mod tests {
         assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::Lower));
         assert!(!resolved.func_variadic);
         assert_eq!(resolved.vatype_oid, 0);
+    }
+
+    #[test]
+    fn resolve_function_call_infers_anyelement_result_from_array_argument() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "unnest",
+            &[SqlType::array_of(SqlType::new(SqlTypeKind::Int4))],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.proc_oid, 6267);
+        assert_eq!(resolved.result_type, SqlType::new(SqlTypeKind::Int4));
+    }
+
+    #[test]
+    fn resolve_function_call_does_not_guess_anyelement_from_anyarray_pseudotype() {
+        let error = resolve_function_call(
+            &Catalog::default(),
+            "unnest",
+            &[SqlType::new(SqlTypeKind::AnyArray)],
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ParseError::UnexpectedToken { expected, actual }
+                if expected == "supported builtin function" && actual == "unnest"
+        ));
     }
 
     #[test]

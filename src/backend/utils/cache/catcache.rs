@@ -30,7 +30,7 @@ use crate::backend::catalog::pg_ts_parser::sort_pg_ts_parser_rows;
 use crate::backend::catalog::pg_ts_template::sort_pg_ts_template_rows;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
+    ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
     BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
     CIRCLE_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
     FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
@@ -652,6 +652,8 @@ fn catalog_object_name(name: &str) -> &str {
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {
     match (sql_type.kind, sql_type.is_array) {
+        (SqlTypeKind::AnyArray, false) => ANYARRAYOID,
+        (SqlTypeKind::AnyArray, true) => unreachable!("anyarray arrays are unsupported"),
         (SqlTypeKind::Bool, false) => BOOL_TYPE_OID,
         (SqlTypeKind::Bool, true) => BOOL_ARRAY_TYPE_OID,
         (SqlTypeKind::Bit, false) => BIT_TYPE_OID,

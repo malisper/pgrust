@@ -69,27 +69,27 @@ pub fn pg_statistic_desc() -> RelationDesc {
             ),
             column_desc(
                 "stavalues1",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                SqlType::new(SqlTypeKind::AnyArray),
                 true,
             ),
             column_desc(
                 "stavalues2",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                SqlType::new(SqlTypeKind::AnyArray),
                 true,
             ),
             column_desc(
                 "stavalues3",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                SqlType::new(SqlTypeKind::AnyArray),
                 true,
             ),
             column_desc(
                 "stavalues4",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                SqlType::new(SqlTypeKind::AnyArray),
                 true,
             ),
             column_desc(
                 "stavalues5",
-                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                SqlType::new(SqlTypeKind::AnyArray),
                 true,
             ),
         ],

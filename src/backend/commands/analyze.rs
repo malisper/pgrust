@@ -331,11 +331,14 @@ fn build_statistics_rows(
                 .round() as i32
         };
 
-        let mut freq = HashMap::<String, usize>::new();
+        let mut freq = HashMap::<String, (usize, Value)>::new();
         let mut rendered_values = Vec::with_capacity(nonnull_rows.len());
         for row in &nonnull_rows {
-            let rendered = value_stats_text(&row.values[sample_index]);
-            *freq.entry(rendered.clone()).or_default() += 1;
+            let value = row.values[sample_index].to_owned_value();
+            let rendered = value_stats_text(&value);
+            freq.entry(rendered.clone())
+                .and_modify(|(count, _)| *count += 1)
+                .or_insert((1, value));
             rendered_values.push((row.physical_ordinal, rendered));
         }
         let distinct_seen = freq.len();
@@ -361,11 +364,17 @@ fn build_statistics_rows(
         let mut stavalues: [Option<ArrayValue>; 5] = Default::default();
 
         let mut ranked = freq.into_iter().collect::<Vec<_>>();
-        ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .0
+                .cmp(&left.1.0)
+                .then_with(|| left.0.cmp(&right.0))
+        });
 
         let mcv = ranked
             .iter()
-            .filter(|(_, count)| *count > 1)
+            .filter(|(_, (count, _))| *count > 1)
             .take(target)
             .cloned()
             .collect::<Vec<_>>();
@@ -374,35 +383,41 @@ fn build_statistics_rows(
             staop[0] = eq_op;
             stanumbers[0] = Some(ArrayValue::from_1d(
                 mcv.iter()
-                    .map(|(_, count)| Value::Float64(*count as f64 / sample_total))
+                    .map(|(_, (count, _))| Value::Float64(*count as f64 / sample_total))
                     .collect(),
             ));
-            stavalues[0] = Some(ArrayValue::from_1d(
+            stavalues[0] = Some(
+                ArrayValue::from_1d(
                 mcv.iter()
-                    .map(|(value, _)| Value::Text(value.clone().into()))
+                    .map(|(_, (_, value))| value.to_owned_value())
                     .collect(),
-            ));
+                )
+                .with_element_type_oid(type_oid),
+            );
         }
 
         if lt_op != 0 {
             let mcv_values = mcv.iter().map(|(value, _)| value.clone()).collect::<HashSet<_>>();
             let mut histogram_values = ranked
                 .iter()
-                .map(|(value, _)| value.clone())
-                .filter(|value| !mcv_values.contains(value))
+                .map(|(value, (_, representative))| (value.clone(), representative.to_owned_value()))
+                .filter(|(value, _)| !mcv_values.contains(value))
                 .collect::<Vec<_>>();
-            histogram_values.sort_unstable();
-            histogram_values.dedup();
+            histogram_values.sort_by(|left, right| left.0.cmp(&right.0));
+            histogram_values.dedup_by(|left, right| left.0 == right.0);
             if histogram_values.len() >= 2 {
                 stakind[1] = STATISTIC_KIND_HISTOGRAM;
                 staop[1] = lt_op;
-                stavalues[1] = Some(ArrayValue::from_1d(
+                stavalues[1] = Some(
+                    ArrayValue::from_1d(
                     histogram_values
                         .into_iter()
                         .step_by((distinct_seen.max(2) / target.max(2)).max(1))
-                        .map(|value| Value::Text(value.into()))
+                        .map(|(_, value)| value)
                         .collect(),
-                ));
+                    )
+                    .with_element_type_oid(type_oid),
+                );
             }
 
             let correlation = sample_correlation(&rendered_values);
