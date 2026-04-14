@@ -713,7 +713,11 @@ fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr
     }
 }
 
-fn rewrite_semantic_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
+pub(crate) fn rewrite_semantic_expr_for_input_path(
+    expr: Expr,
+    path: &Path,
+    layout: &[Expr],
+) -> Expr {
     let rewritten = rewrite_expr_for_input_path(expr.clone(), path, layout);
     if rewritten != expr {
         return rewritten;

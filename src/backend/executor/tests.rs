@@ -6437,6 +6437,36 @@ fn chained_full_join_using_keeps_merged_name_identity() {
 }
 
 #[test]
+fn derived_table_inner_join_using_rebinds_to_distinct_inputs() {
+    let base = temp_dir("derived_table_inner_join_using");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_join_chain_tables(&base, &mut txns);
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from (select * from t2) as s2 inner join (select * from t3) s3 using (name) order by name, 2, 3",
+            join_chain_catalog(),
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Text("bb".into()),
+                Value::Int32(12),
+                Value::Int32(13),
+            ],
+            vec![
+                Value::Text("cc".into()),
+                Value::Int32(22),
+                Value::Int32(23),
+            ],
+        ],
+    );
+}
+
+#[test]
 fn chained_natural_full_join_over_subqueries_keeps_join_outputs() {
     let base = temp_dir("chained_natural_full_join_subqueries");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
