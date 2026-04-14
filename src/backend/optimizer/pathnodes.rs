@@ -5,7 +5,7 @@ use crate::include::nodes::pathnodes::{
     PlannerJoinArraySubscript, PlannerJoinExpr, PlannerOrderByEntry, PlannerPath,
     PlannerProjectSetTarget, PlannerTargetEntry,
 };
-use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, QueryColumn};
 
 struct PlannerPathBuilder {
@@ -22,10 +22,6 @@ impl PlannerPath {
     pub fn from_query(query: Query) -> Self {
         let next_slot_id = query.rtable.len() + 1;
         PlannerPathBuilder { next_slot_id }.from_query(query)
-    }
-
-    pub fn from_bound_select_plan(plan: BoundSelectPlan) -> Self {
-        PlannerPathBuilder { next_slot_id: 0 }.from_bound_select_plan(plan)
     }
 
     pub fn into_plan(self) -> Plan {
@@ -606,176 +602,6 @@ impl PlannerPathBuilder {
         }
     }
 
-    fn from_bound_select_plan(&mut self, plan: BoundSelectPlan) -> PlannerPath {
-        match plan {
-            BoundSelectPlan::From(plan) => self.from_bound_from_plan(plan),
-            BoundSelectPlan::Filter { input, predicate } => {
-                let input = self.from_bound_select_plan(*input);
-                let layout = input.output_vars();
-                PlannerPath::Filter {
-                    plan_info: PlanEstimate::default(),
-                    input: Box::new(input),
-                    predicate: PlannerJoinExpr::from_input_expr_with_layout(&predicate, &layout),
-                }
-            }
-            BoundSelectPlan::OrderBy { input, items } => {
-                let input = self.from_bound_select_plan(*input);
-                let layout = input.output_vars();
-                PlannerPath::OrderBy {
-                    plan_info: PlanEstimate::default(),
-                    input: Box::new(input),
-                    items: items
-                        .into_iter()
-                        .map(|item| {
-                            PlannerOrderByEntry::from_order_by_entry_with_layout(item, &layout)
-                        })
-                        .collect(),
-                }
-            }
-            BoundSelectPlan::Limit {
-                input,
-                limit,
-                offset,
-            } => PlannerPath::Limit {
-                plan_info: PlanEstimate::default(),
-                input: Box::new(self.from_bound_select_plan(*input)),
-                limit,
-                offset,
-            },
-            BoundSelectPlan::Aggregate {
-                input,
-                group_by,
-                accumulators,
-                having,
-                output_columns,
-            } => {
-                let input = self.from_bound_select_plan(*input);
-                let layout = input.output_vars();
-                PlannerPath::Aggregate {
-                    plan_info: PlanEstimate::default(),
-                    slot_id: self.alloc_slot_id(),
-                    input: Box::new(input),
-                    group_by: group_by
-                        .iter()
-                        .map(|expr| PlannerJoinExpr::from_input_expr_with_layout(expr, &layout))
-                        .collect(),
-                    accumulators,
-                    having: having
-                        .as_ref()
-                        .map(|expr| PlannerJoinExpr::from_input_expr_with_layout(expr, &layout)),
-                    output_columns,
-                }
-            }
-            BoundSelectPlan::Projection { input, targets } => {
-                let input = self.from_bound_select_plan(*input);
-                let layout = input.output_vars();
-                PlannerPath::Projection {
-                    plan_info: PlanEstimate::default(),
-                    slot_id: self.alloc_slot_id(),
-                    input: Box::new(input),
-                    targets: targets
-                        .into_iter()
-                        .map(|target| {
-                            PlannerTargetEntry::from_target_entry_with_layout(target, &layout)
-                        })
-                        .collect(),
-                }
-            }
-            BoundSelectPlan::ProjectSet { input, targets } => {
-                let input = self.from_bound_select_plan(*input);
-                let layout = input.output_vars();
-                PlannerPath::ProjectSet {
-                    plan_info: PlanEstimate::default(),
-                    slot_id: self.alloc_slot_id(),
-                    input: Box::new(input),
-                    targets: targets
-                        .into_iter()
-                        .map(|target| {
-                            PlannerProjectSetTarget::from_project_set_target_with_layout(
-                                target, &layout,
-                            )
-                        })
-                        .collect(),
-                }
-            }
-        }
-    }
-
-    fn from_bound_from_plan(&mut self, plan: BoundFromPlan) -> PlannerPath {
-        match plan {
-            BoundFromPlan::Result => PlannerPath::Result {
-                plan_info: PlanEstimate::default(),
-            },
-            BoundFromPlan::SeqScan {
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            } => PlannerPath::SeqScan {
-                plan_info: PlanEstimate::default(),
-                source_id: self.alloc_slot_id(),
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            },
-            BoundFromPlan::Values {
-                rows,
-                output_columns,
-            } => PlannerPath::Values {
-                plan_info: PlanEstimate::default(),
-                slot_id: self.alloc_slot_id(),
-                rows: rows
-                    .iter()
-                    .map(|row| {
-                        row.iter()
-                            .map(|expr| PlannerJoinExpr::from_input_expr_with_layout(expr, &[]))
-                            .collect()
-                    })
-                    .collect(),
-                output_columns,
-            },
-            BoundFromPlan::FunctionScan { call } => PlannerPath::FunctionScan {
-                plan_info: PlanEstimate::default(),
-                slot_id: self.alloc_slot_id(),
-                call,
-            },
-            BoundFromPlan::NestedLoopJoin {
-                left,
-                right,
-                kind,
-                on,
-            } => {
-                let left = self.from_bound_from_plan(*left);
-                let right = self.from_bound_from_plan(*right);
-                let mut layout = left.output_vars();
-                layout.extend(right.output_vars());
-                PlannerPath::NestedLoopJoin {
-                    plan_info: PlanEstimate::default(),
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    kind,
-                    on: PlannerJoinExpr::from_input_expr_with_layout(&on, &layout),
-                }
-            }
-            BoundFromPlan::Projection { input, targets } => {
-                let input = self.from_bound_from_plan(*input);
-                let layout = input.output_vars();
-                PlannerPath::Projection {
-                    plan_info: PlanEstimate::default(),
-                    slot_id: self.alloc_slot_id(),
-                    input: Box::new(input),
-                    targets: targets
-                        .into_iter()
-                        .map(|target| {
-                            PlannerTargetEntry::from_target_entry_with_layout(target, &layout)
-                        })
-                        .collect(),
-                }
-            }
-            BoundFromPlan::Subquery(plan) => self.from_query(*plan),
-        }
-    }
 }
 
 impl PlannerTargetEntry {

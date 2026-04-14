@@ -1,4 +1,5 @@
 use super::*;
+use super::query::AnalyzedFrom;
 
 const RETURN_RULE_NAME: &str = "_RETURN";
 
@@ -61,7 +62,7 @@ pub(super) fn bind_view_reference(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<(BoundFromPlan, BoundScope), ParseError> {
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     let display_name = view_display_name(relation_name);
     if expanded_views.contains(&relation.relation_oid) {
         return Err(ParseError::RecursiveView(display_name));
@@ -86,7 +87,7 @@ pub(super) fn bind_view_reference(
     )?;
     validate_view_shape(&plan, relation, &display_name)?;
     Ok((
-        BoundFromPlan::Subquery(Box::new(plan)),
+        AnalyzedFrom::subquery(plan),
         scope_for_relation(Some(relation_name), &relation.desc),
     ))
 }

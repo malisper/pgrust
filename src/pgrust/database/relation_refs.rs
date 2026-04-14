@@ -4,7 +4,7 @@ use crate::RelFileLocator;
 use crate::backend::executor::{Expr, Plan};
 use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
-use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, PlannedStmt};
+use crate::include::nodes::plannodes::PlannedStmt;
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
@@ -194,96 +194,6 @@ fn collect_rels_from_jointree(jointree: &JoinTreeNode, rels: &mut BTreeSet<RelFi
             collect_rels_from_jointree(right, rels);
             collect_rels_from_expr(quals, rels);
         }
-    }
-}
-
-fn collect_rels_from_bound_select_plan(
-    plan: &BoundSelectPlan,
-    rels: &mut BTreeSet<RelFileLocator>,
-) {
-    match plan {
-        BoundSelectPlan::From(plan) => collect_rels_from_bound_from_plan(plan, rels),
-        BoundSelectPlan::Filter { input, predicate } => {
-            collect_rels_from_bound_select_plan(input, rels);
-            collect_rels_from_expr(predicate, rels);
-        }
-        BoundSelectPlan::OrderBy { input, items } => {
-            collect_rels_from_bound_select_plan(input, rels);
-            for item in items {
-                collect_rels_from_expr(&item.expr, rels);
-            }
-        }
-        BoundSelectPlan::Limit { input, .. } => collect_rels_from_bound_select_plan(input, rels),
-        BoundSelectPlan::Aggregate {
-            input,
-            group_by,
-            accumulators,
-            having,
-            ..
-        } => {
-            collect_rels_from_bound_select_plan(input, rels);
-            for expr in group_by {
-                collect_rels_from_expr(expr, rels);
-            }
-            for accum in accumulators {
-                for arg in &accum.args {
-                    collect_rels_from_expr(arg, rels);
-                }
-            }
-            if let Some(expr) = having {
-                collect_rels_from_expr(expr, rels);
-            }
-        }
-        BoundSelectPlan::Projection { input, targets } => {
-            collect_rels_from_bound_select_plan(input, rels);
-            for target in targets {
-                collect_rels_from_expr(&target.expr, rels);
-            }
-        }
-        BoundSelectPlan::ProjectSet { input, targets } => {
-            collect_rels_from_bound_select_plan(input, rels);
-            for target in targets {
-                match target {
-                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
-                        collect_rels_from_expr(&entry.expr, rels);
-                    }
-                    crate::include::nodes::plannodes::ProjectSetTarget::Set { call, .. } => {
-                        collect_rels_from_set_returning_call(call, rels);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn collect_rels_from_bound_from_plan(plan: &BoundFromPlan, rels: &mut BTreeSet<RelFileLocator>) {
-    match plan {
-        BoundFromPlan::Result => {}
-        BoundFromPlan::SeqScan { rel, .. } => {
-            rels.insert(*rel);
-        }
-        BoundFromPlan::Values { rows, .. } => {
-            for row in rows {
-                for expr in row {
-                    collect_rels_from_expr(expr, rels);
-                }
-            }
-        }
-        BoundFromPlan::FunctionScan { call } => collect_rels_from_set_returning_call(call, rels),
-        BoundFromPlan::NestedLoopJoin {
-            left, right, on, ..
-        } => {
-            collect_rels_from_bound_from_plan(left, rels);
-            collect_rels_from_bound_from_plan(right, rels);
-            collect_rels_from_expr(on, rels);
-        }
-        BoundFromPlan::Projection { input, targets } => {
-            collect_rels_from_bound_from_plan(input, rels);
-            for target in targets {
-                collect_rels_from_expr(&target.expr, rels);
-            }
-        }
-        BoundFromPlan::Subquery(plan) => collect_rels_from_query(plan, rels),
     }
 }
 

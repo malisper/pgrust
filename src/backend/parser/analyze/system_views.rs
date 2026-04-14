@@ -1,4 +1,5 @@
 use super::*;
+use super::query::AnalyzedFrom;
 
 fn is_pg_views_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("pg_views") || name.eq_ignore_ascii_case("pg_catalog.pg_views")
@@ -11,7 +12,7 @@ fn is_pg_stats_name(name: &str) -> bool {
 pub(super) fn bind_builtin_system_view(
     name: &str,
     catalog: &dyn CatalogLookup,
-) -> Option<(BoundFromPlan, BoundScope)> {
+) -> Option<(AnalyzedFrom, BoundScope)> {
     if is_pg_views_name(name) {
         let output_columns = vec![
             QueryColumn::text("schemaname"),
@@ -31,13 +32,7 @@ pub(super) fn bind_builtin_system_view(
             .map(|row| row.into_iter().map(Expr::Const).collect())
             .collect();
 
-        return Some((
-            BoundFromPlan::Values {
-                rows,
-                output_columns,
-            },
-            scope_for_relation(Some(name), &desc),
-        ));
+        return Some((AnalyzedFrom::values(rows, output_columns), scope_for_relation(Some(name), &desc)));
     }
 
     if !is_pg_stats_name(name) {
@@ -117,11 +112,5 @@ pub(super) fn bind_builtin_system_view(
         .map(|row| row.into_iter().map(Expr::Const).collect())
         .collect();
 
-    Some((
-        BoundFromPlan::Values {
-            rows,
-            output_columns,
-        },
-        scope_for_relation(Some(name), &desc),
-    ))
+    Some((AnalyzedFrom::values(rows, output_columns), scope_for_relation(Some(name), &desc)))
 }
