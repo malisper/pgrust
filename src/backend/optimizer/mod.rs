@@ -5,14 +5,14 @@ mod pathnodes;
 
 use crate::RelFileLocator;
 use crate::backend::executor::{
-    Expr, OrderByEntry, Plan, PlanEstimate, QueryColumn, RelationDesc, TargetEntry,
-    ToastRelationRef, Value, compare_order_values,
+    Expr, OrderByEntry, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef,
+    Value, compare_order_values,
 };
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::plannodes::JoinType;
-use pathnodes::{PlannerJoinExpr, PlannerPath};
+use pathnodes::{PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerTargetEntry};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -130,9 +130,10 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
-                let selectivity = clause_selectivity(&predicate, None, input_rows);
+                let predicate_expr = predicate.clone().into_input_expr();
+                let selectivity = clause_selectivity(&predicate_expr, None, input_rows);
                 let rows = clamp_rows(input_rows * selectivity);
-                let qual_cost = predicate_cost(&predicate) * input_rows * CPU_OPERATOR_COST;
+                let qual_cost = predicate_cost(&predicate_expr) * input_rows * CPU_OPERATOR_COST;
                 PlannerPath::Filter {
                     plan_info: PlanEstimate::new(
                         input_info.startup_cost.as_f64(),
@@ -402,7 +403,11 @@ fn try_optimize_access_subtree(
             && !index.index_meta.indkey.is_empty()
             && index.index_meta.am_oid == BTREE_AM_OID
     }) {
-        let Some(spec) = build_index_path_spec(filter.as_ref(), order_items.as_deref(), index) else {
+        let filter_expr = filter.as_ref().cloned().map(PlannerJoinExpr::into_input_expr);
+        let order_exprs = order_items
+            .as_ref()
+            .map(|items| items.iter().cloned().map(PlannerOrderByEntry::into_order_by_entry).collect::<Vec<_>>());
+        let Some(spec) = build_index_path_spec(filter_expr.as_ref(), order_exprs.as_deref(), index) else {
             continue;
         };
         let candidate = estimate_index_candidate(rel, toast, desc.clone(), &stats, spec, order_items.clone(), catalog);
@@ -442,8 +447,8 @@ fn estimate_seqscan_candidate(
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     stats: &RelationStats,
-    filter: Option<Expr>,
-    order_items: Option<Vec<OrderByEntry>>,
+    filter: Option<PlannerJoinExpr>,
+    order_items: Option<Vec<PlannerOrderByEntry>>,
 ) -> AccessCandidate {
     let scan_info = seq_scan_estimate(stats);
     let mut total_cost = scan_info.total_cost.as_f64();
@@ -458,9 +463,10 @@ fn estimate_seqscan_candidate(
     let width = scan_info.plan_width;
 
     if let Some(predicate) = filter {
-        let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
+        let predicate_expr = predicate.clone().into_input_expr();
+        let selectivity = clause_selectivity(&predicate_expr, Some(stats), stats.reltuples);
         current_rows = clamp_rows(stats.reltuples * selectivity);
-        total_cost += stats.reltuples * predicate_cost(&predicate) * CPU_OPERATOR_COST;
+        total_cost += stats.reltuples * predicate_cost(&predicate_expr) * CPU_OPERATOR_COST;
         plan = PlannerPath::Filter {
             plan_info: PlanEstimate::new(
                 scan_info.startup_cost.as_f64(),
@@ -491,7 +497,7 @@ fn estimate_index_candidate(
     desc: RelationDesc,
     stats: &RelationStats,
     spec: IndexPathSpec,
-    order_items: Option<Vec<OrderByEntry>>,
+    order_items: Option<Vec<PlannerOrderByEntry>>,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     let index_class = catalog.class_row_by_oid(spec.index.relation_oid);
@@ -537,7 +543,7 @@ fn estimate_index_candidate(
                 stats.width,
             ),
             input: Box::new(plan),
-            predicate,
+            predicate: PlannerJoinExpr::from_input_expr(&predicate),
         };
     }
 
@@ -624,16 +630,16 @@ fn restore_join_output_order(
     let right_width = right_columns.len();
     let mut targets = Vec::with_capacity(left_columns.len() + right_columns.len());
     for (idx, column) in left_columns.iter().enumerate() {
-        targets.push(TargetEntry {
+        targets.push(PlannerTargetEntry {
             name: column.name.clone(),
-            expr: Expr::Column(right_width + idx),
+            expr: PlannerJoinExpr::InputColumn(right_width + idx),
             sql_type: column.sql_type,
         });
     }
     for (idx, column) in right_columns.iter().enumerate() {
-        targets.push(TargetEntry {
+        targets.push(PlannerTargetEntry {
             name: column.name.clone(),
-            expr: Expr::Column(idx),
+            expr: PlannerJoinExpr::InputColumn(idx),
             sql_type: column.sql_type,
         });
     }
