@@ -205,10 +205,15 @@ pub enum Statement {
     CreateView(CreateViewStatement),
     CreateIndex(CreateIndexStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
+    AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
+    AlterTableDropConstraint(AlterTableDropConstraintStatement),
     AlterTableRenameColumn(AlterTableRenameColumnStatement),
     AlterTableRename(AlterTableRenameStatement),
     AlterTableSet(AlterTableSetStatement),
+    AlterTableSetNotNull(AlterTableSetNotNullStatement),
+    AlterTableDropNotNull(AlterTableDropNotNullStatement),
+    AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
     CommentOnTable(CommentOnTableStatement),
     DropTable(DropTableStatement),
     DropView(DropViewStatement),
@@ -627,9 +632,21 @@ pub struct AlterTableAddColumnStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAddConstraintStatement {
+    pub table_name: String,
+    pub constraint: TableConstraint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableDropColumnStatement {
     pub table_name: String,
     pub column_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableDropConstraintStatement {
+    pub table_name: String,
+    pub constraint_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -643,6 +660,24 @@ pub struct AlterTableRenameColumnStatement {
 pub struct AlterTableRenameStatement {
     pub table_name: String,
     pub new_table_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableSetNotNullStatement {
+    pub table_name: String,
+    pub column_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableDropNotNullStatement {
+    pub table_name: String,
+    pub column_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableValidateConstraintStatement {
+    pub table_name: String,
+    pub constraint_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -689,9 +724,30 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: RawTypeName,
     pub default_expr: Option<String>,
-    pub nullable: bool,
-    pub primary_key: bool,
-    pub unique: bool,
+    pub constraints: Vec<ColumnConstraint>,
+}
+
+impl ColumnDef {
+    pub fn nullable(&self) -> bool {
+        !self.constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                ColumnConstraint::NotNull { .. } | ColumnConstraint::PrimaryKey { .. }
+            )
+        })
+    }
+
+    pub fn primary_key(&self) -> bool {
+        self.constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
+    }
+
+    pub fn unique(&self) -> bool {
+        self.constraints
+            .iter()
+            .any(|constraint| matches!(constraint, ColumnConstraint::Unique { .. }))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -701,9 +757,83 @@ pub enum CreateTableElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintAttributes {
+    pub name: Option<String>,
+    pub not_valid: bool,
+    pub deferrable: Option<bool>,
+    pub initially_deferred: Option<bool>,
+    pub enforced: Option<bool>,
+}
+
+impl Default for ConstraintAttributes {
+    fn default() -> Self {
+        Self {
+            name: None,
+            not_valid: false,
+            deferrable: None,
+            initially_deferred: None,
+            enforced: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnConstraint {
+    NotNull {
+        attributes: ConstraintAttributes,
+    },
+    Check {
+        attributes: ConstraintAttributes,
+        expr_sql: String,
+    },
+    PrimaryKey {
+        attributes: ConstraintAttributes,
+    },
+    Unique {
+        attributes: ConstraintAttributes,
+    },
+}
+
+impl ColumnConstraint {
+    pub fn attributes(&self) -> &ConstraintAttributes {
+        match self {
+            Self::NotNull { attributes }
+            | Self::Check { attributes, .. }
+            | Self::PrimaryKey { attributes }
+            | Self::Unique { attributes } => attributes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableConstraint {
-    PrimaryKey { columns: Vec<String> },
-    Unique { columns: Vec<String> },
+    NotNull {
+        attributes: ConstraintAttributes,
+        column: String,
+    },
+    Check {
+        attributes: ConstraintAttributes,
+        expr_sql: String,
+    },
+    PrimaryKey {
+        attributes: ConstraintAttributes,
+        columns: Vec<String>,
+    },
+    Unique {
+        attributes: ConstraintAttributes,
+        columns: Vec<String>,
+    },
+}
+
+impl TableConstraint {
+    pub fn attributes(&self) -> &ConstraintAttributes {
+        match self {
+            Self::NotNull { attributes, .. }
+            | Self::Check { attributes, .. }
+            | Self::PrimaryKey { attributes, .. }
+            | Self::Unique { attributes, .. } => attributes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

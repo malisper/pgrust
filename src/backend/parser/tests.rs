@@ -21,6 +21,10 @@ fn builtin_type(ty: SqlType) -> RawTypeName {
     RawTypeName::Builtin(ty)
 }
 
+fn attrs() -> ConstraintAttributes {
+    ConstraintAttributes::default()
+}
+
 fn assert_alias_names(spec: &AliasColumnSpec, expected: &[&str]) {
     assert_eq!(
         spec,
@@ -467,10 +471,67 @@ fn parse_alter_table_add_column_statement() {
                 name: "note".into(),
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
-                nullable: true,
-                primary_key: false,
-                unique: false,
+                constraints: vec![],
             },
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_constraint_statements() {
+    let stmt =
+        parse_statement("alter table items add constraint items_id_check check (id > 0) not valid")
+            .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            table_name: "items".into(),
+            constraint: TableConstraint::Check {
+                attributes: ConstraintAttributes {
+                    name: Some("items_id_check".into()),
+                    not_valid: true,
+                    deferrable: None,
+                    initially_deferred: None,
+                    enforced: None,
+                },
+                expr_sql: "id > 0".into(),
+            },
+        })
+    );
+
+    let stmt = parse_statement("alter table items drop constraint items_id_check").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropConstraint(AlterTableDropConstraintStatement {
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+        })
+    );
+
+    let stmt = parse_statement("alter table items validate constraint items_id_check").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableValidateConstraint(AlterTableValidateConstraintStatement {
+            table_name: "items".into(),
+            constraint_name: "items_id_check".into(),
+        })
+    );
+
+    let stmt = parse_statement("alter table items alter column note set not null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableSetNotNull(AlterTableSetNotNullStatement {
+            table_name: "items".into(),
+            column_name: "note".into(),
+        })
+    );
+
+    let stmt = parse_statement("alter table items alter note drop not null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableDropNotNull(AlterTableDropNotNullStatement {
+            table_name: "items".into(),
+            column_name: "note".into(),
         })
     );
 }
@@ -986,9 +1047,7 @@ fn parse_row_constructor_expression() {
         SqlExpr::Row(args) => {
             assert_eq!(args.len(), 2);
             assert!(matches!(&args[0], SqlExpr::IntegerLiteral(value) if value == "1"));
-            assert!(
-                matches!(&args[1], SqlExpr::Const(Value::Text(text)) if text.as_str() == "x")
-            );
+            assert!(matches!(&args[1], SqlExpr::Const(Value::Text(text)) if text.as_str() == "x"));
         }
         other => panic!("expected row constructor, got {other:?}"),
     }
@@ -2131,8 +2190,8 @@ fn parse_create_table_primary_key_and_unique_constraints() {
     };
     let columns = ct.columns().collect::<Vec<_>>();
     assert_eq!(columns.len(), 2);
-    assert!(columns[0].primary_key);
-    assert!(columns[1].unique);
+    assert!(columns[0].primary_key());
+    assert!(columns[1].unique());
     assert_eq!(ct.constraints().count(), 0);
 
     let stmt = parse_statement(
@@ -2147,10 +2206,80 @@ fn parse_create_table_primary_key_and_unique_constraints() {
         ct.constraints().cloned().collect::<Vec<_>>(),
         vec![
             TableConstraint::PrimaryKey {
+                attributes: attrs(),
                 columns: vec!["id".into(), "note".into()],
             },
             TableConstraint::Unique {
+                attributes: attrs(),
                 columns: vec!["note".into(), "id".into()],
+            },
+        ]
+    );
+
+    let stmt =
+        parse_statement("create table items (id int4, constraint named_pk primary key (id))")
+            .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![TableConstraint::PrimaryKey {
+            attributes: ConstraintAttributes {
+                name: Some("named_pk".into()),
+                ..attrs()
+            },
+            columns: vec!["id".into()],
+        }]
+    );
+}
+
+#[test]
+fn parse_create_table_named_check_and_not_null_constraints() {
+    let stmt = parse_statement(
+        "create table items (id int4 constraint id_positive check (id > 0) not valid deferrable initially deferred not enforced, note text, constraint note_present not null note not valid, constraint note_nonempty check (note <> '') not deferrable initially immediate enforced)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(
+        columns[0].constraints,
+        vec![ColumnConstraint::Check {
+            attributes: ConstraintAttributes {
+                name: Some("id_positive".into()),
+                not_valid: true,
+                deferrable: Some(true),
+                initially_deferred: Some(true),
+                enforced: Some(false),
+            },
+            expr_sql: "id > 0".into(),
+        }]
+    );
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![
+            TableConstraint::NotNull {
+                attributes: ConstraintAttributes {
+                    name: Some("note_present".into()),
+                    not_valid: true,
+                    deferrable: None,
+                    initially_deferred: None,
+                    enforced: None,
+                },
+                column: "note".into(),
+            },
+            TableConstraint::Check {
+                attributes: ConstraintAttributes {
+                    name: Some("note_nonempty".into()),
+                    not_valid: false,
+                    deferrable: Some(false),
+                    initially_deferred: Some(false),
+                    enforced: Some(true),
+                },
+                expr_sql: "note <> ''".into(),
             },
         ]
     );
@@ -2200,11 +2329,6 @@ fn lower_create_table_rejects_invalid_key_constraints() {
             if expected == "distinct PRIMARY KEY/UNIQUE definitions"
                 && actual == "duplicate key definition on (id)"
     ));
-
-    assert!(
-        parse_statement("create table items (id int4, constraint named_pk primary key (id))")
-            .is_err()
-    );
 }
 
 #[test]
@@ -2376,7 +2500,8 @@ fn build_plan_with_aggregate() {
 
 #[test]
 fn build_plan_with_group_by_order_by_wraps_aggregate_then_sort() {
-    let stmt = parse_select("select name, count(*) from people group by name order by name").unwrap();
+    let stmt =
+        parse_select("select name, count(*) from people group by name order by name").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::Projection { input, targets, .. } => {
@@ -2412,7 +2537,9 @@ fn grouped_join_using_projects_scanjoin_target_before_aggregate() {
                     assert_eq!(items.len(), 1);
                     assert!(matches!(items[0].expr, Expr::Column(0)));
                     match *input {
-                        Plan::Aggregate { input, group_by, .. } => {
+                        Plan::Aggregate {
+                            input, group_by, ..
+                        } => {
                             assert_eq!(group_by.len(), 1);
                             assert!(matches!(group_by[0], Expr::Column(0)));
                             match *input {
@@ -3175,12 +3302,10 @@ fn parse_jsonpath_type_and_operators() {
             "select '$.a'::jsonpath, '{\"a\":1}'::jsonb @? '$.a', '{\"a\":1}'::jsonb @@ '$.a == 1', jsonb_path_query_array('{\"a\":1}'::jsonb, '$.a')",
         )
         .unwrap();
-    assert!(
-        matches!(
-            &stmt.targets[0].expr,
-            SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::JsonPath)
-        )
-    );
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::JsonPath)
+    ));
     assert!(matches!(
         stmt.targets[1].expr,
         SqlExpr::JsonbPathExists(_, _)

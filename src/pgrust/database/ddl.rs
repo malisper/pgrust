@@ -115,19 +115,19 @@ pub(super) fn validate_alter_table_add_column(
     desc: &RelationDesc,
     column: &ColumnDef,
 ) -> Result<crate::backend::executor::ColumnDesc, ExecError> {
-    if !column.nullable {
+    if !column.nullable() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without NOT NULL",
             actual: "NOT NULL".into(),
         }));
     }
-    if column.primary_key {
+    if column.primary_key() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without PRIMARY KEY",
             actual: "PRIMARY KEY".into(),
         }));
     }
-    if column.unique {
+    if column.unique() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ADD COLUMN without UNIQUE",
             actual: "UNIQUE".into(),
@@ -153,7 +153,9 @@ pub(super) fn validate_alter_table_add_column(
     let sql_type = match &column.ty {
         crate::backend::parser::RawTypeName::Builtin(sql_type) => *sql_type,
         crate::backend::parser::RawTypeName::Record => {
-            return Err(ExecError::Parse(ParseError::UnsupportedType("record".into())));
+            return Err(ExecError::Parse(ParseError::UnsupportedType(
+                "record".into(),
+            )));
         }
         crate::backend::parser::RawTypeName::Named { name } => {
             return Err(ExecError::Parse(ParseError::UnsupportedType(name.clone())));
@@ -162,7 +164,7 @@ pub(super) fn validate_alter_table_add_column(
     let mut desc = column_desc(column.name.clone(), sql_type, true);
     desc.default_expr = column.default_expr.clone();
     if let Some(sql) = desc.default_expr.as_deref() {
-    desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+        desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
     }
     Ok(desc)
 }
