@@ -775,10 +775,10 @@ impl Session {
                 )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::CreateRole(ref create_stmt) => db.execute_create_role_stmt(client_id, create_stmt),
+            Statement::AlterRole(ref alter_stmt) => db.execute_alter_role_stmt(client_id, alter_stmt),
+            Statement::DropRole(ref drop_stmt) => db.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::CommentOnRole(_)
-            | Statement::CreateRole(_)
-            | Statement::AlterRole(_)
-            | Statement::DropRole(_)
             | Statement::SetSessionAuthorization(_)
             | Statement::ResetSessionAuthorization(_)
             | Statement::ReassignOwned(_) => Err(ExecError::Parse(
