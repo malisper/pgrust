@@ -4,9 +4,9 @@ use std::rc::Rc;
 use parking_lot::RwLock;
 
 use crate::backend::access::heap::heapam::{
-    HeapError, heap_delete_with_waiter, heap_fetch, heap_fetch_visible, heap_insert_mvcc_with_cid,
-    heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple, heap_scan_prepare_next_page,
-    heap_update_with_waiter,
+    HeapError, heap_delete_with_waiter, heap_fetch, heap_fetch_visible_with_txns,
+    heap_insert_mvcc_with_cid, heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple,
+    heap_scan_prepare_next_page, heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
     StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple, encoded_pointer_bytes,
@@ -392,11 +392,15 @@ fn collect_matching_rows_index(
         if !seen.insert(tid) {
             continue;
         }
-        let visible = {
-            let txns = ctx.txns.read();
-            heap_fetch_visible(&ctx.pool, ctx.client_id, rel, tid, &txns, &ctx.snapshot)?
-        };
-        let Some(tuple) = visible else {
+        let Some(tuple) = heap_fetch_visible_with_txns(
+            &ctx.pool,
+            ctx.client_id,
+            rel,
+            tid,
+            &ctx.txns,
+            &ctx.snapshot,
+        )?
+        else {
             continue;
         };
         let mut slot =

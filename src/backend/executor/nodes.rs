@@ -1,7 +1,7 @@
 use super::{AccumState, AggGroup, ExecError, ExecutorContext};
 use crate::backend::access::heap::heapam::{
-    heap_fetch_visible, heap_scan_begin_visible, heap_scan_end, heap_scan_page_next_tuple,
-    heap_scan_prepare_next_page,
+    heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end,
+    heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines;
@@ -227,17 +227,14 @@ impl PlanNode for IndexScanState {
                 .as_ref()
                 .and_then(|scan| scan.xs_heaptid)
                 .expect("index scan tuple must set heap tid");
-            let visible = {
-                let txns = ctx.txns.read();
-                heap_fetch_visible(
+                let visible = heap_fetch_visible_with_txns(
                     &ctx.pool,
                     ctx.client_id,
                     self.rel,
                     tid,
-                    &txns,
+                    &ctx.txns,
                     &ctx.snapshot,
-                )?
-            };
+                )?;
             let Some(tuple) = visible else {
                 continue;
             };

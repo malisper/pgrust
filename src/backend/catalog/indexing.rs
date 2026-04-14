@@ -268,12 +268,12 @@ pub fn probe_system_catalog_rows_visible(
         let Some(tid) = scan.xs_heaptid else {
             continue;
         };
-        let Some(tuple) = crate::backend::access::heap::heapam::heap_fetch_visible(
+        let Some(tuple) = crate::backend::access::heap::heapam::heap_fetch_visible_with_txns(
             pool,
             client_id,
             scan_ctx.heap_relation,
             tid,
-            &txns.read(),
+            txns,
             snapshot,
         )
         .map_err(|err| CatalogError::Io(format!("catalog heap fetch failed: {err:?}")))?

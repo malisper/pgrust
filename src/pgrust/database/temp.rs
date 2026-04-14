@@ -1,0 +1,337 @@
+use super::*;
+
+fn normalize_temp_lookup_name(table_name: &str) -> String {
+    table_name
+        .strip_prefix("pg_temp.")
+        .unwrap_or(table_name)
+        .to_ascii_lowercase()
+}
+
+impl Database {
+    #[cfg(test)]
+    pub(crate) fn temp_entry(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+    ) -> Option<RelCacheEntry> {
+        let normalized = normalize_temp_lookup_name(table_name);
+        self.temp_relations
+            .read()
+            .get(&client_id)
+            .and_then(|ns| ns.tables.get(&normalized).map(|entry| entry.entry.clone()))
+    }
+
+    pub(super) fn ensure_temp_namespace(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<TempNamespace, ExecError> {
+        if let Some(namespace) = self.owned_temp_namespace(client_id) {
+            return Ok(namespace);
+        }
+
+        let namespace = TempNamespace {
+            oid: Self::temp_namespace_oid(client_id),
+            name: Self::temp_namespace_name(client_id),
+            toast_oid: Self::temp_toast_namespace_oid(client_id),
+            toast_name: Self::temp_toast_namespace_name(client_id),
+            tables: BTreeMap::new(),
+            generation: 0,
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .create_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        let effect = self
+            .catalog
+            .write()
+            .create_namespace_mvcc(namespace.toast_oid, &namespace.toast_name, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        {
+            let mut namespaces = self.temp_relations.write();
+            namespaces.insert(client_id, namespace.clone());
+        }
+        temp_effects.push(TempMutationEffect::Create {
+            name: namespace.name.clone(),
+            entry: RelCacheEntry {
+                rel: RelFileLocator {
+                    spc_oid: 0,
+                    db_oid: 1,
+                    rel_number: crate::include::catalog::BootstrapCatalogKind::PgNamespace
+                        .relation_oid(),
+                },
+                relation_oid: namespace.oid,
+                namespace_oid: namespace.oid,
+                row_type_oid: 0,
+                reltoastrelid: 0,
+                relpersistence: 't',
+                relkind: 'n',
+                desc: crate::backend::executor::RelationDesc {
+                    columns: Vec::new(),
+                },
+                index: None,
+            },
+            on_commit: OnCommitAction::PreserveRows,
+            namespace_created: true,
+        });
+        self.invalidate_session_catalog_state(client_id);
+        Ok(namespace)
+    }
+
+    pub(super) fn create_temp_relation_in_transaction(
+        &self,
+        client_id: ClientId,
+        table_name: String,
+        desc: crate::backend::executor::RelationDesc,
+        on_commit: OnCommitAction,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<CreatedTempRelation, ExecError> {
+        let normalized = normalize_temp_lookup_name(&table_name);
+        let namespace =
+            self.ensure_temp_namespace(client_id, xid, cid, catalog_effects, temp_effects)?;
+        if namespace.tables.contains_key(&normalized) {
+            return Err(ExecError::Parse(ParseError::TableAlreadyExists(normalized)));
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let (created, effect) = self
+            .catalog
+            .write()
+            .create_table_mvcc_with_options(
+                format!("{}.{}", namespace.name, normalized),
+                desc,
+                namespace.oid,
+                Self::temp_db_oid(client_id),
+                't',
+                namespace.toast_oid,
+                &namespace.toast_name,
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        let rel_entry = RelCacheEntry {
+            rel: created.entry.rel,
+            relation_oid: created.entry.relation_oid,
+            namespace_oid: created.entry.namespace_oid,
+            row_type_oid: created.entry.row_type_oid,
+            reltoastrelid: created.entry.reltoastrelid,
+            relpersistence: created.entry.relpersistence,
+            relkind: created.entry.relkind,
+            desc: created.entry.desc.clone(),
+            index: None,
+        };
+        {
+            let mut namespaces = self.temp_relations.write();
+            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            namespace.tables.insert(
+                normalized.clone(),
+                TempCatalogEntry {
+                    entry: rel_entry.clone(),
+                    on_commit,
+                },
+            );
+            namespace.generation = namespace.generation.saturating_add(1);
+        }
+        temp_effects.push(TempMutationEffect::Create {
+            name: normalized,
+            entry: rel_entry.clone(),
+            on_commit,
+            namespace_created: false,
+        });
+        self.invalidate_session_catalog_state(client_id);
+        Ok(CreatedTempRelation {
+            entry: rel_entry,
+            toast: created.toast,
+        })
+    }
+
+    pub(crate) fn drop_temp_relation_in_transaction(
+        &self,
+        client_id: ClientId,
+        table_name: &str,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<RelCacheEntry, ExecError> {
+        let normalized = normalize_temp_lookup_name(table_name);
+        let removed = {
+            let mut namespaces = self.temp_relations.write();
+            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            let removed = namespace.tables.remove(&normalized).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized.clone()))
+            })?;
+            namespace.generation = namespace.generation.saturating_add(1);
+            removed
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .drop_relation_by_oid_mvcc(removed.entry.relation_oid, &ctx)
+            .map_err(map_catalog_error)?
+            .1;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        temp_effects.push(TempMutationEffect::Drop {
+            name: normalized,
+            entry: removed.entry.clone(),
+            on_commit: removed.on_commit,
+        });
+        self.invalidate_session_catalog_state(client_id);
+        Ok(removed.entry)
+    }
+
+    pub(crate) fn apply_temp_on_commit(&self, client_id: ClientId) -> Result<(), ExecError> {
+        let mut to_delete = Vec::new();
+        let mut to_drop = Vec::new();
+        {
+            let namespaces = self.temp_relations.read();
+            if let Some(namespace) = namespaces.get(&client_id) {
+                for (name, entry) in &namespace.tables {
+                    match entry.on_commit {
+                        OnCommitAction::PreserveRows => {}
+                        OnCommitAction::DeleteRows => to_delete.push(entry.entry.rel),
+                        OnCommitAction::Drop => to_drop.push(name.clone()),
+                    }
+                }
+            }
+        }
+
+        for rel in to_delete {
+            let _ = self.pool.invalidate_relation(rel);
+            self.pool
+                .with_storage_mut(|s| {
+                    s.smgr
+                        .truncate(rel, crate::backend::storage::smgr::ForkNumber::Main, 0)
+                })
+                .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
+        }
+
+        for name in to_drop {
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let mut catalog_effects = Vec::new();
+            let mut temp_effects = Vec::new();
+            let result = self.drop_temp_relation_in_transaction(
+                client_id,
+                &name,
+                xid,
+                0,
+                &mut catalog_effects,
+                &mut temp_effects,
+            );
+            let result = self.finish_txn(
+                client_id,
+                xid,
+                result.map(|_| StatementResult::AffectedRows(0)),
+                &catalog_effects,
+                &temp_effects,
+            );
+            guard.disarm();
+            let _ = result?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_client_temp_relations(&self, client_id: ClientId) {
+        let Some(namespace) = self.owned_temp_namespace(client_id) else {
+            return;
+        };
+        for name in namespace.tables.keys().cloned().collect::<Vec<_>>() {
+            let xid = self.txns.write().begin();
+            let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+            let mut catalog_effects = Vec::new();
+            let mut temp_effects = Vec::new();
+            let result = self.drop_temp_relation_in_transaction(
+                client_id,
+                &name,
+                xid,
+                0,
+                &mut catalog_effects,
+                &mut temp_effects,
+            );
+            let _ = self.finish_txn(
+                client_id,
+                xid,
+                result.map(|_| StatementResult::AffectedRows(0)),
+                &catalog_effects,
+                &temp_effects,
+            );
+            guard.disarm();
+        }
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid: 0,
+            client_id,
+            waiter: None,
+        };
+        let mut effects = Vec::new();
+        if let Ok(effect) =
+            self.catalog
+                .write()
+                .drop_namespace_mvcc(namespace.oid, &namespace.name, &ctx)
+        {
+            effects.push(effect);
+        }
+        if let Ok(effect) = self.catalog.write().drop_namespace_mvcc(
+            namespace.toast_oid,
+            &namespace.toast_name,
+            &ctx,
+        ) {
+            effects.push(effect);
+        }
+        if !effects.is_empty() {
+            let _ = self.finish_txn(
+                client_id,
+                xid,
+                Ok(StatementResult::AffectedRows(0)),
+                &effects,
+                &[],
+            );
+            guard.disarm();
+        }
+        self.temp_relations.write().remove(&client_id);
+        self.invalidate_session_catalog_state(client_id);
+    }
+}
