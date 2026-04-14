@@ -6,11 +6,15 @@ use super::expr_bit::{
     substring as eval_bit_substring,
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
-use super::expr_casts::{cast_value, soft_input_error_info};
+use super::expr_casts::{cast_value, cast_value_with_config, soft_input_error_info_with_config};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
-use super::expr_datetime::{current_date_value, current_time_value, current_timestamp_value};
+use super::expr_datetime::{
+    current_date_value, current_date_value_with_config, current_time_value,
+    current_time_value_with_config, current_timestamp_value,
+    current_timestamp_value_with_config, render_datetime_value_text_with_config,
+};
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_jsonpath_operator,
@@ -310,7 +314,7 @@ pub fn eval_expr(
                 index: *index,
             }),
         Expr::Const(value) => Ok(value.clone()),
-        Expr::Cast(inner, ty) => cast_value(eval_expr(inner, slot, ctx)?, *ty),
+        Expr::Cast(inner, ty) => cast_value_with_config(eval_expr(inner, slot, ctx)?, *ty, &ctx.datetime_config),
         Expr::Coalesce(left, right) => {
             let left = eval_expr(left, slot, ctx)?;
             if !matches!(left, Value::Null) {
@@ -377,7 +381,11 @@ pub fn eval_expr(
             let element_type = array_type.element_type();
             let mut values = Vec::with_capacity(elements.len());
             for expr in elements {
-                values.push(cast_value(eval_expr(expr, slot, ctx)?, element_type)?);
+                values.push(cast_value_with_config(
+                    eval_expr(expr, slot, ctx)?,
+                    element_type,
+                    &ctx.datetime_config,
+                )?);
             }
             Ok(Value::PgArray(ArrayValue::from_1d(values)))
         }
@@ -410,11 +418,27 @@ pub fn eval_expr(
             eval_array_subscript(value, subscripts, slot, ctx)
         }
         Expr::Random => Ok(Value::Float64(rand::random::<f64>())),
-        Expr::CurrentDate => Ok(current_date_value()),
-        Expr::CurrentTime { precision } => Ok(current_time_value(*precision, true)),
-        Expr::CurrentTimestamp { precision } => Ok(current_timestamp_value(*precision, true)),
-        Expr::LocalTime { precision } => Ok(current_time_value(*precision, false)),
-        Expr::LocalTimestamp { precision } => Ok(current_timestamp_value(*precision, false)),
+        Expr::CurrentDate => Ok(current_date_value_with_config(&ctx.datetime_config)),
+        Expr::CurrentTime { precision } => Ok(current_time_value_with_config(
+            &ctx.datetime_config,
+            *precision,
+            true,
+        )),
+        Expr::CurrentTimestamp { precision } => Ok(current_timestamp_value_with_config(
+            &ctx.datetime_config,
+            *precision,
+            true,
+        )),
+        Expr::LocalTime { precision } => Ok(current_time_value_with_config(
+            &ctx.datetime_config,
+            *precision,
+            false,
+        )),
+        Expr::LocalTimestamp { precision } => Ok(current_timestamp_value_with_config(
+            &ctx.datetime_config,
+            *precision,
+            false,
+        )),
     }
 }
 
@@ -1108,11 +1132,13 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp
-        | BuiltinScalarFunction::ClockTimestamp => Ok(current_timestamp_value(None, true)),
+        | BuiltinScalarFunction::ClockTimestamp => {
+            Ok(current_timestamp_value_with_config(&ctx.datetime_config, None, true))
+        }
         BuiltinScalarFunction::TimeOfDay => {
-            let value = current_timestamp_value(None, true);
+            let value = current_timestamp_value_with_config(&ctx.datetime_config, None, true);
             Ok(Value::Text(
-                super::render_datetime_value_text(&value)
+                render_datetime_value_text_with_config(&value, &ctx.datetime_config)
                     .unwrap_or_else(render_current_timestamp)
                     .into(),
             ))
@@ -1129,7 +1155,9 @@ fn eval_builtin_function(
                 left: values[1].clone(),
                 right: Value::Text("".into()),
             })?;
-            Ok(Value::Bool(soft_input_error_info(input, ty)?.is_none()))
+            Ok(Value::Bool(
+                soft_input_error_info_with_config(input, ty, &ctx.datetime_config)?.is_none(),
+            ))
         }
         BuiltinScalarFunction::PgInputErrorMessage
         | BuiltinScalarFunction::PgInputErrorDetail
@@ -1145,7 +1173,7 @@ fn eval_builtin_function(
                 left: values[1].clone(),
                 right: Value::Text("".into()),
             })?;
-            let info = soft_input_error_info(input, ty)?;
+            let info = soft_input_error_info_with_config(input, ty, &ctx.datetime_config)?;
             Ok(match (func, info) {
                 (_, None) => Value::Null,
                 (BuiltinScalarFunction::PgInputErrorMessage, Some(info)) => {

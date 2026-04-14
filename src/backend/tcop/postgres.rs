@@ -660,6 +660,7 @@ fn handle_query(
                                         FloatFormatOptions {
                                             extra_float_digits: state.session.extra_float_digits(),
                                             bytea_output: state.session.bytea_output(),
+                                            datetime_config: state.session.datetime_config().clone(),
                                         },
                                     )?;
                                     row_count += 1;
@@ -708,6 +709,7 @@ fn handle_query(
                     FloatFormatOptions {
                         extra_float_digits: state.session.extra_float_digits(),
                         bytea_output: state.session.bytea_output(),
+                        datetime_config: state.session.datetime_config().clone(),
                     },
                 )?;
             }
@@ -743,6 +745,7 @@ fn try_handle_psql_describe_query(
         FloatFormatOptions {
             extra_float_digits: state.session.extra_float_digits(),
             bytea_output: state.session.bytea_output(),
+            datetime_config: state.session.datetime_config().clone(),
         },
     )?;
     Ok(true)
@@ -1581,6 +1584,7 @@ fn execute_portal(
                     FloatFormatOptions {
                         extra_float_digits: session.extra_float_digits(),
                         bytea_output: session.bytea_output(),
+                        datetime_config: session.datetime_config().clone(),
                     },
                 )?;
             }
