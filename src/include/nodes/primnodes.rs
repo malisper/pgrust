@@ -521,6 +521,9 @@ pub struct BoolExpr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpExprKind {
+    UnaryPlus,
+    Negate,
+    BitNot,
     Add,
     Sub,
     BitAnd,
@@ -712,6 +715,83 @@ pub enum Expr {
 }
 
 impl Expr {
+    pub fn op(op: OpExprKind, opresulttype: SqlType, args: Vec<Expr>) -> Self {
+        Expr::Op(Box::new(OpExpr {
+            opno: 0,
+            opfuncid: 0,
+            op,
+            opresulttype,
+            args,
+        }))
+    }
+
+    pub fn unary_op(op: OpExprKind, opresulttype: SqlType, arg: Expr) -> Self {
+        Self::op(op, opresulttype, vec![arg])
+    }
+
+    pub fn binary_op(op: OpExprKind, opresulttype: SqlType, left: Expr, right: Expr) -> Self {
+        Self::op(op, opresulttype, vec![left, right])
+    }
+
+    pub fn bool_expr(boolop: BoolExprType, args: Vec<Expr>) -> Self {
+        Expr::Bool(Box::new(BoolExpr { boolop, args }))
+    }
+
+    pub fn and(left: Expr, right: Expr) -> Self {
+        Self::bool_expr(BoolExprType::And, vec![left, right])
+    }
+
+    pub fn or(left: Expr, right: Expr) -> Self {
+        Self::bool_expr(BoolExprType::Or, vec![left, right])
+    }
+
+    pub fn not(inner: Expr) -> Self {
+        Self::bool_expr(BoolExprType::Not, vec![inner])
+    }
+
+    pub fn func(
+        funcid: u32,
+        funcresulttype: Option<SqlType>,
+        funcvariadic: bool,
+        args: Vec<Expr>,
+    ) -> Self {
+        Expr::Func(Box::new(FuncExpr {
+            funcid,
+            funcresulttype,
+            funcvariadic,
+            args,
+        }))
+    }
+
+    pub fn builtin_func(
+        func: BuiltinScalarFunction,
+        funcresulttype: Option<SqlType>,
+        funcvariadic: bool,
+        args: Vec<Expr>,
+    ) -> Self {
+        let funcid = proc_oid_for_builtin_scalar_function(func).unwrap_or_else(|| {
+            panic!(
+                "builtin scalar function {:?} lacks pg_proc OID mapping",
+                func
+            )
+        });
+        Self::func(funcid, funcresulttype, funcvariadic, args)
+    }
+
+    pub fn scalar_array_op(
+        op: SubqueryComparisonOp,
+        use_or: bool,
+        left: Expr,
+        right: Expr,
+    ) -> Self {
+        Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            op,
+            use_or,
+            left: Box::new(left),
+            right: Box::new(right),
+        }))
+    }
+
     pub fn into_pg_semantic_shape(self) -> Self {
         match self {
             Expr::Var(_)

@@ -8,8 +8,24 @@ use crate::include::nodes::plannodes::PlannedStmt;
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
-            collect_rels_from_expr(&expr.clone().into_legacy_shape(), rels)
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_rels_from_expr(&saop.left, rels);
+            collect_rels_from_expr(&saop.right, rels);
         }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
