@@ -1,6 +1,7 @@
 use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::include::catalog::bootstrap_catalog_kinds;
+use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
     NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
@@ -243,7 +244,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let key_buffer = Vec::with_capacity(group_by.len());
             let trans_fns: Vec<fn(&mut AccumState, &[super::Value])> = accumulators
                 .iter()
-                .map(|a| AccumState::transition_fn(a.func, a.args.len(), a.distinct))
+                .map(|a| {
+                    let func = builtin_aggregate_function_for_proc_oid(a.aggfnoid)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "aggregate {:?} lacks builtin implementation mapping",
+                                a.aggfnoid
+                            )
+                        });
+                    AccumState::transition_fn(func, a.args.len(), a.distinct)
+                })
                 .collect();
             Box::new(AggregateState {
                 input: executor_start(*input),

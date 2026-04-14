@@ -9,6 +9,8 @@ use crate::include::catalog::{
     PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TSQUERY_TYPE_OID, VARBIT_TYPE_OID,
 };
+use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction};
+use std::sync::OnceLock;
 
 const VOID_TYPE_OID: u32 = 2278;
 const INTERNAL_TYPE_OID: u32 = 2281;
@@ -1152,6 +1154,421 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     ];
     rows.extend(geometry_proc_rows());
     rows
+}
+
+pub fn builtin_scalar_function_for_proc_oid(oid: u32) -> Option<BuiltinScalarFunction> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| row.oid == oid && row.prokind == 'f' && !row.proretset)
+        .and_then(|row| builtin_scalar_function_for_proc_row(&row))
+        .or_else(|| {
+            synthetic_scalar_proc_oids()
+                .iter()
+                .find_map(|(func, synthetic_oid)| (*synthetic_oid == oid).then_some(*func))
+        })
+}
+
+pub fn proc_oid_for_builtin_scalar_function(func: BuiltinScalarFunction) -> Option<u32> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| {
+            row.prokind == 'f'
+                && !row.proretset
+                && builtin_scalar_function_for_proc_row(row) == Some(func)
+        })
+        .map(|row| row.oid)
+        .or_else(|| {
+            synthetic_scalar_proc_oids()
+                .iter()
+                .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
+        })
+}
+
+pub fn builtin_aggregate_function_for_proc_oid(oid: u32) -> Option<AggFunc> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| row.oid == oid && row.prokind == 'a')
+        .and_then(|row| aggregate_func_for_proname(&row.proname))
+        .or_else(|| {
+            synthetic_aggregate_proc_oids()
+                .iter()
+                .find_map(|(func, synthetic_oid)| (*synthetic_oid == oid).then_some(*func))
+        })
+}
+
+pub fn proc_oid_for_builtin_aggregate_function(func: AggFunc) -> Option<u32> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| row.prokind == 'a' && aggregate_func_for_proname(&row.proname) == Some(func))
+        .map(|row| row.oid)
+        .or_else(|| {
+            synthetic_aggregate_proc_oids()
+                .iter()
+                .find_map(|(candidate, oid)| (*candidate == func).then_some(*oid))
+        })
+}
+
+fn builtin_scalar_function_for_proc_row(row: &PgProcRow) -> Option<BuiltinScalarFunction> {
+    builtin_scalar_function_for_proc_src(&row.prosrc)
+        .or_else(|| builtin_scalar_function_for_proc_src(&row.proname))
+}
+
+fn builtin_scalar_function_for_proc_src(proc_src: &str) -> Option<BuiltinScalarFunction> {
+    legacy_scalar_function_entries()
+        .iter()
+        .find_map(|(name, func)| proc_src.eq_ignore_ascii_case(name).then_some(*func))
+}
+
+fn synthetic_scalar_proc_oids() -> &'static Vec<(BuiltinScalarFunction, u32)> {
+    static OIDS: OnceLock<Vec<(BuiltinScalarFunction, u32)>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        // :HACK: Semantic nodes are OID-first now, but pgrust's bootstrap
+        // pg_proc still does not catalog every builtin that the legacy binder
+        // can emit. Use stable synthetic OIDs until those rows move into
+        // bootstrap_pg_proc_rows().
+        const BASE: u32 = 900_000;
+        let mut by_func = Vec::new();
+        for (_, func) in legacy_scalar_function_entries() {
+            if by_func.iter().all(|(existing, _)| existing != func) {
+                let oid = BASE + by_func.len() as u32;
+                by_func.push((*func, oid));
+            }
+        }
+        by_func
+    })
+}
+
+fn synthetic_aggregate_proc_oids() -> &'static Vec<(AggFunc, u32)> {
+    static OIDS: OnceLock<Vec<(AggFunc, u32)>> = OnceLock::new();
+    OIDS.get_or_init(|| {
+        // :HACK: See synthetic_scalar_proc_oids().
+        const BASE: u32 = 910_000;
+        [
+            AggFunc::Count,
+            AggFunc::Sum,
+            AggFunc::Avg,
+            AggFunc::Variance,
+            AggFunc::Stddev,
+            AggFunc::Min,
+            AggFunc::Max,
+            AggFunc::ArrayAgg,
+            AggFunc::JsonAgg,
+            AggFunc::JsonbAgg,
+            AggFunc::JsonObjectAgg,
+            AggFunc::JsonbObjectAgg,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, func)| (func, BASE + index as u32))
+        .collect()
+    })
+}
+
+fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
+    match name.to_ascii_lowercase().as_str() {
+        "count" => Some(AggFunc::Count),
+        "sum" => Some(AggFunc::Sum),
+        "avg" => Some(AggFunc::Avg),
+        "variance" => Some(AggFunc::Variance),
+        "stddev" => Some(AggFunc::Stddev),
+        "min" => Some(AggFunc::Min),
+        "max" => Some(AggFunc::Max),
+        "array_agg" => Some(AggFunc::ArrayAgg),
+        "json_agg" => Some(AggFunc::JsonAgg),
+        "jsonb_agg" => Some(AggFunc::JsonbAgg),
+        "json_object_agg" => Some(AggFunc::JsonObjectAgg),
+        "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        _ => None,
+    }
+}
+
+fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFunction)] {
+    &[
+        ("random", BuiltinScalarFunction::Random),
+        ("now", BuiltinScalarFunction::Now),
+        (
+            "transaction_timestamp",
+            BuiltinScalarFunction::TransactionTimestamp,
+        ),
+        (
+            "statement_timestamp",
+            BuiltinScalarFunction::StatementTimestamp,
+        ),
+        ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
+        ("timeofday", BuiltinScalarFunction::TimeOfDay),
+        (
+            "getdatabaseencoding",
+            BuiltinScalarFunction::GetDatabaseEncoding,
+        ),
+        ("to_json", BuiltinScalarFunction::ToJson),
+        ("to_jsonb", BuiltinScalarFunction::ToJsonb),
+        ("to_tsvector", BuiltinScalarFunction::ToTsVector),
+        ("to_tsquery", BuiltinScalarFunction::ToTsQuery),
+        ("plainto_tsquery", BuiltinScalarFunction::PlainToTsQuery),
+        ("phraseto_tsquery", BuiltinScalarFunction::PhraseToTsQuery),
+        (
+            "websearch_to_tsquery",
+            BuiltinScalarFunction::WebSearchToTsQuery,
+        ),
+        ("ts_lexize", BuiltinScalarFunction::TsLexize),
+        ("array_to_json", BuiltinScalarFunction::ArrayToJson),
+        ("json_build_array", BuiltinScalarFunction::JsonBuildArray),
+        ("json_build_object", BuiltinScalarFunction::JsonBuildObject),
+        ("json_object", BuiltinScalarFunction::JsonObject),
+        ("json_strip_nulls", BuiltinScalarFunction::JsonStripNulls),
+        ("json_typeof", BuiltinScalarFunction::JsonTypeof),
+        ("json_array_length", BuiltinScalarFunction::JsonArrayLength),
+        ("json_extract_path", BuiltinScalarFunction::JsonExtractPath),
+        (
+            "json_extract_path_text",
+            BuiltinScalarFunction::JsonExtractPathText,
+        ),
+        ("jsonb_typeof", BuiltinScalarFunction::JsonbTypeof),
+        (
+            "jsonb_array_length",
+            BuiltinScalarFunction::JsonbArrayLength,
+        ),
+        (
+            "jsonb_extract_path",
+            BuiltinScalarFunction::JsonbExtractPath,
+        ),
+        (
+            "jsonb_extract_path_text",
+            BuiltinScalarFunction::JsonbExtractPathText,
+        ),
+        ("jsonb_object", BuiltinScalarFunction::JsonbObject),
+        ("jsonb_strip_nulls", BuiltinScalarFunction::JsonbStripNulls),
+        ("jsonb_pretty", BuiltinScalarFunction::JsonbPretty),
+        ("jsonb_build_array", BuiltinScalarFunction::JsonbBuildArray),
+        ("jsonb_build_object", BuiltinScalarFunction::JsonbBuildObject),
+        ("jsonb_delete", BuiltinScalarFunction::JsonbDelete),
+        ("jsonb_delete_path", BuiltinScalarFunction::JsonbDeletePath),
+        ("jsonb_set", BuiltinScalarFunction::JsonbSet),
+        ("jsonb_set_lax", BuiltinScalarFunction::JsonbSetLax),
+        ("jsonb_insert", BuiltinScalarFunction::JsonbInsert),
+        ("jsonb_path_exists", BuiltinScalarFunction::JsonbPathExists),
+        ("jsonb_path_match", BuiltinScalarFunction::JsonbPathMatch),
+        (
+            "jsonb_path_query_array",
+            BuiltinScalarFunction::JsonbPathQueryArray,
+        ),
+        (
+            "jsonb_path_query_first",
+            BuiltinScalarFunction::JsonbPathQueryFirst,
+        ),
+        ("btrim", BuiltinScalarFunction::BTrim),
+        ("ltrim", BuiltinScalarFunction::LTrim),
+        ("rtrim", BuiltinScalarFunction::RTrim),
+        ("regexp_match", BuiltinScalarFunction::RegexpMatch),
+        ("regexp_like", BuiltinScalarFunction::RegexpLike),
+        ("regexp_replace", BuiltinScalarFunction::RegexpReplace),
+        ("regexp_count", BuiltinScalarFunction::RegexpCount),
+        ("regexp_instr", BuiltinScalarFunction::RegexpInstr),
+        ("regexp_substr", BuiltinScalarFunction::RegexpSubstr),
+        (
+            "regexp_split_to_array",
+            BuiltinScalarFunction::RegexpSplitToArray,
+        ),
+        ("substring_similar", BuiltinScalarFunction::SimilarSubstring),
+        ("initcap", BuiltinScalarFunction::Initcap),
+        ("concat", BuiltinScalarFunction::Concat),
+        ("concat_ws", BuiltinScalarFunction::ConcatWs),
+        ("format", BuiltinScalarFunction::Format),
+        ("left", BuiltinScalarFunction::Left),
+        ("right", BuiltinScalarFunction::Right),
+        ("lpad", BuiltinScalarFunction::LPad),
+        ("rpad", BuiltinScalarFunction::RPad),
+        ("repeat", BuiltinScalarFunction::Repeat),
+        ("length", BuiltinScalarFunction::Length),
+        ("array_ndims", BuiltinScalarFunction::ArrayNdims),
+        ("array_dims", BuiltinScalarFunction::ArrayDims),
+        ("array_lower", BuiltinScalarFunction::ArrayLower),
+        ("array_fill", BuiltinScalarFunction::ArrayFill),
+        ("string_to_array", BuiltinScalarFunction::StringToArray),
+        ("array_to_string", BuiltinScalarFunction::ArrayToString),
+        ("array_length", BuiltinScalarFunction::ArrayLength),
+        ("cardinality", BuiltinScalarFunction::Cardinality),
+        ("array_position", BuiltinScalarFunction::ArrayPosition),
+        ("array_positions", BuiltinScalarFunction::ArrayPositions),
+        ("array_remove", BuiltinScalarFunction::ArrayRemove),
+        ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("array_sort", BuiltinScalarFunction::ArraySort),
+        ("lower", BuiltinScalarFunction::Lower),
+        ("unistr", BuiltinScalarFunction::Unistr),
+        ("strpos", BuiltinScalarFunction::Strpos),
+        ("position", BuiltinScalarFunction::Position),
+        ("substring", BuiltinScalarFunction::Substring),
+        ("substr", BuiltinScalarFunction::Substring),
+        ("similar_substring", BuiltinScalarFunction::SimilarSubstring),
+        ("overlay", BuiltinScalarFunction::Overlay),
+        ("replace", BuiltinScalarFunction::Replace),
+        ("split_part", BuiltinScalarFunction::SplitPart),
+        ("translate", BuiltinScalarFunction::Translate),
+        ("ascii", BuiltinScalarFunction::Ascii),
+        ("chr", BuiltinScalarFunction::Chr),
+        ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
+        ("bpchar_to_text", BuiltinScalarFunction::BpcharToText),
+        ("bpchartotext", BuiltinScalarFunction::BpcharToText),
+        ("trim_scale", BuiltinScalarFunction::TrimScale),
+        ("scale", BuiltinScalarFunction::Scale),
+        ("min_scale", BuiltinScalarFunction::MinScale),
+        ("numeric_inc", BuiltinScalarFunction::NumericInc),
+        ("factorial", BuiltinScalarFunction::Factorial),
+        ("pg_lsn", BuiltinScalarFunction::PgLsn),
+        ("div", BuiltinScalarFunction::Div),
+        ("mod", BuiltinScalarFunction::Mod),
+        ("width_bucket", BuiltinScalarFunction::WidthBucket),
+        ("get_bit", BuiltinScalarFunction::GetBit),
+        ("set_bit", BuiltinScalarFunction::SetBit),
+        ("bit_count", BuiltinScalarFunction::BitCount),
+        ("get_byte", BuiltinScalarFunction::GetByte),
+        ("set_byte", BuiltinScalarFunction::SetByte),
+        ("convert_from", BuiltinScalarFunction::ConvertFrom),
+        ("md5", BuiltinScalarFunction::Md5),
+        ("reverse", BuiltinScalarFunction::Reverse),
+        ("encode", BuiltinScalarFunction::Encode),
+        ("decode", BuiltinScalarFunction::Decode),
+        ("sha224", BuiltinScalarFunction::Sha224),
+        ("sha256", BuiltinScalarFunction::Sha256),
+        ("sha384", BuiltinScalarFunction::Sha384),
+        ("sha512", BuiltinScalarFunction::Sha512),
+        ("crc32", BuiltinScalarFunction::Crc32),
+        ("crc32c", BuiltinScalarFunction::Crc32c),
+        ("to_char", BuiltinScalarFunction::ToChar),
+        ("to_number", BuiltinScalarFunction::ToNumber),
+        ("abs", BuiltinScalarFunction::Abs),
+        ("log", BuiltinScalarFunction::Log),
+        ("log10", BuiltinScalarFunction::Log10),
+        ("gcd", BuiltinScalarFunction::Gcd),
+        ("lcm", BuiltinScalarFunction::Lcm),
+        ("trunc", BuiltinScalarFunction::Trunc),
+        ("round", BuiltinScalarFunction::Round),
+        ("ceil", BuiltinScalarFunction::Ceil),
+        ("ceiling", BuiltinScalarFunction::Ceiling),
+        ("floor", BuiltinScalarFunction::Floor),
+        ("sign", BuiltinScalarFunction::Sign),
+        ("sqrt", BuiltinScalarFunction::Sqrt),
+        ("cbrt", BuiltinScalarFunction::Cbrt),
+        ("power", BuiltinScalarFunction::Power),
+        ("exp", BuiltinScalarFunction::Exp),
+        ("ln", BuiltinScalarFunction::Ln),
+        ("sinh", BuiltinScalarFunction::Sinh),
+        ("cosh", BuiltinScalarFunction::Cosh),
+        ("tanh", BuiltinScalarFunction::Tanh),
+        ("asinh", BuiltinScalarFunction::Asinh),
+        ("acosh", BuiltinScalarFunction::Acosh),
+        ("atanh", BuiltinScalarFunction::Atanh),
+        ("sind", BuiltinScalarFunction::Sind),
+        ("cosd", BuiltinScalarFunction::Cosd),
+        ("tand", BuiltinScalarFunction::Tand),
+        ("cotd", BuiltinScalarFunction::Cotd),
+        ("asind", BuiltinScalarFunction::Asind),
+        ("acosd", BuiltinScalarFunction::Acosd),
+        ("atand", BuiltinScalarFunction::Atand),
+        ("atan2d", BuiltinScalarFunction::Atan2d),
+        ("float4send", BuiltinScalarFunction::Float4Send),
+        ("float8send", BuiltinScalarFunction::Float8Send),
+        ("erf", BuiltinScalarFunction::Erf),
+        ("erfc", BuiltinScalarFunction::Erfc),
+        ("gamma", BuiltinScalarFunction::Gamma),
+        ("lgamma", BuiltinScalarFunction::Lgamma),
+        ("array_fill", BuiltinScalarFunction::ArrayFill),
+        ("array_length", BuiltinScalarFunction::ArrayLength),
+        ("array_lower", BuiltinScalarFunction::ArrayLower),
+        ("cardinality", BuiltinScalarFunction::Cardinality),
+        ("array_ndims", BuiltinScalarFunction::ArrayNdims),
+        ("array_dims", BuiltinScalarFunction::ArrayDims),
+        ("array_position", BuiltinScalarFunction::ArrayPosition),
+        ("array_positions", BuiltinScalarFunction::ArrayPositions),
+        ("array_remove", BuiltinScalarFunction::ArrayRemove),
+        ("array_replace", BuiltinScalarFunction::ArrayReplace),
+        ("array_sort", BuiltinScalarFunction::ArraySort),
+        ("string_to_array", BuiltinScalarFunction::StringToArray),
+        ("array_to_string", BuiltinScalarFunction::ArrayToString),
+        ("booleq", BuiltinScalarFunction::BoolEq),
+        ("boolne", BuiltinScalarFunction::BoolNe),
+        ("tsmatch", BuiltinScalarFunction::TsMatch),
+        ("tsquery_and", BuiltinScalarFunction::TsQueryAnd),
+        ("tsquery_or", BuiltinScalarFunction::TsQueryOr),
+        ("tsquery_not", BuiltinScalarFunction::TsQueryNot),
+        ("tsvector_concat", BuiltinScalarFunction::TsVectorConcat),
+        ("point", BuiltinScalarFunction::GeoPoint),
+        ("box", BuiltinScalarFunction::GeoBox),
+        ("line", BuiltinScalarFunction::GeoLine),
+        ("lseg", BuiltinScalarFunction::GeoLseg),
+        ("path", BuiltinScalarFunction::GeoPath),
+        ("polygon", BuiltinScalarFunction::GeoPolygon),
+        ("circle", BuiltinScalarFunction::GeoCircle),
+        ("area", BuiltinScalarFunction::GeoArea),
+        ("center", BuiltinScalarFunction::GeoCenter),
+        ("poly_center", BuiltinScalarFunction::GeoPolyCenter),
+        ("bound_box", BuiltinScalarFunction::GeoBoundBox),
+        ("diagonal", BuiltinScalarFunction::GeoDiagonal),
+        ("radius", BuiltinScalarFunction::GeoRadius),
+        ("diameter", BuiltinScalarFunction::GeoDiameter),
+        ("npoints", BuiltinScalarFunction::GeoNpoints),
+        ("pclose", BuiltinScalarFunction::GeoPclose),
+        ("popen", BuiltinScalarFunction::GeoPopen),
+        ("isopen", BuiltinScalarFunction::GeoIsOpen),
+        ("isclosed", BuiltinScalarFunction::GeoIsClosed),
+        ("slope", BuiltinScalarFunction::GeoSlope),
+        ("isvertical", BuiltinScalarFunction::GeoIsVertical),
+        ("ishorizontal", BuiltinScalarFunction::GeoIsHorizontal),
+        ("height", BuiltinScalarFunction::GeoHeight),
+        ("width", BuiltinScalarFunction::GeoWidth),
+        ("geoeq", BuiltinScalarFunction::GeoEq),
+        ("geone", BuiltinScalarFunction::GeoNe),
+        ("geolt", BuiltinScalarFunction::GeoLt),
+        ("geole", BuiltinScalarFunction::GeoLe),
+        ("geogt", BuiltinScalarFunction::GeoGt),
+        ("geoge", BuiltinScalarFunction::GeoGe),
+        ("same", BuiltinScalarFunction::GeoSame),
+        ("distance", BuiltinScalarFunction::GeoDistance),
+        ("close_pt", BuiltinScalarFunction::GeoClosestPoint),
+        ("interpt", BuiltinScalarFunction::GeoIntersection),
+        ("intersects", BuiltinScalarFunction::GeoIntersects),
+        ("parallel", BuiltinScalarFunction::GeoParallel),
+        ("perpendicular", BuiltinScalarFunction::GeoPerpendicular),
+        ("contains", BuiltinScalarFunction::GeoContains),
+        ("contained", BuiltinScalarFunction::GeoContainedBy),
+        ("overlap", BuiltinScalarFunction::GeoOverlap),
+        ("left", BuiltinScalarFunction::GeoLeft),
+        ("overleft", BuiltinScalarFunction::GeoOverLeft),
+        ("right", BuiltinScalarFunction::GeoRight),
+        ("overright", BuiltinScalarFunction::GeoOverRight),
+        ("below", BuiltinScalarFunction::GeoBelow),
+        ("overbelow", BuiltinScalarFunction::GeoOverBelow),
+        ("above", BuiltinScalarFunction::GeoAbove),
+        ("overabove", BuiltinScalarFunction::GeoOverAbove),
+        ("geo_add", BuiltinScalarFunction::GeoAdd),
+        ("geo_sub", BuiltinScalarFunction::GeoSub),
+        ("geo_mul", BuiltinScalarFunction::GeoMul),
+        ("geo_div", BuiltinScalarFunction::GeoDiv),
+        ("pointx", BuiltinScalarFunction::GeoPointX),
+        ("pointy", BuiltinScalarFunction::GeoPointY),
+        (
+            "bitcast_integer_to_float4",
+            BuiltinScalarFunction::BitcastIntegerToFloat4,
+        ),
+        (
+            "bitcast_bigint_to_float8",
+            BuiltinScalarFunction::BitcastBigintToFloat8,
+        ),
+        ("pg_input_is_valid", BuiltinScalarFunction::PgInputIsValid),
+        (
+            "pg_input_error_message",
+            BuiltinScalarFunction::PgInputErrorMessage,
+        ),
+        (
+            "pg_input_error_detail",
+            BuiltinScalarFunction::PgInputErrorDetail,
+        ),
+        ("pg_input_error_hint", BuiltinScalarFunction::PgInputErrorHint),
+        (
+            "pg_input_error_sqlstate",
+            BuiltinScalarFunction::PgInputErrorSqlState,
+        ),
+    ]
 }
 
 fn geometry_proc_rows() -> Vec<PgProcRow> {
@@ -3716,6 +4133,25 @@ mod tests {
                 "proargtypes",
                 "prosrc",
             ]
+        );
+    }
+
+    #[test]
+    fn scalar_proc_oid_helpers_cover_real_and_synthetic_builtins() {
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(6202),
+            Some(BuiltinScalarFunction::Lower)
+        );
+        assert_eq!(
+            proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::Lower),
+            Some(6202)
+        );
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(
+                proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::ArrayToJson)
+                    .expect("synthetic oid")
+            ),
+            Some(BuiltinScalarFunction::ArrayToJson)
         );
     }
 }

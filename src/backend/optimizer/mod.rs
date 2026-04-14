@@ -376,7 +376,6 @@ fn finalize_agg_accum(accum: AggAccum, catalog: &dyn CatalogLookup) -> AggAccum 
     let AggAccum {
         aggfnoid,
         agg_variadic,
-        func,
         args,
         distinct,
         sql_type,
@@ -384,7 +383,6 @@ fn finalize_agg_accum(accum: AggAccum, catalog: &dyn CatalogLookup) -> AggAccum 
     AggAccum {
         aggfnoid,
         agg_variadic,
-        func,
         args: args
             .into_iter()
             .map(|arg| finalize_expr_subqueries(arg, catalog))

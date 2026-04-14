@@ -10,6 +10,7 @@ use crate::backend::executor::srf::{
     eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
+use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, FilterState, FunctionScanState, IndexScanState, LimitState,
@@ -781,7 +782,16 @@ impl PlanNode for AggregateState {
                         let accum_states = self
                             .accumulators
                             .iter()
-                            .map(|a| AccumState::new(a.func, a.distinct, a.sql_type))
+                            .map(|a| {
+                                let func = builtin_aggregate_function_for_proc_oid(a.aggfnoid)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "aggregate {:?} lacks builtin implementation mapping",
+                                            a.aggfnoid
+                                        )
+                                    });
+                                AccumState::new(func, a.distinct, a.sql_type)
+                            })
                             .collect();
                         groups.push(AggGroup {
                             key_values: self.key_buffer.clone(),
@@ -805,7 +815,16 @@ impl PlanNode for AggregateState {
                 let accum_states = self
                     .accumulators
                     .iter()
-                    .map(|a| AccumState::new(a.func, a.distinct, a.sql_type))
+                    .map(|a| {
+                        let func = builtin_aggregate_function_for_proc_oid(a.aggfnoid)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "aggregate {:?} lacks builtin implementation mapping",
+                                    a.aggfnoid
+                                )
+                            });
+                        AccumState::new(func, a.distinct, a.sql_type)
+                    })
                     .collect();
                 groups.push(AggGroup {
                     key_values: Vec::new(),

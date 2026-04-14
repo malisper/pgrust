@@ -21,6 +21,7 @@ use crate::backend::optimizer::planner;
 use crate::include::catalog::{
     PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
     bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    proc_oid_for_builtin_aggregate_function,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -836,12 +837,15 @@ fn bind_select_query_with_outer(
                 let resolved =
                     resolve_function_call(catalog, func.name(), &arg_types, *func_variadic).ok();
                 Ok(AggAccum {
-                    aggfnoid: resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0),
+                    aggfnoid: resolved
+                        .as_ref()
+                        .map(|call| call.proc_oid)
+                        .or_else(|| proc_oid_for_builtin_aggregate_function(*func))
+                        .unwrap_or(0),
                     agg_variadic: resolved
                         .as_ref()
                         .map(|call| call.func_variadic)
                         .unwrap_or(*func_variadic),
-                    func: *func,
                     args: arg_values
                         .iter()
                         .map(|e| {
