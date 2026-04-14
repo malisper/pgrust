@@ -15,16 +15,17 @@ mod views;
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::executor::{
-    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, Plan,
-    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
-    Value, cast_value,
-};
-use crate::backend::optimizer::optimize_bound_query;
+use crate::backend::optimizer::planner;
 use crate::include::catalog::{
     PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
     bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
 };
+use crate::include::nodes::plannodes::{Plan, PlannedStmt};
+use crate::include::nodes::primnodes::{
+    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry,
+    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
+};
+use crate::backend::executor::{Value, cast_value};
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
@@ -580,15 +581,29 @@ pub fn bind_create_table(
         })
 }
 
-pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
+pub fn pg_plan_query(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<PlannedStmt, ParseError> {
     build_plan_with_outer(stmt, catalog, &[], None, &[], &[])
+}
+
+pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
+    Ok(pg_plan_query(stmt, catalog)?.plan_tree)
+}
+
+pub fn pg_plan_values_query(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[])
 }
 
 pub fn build_values_plan(
     stmt: &ValuesStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<Plan, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[])
+    Ok(pg_plan_values_query(stmt, catalog)?.plan_tree)
 }
 
 fn bind_values_query_with_outer(
@@ -663,7 +678,7 @@ fn build_values_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<Plan, ParseError> {
+) -> Result<PlannedStmt, ParseError> {
     let (plan, _) = bind_values_query_with_outer(
         stmt,
         catalog,
@@ -672,7 +687,7 @@ fn build_values_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    Ok(optimize_bound_query(plan, catalog))
+    Ok(planner(plan, catalog))
 }
 
 fn bind_select_query_with_outer(
@@ -1072,7 +1087,7 @@ fn build_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<Plan, ParseError> {
+) -> Result<PlannedStmt, ParseError> {
     let (plan, _) = bind_select_query_with_outer(
         stmt,
         catalog,
@@ -1081,5 +1096,5 @@ fn build_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    Ok(optimize_bound_query(plan, catalog))
+    Ok(planner(plan, catalog))
 }

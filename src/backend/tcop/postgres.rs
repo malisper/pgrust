@@ -1619,9 +1619,9 @@ fn describe_sql(
     let catalog = session.catalog_lookup(db);
     let sql = rewrite_regression_sql(&substitute_params(sql, params, &catalog)).into_owned();
     match parse_statement(&sql).ok()? {
-        Statement::Select(stmt) => crate::backend::parser::build_plan(&stmt, &catalog)
+        Statement::Select(stmt) => crate::backend::parser::pg_plan_query(&stmt, &catalog)
             .ok()
-            .map(|plan| plan.columns()),
+            .map(|planned_stmt| planned_stmt.columns()),
         Statement::Explain(_) => Some(vec![QueryColumn::text("QUERY PLAN")]),
         _ => None,
     }

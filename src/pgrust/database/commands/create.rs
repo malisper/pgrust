@@ -196,7 +196,7 @@ impl Database {
         let view_name =
             self.normalize_create_view_stmt_with_search_path(create_stmt, configured_search_path)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let plan = build_plan(&create_stmt.query, &catalog)?;
+        let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
         let desc = crate::backend::executor::RelationDesc {
             columns: plan
                 .column_names()
@@ -249,7 +249,7 @@ impl Database {
         let (table_name, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let plan = build_plan(&create_stmt.query, &catalog)?;
+        let plan = crate::backend::parser::pg_plan_query(&create_stmt.query, &catalog)?.plan_tree;
         let mut rels = std::collections::BTreeSet::new();
         collect_rels_from_plan(&plan, &mut rels);
 

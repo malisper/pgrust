@@ -68,16 +68,18 @@ impl Database {
                     let mut rels = std::collections::BTreeSet::new();
                     match &stmt {
                         Statement::Select(select) => {
-                            let plan =
-                                crate::backend::parser::build_plan(select, &visible_catalog)?;
-                            collect_rels_from_plan(&plan, &mut rels);
+                            let planned_stmt =
+                                crate::backend::parser::pg_plan_query(select, &visible_catalog)?;
+                            collect_rels_from_plan(&planned_stmt.plan_tree, &mut rels);
                         }
                         Statement::Values(_) => {}
                         Statement::Explain(explain) => {
                             if let Statement::Select(select) = explain.statement.as_ref() {
-                                let plan =
-                                    crate::backend::parser::build_plan(select, &visible_catalog)?;
-                                collect_rels_from_plan(&plan, &mut rels);
+                                let planned_stmt = crate::backend::parser::pg_plan_query(
+                                    select,
+                                    &visible_catalog,
+                                )?;
+                                collect_rels_from_plan(&planned_stmt.plan_tree, &mut rels);
                             }
                         }
                         _ => unreachable!(),
@@ -320,7 +322,8 @@ impl Database {
         let (plan, rels) = {
             let visible_catalog =
                 self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-            let plan = build_plan(select_stmt, &visible_catalog)?;
+            let plan = crate::backend::parser::pg_plan_query(select_stmt, &visible_catalog)?
+                .plan_tree;
             let mut rels = std::collections::BTreeSet::new();
             collect_rels_from_plan(&plan, &mut rels);
             (plan, rels.into_iter().collect::<Vec<_>>())
