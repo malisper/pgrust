@@ -1550,7 +1550,7 @@ fn cross_join_returns_cartesian_product() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
-        "select people.name, pets.name from people, pets",
+        "select people.name, pets.name from people, pets order by pets.name, people.name",
         catalog_with_pets(),
     )
     .unwrap()
@@ -5793,7 +5793,7 @@ fn left_join_on_emits_null_extended_rows() {
 }
 
 #[test]
-fn cross_join_uses_right_side_as_outer_loop_for_output_order() {
+fn cross_join_limit_respects_order_by_after_reordering() {
     let base = temp_dir("cross_join_row_order");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
     seed_people_and_pets(&base, &mut txns);
@@ -5803,7 +5803,7 @@ fn cross_join_uses_right_side_as_outer_loop_for_output_order() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
-            "select people.id, pets.id from people, pets limit 6",
+            "select people.id, pets.id from people, pets order by pets.id, people.id limit 6",
             catalog_with_pets(),
         )
         .unwrap(),

@@ -2286,6 +2286,26 @@ fn build_plan_with_aggregate() {
 }
 
 #[test]
+fn build_plan_with_group_by_order_by_wraps_aggregate_then_sort() {
+    let stmt = parse_select("select name, count(*) from people group by name order by name").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            assert_eq!(targets.len(), 2);
+            match *input {
+                Plan::OrderBy { input, items, .. } => {
+                    assert_eq!(items.len(), 1);
+                    assert!(matches!(items[0].expr, Expr::Column(0)));
+                    assert!(matches!(*input, Plan::Aggregate { .. }));
+                }
+                other => panic!("expected order by above aggregate, got {:?}", other),
+            }
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
 fn analyze_grouped_query_keeps_semantic_group_refs() {
     let stmt = parse_select(
         "select name, count(*) from people group by name having name is not null order by name",
