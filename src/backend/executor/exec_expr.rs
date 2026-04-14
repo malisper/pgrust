@@ -7,7 +7,10 @@ use super::expr_bit::{
 };
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::expr_casts::{cast_value, cast_value_with_config, soft_input_error_info_with_config};
-use super::expr_date::eval_date_part_function;
+use super::expr_date::{
+    eval_date_part_function, eval_date_trunc_function, eval_isfinite_function,
+    eval_make_date_function,
+};
 pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
@@ -1201,6 +1204,9 @@ fn eval_builtin_function(
             ))
         }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
+        BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values),
+        BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
+        BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgInputIsValid => {
             let input = values[0].as_text().ok_or_else(|| ExecError::TypeMismatch {
