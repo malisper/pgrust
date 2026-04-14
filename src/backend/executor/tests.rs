@@ -2482,6 +2482,37 @@ fn oid_comparisons_bind_and_execute_with_unsigned_semantics() {
 }
 
 #[test]
+fn sub_values_supports_date_difference() {
+    use crate::include::nodes::datetime::DateADT;
+
+    assert_eq!(
+        crate::backend::executor::expr_ops::sub_values(
+            Value::Date(DateADT(10)),
+            Value::Date(DateADT(3))
+        )
+        .unwrap(),
+        Value::Int32(7)
+    );
+}
+
+#[test]
+fn select_date_subtraction_returns_day_count() {
+    let base = temp_dir("select_date_subtraction");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date '2000-01-02' - date '2000-01-01'",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1)]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_supports_oidvector_tokens() {
     let valid = expr_casts::soft_input_error_info(" 1 2  4 ", "oidvector").unwrap();
     assert!(valid.is_none());
