@@ -1187,6 +1187,10 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
 fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
+        Rule::named_table_constraint => Err(ParseError::UnexpectedToken {
+            expected: "unnamed PRIMARY KEY or UNIQUE table constraint",
+            actual: inner.as_str().to_string(),
+        }),
         Rule::primary_key_table_constraint => Ok(TableConstraint::PrimaryKey {
             columns: inner
                 .into_inner()
