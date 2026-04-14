@@ -39,9 +39,9 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::TransactionWaiter;
 use crate::backend::storage::smgr::{MdStorageManager, RelFileLocator};
-use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
+use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgDependRow,
     PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow, bootstrap_catalog_kinds,
@@ -874,6 +874,47 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_table_alter_column_type_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        new_column: crate::backend::executor::ColumnDesc,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (name, old_entry, new_entry) =
+            catalog.alter_table_alter_column_type(relation_oid, column_name, new_column)?;
+        self.persist_control_state(&catalog)?;
+
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgAttribute,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        if old_entry
+            .desc
+            .columns
+            .iter()
+            .any(|column| column.attrdef_oid.is_some())
+            || new_entry
+                .desc
+                .columns
+                .iter()
+                .any(|column| column.attrdef_oid.is_some())
+        {
+            kinds.push(BootstrapCatalogKind::PgAttrdef);
+        }
+        let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn alter_table_rename_column_mvcc(
         &mut self,
         relation_oid: u32,
@@ -1238,10 +1279,7 @@ fn load_catalog_from_visible_physical_startup(base_dir: &Path) -> Result<Catalog
     let snapshot = txns
         .snapshot(INVALID_TRANSACTION_ID)
         .map_err(|e| CatalogError::Io(format!("startup catalog snapshot failed: {e:?}")))?;
-    let pool = BufferPool::new(
-        SmgrStorageBackend::new(MdStorageManager::new(base_dir)),
-        64,
-    );
+    let pool = BufferPool::new(SmgrStorageBackend::new(MdStorageManager::new(base_dir)), 64);
     load_catalog_from_visible_physical(base_dir, &pool, &txns, &snapshot, 0)
 }
 

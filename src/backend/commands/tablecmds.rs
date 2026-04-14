@@ -218,7 +218,7 @@ fn validate_maintenance_targets(
     Ok(())
 }
 
-fn maintain_indexes_for_row(
+pub(crate) fn maintain_indexes_for_row(
     heap_rel: crate::backend::storage::smgr::RelFileLocator,
     heap_desc: &RelationDesc,
     indexes: &[BoundIndexRelation],
@@ -373,7 +373,7 @@ fn reinitialize_index_relation(
     Ok(())
 }
 
-fn collect_matching_rows_heap(
+pub(crate) fn collect_matching_rows_heap(
     rel: crate::backend::storage::smgr::RelFileLocator,
     desc: &RelationDesc,
     toast: Option<ToastRelationRef>,

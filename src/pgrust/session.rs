@@ -28,9 +28,7 @@ use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
     parse_timezone,
 };
-use crate::backend::utils::misc::interrupts::{
-    InterruptState, StatementInterruptGuard,
-};
+use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::database::{Database, TempMutationEffect};
 use crate::pl::plpgsql::execute_do;
@@ -353,6 +351,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterTableAlterColumnType(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_alter_column_type_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
@@ -506,13 +522,21 @@ impl Session {
         mode: TableLockMode,
     ) -> Result<(), ExecError> {
         let Some(txn) = self.active_txn.as_mut() else {
-            db.table_locks
-                .lock_table_interruptible(rel, mode, self.client_id, self.interrupts.as_ref())?;
+            db.table_locks.lock_table_interruptible(
+                rel,
+                mode,
+                self.client_id,
+                self.interrupts.as_ref(),
+            )?;
             return Ok(());
         };
         if !txn.held_table_locks.contains(&rel) {
-            db.table_locks
-                .lock_table_interruptible(rel, mode, self.client_id, self.interrupts.as_ref())?;
+            db.table_locks.lock_table_interruptible(
+                rel,
+                mode,
+                self.client_id,
+                self.interrupts.as_ref(),
+            )?;
             txn.held_table_locks.push(rel);
         }
         Ok(())
@@ -592,11 +616,7 @@ impl Session {
                             rename_stmt.table_name.clone(),
                         ))
                     })?;
-                self.lock_table_if_needed(
-                    db,
-                    relation.rel,
-                    TableLockMode::AccessExclusive,
-                )?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_rename_stmt_in_transaction_with_search_path(
@@ -640,11 +660,7 @@ impl Session {
                                 alter_stmt.table_name.clone(),
                             ))
                         })?;
-                self.lock_table_if_needed(
-                    db,
-                    relation.rel,
-                    TableLockMode::AccessExclusive,
-                )?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_add_column_stmt_in_transaction_with_search_path(
@@ -685,6 +701,27 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterTableAlterColumnType(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = catalog
+                    .lookup_any_relation(&alter_stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(
+                            alter_stmt.table_name.clone(),
+                        ))
+                    })?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_alter_column_type_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::Unsupported(ref unsupported_stmt) => {
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
@@ -701,11 +738,7 @@ impl Session {
                             comment_stmt.table_name.clone(),
                         ))
                     })?;
-                self.lock_table_if_needed(
-                    db,
-                    relation.rel,
-                    TableLockMode::AccessExclusive,
-                )?;
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_table_stmt_in_transaction_with_search_path(
@@ -1317,7 +1350,7 @@ impl Session {
                     Ok(values)
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?;
- 
+
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
             let interrupts = self.interrupts();
             let mut ctx = ExecutorContext {
@@ -1436,9 +1469,9 @@ fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
             value.to_string(),
         )));
     }
-    let amount = number.parse::<f64>().map_err(|_| {
-        ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
-    })?;
+    let amount = number
+        .parse::<f64>()
+        .map_err(|_| ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string())))?;
     if !amount.is_finite() || amount < 0.0 {
         return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
             value.to_string(),

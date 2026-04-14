@@ -528,6 +528,26 @@ fn parse_alter_table_drop_column_statement() {
 }
 
 #[test]
+fn parse_alter_table_alter_column_type_statement() {
+    let stmt = parse_statement(
+        "alter table items alter column note set data type varchar(10) using note::varchar(10)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement {
+            table_name: "items".into(),
+            column_name: "note".into(),
+            ty: builtin_type(SqlType::with_char_len(SqlTypeKind::Varchar, 10)),
+            using_expr: Some(SqlExpr::Cast(
+                Box::new(SqlExpr::Column("note".into())),
+                builtin_type(SqlType::with_char_len(SqlTypeKind::Varchar, 10)),
+            )),
+        })
+    );
+}
+
+#[test]
 fn parse_unsupported_role_statement_into_placeholder() {
     let stmt = parse_statement("drop role if exists regress_alter_table_user1").unwrap();
     assert_eq!(
@@ -986,9 +1006,7 @@ fn parse_row_constructor_expression() {
         SqlExpr::Row(args) => {
             assert_eq!(args.len(), 2);
             assert!(matches!(&args[0], SqlExpr::IntegerLiteral(value) if value == "1"));
-            assert!(
-                matches!(&args[1], SqlExpr::Const(Value::Text(text)) if text.as_str() == "x")
-            );
+            assert!(matches!(&args[1], SqlExpr::Const(Value::Text(text)) if text.as_str() == "x"));
         }
         other => panic!("expected row constructor, got {other:?}"),
     }
@@ -2376,7 +2394,8 @@ fn build_plan_with_aggregate() {
 
 #[test]
 fn build_plan_with_group_by_order_by_wraps_aggregate_then_sort() {
-    let stmt = parse_select("select name, count(*) from people group by name order by name").unwrap();
+    let stmt =
+        parse_select("select name, count(*) from people group by name order by name").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::Projection { input, targets, .. } => {
@@ -2412,7 +2431,9 @@ fn grouped_join_using_projects_scanjoin_target_before_aggregate() {
                     assert_eq!(items.len(), 1);
                     assert!(matches!(items[0].expr, Expr::Column(0)));
                     match *input {
-                        Plan::Aggregate { input, group_by, .. } => {
+                        Plan::Aggregate {
+                            input, group_by, ..
+                        } => {
                             assert_eq!(group_by.len(), 1);
                             assert!(matches!(group_by[0], Expr::Column(0)));
                             match *input {
@@ -3175,12 +3196,10 @@ fn parse_jsonpath_type_and_operators() {
             "select '$.a'::jsonpath, '{\"a\":1}'::jsonb @? '$.a', '{\"a\":1}'::jsonb @@ '$.a == 1', jsonb_path_query_array('{\"a\":1}'::jsonb, '$.a')",
         )
         .unwrap();
-    assert!(
-        matches!(
-            &stmt.targets[0].expr,
-            SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::JsonPath)
-        )
-    );
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::JsonPath)
+    ));
     assert!(matches!(
         stmt.targets[1].expr,
         SqlExpr::JsonbPathExists(_, _)
