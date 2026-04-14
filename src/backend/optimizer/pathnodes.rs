@@ -2,12 +2,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::pathnodes::Path;
+use crate::include::nodes::pathnodes::{Path, PathKey};
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, OpExpr, OrderByEntry,
-    ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SetReturningCall, SubLinkType, TargetEntry,
-    Var,
+    AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, JoinType, OpExpr,
+    OrderByEntry, ProjectSetTarget, QueryColumn, ScalarArrayOpExpr, SetReturningCall,
+    SubLinkType, TargetEntry, Var,
 };
 
 // :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
@@ -50,6 +50,7 @@ impl Path {
                 index_meta,
                 keys,
                 direction,
+                pathkeys: _,
             } => Plan::IndexScan {
                 plan_info,
                 rel,
@@ -317,6 +318,39 @@ impl Path {
             }
         }
     }
+
+    pub fn pathkeys(&self) -> Vec<PathKey> {
+        match self {
+            Self::Result { .. }
+            | Self::SeqScan { .. }
+            | Self::Aggregate { .. }
+            | Self::Values { .. }
+            | Self::FunctionScan { .. }
+            | Self::ProjectSet { .. } => Vec::new(),
+            Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
+            Self::Filter { input, .. } | Self::Limit { input, .. } => input.pathkeys(),
+            Self::Projection {
+                slot_id,
+                targets,
+                input,
+                ..
+            } => project_pathkeys(*slot_id, targets, &input.pathkeys()),
+            Self::OrderBy { items, .. } => items
+                .iter()
+                .map(|item| PathKey {
+                    expr: item.expr.clone(),
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                })
+                .collect(),
+            Self::NestedLoopJoin { left, kind, .. }
+                if matches!(kind, JoinType::Inner | JoinType::Cross | JoinType::Left) =>
+            {
+                left.pathkeys()
+            }
+            Self::NestedLoopJoin { .. } => Vec::new(),
+        }
+    }
 }
 
 fn slot_output_vars<T>(
@@ -338,6 +372,25 @@ fn slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
         varlevelsup: 0,
         vartype,
     })
+}
+
+fn project_pathkeys(slot_id: usize, targets: &[TargetEntry], input_pathkeys: &[PathKey]) -> Vec<PathKey> {
+    let mut pathkeys = Vec::new();
+    for key in input_pathkeys {
+        let Some((index, target)) = targets
+            .iter()
+            .enumerate()
+            .find(|(_, target)| target.expr == key.expr)
+        else {
+            break;
+        };
+        pathkeys.push(PathKey {
+            expr: slot_var(slot_id, index + 1, target.sql_type),
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        });
+    }
+    pathkeys
 }
 
 pub(super) fn aggregate_output_vars(

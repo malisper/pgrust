@@ -10,7 +10,7 @@ use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
-    Path, PathTarget, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo,
+    Path, PathKey, PathTarget, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo,
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -74,17 +74,23 @@ fn create_plan(path: Path) -> Plan {
     path.into_plan()
 }
 
-fn sort_clause_to_order_items(
-    sort_clause: &[crate::include::nodes::primnodes::SortGroupClause],
-) -> Vec<OrderByEntry> {
-    sort_clause
+fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry> {
+    pathkeys
         .iter()
-        .map(|clause| OrderByEntry {
-            expr: clause.expr.clone(),
-            descending: clause.descending,
-            nulls_first: clause.nulls_first,
+        .map(|key| OrderByEntry {
+            expr: key.expr.clone(),
+            descending: key.descending,
+            nulls_first: key.nulls_first,
         })
         .collect()
+}
+
+fn pathkeys_satisfy(actual: &[PathKey], required: &[PathKey]) -> bool {
+    actual.len() >= required.len()
+        && actual
+            .iter()
+            .zip(required.iter())
+            .all(|(actual, required)| actual == required)
 }
 
 fn has_outer_joins(root: &PlannerInfo) -> bool {
@@ -556,6 +562,30 @@ fn build_aggregate_output_columns(group_by: &[Expr], accumulators: &[AggAccum]) 
     output_columns
 }
 
+fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<Vec<OrderByEntry>> {
+    if root.query_pathkeys.is_empty() {
+        return None;
+    }
+    let expanded_pathkeys = root
+        .query_pathkeys
+        .iter()
+        .cloned()
+        .map(|key| PathKey {
+            expr: expand_join_rte_vars(root, key.expr),
+            descending: key.descending,
+            nulls_first: key.nulls_first,
+        })
+        .collect::<Vec<_>>();
+    if expanded_pathkeys
+        .iter()
+        .all(|key| expr_relids(&key.expr).iter().all(|relid| *relid == rtindex))
+    {
+        Some(pathkeys_to_order_items(&expanded_pathkeys))
+    } else {
+        None
+    }
+}
+
 fn project_to_slot_layout(
     slot_id: usize,
     desc: &RelationDesc,
@@ -651,33 +681,33 @@ fn lower_targets_for_path(
     }
 }
 
-fn lower_order_items_for_path(
+fn lower_pathkeys_for_path(
     root: &PlannerInfo,
     path: &Path,
-    items: &[OrderByEntry],
-) -> Vec<OrderByEntry> {
+    pathkeys: &[PathKey],
+) -> Vec<PathKey> {
     let layout = path.output_vars();
     match aggregate_group_by(path) {
-        Some(group_by) => items
+        Some(group_by) => pathkeys
             .iter()
             .cloned()
-            .map(|item| OrderByEntry {
-                expr: lower_agg_output_expr(expand_join_rte_vars(root, item.expr), group_by, &layout),
-                descending: item.descending,
-                nulls_first: item.nulls_first,
+            .map(|key| PathKey {
+                expr: lower_agg_output_expr(expand_join_rte_vars(root, key.expr), group_by, &layout),
+                descending: key.descending,
+                nulls_first: key.nulls_first,
             })
             .collect(),
-        None => items
+        None => pathkeys
             .iter()
             .cloned()
-            .map(|item| OrderByEntry {
+            .map(|key| PathKey {
                 expr: rewrite_semantic_expr_for_path(
-                    expand_join_rte_vars(root, item.expr),
+                    expand_join_rte_vars(root, key.expr),
                     path,
                     &layout,
                 ),
-                descending: item.descending,
-                nulls_first: item.nulls_first,
+                descending: key.descending,
+                nulls_first: key.nulls_first,
             })
             .collect(),
     }
@@ -895,6 +925,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
     let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)).cloned() else {
         return;
     };
+    let query_order_items = query_order_items_for_base_rel(root, rtindex);
     let Some(rel) = root
         .simple_rel_array
         .get_mut(rtindex)
@@ -934,6 +965,21 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 )
                 .plan,
             );
+            if let Some(order_items) = query_order_items.clone() {
+                rel.add_path(
+                    estimate_seqscan_candidate(
+                        rtindex,
+                        heap_rel,
+                        relation_oid,
+                        toast,
+                        rte.desc.clone(),
+                        &stats,
+                        filter.clone(),
+                        Some(order_items),
+                    )
+                    .plan,
+                );
+            }
             for index in catalog.index_relations_for_heap(relation_oid).iter().filter(|index| {
                 index.index_meta.indisvalid
                     && index.index_meta.indisready
@@ -956,6 +1002,23 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     )
                     .plan,
                 );
+                if let Some(order_items) = query_order_items.as_ref()
+                    && let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index)
+                {
+                    rel.add_path(
+                        estimate_index_candidate(
+                            rtindex,
+                            heap_rel,
+                            toast,
+                            rte.desc.clone(),
+                            &stats,
+                            spec,
+                            Some(order_items.clone()),
+                            catalog,
+                        )
+                        .plan,
+                    );
+                }
             }
         }
         RangeTblEntryKind::Values {
@@ -1516,86 +1579,22 @@ fn make_project_set_rel(
     rel
 }
 
-fn maybe_add_ordered_base_paths(
-    root: &PlannerInfo,
-    input_rel: &RelOptInfo,
-    output_rel: &mut RelOptInfo,
-    catalog: &dyn CatalogLookup,
-) {
-    if input_rel.reloptkind != RelOptKind::BaseRel || input_rel.relids.len() != 1 {
-        return;
-    }
-    let rtindex = input_rel.relids[0];
-    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
-        return;
-    };
-    let RangeTblEntryKind::Relation {
-        rel,
-        relation_oid,
-        relkind: _,
-        toast,
-    } = rte.kind
-    else {
-        return;
-    };
-    let order_items = sort_clause_to_order_items(&root.parse.sort_clause);
-    let filter = base_filter_expr(input_rel);
-    let stats = relation_stats(catalog, relation_oid, &rte.desc);
-    output_rel.add_path(
-        estimate_seqscan_candidate(
-            rtindex,
-            rel,
-            relation_oid,
-            toast,
-            rte.desc.clone(),
-            &stats,
-            filter.clone(),
-            Some(order_items.clone()),
-        )
-        .plan,
-    );
-    for index in catalog.index_relations_for_heap(relation_oid).iter().filter(|index| {
-        index.index_meta.indisvalid
-            && index.index_meta.indisready
-            && !index.index_meta.indkey.is_empty()
-            && index.index_meta.am_oid == BTREE_AM_OID
-    }) {
-        let Some(spec) = build_index_path_spec(filter.as_ref(), Some(&order_items), index) else {
-            continue;
-        };
-        output_rel.add_path(
-            estimate_index_candidate(
-                rtindex,
-                rel,
-                toast,
-                rte.desc.clone(),
-                &stats,
-                spec,
-                Some(order_items.clone()),
-                catalog,
-            )
-            .plan,
-        );
-    }
-}
-
-fn make_ordered_rel(
-    root: &PlannerInfo,
-    input_rel: RelOptInfo,
-    order_items: &[OrderByEntry],
-    catalog: &dyn CatalogLookup,
-) -> RelOptInfo {
+fn make_ordered_rel(root: &PlannerInfo, input_rel: RelOptInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    maybe_add_ordered_base_paths(root, &input_rel, &mut rel, catalog);
     for path in input_rel.pathlist {
+        let required_pathkeys = lower_pathkeys_for_path(root, &path, &root.query_pathkeys);
+        if pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+            rel.add_path(path);
+            continue;
+        }
         rel.add_path(optimize_path(
             Path::OrderBy {
                 plan_info: PlanEstimate::default(),
-                items: lower_order_items_for_path(root, &path, order_items),
+                items: pathkeys_to_order_items(&required_pathkeys),
                 input: Box::new(path),
             },
             catalog,
@@ -1686,9 +1685,8 @@ fn grouping_planner(
         projection_done = true;
     }
 
-    let order_items = sort_clause_to_order_items(&root.parse.sort_clause);
-    if !order_items.is_empty() {
-        current_rel = make_ordered_rel(root, current_rel, &order_items, catalog);
+    if !root.query_pathkeys.is_empty() {
+        current_rel = make_ordered_rel(root, current_rel, catalog);
     }
 
     if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
@@ -2531,6 +2529,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 index_meta,
                 keys,
                 direction,
+                pathkeys,
                 ..
             } => {
                 let stats = relation_stats(catalog, index_meta.indrelid, &desc);
@@ -2556,6 +2555,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     index_meta,
                     keys,
                     direction,
+                    pathkeys,
                 }
             }
             Path::Filter {
@@ -3016,6 +3016,23 @@ fn estimate_index_candidate(
     let scan_info = PlanEstimate::new(CPU_OPERATOR_COST, base_cost, index_rows, stats.width);
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut current_rows = scan_info.plan_rows.as_f64();
+    let native_pathkeys = if spec.removes_order {
+        order_items
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| PathKey {
+                        expr: item.expr.clone(),
+                        descending: item.descending,
+                        nulls_first: item.nulls_first,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut plan = Path::IndexScan {
         plan_info: scan_info,
         source_id,
@@ -3027,6 +3044,7 @@ fn estimate_index_candidate(
         index_meta: spec.index.index_meta,
         keys: spec.keys,
         direction: spec.direction,
+        pathkeys: native_pathkeys,
     };
 
     if let Some(predicate) = spec.residual {

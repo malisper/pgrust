@@ -689,6 +689,7 @@ pub enum Path {
         index_meta: IndexRelCacheEntry,
         keys: Vec<ScanKeyData>,
         direction: ScanDirection,
+        pathkeys: Vec<PathKey>,
     },
     Filter {
         plan_info: PlanEstimate,
