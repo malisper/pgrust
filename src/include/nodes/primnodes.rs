@@ -708,8 +708,9 @@ impl Expr {
                 let right = args.get(1).or(left);
                 match (left, right) {
                     (Some(left), Some(right)) => binary_result_type(left, right),
-                    (Some(inner), None) => expr_sql_type_hint(inner)
-                        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    (Some(inner), None) => {
+                        expr_sql_type_hint(inner).unwrap_or(SqlType::new(SqlTypeKind::Text))
+                    }
                     _ => SqlType::new(SqlTypeKind::Text),
                 }
             }
@@ -817,7 +818,6 @@ impl Expr {
         }))
     }
 }
-
 
 // :HACK: This is only a migration hint while pgrust is moving from legacy
 // operator-per-enum expression nodes to PostgreSQL-shaped semantic nodes.

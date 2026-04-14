@@ -1426,7 +1426,9 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(right_type)),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         left_type,
@@ -1437,7 +1439,8 @@ fn bind_scalar_function_call(
                         right_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Concat => Ok(build_func(func_variadic, bound_args)),
         BuiltinScalarFunction::ConcatWs => {
@@ -1516,15 +1519,23 @@ fn bind_scalar_function_call(
             if is_bit_string_type(left_type) && is_bit_string_type(right_type) {
                 let common = resolve_common_scalar_type(left_type, right_type)
                     .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
-                return Ok(build_func(func_variadic, vec![
+                return Ok(build_func(
+                    func_variadic,
+                    vec![
                         coerce_bound_expr(bound_args[0].clone(), left_type, common),
                         coerce_bound_expr(bound_args[1].clone(), right_type, common),
-                    ]));
+                    ],
+                ));
             }
             if left_type.kind == SqlTypeKind::Bytea && right_type.kind == SqlTypeKind::Bytea {
-                return Ok(build_func(func_variadic, vec![bound_args[0].clone(), bound_args[1].clone()]));
+                return Ok(build_func(
+                    func_variadic,
+                    vec![bound_args[0].clone(), bound_args[1].clone()],
+                ));
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         left_type,
@@ -1535,7 +1546,8 @@ fn bind_scalar_function_call(
                         right_type,
                         SqlType::new(SqlTypeKind::Text),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Strpos => {
             let left_type = infer_sql_expr_type_with_ctes(
@@ -1554,7 +1566,9 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         left_type,
@@ -1565,7 +1579,8 @@ fn bind_scalar_function_call(
                         right_type,
                         SqlType::new(SqlTypeKind::Text),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Substring => {
             let value_type = infer_sql_expr_type_with_ctes(
@@ -1942,14 +1957,17 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     bound_args[0].clone(),
                     coerce_bound_expr(
                         bound_args[1].clone(),
                         index_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::SetBit => {
             let value_type = infer_sql_expr_type_with_ctes(
@@ -1990,7 +2008,9 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     bound_args[0].clone(),
                     coerce_bound_expr(
                         bound_args[1].clone(),
@@ -2002,7 +2022,8 @@ fn bind_scalar_function_call(
                         bit_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::BitCount => {
             let value_type = infer_sql_expr_type_with_ctes(
@@ -2048,14 +2069,17 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     bound_args[0].clone(),
                     coerce_bound_expr(
                         bound_args[1].clone(),
                         index_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::SetByte => {
             let value_type = infer_sql_expr_type_with_ctes(
@@ -2096,7 +2120,9 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     bound_args[0].clone(),
                     coerce_bound_expr(
                         bound_args[1].clone(),
@@ -2108,7 +2134,8 @@ fn bind_scalar_function_call(
                         new_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::ConvertFrom => {
             let left_type = infer_sql_expr_type_with_ctes(
@@ -2127,7 +2154,9 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         left_type,
@@ -2138,7 +2167,8 @@ fn bind_scalar_function_call(
                         right_type,
                         SqlType::new(SqlTypeKind::Text),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Lower | BuiltinScalarFunction::Unistr => {
             let arg_type = infer_sql_expr_type_with_ctes(
@@ -2149,17 +2179,21 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     SqlType::new(SqlTypeKind::Text),
-                )]))
+                )],
+            ))
         }
         BuiltinScalarFunction::Initcap
         | BuiltinScalarFunction::Ascii
         | BuiltinScalarFunction::Replace
-        | BuiltinScalarFunction::Translate => Ok(build_func(func_variadic, args
-                .iter()
+        | BuiltinScalarFunction::Translate => Ok(build_func(
+            func_variadic,
+            args.iter()
                 .enumerate()
                 .map(|(idx, arg)| {
                     let ty = infer_sql_expr_type_with_ctes(
@@ -2172,7 +2206,8 @@ fn bind_scalar_function_call(
                     );
                     coerce_bound_expr(bound_args[idx].clone(), ty, SqlType::new(SqlTypeKind::Text))
                 })
-                .collect())),
+                .collect(),
+        )),
         BuiltinScalarFunction::Chr => {
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
@@ -2188,13 +2223,18 @@ fn bind_scalar_function_call(
                     actual: sql_type_name(arg_type),
                 });
             }
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     SqlType::new(SqlTypeKind::Int4),
-                )]))
+                )],
+            ))
         }
-        BuiltinScalarFunction::SplitPart => Ok(build_func(func_variadic, vec![
+        BuiltinScalarFunction::SplitPart => Ok(build_func(
+            func_variadic,
+            vec![
                 coerce_bound_expr(
                     bound_args[0].clone(),
                     infer_sql_expr_type_with_ctes(
@@ -2231,7 +2271,8 @@ fn bind_scalar_function_call(
                     ),
                     SqlType::new(SqlTypeKind::Int4),
                 ),
-            ])),
+            ],
+        )),
         BuiltinScalarFunction::LPad | BuiltinScalarFunction::RPad => {
             let value_type = infer_sql_expr_type_with_ctes(
                 &args[0],
@@ -2315,25 +2356,27 @@ fn bind_scalar_function_call(
             }
             Ok(build_func(func_variadic, coerced))
         }
-        BuiltinScalarFunction::RegexpMatch | BuiltinScalarFunction::RegexpLike => {
-            Ok(build_func(func_variadic, args
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, arg)| {
-                        let ty = infer_sql_expr_type_with_ctes(
-                            arg,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        );
-                        let target = SqlType::new(SqlTypeKind::Text);
-                        coerce_bound_expr(bound_args[idx].clone(), ty, target)
-                    })
-                    .collect()))
-        }
-        BuiltinScalarFunction::RegexpCount => Ok(build_func(func_variadic, bind_regex_count_args(
+        BuiltinScalarFunction::RegexpMatch | BuiltinScalarFunction::RegexpLike => Ok(build_func(
+            func_variadic,
+            args.iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    let target = SqlType::new(SqlTypeKind::Text);
+                    coerce_bound_expr(bound_args[idx].clone(), ty, target)
+                })
+                .collect(),
+        )),
+        BuiltinScalarFunction::RegexpCount => Ok(build_func(
+            func_variadic,
+            bind_regex_count_args(
                 &bound_args,
                 args,
                 scope,
@@ -2341,8 +2384,11 @@ fn bind_scalar_function_call(
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            ))),
-        BuiltinScalarFunction::RegexpInstr => Ok(build_func(func_variadic, bind_regex_instr_args(
+            ),
+        )),
+        BuiltinScalarFunction::RegexpInstr => Ok(build_func(
+            func_variadic,
+            bind_regex_instr_args(
                 &bound_args,
                 args,
                 scope,
@@ -2350,8 +2396,11 @@ fn bind_scalar_function_call(
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            ))),
-        BuiltinScalarFunction::RegexpSubstr => Ok(build_func(func_variadic, bind_regex_substr_args(
+            ),
+        )),
+        BuiltinScalarFunction::RegexpSubstr => Ok(build_func(
+            func_variadic,
+            bind_regex_substr_args(
                 &bound_args,
                 args,
                 scope,
@@ -2359,8 +2408,11 @@ fn bind_scalar_function_call(
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            ))),
-        BuiltinScalarFunction::RegexpReplace => Ok(build_func(func_variadic, bind_regex_replace_args(
+            ),
+        )),
+        BuiltinScalarFunction::RegexpReplace => Ok(build_func(
+            func_variadic,
+            bind_regex_replace_args(
                 &bound_args,
                 args,
                 scope,
@@ -2368,8 +2420,11 @@ fn bind_scalar_function_call(
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            ))),
-        BuiltinScalarFunction::RegexpSplitToArray => Ok(build_func(func_variadic, bind_regex_split_to_array_args(
+            ),
+        )),
+        BuiltinScalarFunction::RegexpSplitToArray => Ok(build_func(
+            func_variadic,
+            bind_regex_split_to_array_args(
                 &bound_args,
                 args,
                 scope,
@@ -2377,7 +2432,8 @@ fn bind_scalar_function_call(
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            ))),
+            ),
+        )),
         BuiltinScalarFunction::Md5 => {
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
@@ -2444,16 +2500,21 @@ fn bind_scalar_function_call(
                     actual: sql_type_name(value_type),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     bound_args[0].clone(),
                     coerce_bound_expr(
                         bound_args[1].clone(),
                         format_type,
                         SqlType::new(SqlTypeKind::Text),
                     ),
-                ]))
+                ],
+            ))
         }
-        BuiltinScalarFunction::Decode => Ok(build_func(func_variadic, vec![
+        BuiltinScalarFunction::Decode => Ok(build_func(
+            func_variadic,
+            vec![
                 coerce_bound_expr(
                     bound_args[0].clone(),
                     infer_sql_expr_type_with_ctes(
@@ -2478,7 +2539,8 @@ fn bind_scalar_function_call(
                     ),
                     SqlType::new(SqlTypeKind::Text),
                 ),
-            ])),
+            ],
+        )),
         BuiltinScalarFunction::ToChar => {
             let value_type = infer_sql_expr_type_with_ctes(
                 &args[0],
@@ -2502,14 +2564,17 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(value_type)),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     bound_args[0].clone(),
                     coerce_bound_expr(
                         bound_args[1].clone(),
                         format_type,
                         SqlType::new(SqlTypeKind::Text),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::NumericInc
         | BuiltinScalarFunction::Factorial
@@ -2533,11 +2598,14 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     SqlType::new(SqlTypeKind::Numeric),
-                )]))
+                )],
+            ))
         }
         BuiltinScalarFunction::Log10 | BuiltinScalarFunction::Log if args.len() == 1 => {
             let raw_arg_type = infer_sql_expr_type_with_ctes(
@@ -2567,7 +2635,10 @@ fn bind_scalar_function_call(
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
             };
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)]))
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)],
+            ))
         }
         BuiltinScalarFunction::Log => {
             let raw_left_type = infer_sql_expr_type_with_ctes(
@@ -2614,10 +2685,13 @@ fn bind_scalar_function_call(
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
             };
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(bound_args[0].clone(), left_type, target),
                     coerce_bound_expr(bound_args[1].clone(), right_type, target),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => {
             let left_type = infer_sql_expr_type_with_ctes(
@@ -2647,10 +2721,13 @@ fn bind_scalar_function_call(
                 });
             }
             let common = resolve_numeric_binary_type("+", left_type, right_type)?;
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(bound_args[0].clone(), left_type, common),
                     coerce_bound_expr(bound_args[1].clone(), right_type, common),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Div | BuiltinScalarFunction::Mod => {
             let raw_left_type = infer_sql_expr_type_with_ctes(
@@ -2689,7 +2766,9 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         left_type,
@@ -2700,7 +2779,8 @@ fn bind_scalar_function_call(
                         right_type,
                         SqlType::new(SqlTypeKind::Numeric),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Scale
         | BuiltinScalarFunction::MinScale
@@ -2724,11 +2804,14 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     SqlType::new(SqlTypeKind::Numeric),
-                )]))
+                )],
+            ))
         }
         BuiltinScalarFunction::WidthBucket => {
             if args.len() == 2 {
@@ -2804,7 +2887,9 @@ fn bind_scalar_function_call(
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
             };
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(bound_args[0].clone(), operand_type, target),
                     coerce_bound_expr(bound_args[1].clone(), low_type, target),
                     coerce_bound_expr(bound_args[2].clone(), high_type, target),
@@ -2813,7 +2898,8 @@ fn bind_scalar_function_call(
                         count_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round if args.len() == 2 => {
             let raw_value_type = infer_sql_expr_type_with_ctes(
@@ -2849,7 +2935,9 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         value_type,
@@ -2860,7 +2948,8 @@ fn bind_scalar_function_call(
                         scale_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => {
             let raw_arg_type = infer_sql_expr_type_with_ctes(
@@ -2890,7 +2979,10 @@ fn bind_scalar_function_call(
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
             };
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)]))
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)],
+            ))
         }
         BuiltinScalarFunction::Ceil
         | BuiltinScalarFunction::Ceiling
@@ -2925,7 +3017,10 @@ fn bind_scalar_function_call(
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
             };
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)]))
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)],
+            ))
         }
         BuiltinScalarFunction::Ceil
         | BuiltinScalarFunction::Ceiling
@@ -2971,11 +3066,14 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     SqlType::new(SqlTypeKind::Float8),
-                )]))
+                )],
+            ))
         }
         BuiltinScalarFunction::BitcastIntegerToFloat4 => {
             let arg_type = infer_sql_expr_type_with_ctes(
@@ -3048,7 +3146,9 @@ fn bind_scalar_function_call(
                     ),
                 });
             }
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         left_type,
@@ -3059,7 +3159,8 @@ fn bind_scalar_function_call(
                         right_type,
                         SqlType::new(SqlTypeKind::Float8),
                     ),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::Float4Send | BuiltinScalarFunction::Float8Send => {
             let arg_type = infer_sql_expr_type_with_ctes(
@@ -3081,11 +3182,14 @@ fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            Ok(build_func(func_variadic, vec![coerce_bound_expr(
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     target_type,
-                )]))
+                )],
+            ))
         }
         BuiltinScalarFunction::PgInputIsValid
         | BuiltinScalarFunction::PgInputErrorMessage
@@ -3109,10 +3213,13 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     coerce_bound_expr(bound_args[0].clone(), left_type, text_type),
                     coerce_bound_expr(bound_args[1].clone(), right_type, text_type),
-                ]))
+                ],
+            ))
         }
         BuiltinScalarFunction::JsonbDeletePath
         | BuiltinScalarFunction::JsonbSet
@@ -3150,14 +3257,17 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            Ok(build_func(func_variadic, vec![
+            Ok(build_func(
+                func_variadic,
+                vec![
                     bound_args[0].clone(),
                     coerce_bound_expr(
                         bound_args[1].clone(),
                         dim_type,
                         SqlType::new(SqlTypeKind::Int4),
                     ),
-                ]))
+                ],
+            ))
         }
         _ => Ok(build_func(func_variadic, rewritten_bound_args)),
     }

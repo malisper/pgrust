@@ -1,5 +1,5 @@
-use super::*;
 use super::query::{AnalyzedFrom, JoinAliasInfo};
+use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::nodes::primnodes::JoinType;
 
@@ -181,7 +181,10 @@ pub(super) fn bind_values_rows(
             .map(|col| column_desc(col.name.clone(), col.sql_type, true))
             .collect(),
     };
-    Ok((AnalyzedFrom::values(bound_rows, output_columns), scope_for_relation(None, &desc)))
+    Ok((
+        AnalyzedFrom::values(bound_rows, output_columns),
+        scope_for_relation(None, &desc),
+    ))
 }
 
 pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
@@ -585,51 +588,51 @@ pub(super) fn bind_from_item_with_ctes(
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
                         AnalyzedFrom::result().with_projection(vec![
-                                TargetEntry::new(
-                                    "message",
-                                    Expr::builtin_func(
-                                        BuiltinScalarFunction::PgInputErrorMessage,
-                                        Some(text_type),
-                                        false,
-                                        vec![left.clone(), right.clone()],
-                                    ),
-                                    text_type,
-                                    1,
+                            TargetEntry::new(
+                                "message",
+                                Expr::builtin_func(
+                                    BuiltinScalarFunction::PgInputErrorMessage,
+                                    Some(text_type),
+                                    false,
+                                    vec![left.clone(), right.clone()],
                                 ),
-                                TargetEntry::new(
-                                    "detail",
-                                    Expr::builtin_func(
-                                        BuiltinScalarFunction::PgInputErrorDetail,
-                                        Some(text_type),
-                                        false,
-                                        vec![left.clone(), right.clone()],
-                                    ),
-                                    text_type,
-                                    2,
+                                text_type,
+                                1,
+                            ),
+                            TargetEntry::new(
+                                "detail",
+                                Expr::builtin_func(
+                                    BuiltinScalarFunction::PgInputErrorDetail,
+                                    Some(text_type),
+                                    false,
+                                    vec![left.clone(), right.clone()],
                                 ),
-                                TargetEntry::new(
-                                    "hint",
-                                    Expr::builtin_func(
-                                        BuiltinScalarFunction::PgInputErrorHint,
-                                        Some(text_type),
-                                        false,
-                                        vec![left.clone(), right.clone()],
-                                    ),
-                                    text_type,
-                                    3,
+                                text_type,
+                                2,
+                            ),
+                            TargetEntry::new(
+                                "hint",
+                                Expr::builtin_func(
+                                    BuiltinScalarFunction::PgInputErrorHint,
+                                    Some(text_type),
+                                    false,
+                                    vec![left.clone(), right.clone()],
                                 ),
-                                TargetEntry::new(
-                                    "sql_error_code",
-                                    Expr::builtin_func(
-                                        BuiltinScalarFunction::PgInputErrorSqlState,
-                                        Some(text_type),
-                                        false,
-                                        vec![left, right],
-                                    ),
-                                    text_type,
-                                    4,
+                                text_type,
+                                3,
+                            ),
+                            TargetEntry::new(
+                                "sql_error_code",
+                                Expr::builtin_func(
+                                    BuiltinScalarFunction::PgInputErrorSqlState,
+                                    Some(text_type),
+                                    false,
+                                    vec![left, right],
                                 ),
-                            ]),
+                                text_type,
+                                4,
+                            ),
+                        ]),
                         scope,
                     ))
                 }

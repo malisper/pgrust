@@ -199,13 +199,11 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
 
     match expr {
         Expr::Op(op) => match op.op {
-            crate::include::nodes::primnodes::OpExprKind::Eq => {
-                match op.args.as_slice() {
-                    [Expr::Column(column), Expr::Const(value)] => mk(*column, 3, value),
-                    [Expr::Const(value), Expr::Column(column)] => mk(*column, 3, value),
-                    _ => None,
-                }
-            }
+            crate::include::nodes::primnodes::OpExprKind::Eq => match op.args.as_slice() {
+                [Expr::Column(column), Expr::Const(value)] => mk(*column, 3, value),
+                [Expr::Const(value), Expr::Column(column)] => mk(*column, 3, value),
+                _ => None,
+            },
             crate::include::nodes::primnodes::OpExprKind::Lt => match op.args.as_slice() {
                 [Expr::Column(column), Expr::Const(value)] => mk(*column, 1, value),
                 [Expr::Const(value), Expr::Column(column)] => mk(*column, 5, value),

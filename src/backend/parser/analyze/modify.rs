@@ -264,10 +264,7 @@ pub fn bind_insert(
                     actual,
                 });
             }
-            (
-                target_columns,
-                BoundInsertSource::Select(Box::new(query)),
-            )
+            (target_columns, BoundInsertSource::Select(Box::new(query)))
         }
     };
     let (target_columns, source) = source;

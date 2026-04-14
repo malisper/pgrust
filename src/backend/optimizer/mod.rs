@@ -10,13 +10,13 @@ use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::parsenodes::Query;
 use crate::include::nodes::pathnodes::{
-    PlannerGlobal, PlannerInfo, PlannerJoinExpr, PlannerOrderByEntry, PlannerPath,
-    PlannerProjectSetTarget, PlannerTargetEntry, RelOptInfo, RelOptKind, RestrictInfo,
+    PlannerGlobal, PlannerInfo, PlannerPath, RelOptInfo, RelOptKind, RestrictInfo,
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, ProjectSetTarget,
-    QueryColumn, RelationDesc, SetReturningCall, SubLink, SubPlan, ToastRelationRef,
+    AggAccum, BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, OrderByEntry,
+    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, SubLink, SubPlan, TargetEntry,
+    ToastRelationRef,
 };
 use pathnodes::next_synthetic_slot_id;
 
@@ -48,15 +48,15 @@ struct IndexableQual {
     column: usize,
     strategy: u16,
     argument: Value,
-    expr: PlannerJoinExpr,
+    expr: Expr,
 }
 
 #[derive(Debug, Clone)]
 struct IndexPathSpec {
     index: BoundIndexRelation,
     keys: Vec<crate::include::access::scankey::ScanKeyData>,
-    residual: Option<PlannerJoinExpr>,
-    used_quals: Vec<PlannerJoinExpr>,
+    residual: Option<Expr>,
+    used_quals: Vec<Expr>,
     direction: crate::include::access::relscan::ScanDirection,
     removes_order: bool,
 }
@@ -78,7 +78,9 @@ fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptIn
         root.final_target.clone(),
     );
     if let Some(where_qual) = root.parse.where_qual.clone() {
-        final_rel.baserestrictinfo.push(RestrictInfo::new(where_qual));
+        final_rel
+            .baserestrictinfo
+            .push(RestrictInfo::new(where_qual));
     }
     if let Some(having_qual) = root.parse.having_qual.clone() {
         final_rel.joininfo.push(RestrictInfo::new(having_qual));
@@ -86,7 +88,10 @@ fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptIn
     // :HACK: The planner root now mirrors PostgreSQL's PlannerInfo/RelOptInfo boundary,
     // but physical path generation still funnels through the existing PlannerPath bridge
     // until grouped-query semantics are fully Var/Aggref-based.
-    final_rel.add_path(optimize_path(PlannerPath::from_query(root.parse.clone()), catalog));
+    final_rel.add_path(optimize_path(
+        PlannerPath::from_query(root.parse.clone()),
+        catalog,
+    ));
     root.join_rel_list.push(final_rel.clone());
     root.final_rel = Some(final_rel.clone());
     final_rel
@@ -109,11 +114,7 @@ pub(crate) fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> Pla
         });
     PlannedStmt {
         command_type,
-        plan_tree: finalize_plan_subqueries(
-            create_plan(best_path),
-            catalog,
-            &mut glob.subplans,
-        ),
+        plan_tree: finalize_plan_subqueries(create_plan(best_path), catalog, &mut glob.subplans),
         subplans: glob.subplans,
     }
 }
@@ -143,7 +144,11 @@ fn lower_sublink_to_subplan(
     let testexpr = sublink
         .testexpr
         .map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans)));
-    let first_col_type = sublink.subselect.target_list.first().map(|target| target.sql_type);
+    let first_col_type = sublink
+        .subselect
+        .target_list
+        .first()
+        .map(|target| target.sql_type);
     let plan_id = append_planned_subquery(planner(*sublink.subselect, catalog), subplans);
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
@@ -200,22 +205,23 @@ pub(crate) fn finalize_expr_subqueries(
                 .map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans))),
             ..*subplan
         })),
-        Expr::ScalarArrayOp(saop) => {
-            Expr::ScalarArrayOp(Box::new(crate::include::nodes::primnodes::ScalarArrayOpExpr {
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(finalize_expr_subqueries(*saop.left, catalog, subplans)),
                 right: Box::new(finalize_expr_subqueries(*saop.right, catalog, subplans)),
                 ..*saop
-            }))
-        }
-        Expr::Cast(inner, ty) => {
-            Expr::Cast(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)), ty)
-        }
-        Expr::IsNull(inner) => {
-            Expr::IsNull(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)))
-        }
-        Expr::IsNotNull(inner) => {
-            Expr::IsNotNull(Box::new(finalize_expr_subqueries(*inner, catalog, subplans)))
-        }
+            },
+        )),
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(finalize_expr_subqueries(*inner, catalog, subplans)),
+            ty,
+        ),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(finalize_expr_subqueries(
+            *inner, catalog, subplans,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(finalize_expr_subqueries(
+            *inner, catalog, subplans,
+        ))),
         Expr::Like {
             expr,
             pattern,
@@ -429,13 +435,13 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             plan_id: subplan.plan_id + base,
             sublink_type: subplan.sublink_type,
         })),
-        Expr::ScalarArrayOp(saop) => {
-            Expr::ScalarArrayOp(Box::new(crate::include::nodes::primnodes::ScalarArrayOpExpr {
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(rebase_expr_subplan_ids(*saop.left, base)),
                 right: Box::new(rebase_expr_subplan_ids(*saop.right, base)),
                 ..*saop
-            }))
-        }
+            },
+        )),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(rebase_expr_subplan_ids(*inner, base)), ty),
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
@@ -948,10 +954,9 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let input_rows = input_info.plan_rows.as_f64();
-                let predicate_expr = predicate.clone().into_input_expr();
-                let selectivity = clause_selectivity(&predicate_expr, None, input_rows);
+                let selectivity = clause_selectivity(&predicate, None, input_rows);
                 let rows = clamp_rows(input_rows * selectivity);
-                let qual_cost = predicate_cost(&predicate_expr) * input_rows * CPU_OPERATOR_COST;
+                let qual_cost = predicate_cost(&predicate) * input_rows * CPU_OPERATOR_COST;
                 PlannerPath::Filter {
                     plan_info: PlanEstimate::new(
                         input_info.startup_cost.as_f64(),
@@ -1127,10 +1132,8 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                 let width = targets
                     .iter()
                     .map(|target| match target {
-                        PlannerProjectSetTarget::Scalar(entry) => {
-                            estimate_sql_type_width(entry.sql_type)
-                        }
-                        PlannerProjectSetTarget::Set { sql_type, .. } => {
+                        ProjectSetTarget::Scalar(entry) => estimate_sql_type_width(entry.sql_type),
+                        ProjectSetTarget::Set { sql_type, .. } => {
                             estimate_sql_type_width(*sql_type)
                         }
                     })
@@ -1325,8 +1328,8 @@ fn estimate_seqscan_candidate(
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     stats: &RelationStats,
-    filter: Option<PlannerJoinExpr>,
-    order_items: Option<Vec<PlannerOrderByEntry>>,
+    filter: Option<Expr>,
+    order_items: Option<Vec<OrderByEntry>>,
 ) -> AccessCandidate {
     let scan_info = seq_scan_estimate(stats);
     let mut total_cost = scan_info.total_cost.as_f64();
@@ -1342,9 +1345,9 @@ fn estimate_seqscan_candidate(
     let width = scan_info.plan_width;
 
     if let Some(predicate) = filter {
-        let selectivity = base_clause_selectivity(&predicate, Some(stats), stats.reltuples);
+        let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
         current_rows = clamp_rows(stats.reltuples * selectivity);
-        total_cost += stats.reltuples * planner_predicate_cost(&predicate) * CPU_OPERATOR_COST;
+        total_cost += stats.reltuples * predicate_cost(&predicate) * CPU_OPERATOR_COST;
         plan = PlannerPath::Filter {
             plan_info: PlanEstimate::new(
                 scan_info.startup_cost.as_f64(),
@@ -1381,7 +1384,7 @@ fn estimate_index_candidate(
     desc: RelationDesc,
     stats: &RelationStats,
     spec: IndexPathSpec,
-    order_items: Option<Vec<PlannerOrderByEntry>>,
+    order_items: Option<Vec<OrderByEntry>>,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     let index_class = catalog.class_row_by_oid(spec.index.relation_oid);
@@ -1393,7 +1396,7 @@ fn estimate_index_candidate(
     let used_sel = spec
         .used_quals
         .iter()
-        .map(|expr| base_clause_selectivity(expr, Some(stats), stats.reltuples))
+        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
         .product::<f64>()
         .clamp(0.0, 1.0);
     let index_rows = clamp_rows(stats.reltuples * used_sel);
@@ -1417,9 +1420,9 @@ fn estimate_index_candidate(
     };
 
     if let Some(predicate) = spec.residual {
-        let selectivity = base_clause_selectivity(&predicate, Some(stats), stats.reltuples);
+        let selectivity = clause_selectivity(&predicate, Some(stats), stats.reltuples);
         current_rows = clamp_rows(current_rows * selectivity);
-        total_cost += current_rows * planner_predicate_cost(&predicate) * CPU_OPERATOR_COST;
+        total_cost += current_rows * predicate_cost(&predicate) * CPU_OPERATOR_COST;
         plan = PlannerPath::Filter {
             plan_info: PlanEstimate::new(
                 scan_info.startup_cost.as_f64(),
@@ -1461,7 +1464,7 @@ fn choose_join_plan(
     left: PlannerPath,
     right: PlannerPath,
     kind: JoinType,
-    on: PlannerJoinExpr,
+    on: Expr,
 ) -> PlannerPath {
     let original = estimate_nested_loop_join(left.clone(), right.clone(), kind, on.clone());
     if !matches!(kind, JoinType::Inner | JoinType::Cross) {
@@ -1491,20 +1494,17 @@ fn estimate_nested_loop_join(
     left: PlannerPath,
     right: PlannerPath,
     kind: JoinType,
-    on: PlannerJoinExpr,
+    on: Expr,
 ) -> PlannerPath {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
-    let mut join_layout = left.output_vars();
-    join_layout.extend(right.output_vars());
-    let on_expr = on.clone().into_input_expr_with_layout(&join_layout);
-    let join_sel = clause_selectivity(&on_expr, None, left_info.plan_rows.as_f64());
+    let join_sel = clause_selectivity(&on, None, left_info.plan_rows.as_f64());
     let rows = clamp_rows(left_info.plan_rows.as_f64() * right_info.plan_rows.as_f64() * join_sel);
     let total = left_info.total_cost.as_f64()
         + left_info.plan_rows.as_f64() * right_info.total_cost.as_f64()
         + left_info.plan_rows.as_f64()
             * right_info.plan_rows.as_f64()
-            * predicate_cost(&on_expr)
+            * predicate_cost(&on)
             * CPU_OPERATOR_COST;
     PlannerPath::NestedLoopJoin {
         plan_info: PlanEstimate::new(
@@ -1524,13 +1524,13 @@ fn restore_join_output_order(
     join: PlannerPath,
     left_columns: &[QueryColumn],
     right_columns: &[QueryColumn],
-    left_vars: &[PlannerJoinExpr],
-    right_vars: &[PlannerJoinExpr],
+    left_vars: &[Expr],
+    right_vars: &[Expr],
 ) -> PlannerPath {
     let join_info = join.plan_info();
     let mut targets = Vec::with_capacity(left_columns.len() + right_columns.len());
     for (column, expr) in left_columns.iter().zip(left_vars.iter()) {
-        targets.push(PlannerTargetEntry {
+        targets.push(TargetEntry {
             name: column.name.clone(),
             expr: expr.clone(),
             sql_type: column.sql_type,
@@ -1540,7 +1540,7 @@ fn restore_join_output_order(
         });
     }
     for (column, expr) in right_columns.iter().zip(right_vars.iter()) {
-        targets.push(PlannerTargetEntry {
+        targets.push(TargetEntry {
             name: column.name.clone(),
             expr: expr.clone(),
             sql_type: column.sql_type,
@@ -1567,13 +1567,11 @@ fn restore_join_output_order(
 }
 
 fn build_index_path_spec(
-    filter: Option<&PlannerJoinExpr>,
-    order_items: Option<&[PlannerOrderByEntry]>,
+    filter: Option<&Expr>,
+    order_items: Option<&[OrderByEntry]>,
     index: &BoundIndexRelation,
 ) -> Option<IndexPathSpec> {
-    let conjuncts = filter
-        .map(flatten_and_conjuncts_planner)
-        .unwrap_or_default();
+    let conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
     let parsed_quals = conjuncts
         .iter()
         .filter_map(indexable_qual)
@@ -1632,7 +1630,7 @@ fn build_index_path_spec(
                 .then_some(&qual.expr)
         })
         .collect::<Vec<_>>();
-    let residual = planner_and_exprs(
+    let residual = and_exprs(
         conjuncts
             .iter()
             .filter(|expr| !used_exprs.iter().any(|used_expr| *used_expr == *expr))
@@ -1658,7 +1656,9 @@ fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
             .args
             .iter()
-            .fold(1.0, |acc, arg| acc * clause_selectivity(arg, stats, reltuples))
+            .fold(1.0, |acc, arg| {
+                acc * clause_selectivity(arg, stats, reltuples)
+            })
             .clamp(0.0, 1.0),
         Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::Or => {
             let mut result = 0.0;
@@ -1686,57 +1686,22 @@ fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64
             ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Less)
                 .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
         }
-        Expr::Op(op) if matches!(op.op, OpExprKind::Gt) && op.args.len() == 2 => {
-            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Greater)
-        }
+        Expr::Op(op) if matches!(op.op, OpExprKind::Gt) && op.args.len() == 2 => ineq_selectivity(
+            &op.args[0],
+            &op.args[1],
+            stats,
+            reltuples,
+            Ordering::Greater,
+        ),
         Expr::Op(op) if matches!(op.op, OpExprKind::GtEq) && op.args.len() == 2 => {
-            ineq_selectivity(&op.args[0], &op.args[1], stats, reltuples, Ordering::Greater)
-                .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
-        }
-        _ => DEFAULT_BOOL_SEL,
-    }
-    .clamp(0.0, 1.0)
-}
-
-fn base_clause_selectivity(
-    expr: &PlannerJoinExpr,
-    stats: Option<&RelationStats>,
-    reltuples: f64,
-) -> f64 {
-    match expr {
-        PlannerJoinExpr::And(left, right) => (base_clause_selectivity(left, stats, reltuples)
-            * base_clause_selectivity(right, stats, reltuples))
-        .clamp(0.0, 1.0),
-        PlannerJoinExpr::Or(left, right) => {
-            let left = base_clause_selectivity(left, stats, reltuples);
-            let right = base_clause_selectivity(right, stats, reltuples);
-            (left + right - left * right).clamp(0.0, 1.0)
-        }
-        PlannerJoinExpr::IsNull(inner) => {
-            base_column_selectivity(inner, stats, |row, _| row.stanullfrac)
-                .unwrap_or(DEFAULT_EQ_SEL)
-        }
-        PlannerJoinExpr::IsNotNull(inner) => {
-            base_column_selectivity(inner, stats, |row, _| 1.0 - row.stanullfrac)
-                .unwrap_or(1.0 - DEFAULT_EQ_SEL)
-        }
-        PlannerJoinExpr::Eq(left, right) => base_eq_selectivity(left, right, stats, reltuples),
-        PlannerJoinExpr::NotEq(left, right) => {
-            1.0 - base_eq_selectivity(left, right, stats, reltuples)
-        }
-        PlannerJoinExpr::Lt(left, right) => {
-            base_ineq_selectivity(left, right, stats, reltuples, Ordering::Less)
-        }
-        PlannerJoinExpr::LtEq(left, right) => {
-            base_ineq_selectivity(left, right, stats, reltuples, Ordering::Less)
-                .max(base_eq_selectivity(left, right, stats, reltuples))
-        }
-        PlannerJoinExpr::Gt(left, right) => {
-            base_ineq_selectivity(left, right, stats, reltuples, Ordering::Greater)
-        }
-        PlannerJoinExpr::GtEq(left, right) => {
-            base_ineq_selectivity(left, right, stats, reltuples, Ordering::Greater)
-                .max(base_eq_selectivity(left, right, stats, reltuples))
+            ineq_selectivity(
+                &op.args[0],
+                &op.args[1],
+                stats,
+                reltuples,
+                Ordering::Greater,
+            )
+            .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
         }
         _ => DEFAULT_BOOL_SEL,
     }
@@ -1745,41 +1710,6 @@ fn base_clause_selectivity(
 
 fn eq_selectivity(left: &Expr, right: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
     let Some((column, constant)) = column_const_pair(left, right) else {
-        return DEFAULT_EQ_SEL;
-    };
-    let Some(stats) = stats else {
-        return DEFAULT_EQ_SEL;
-    };
-    let Some(row) = stats.stats_by_attnum.get(&((column + 1) as i16)) else {
-        return DEFAULT_EQ_SEL;
-    };
-    if let Some((values, freqs)) = slot_values_and_numbers(row, STATISTIC_KIND_MCV) {
-        for (value, freq) in values.elements.iter().zip(freqs.elements.iter()) {
-            if values_equal(value, &constant) {
-                return float_value(freq).unwrap_or(DEFAULT_EQ_SEL).clamp(0.0, 1.0);
-            }
-        }
-    }
-
-    let ndistinct = effective_ndistinct(row, reltuples).unwrap_or(200.0);
-    let mcv_count = slot_values(row, STATISTIC_KIND_MCV)
-        .map(|array| array.elements.len() as f64)
-        .unwrap_or(0.0);
-    let mcv_total = slot_numbers(row, STATISTIC_KIND_MCV)
-        .map(|array| array.elements.iter().filter_map(float_value).sum::<f64>())
-        .unwrap_or(0.0);
-    let remaining = (1.0 - row.stanullfrac - mcv_total).max(0.0);
-    let distinct_remaining = (ndistinct - mcv_count).max(1.0);
-    (remaining / distinct_remaining).clamp(0.0, 1.0)
-}
-
-fn base_eq_selectivity(
-    left: &PlannerJoinExpr,
-    right: &PlannerJoinExpr,
-    stats: Option<&RelationStats>,
-    reltuples: f64,
-) -> f64 {
-    let Some((column, constant)) = base_column_const_pair(left, right) else {
         return DEFAULT_EQ_SEL;
     };
     let Some(stats) = stats else {
@@ -1839,105 +1769,29 @@ fn ineq_selectivity(
     }
 }
 
-fn base_ineq_selectivity(
-    left: &PlannerJoinExpr,
-    right: &PlannerJoinExpr,
-    stats: Option<&RelationStats>,
-    _reltuples: f64,
-    wanted: Ordering,
-) -> f64 {
-    let Some((column, constant, flipped)) = base_ordered_column_const_pair(left, right) else {
-        return DEFAULT_INEQ_SEL;
-    };
-    let Some(stats) = stats else {
-        return DEFAULT_INEQ_SEL;
-    };
-    let Some(row) = stats.stats_by_attnum.get(&((column + 1) as i16)) else {
-        return DEFAULT_INEQ_SEL;
-    };
-    let Some(hist) = slot_values(row, STATISTIC_KIND_HISTOGRAM) else {
-        return DEFAULT_INEQ_SEL;
-    };
-    let fraction = histogram_fraction(&hist, &constant);
-    let lt_fraction = fraction * (1.0 - row.stanullfrac);
-    let gt_fraction = (1.0 - fraction) * (1.0 - row.stanullfrac);
-    match (wanted, flipped) {
-        (Ordering::Less, false) => lt_fraction,
-        (Ordering::Greater, false) => gt_fraction,
-        (Ordering::Less, true) => gt_fraction,
-        (Ordering::Greater, true) => lt_fraction,
-        _ => DEFAULT_INEQ_SEL,
-    }
-}
-
 fn column_selectivity(
     expr: &Expr,
     stats: Option<&RelationStats>,
     f: impl FnOnce(&PgStatisticRow, f64) -> f64,
 ) -> Option<f64> {
-    let Expr::Column(column) = expr else {
-        return None;
-    };
+    let column = expr_column_index(expr)?;
     let stats = stats?;
-    let row = stats.stats_by_attnum.get(&((*column + 1) as i16))?;
-    Some(f(row, stats.reltuples))
-}
-
-fn base_column_selectivity(
-    expr: &PlannerJoinExpr,
-    stats: Option<&RelationStats>,
-    f: impl FnOnce(&PgStatisticRow, f64) -> f64,
-) -> Option<f64> {
-    let PlannerJoinExpr::BaseColumn { index, .. } = expr else {
-        return None;
-    };
-    let stats = stats?;
-    let row = stats.stats_by_attnum.get(&((*index + 1) as i16))?;
+    let row = stats.stats_by_attnum.get(&((column + 1) as i16))?;
     Some(f(row, stats.reltuples))
 }
 
 fn column_const_pair<'a>(left: &'a Expr, right: &'a Expr) -> Option<(usize, Value)> {
     match (left, right) {
-        (Expr::Column(column), Expr::Const(value)) => Some((*column, value.clone())),
-        (Expr::Const(value), Expr::Column(column)) => Some((*column, value.clone())),
-        _ => None,
-    }
-}
-
-fn base_column_const_pair(
-    left: &PlannerJoinExpr,
-    right: &PlannerJoinExpr,
-) -> Option<(usize, Value)> {
-    match (left, right) {
-        (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
-            Some((*index, value.clone()))
-        }
-        (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
-            Some((*index, value.clone()))
-        }
+        (expr, Expr::Const(value)) => Some((expr_column_index(expr)?, value.clone())),
+        (Expr::Const(value), expr) => Some((expr_column_index(expr)?, value.clone())),
         _ => None,
     }
 }
 
 fn ordered_column_const_pair<'a>(left: &'a Expr, right: &'a Expr) -> Option<(usize, Value, bool)> {
     match (left, right) {
-        (Expr::Column(column), Expr::Const(value)) => Some((*column, value.clone(), false)),
-        (Expr::Const(value), Expr::Column(column)) => Some((*column, value.clone(), true)),
-        _ => None,
-    }
-}
-
-fn base_ordered_column_const_pair(
-    left: &PlannerJoinExpr,
-    right: &PlannerJoinExpr,
-) -> Option<(usize, Value, bool)> {
-    match (left, right) {
-        (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
-            Some((*index, value.clone(), false))
-        }
-        (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
-            Some((*index, value.clone(), true))
-        }
+        (expr, Expr::Const(value)) => Some((expr_column_index(expr)?, value.clone(), false)),
+        (Expr::Const(value), expr) => Some((expr_column_index(expr)?, value.clone(), true)),
         _ => None,
     }
 }
@@ -2075,27 +1929,6 @@ fn predicate_cost(expr: &Expr) -> f64 {
     }
 }
 
-fn planner_predicate_cost(expr: &PlannerJoinExpr) -> f64 {
-    match expr {
-        PlannerJoinExpr::And(left, right)
-        | PlannerJoinExpr::Or(left, right)
-        | PlannerJoinExpr::Eq(left, right)
-        | PlannerJoinExpr::NotEq(left, right)
-        | PlannerJoinExpr::Lt(left, right)
-        | PlannerJoinExpr::LtEq(left, right)
-        | PlannerJoinExpr::Gt(left, right)
-        | PlannerJoinExpr::GtEq(left, right)
-        | PlannerJoinExpr::RegexMatch(left, right)
-        | PlannerJoinExpr::Coalesce(left, right) => {
-            1.0 + planner_predicate_cost(left) + planner_predicate_cost(right)
-        }
-        PlannerJoinExpr::IsNull(inner) | PlannerJoinExpr::IsNotNull(inner) => {
-            1.0 + planner_predicate_cost(inner)
-        }
-        _ => 1.0,
-    }
-}
-
 fn clamp_rows(rows: f64) -> f64 {
     if !rows.is_finite() {
         1.0
@@ -2115,24 +1948,8 @@ fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
     }
 }
 
-fn flatten_and_conjuncts_planner(expr: &PlannerJoinExpr) -> Vec<PlannerJoinExpr> {
-    match expr {
-        PlannerJoinExpr::And(left, right) => {
-            let mut out = flatten_and_conjuncts_planner(left);
-            out.extend(flatten_and_conjuncts_planner(right));
-            out
-        }
-        other => vec![other.clone()],
-    }
-}
-
-fn indexable_qual(expr: &PlannerJoinExpr) -> Option<IndexableQual> {
-    fn mk(
-        column: usize,
-        strategy: u16,
-        argument: &Value,
-        expr: &PlannerJoinExpr,
-    ) -> Option<IndexableQual> {
+fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
+    fn mk(column: usize, strategy: u16, argument: &Value, expr: &Expr) -> Option<IndexableQual> {
         Some(IndexableQual {
             column,
             strategy,
@@ -2142,51 +1959,41 @@ fn indexable_qual(expr: &PlannerJoinExpr) -> Option<IndexableQual> {
     }
 
     match expr {
-        PlannerJoinExpr::Eq(left, right) => match (&**left, &**right) {
-            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
-                mk(*index, 3, value, expr)
+        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::Eq) => {
+            match (&op.args[0], &op.args[1]) {
+                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 3, value, expr),
+                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 3, value, expr),
+                _ => None,
             }
-            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
-                mk(*index, 3, value, expr)
+        }
+        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::Lt) => {
+            match (&op.args[0], &op.args[1]) {
+                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 1, value, expr),
+                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 5, value, expr),
+                _ => None,
             }
-            _ => None,
-        },
-        PlannerJoinExpr::Lt(left, right) => match (&**left, &**right) {
-            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
-                mk(*index, 1, value, expr)
+        }
+        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::LtEq) => {
+            match (&op.args[0], &op.args[1]) {
+                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 2, value, expr),
+                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 4, value, expr),
+                _ => None,
             }
-            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
-                mk(*index, 5, value, expr)
+        }
+        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::Gt) => {
+            match (&op.args[0], &op.args[1]) {
+                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 5, value, expr),
+                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 1, value, expr),
+                _ => None,
             }
-            _ => None,
-        },
-        PlannerJoinExpr::LtEq(left, right) => match (&**left, &**right) {
-            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
-                mk(*index, 2, value, expr)
+        }
+        Expr::Op(op) if op.args.len() == 2 && matches!(op.op, OpExprKind::GtEq) => {
+            match (&op.args[0], &op.args[1]) {
+                (arg, Expr::Const(value)) => mk(expr_column_index(arg)?, 4, value, expr),
+                (Expr::Const(value), arg) => mk(expr_column_index(arg)?, 2, value, expr),
+                _ => None,
             }
-            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
-                mk(*index, 4, value, expr)
-            }
-            _ => None,
-        },
-        PlannerJoinExpr::Gt(left, right) => match (&**left, &**right) {
-            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
-                mk(*index, 5, value, expr)
-            }
-            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
-                mk(*index, 1, value, expr)
-            }
-            _ => None,
-        },
-        PlannerJoinExpr::GtEq(left, right) => match (&**left, &**right) {
-            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
-                mk(*index, 4, value, expr)
-            }
-            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
-                mk(*index, 2, value, expr)
-            }
-            _ => None,
-        },
+        }
         _ => None,
     }
 }
@@ -2199,18 +2006,8 @@ fn and_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {
     Some(exprs.into_iter().fold(first, Expr::and))
 }
 
-fn planner_and_exprs(mut exprs: Vec<PlannerJoinExpr>) -> Option<PlannerJoinExpr> {
-    if exprs.is_empty() {
-        return None;
-    }
-    let first = exprs.remove(0);
-    Some(exprs.into_iter().fold(first, |acc, expr| {
-        PlannerJoinExpr::And(Box::new(acc), Box::new(expr))
-    }))
-}
-
 fn index_order_match(
-    items: &[PlannerOrderByEntry],
+    items: &[OrderByEntry],
     index: &BoundIndexRelation,
     equality_prefix: usize,
 ) -> Option<(usize, crate::include::access::relscan::ScanDirection)> {
@@ -2220,7 +2017,7 @@ fn index_order_match(
     let mut direction = None;
     let mut matched = 0usize;
     for (idx, item) in items.iter().enumerate() {
-        let PlannerJoinExpr::BaseColumn { index: column, .. } = item.expr else {
+        let Some(column) = expr_column_index(&item.expr) else {
             break;
         };
         let Some(attnum) = index.index_meta.indkey.get(equality_prefix + idx) else {
@@ -2247,4 +2044,12 @@ fn index_order_match(
         matched,
         direction.unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
     ))
+}
+
+fn expr_column_index(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == 0 => Some(var.varattno.saturating_sub(1)),
+        Expr::Column(column) => Some(*column),
+        _ => None,
+    }
 }

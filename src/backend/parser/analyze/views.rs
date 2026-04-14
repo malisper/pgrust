@@ -40,7 +40,8 @@ pub(crate) fn validate_view_shape(
             actual: format!("stale view definition for {display_name}"),
         });
     }
-    for (actual_column, stored_column) in actual_columns.into_iter().zip(relation_desc.columns.iter())
+    for (actual_column, stored_column) in
+        actual_columns.into_iter().zip(relation_desc.columns.iter())
     {
         if !actual_column.name.eq_ignore_ascii_case(&stored_column.name)
             || actual_column.sql_type != stored_column.sql_type
@@ -75,14 +76,8 @@ pub(crate) fn analyze_view_rule_sql(
     };
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation_oid);
-    let (query, _) = analyze_select_query_with_outer(
-        &select,
-        catalog,
-        &[],
-        None,
-        &[],
-        &next_views,
-    )?;
+    let (query, _) =
+        analyze_select_query_with_outer(&select, catalog, &[], None, &[], &next_views)?;
     validate_view_shape(&query, relation_desc, &display_name)?;
     Ok(query)
 }

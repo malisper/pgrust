@@ -564,7 +564,7 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-                subplans: Vec::new(),
+                    subplans: Vec::new(),
                 };
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
@@ -588,7 +588,7 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-                subplans: Vec::new(),
+                    subplans: Vec::new(),
                 };
                 execute_insert(bound, &catalog, &mut ctx, xid, cid)
             }
@@ -612,7 +612,7 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-                subplans: Vec::new(),
+                    subplans: Vec::new(),
                 };
                 execute_update_with_waiter(
                     bound,
@@ -643,7 +643,7 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-                subplans: Vec::new(),
+                    subplans: Vec::new(),
                 };
                 execute_delete_with_waiter(
                     bound,
@@ -775,7 +775,7 @@ impl Session {
                     next_command_id: cid,
                     timed: false,
                     outer_rows: Vec::new(),
-                subplans: Vec::new(),
+                    subplans: Vec::new(),
                 };
                 execute_truncate_table(truncate_stmt.clone(), &catalog, &mut ctx, xid)
             }
@@ -957,7 +957,7 @@ impl Session {
             next_command_id: cid,
             timed: false,
             outer_rows: Vec::new(),
-        subplans: Vec::new(),
+            subplans: Vec::new(),
         };
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
     }
@@ -1153,7 +1153,7 @@ impl Session {
                 next_command_id: cid,
                 timed: false,
                 outer_rows: Vec::new(),
-            subplans: Vec::new(),
+                subplans: Vec::new(),
             };
             crate::backend::commands::tablecmds::execute_insert_values(
                 rel,
