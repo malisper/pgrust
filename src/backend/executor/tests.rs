@@ -2277,10 +2277,31 @@ fn multidimensional_array_columns_round_trip_through_storage() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Array(vec![Value::Array(vec![
-                    Value::Array(vec![Value::Int32(1), Value::Int32(2)]),
-                    Value::Array(vec![Value::Int32(3), Value::Int32(4)]),
-                ])])]]
+                vec![vec![Value::PgArray(
+                    crate::include::nodes::datum::ArrayValue::from_dimensions(
+                        vec![
+                            crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 1,
+                            },
+                            crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 2,
+                            },
+                            crate::include::nodes::datum::ArrayDimension {
+                                lower_bound: 1,
+                                length: 2,
+                            },
+                        ],
+                        vec![
+                            Value::Int32(1),
+                            Value::Int32(2),
+                            Value::Int32(3),
+                            Value::Int32(4),
+                        ],
+                    )
+                    .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+                )]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -2365,14 +2386,16 @@ fn array_subscript_select_and_update_work() {
                             length: 3,
                         }],
                         vec![Value::Int32(1), Value::Int32(22), Value::Int32(3)],
-                    )),
+                    )
+                    .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID)),
                     Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
                         vec![crate::include::nodes::datum::ArrayDimension {
                             lower_bound: 1,
                             length: 3,
                         }],
                         vec![Value::Int32(4), Value::Int32(50), Value::Int32(60)],
-                    )),
+                    )
+                    .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID)),
                 ]]
             );
         }
@@ -2410,11 +2433,14 @@ fn array_assignment_coerces_text_literals_using_target_type() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Array(vec![
-                    Value::Int32(1),
-                    Value::Int32(2),
-                    Value::Int32(3),
-                ])]]
+                vec![vec![Value::PgArray(
+                    crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                        Value::Int32(1),
+                        Value::Int32(2),
+                        Value::Int32(3),
+                    ])
+                    .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+                )]]
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -4932,10 +4958,13 @@ fn array_columns_round_trip_through_storage() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
-                vec![vec![Value::Array(vec![
-                    Value::Text("n1".into()),
-                    Value::Null
-                ])]]
+                vec![vec![Value::PgArray(
+                    crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                        Value::Text("n1".into()),
+                        Value::Null,
+                    ])
+                    .with_element_type_oid(crate::include::catalog::VARCHAR_TYPE_OID),
+                )]]
             );
         }
         other => panic!("expected query result, got {:?}", other),

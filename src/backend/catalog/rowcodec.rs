@@ -1271,9 +1271,15 @@ mod tests {
             staop: [96, 97, 98, 0, 0],
             stacoll: [0; 5],
             stanumbers: [
-                Some(ArrayValue::from_1d(vec![Value::Float64(0.5)])),
+                Some(
+                    ArrayValue::from_1d(vec![Value::Float64(0.5)])
+                        .with_element_type_oid(crate::include::catalog::FLOAT4_TYPE_OID),
+                ),
                 None,
-                Some(ArrayValue::from_1d(vec![Value::Float64(1.0)])),
+                Some(
+                    ArrayValue::from_1d(vec![Value::Float64(1.0)])
+                        .with_element_type_oid(crate::include::catalog::FLOAT4_TYPE_OID),
+                ),
                 None,
                 None,
             ],
