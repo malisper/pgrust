@@ -1,5 +1,6 @@
 use crate::backend::access::heap::heapam::VisibleHeapScan;
 use crate::backend::access::transam::xact::{Snapshot, TransactionManager};
+use crate::backend::executor::hashjoin::{HashJoinPhase, HashJoinTable};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
@@ -299,6 +300,39 @@ pub struct NestedLoopJoinState {
     pub(crate) left_width: usize,
     pub(crate) right_width: usize,
     pub(crate) unmatched_right_index: usize,
+    pub(crate) slot: TupleSlot,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct HashState {
+    pub(crate) input: PlanState,
+    pub(crate) hash_keys: Vec<Expr>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) table: Option<HashJoinTable>,
+    pub(crate) built: bool,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct HashJoinState {
+    pub(crate) left: PlanState,
+    pub(crate) right: Box<HashState>,
+    pub(crate) kind: JoinType,
+    pub(crate) hash_clauses: Vec<Expr>,
+    pub(crate) hash_keys: Vec<Expr>,
+    pub(crate) join_qual: Option<Expr>,
+    pub(crate) combined_names: Vec<String>,
+    pub(crate) left_width: usize,
+    pub(crate) right_width: usize,
+    pub(crate) phase: HashJoinPhase,
+    pub(crate) current_outer: Option<TupleSlot>,
+    pub(crate) current_bucket_entries: Vec<usize>,
+    pub(crate) current_bucket_index: usize,
+    pub(crate) matched_outer: bool,
+    pub(crate) unmatched_inner_index: usize,
     pub(crate) slot: TupleSlot,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
