@@ -1397,7 +1397,7 @@ fn bind_scalar_function_call(
                 SqlType::new(SqlTypeKind::Money),
             )],
         )),
-        BuiltinScalarFunction::DatePart => Ok(build_func(
+        BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => Ok(build_func(
             false,
             vec![
                 coerce_bound_expr(
@@ -1407,6 +1407,15 @@ fn bind_scalar_function_call(
                 ),
                 bound_args[1].clone(),
             ],
+        )),
+        BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
+        BuiltinScalarFunction::MakeDate => Ok(build_func(
+            false,
+            arg_types
+                .into_iter()
+                .zip(bound_args)
+                .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Int4)))
+                .collect(),
         )),
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::ToTsQuery

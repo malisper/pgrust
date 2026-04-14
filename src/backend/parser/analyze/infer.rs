@@ -319,6 +319,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 }
                 Some(BuiltinScalarFunction::TimeOfDay) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
+                Some(BuiltinScalarFunction::DateTrunc) => SqlType::new(SqlTypeKind::Date),
+                Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
+                Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)
