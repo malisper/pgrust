@@ -887,18 +887,14 @@ fn create_index_and_alter_table_set_are_noops() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    match db
-        .execute(
-            1,
-            "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname, l.lanname \
-                 from pg_proc p \
-                 join pg_type t on t.oid = p.prorettype \
-                 join pg_language l on l.oid = p.prolang \
-                 where p.proname in ('count', 'json_array_elements', 'lower', 'random') \
-                 order by p.proname",
-        )
-        .unwrap()
-    {
+    let proc_sql =
+        "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname, l.lanname \
+             from pg_proc p \
+             join pg_type t on t.oid = p.prorettype \
+             join pg_language l on l.oid = p.prolang \
+             where p.proname in ('count', 'json_array_elements', 'lower', 'random') \
+             order by p.proname";
+    match db.execute(1, proc_sql).unwrap() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
@@ -941,17 +937,16 @@ fn create_index_and_alter_table_set_are_noops() {
         other => panic!("expected query result, got {:?}", other),
     }
 
+    let op_sql =
+        "select o.oprname, l.typname, r.typname, p.proname \
+             from pg_operator o \
+             join pg_type l on l.oid = o.oprleft \
+             join pg_type r on r.oid = o.oprright \
+             join pg_proc p on p.oid = o.oprcode \
+             where o.oid in (91, 96, 98, 531, 1694, 3877) \
+             order by o.oid";
     match db
-        .execute(
-            1,
-            "select o.oprname, l.typname, r.typname, p.proname \
-                 from pg_operator o \
-                 join pg_type l on l.oid = o.oprleft \
-                 join pg_type r on r.oid = o.oprright \
-                 join pg_proc p on p.oid = o.oprcode \
-                 where o.oid in (91, 96, 98, 531, 1694, 3877) \
-                 order by o.oid",
-        )
+        .execute(1, op_sql)
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
@@ -1676,6 +1671,104 @@ fn explain_inner_join_can_reorder_commutative_inputs() {
                 Value::Int32(3),
                 Value::Text("big3".into()),
                 Value::Int32(3),
+                Value::Text("small3".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn explain_three_way_inner_join_can_build_smaller_join_first() {
+    let base = temp_dir("explain_three_way_inner_join_reorder");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table big_items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create table medium_items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create table small_items (id int4 not null, note text)")
+        .unwrap();
+
+    for id in 0..64 {
+        db.execute(
+            1,
+            &format!("insert into big_items values ({id}, 'big{id}')"),
+        )
+        .unwrap();
+    }
+    for id in 0..16 {
+        db.execute(
+            1,
+            &format!("insert into medium_items values ({id}, 'medium{id}')"),
+        )
+        .unwrap();
+    }
+    for id in 0..4 {
+        db.execute(
+            1,
+            &format!("insert into small_items values ({id}, 'small{id}')"),
+        )
+        .unwrap();
+    }
+
+    db.execute(1, "analyze big_items").unwrap();
+    db.execute(1, "analyze medium_items").unwrap();
+    db.execute(1, "analyze small_items").unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "select * from big_items join medium_items on big_items.id = medium_items.id join small_items on medium_items.id = small_items.id",
+    );
+    let big_rel = relfilenode_for(&db, 1, "big_items");
+    let medium_rel = relfilenode_for(&db, 1, "medium_items");
+    let small_rel = relfilenode_for(&db, 1, "small_items");
+    let big_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {big_rel}")))
+        .unwrap();
+    let medium_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {medium_rel}")))
+        .unwrap();
+    let small_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {small_rel}")))
+        .unwrap();
+    assert!(
+        medium_pos < big_pos && small_pos < big_pos,
+        "expected planner to join medium/small before big, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select big_items.id, big_items.note, medium_items.note, small_items.note from big_items join medium_items on big_items.id = medium_items.id join small_items on medium_items.id = small_items.id order by 1",
+        ),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Text("big0".into()),
+                Value::Text("medium0".into()),
+                Value::Text("small0".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("big1".into()),
+                Value::Text("medium1".into()),
+                Value::Text("small1".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("big2".into()),
+                Value::Text("medium2".into()),
+                Value::Text("small2".into()),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("big3".into()),
+                Value::Text("medium3".into()),
                 Value::Text("small3".into()),
             ],
         ]
