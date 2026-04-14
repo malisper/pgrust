@@ -2,7 +2,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::PlannerPath;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
@@ -11,10 +10,6 @@ use crate::include::nodes::primnodes::{
     Var,
 };
 
-struct PlannerPathBuilder {
-    next_slot_id: usize,
-}
-
 static NEXT_SYNTHETIC_SLOT_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub(crate) fn next_synthetic_slot_id() -> usize {
@@ -22,11 +17,6 @@ pub(crate) fn next_synthetic_slot_id() -> usize {
 }
 
 impl PlannerPath {
-    pub fn from_query(query: Query) -> Self {
-        let next_slot_id = query.rtable.len() + 1;
-        PlannerPathBuilder { next_slot_id }.from_query(query)
-    }
-
     pub fn into_plan(self) -> Plan {
         match self {
             Self::Result { plan_info } => Plan::Result { plan_info },
@@ -324,316 +314,6 @@ impl PlannerPath {
     }
 }
 
-impl PlannerPathBuilder {
-    fn alloc_slot_id(&mut self) -> usize {
-        let id = self.next_slot_id;
-        self.next_slot_id += 1;
-        id
-    }
-
-    fn from_query(&mut self, query: Query) -> PlannerPath {
-        let mut plan = match query.jointree {
-            Some(jointree) => self.from_jointree(jointree, query.rtable),
-            None => PlannerPath::Result {
-                plan_info: PlanEstimate::default(),
-            },
-        };
-
-        if let Some(predicate) = query.where_qual {
-            let layout = plan.output_vars();
-            plan = PlannerPath::Filter {
-                plan_info: PlanEstimate::default(),
-                input: Box::new(plan),
-                predicate: rewrite_expr_against_layout(predicate, &layout),
-            };
-        }
-
-        let has_agg = !query.group_by.is_empty()
-            || !query.accumulators.is_empty()
-            || query.having_qual.is_some();
-        if has_agg {
-            let input_layout = plan.output_vars();
-            let group_by = query
-                .group_by
-                .iter()
-                .cloned()
-                .map(|expr| rewrite_expr_against_layout(expr, &input_layout))
-                .collect::<Vec<_>>();
-            let slot_id = self.alloc_slot_id();
-            let agg_output_layout = aggregate_output_vars(slot_id, &group_by, &query.accumulators);
-            let lowered_targets = query
-                .target_list
-                .into_iter()
-                .map(|target| TargetEntry {
-                    expr: lower_agg_output_expr(
-                        rewrite_expr_against_layout(target.expr, &input_layout),
-                        &group_by,
-                        &agg_output_layout,
-                    ),
-                    ..target
-                })
-                .collect::<Vec<_>>();
-            let lowered_sort_clause = query
-                .sort_clause
-                .into_iter()
-                .map(|item| OrderByEntry {
-                    expr: lower_agg_output_expr(
-                        rewrite_expr_against_layout(item.expr, &input_layout),
-                        &group_by,
-                        &agg_output_layout,
-                    ),
-                    descending: item.descending,
-                    nulls_first: item.nulls_first,
-                })
-                .collect::<Vec<_>>();
-            let lowered_having = query.having_qual.map(|expr| {
-                lower_agg_output_expr(
-                    rewrite_expr_against_layout(expr, &input_layout),
-                    &group_by,
-                    &agg_output_layout,
-                )
-            });
-            let output_columns = lowered_targets
-                .iter()
-                .map(|target| QueryColumn {
-                    name: target.name.clone(),
-                    sql_type: target.sql_type,
-                })
-                .collect();
-            plan = PlannerPath::Aggregate {
-                plan_info: PlanEstimate::default(),
-                slot_id,
-                input: Box::new(plan),
-                group_by,
-                accumulators: query.accumulators,
-                having: lowered_having,
-                output_columns,
-            };
-            if !lowered_sort_clause.is_empty() {
-                plan = PlannerPath::OrderBy {
-                    plan_info: PlanEstimate::default(),
-                    input: Box::new(plan),
-                    items: lowered_sort_clause,
-                };
-            }
-            if query.limit_count.is_some() || query.limit_offset != 0 {
-                plan = PlannerPath::Limit {
-                    plan_info: PlanEstimate::default(),
-                    input: Box::new(plan),
-                    limit: query.limit_count,
-                    offset: query.limit_offset,
-                };
-            }
-            return self.add_projection(plan, lowered_targets);
-        }
-
-        let project_set_targets = query.project_set;
-        let projection_targets = query.target_list;
-        let projection_before_sort = project_set_targets.is_some();
-
-        if let Some(targets) = project_set_targets {
-            let layout = plan.output_vars();
-            plan = PlannerPath::ProjectSet {
-                plan_info: PlanEstimate::default(),
-                slot_id: self.alloc_slot_id(),
-                input: Box::new(plan),
-                targets: targets
-                    .into_iter()
-                    .map(|target| rewrite_project_set_target_against_layout(target, &layout))
-                    .collect(),
-            };
-            plan = self.add_projection(plan, projection_targets.clone());
-        }
-
-        if !query.sort_clause.is_empty() {
-            let layout = plan.output_vars();
-            plan = PlannerPath::OrderBy {
-                plan_info: PlanEstimate::default(),
-                input: Box::new(plan),
-                items: query
-                    .sort_clause
-                    .into_iter()
-                    .map(|item| OrderByEntry {
-                        expr: rewrite_expr_against_layout(item.expr, &layout),
-                        descending: item.descending,
-                        nulls_first: item.nulls_first,
-                    })
-                    .collect(),
-            };
-        }
-
-        if query.limit_count.is_some() || query.limit_offset != 0 {
-            plan = PlannerPath::Limit {
-                plan_info: PlanEstimate::default(),
-                input: Box::new(plan),
-                limit: query.limit_count,
-                offset: query.limit_offset,
-            };
-        }
-
-        if !projection_before_sort {
-            plan = self.maybe_add_projection(plan, projection_targets);
-        }
-
-        plan
-    }
-
-    fn add_projection(&mut self, input: PlannerPath, targets: Vec<TargetEntry>) -> PlannerPath {
-        let layout = input.output_vars();
-        PlannerPath::Projection {
-            plan_info: PlanEstimate::default(),
-            slot_id: self.alloc_slot_id(),
-            input: Box::new(input),
-            targets: targets
-                .into_iter()
-                .map(|target| rewrite_target_entry_against_layout(target, &layout))
-                .collect(),
-        }
-    }
-
-    fn maybe_add_projection(
-        &mut self,
-        input: PlannerPath,
-        targets: Vec<TargetEntry>,
-    ) -> PlannerPath {
-        let input_columns = input.columns();
-        let layout = input.output_vars();
-        let is_identity = targets.len() == input_columns.len()
-            && targets.iter().enumerate().all(|(index, target)| {
-                rewrite_expr_against_layout(target.expr.clone(), &layout) == layout[index]
-                    && target.name == input_columns[index].name
-            });
-        if is_identity {
-            input
-        } else {
-            self.add_projection(input, targets)
-        }
-    }
-
-    fn from_jointree(&mut self, jointree: JoinTreeNode, rtable: Vec<RangeTblEntry>) -> PlannerPath {
-        match jointree {
-            JoinTreeNode::RangeTblRef(rtindex) => {
-                let rte = rtable
-                    .get(rtindex.saturating_sub(1))
-                    .cloned()
-                    .expect("range table entry for rtindex");
-                match rte.kind {
-                    RangeTblEntryKind::Result => PlannerPath::Result {
-                        plan_info: PlanEstimate::default(),
-                    },
-                    RangeTblEntryKind::Relation {
-                        rel,
-                        relation_oid,
-                        relkind: _,
-                        toast,
-                    } => PlannerPath::SeqScan {
-                        plan_info: PlanEstimate::default(),
-                        source_id: rtindex,
-                        rel,
-                        relation_oid,
-                        toast,
-                        desc: rte.desc,
-                    },
-                    RangeTblEntryKind::Values {
-                        rows,
-                        output_columns,
-                    } => PlannerPath::Values {
-                        plan_info: PlanEstimate::default(),
-                        slot_id: rtindex,
-                        rows: rows
-                            .into_iter()
-                            .map(|row| {
-                                row.into_iter()
-                                    .map(|expr| rewrite_expr_against_layout(expr, &[]))
-                                    .collect()
-                            })
-                            .collect(),
-                        output_columns,
-                    },
-                    RangeTblEntryKind::Function { call } => PlannerPath::FunctionScan {
-                        plan_info: PlanEstimate::default(),
-                        slot_id: rtindex,
-                        call: rewrite_set_returning_call_against_layout(call, &[]),
-                    },
-                    RangeTblEntryKind::Subquery { query } => {
-                        let output_columns = query.columns();
-                        let input = self.from_query(*query);
-                        let layout = input.output_vars();
-                        PlannerPath::Projection {
-                            plan_info: PlanEstimate::default(),
-                            slot_id: rtindex,
-                            input: Box::new(input),
-                            targets: output_columns
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, column)| {
-                                    TargetEntry::new(
-                                        column.name,
-                                        layout.get(index).cloned().unwrap_or_else(|| {
-                                            slot_var(rtindex, index + 1, column.sql_type)
-                                        }),
-                                        column.sql_type,
-                                        index + 1,
-                                    )
-                                })
-                                .collect(),
-                        }
-                    }
-                    RangeTblEntryKind::Join { .. } => unreachable!(
-                        "join RTEs are referenced through JoinExpr nodes, not bare RangeTblRef"
-                    ),
-                }
-            }
-            JoinTreeNode::JoinExpr {
-                left,
-                right,
-                kind,
-                quals,
-                rtindex,
-            } => {
-                let join_rte = rtable.get(rtindex.saturating_sub(1)).cloned();
-                let left = self.from_jointree(*left, rtable.clone());
-                let right = self.from_jointree(*right, rtable);
-                let mut layout = left.output_vars();
-                layout.extend(right.output_vars());
-                let join = PlannerPath::NestedLoopJoin {
-                    plan_info: PlanEstimate::default(),
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    kind,
-                    on: rewrite_expr_against_layout(quals, &layout),
-                };
-                let Some(rte) = join_rte else {
-                    return join;
-                };
-                let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
-                    return join;
-                };
-                if join_alias_vars_match_layout(joinaliasvars, &layout) {
-                    return join;
-                }
-                PlannerPath::Projection {
-                    plan_info: PlanEstimate::default(),
-                    slot_id: rtindex,
-                    input: Box::new(join),
-                    targets: joinaliasvars
-                        .iter()
-                        .enumerate()
-                        .map(|(index, expr)| {
-                            TargetEntry::new(
-                                rte.desc.columns[index].name.clone(),
-                                rewrite_expr_against_layout(expr.clone(), &layout),
-                                rte.desc.columns[index].sql_type,
-                                index + 1,
-                            )
-                        })
-                        .collect(),
-                }
-            }
-        }
-    }
-}
-
 fn slot_output_vars<T>(
     slot_id: usize,
     columns: &[T],
@@ -655,7 +335,7 @@ fn slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
     })
 }
 
-fn aggregate_output_vars(
+pub(super) fn aggregate_output_vars(
     slot_id: usize,
     group_by: &[Expr],
     accumulators: &[AggAccum],
@@ -674,17 +354,10 @@ fn aggregate_output_vars(
     vars
 }
 
-fn join_alias_vars_match_layout(joinaliasvars: &[Expr], layout: &[Expr]) -> bool {
-    joinaliasvars.len() == layout.len()
-        && joinaliasvars
-            .iter()
-            .cloned()
-            .map(|expr| rewrite_expr_against_layout(expr, layout))
-            .zip(layout.iter())
-            .all(|(expr, expected)| expr == *expected)
-}
-
-fn rewrite_target_entry_against_layout(target: TargetEntry, layout: &[Expr]) -> TargetEntry {
+pub(super) fn rewrite_target_entry_against_layout(
+    target: TargetEntry,
+    layout: &[Expr],
+) -> TargetEntry {
     TargetEntry {
         expr: rewrite_expr_against_layout(target.expr, layout),
         ..target
@@ -705,7 +378,7 @@ fn lower_order_by_entry_to_plan_layout(item: OrderByEntry, layout: &[Expr]) -> O
     }
 }
 
-fn rewrite_project_set_target_against_layout(
+pub(super) fn rewrite_project_set_target_against_layout(
     target: ProjectSetTarget,
     layout: &[Expr],
 ) -> ProjectSetTarget {
@@ -749,7 +422,7 @@ fn lower_project_set_target_to_plan_layout(
     }
 }
 
-fn rewrite_set_returning_call_against_layout(
+pub(super) fn rewrite_set_returning_call_against_layout(
     call: SetReturningCall,
     layout: &[Expr],
 ) -> SetReturningCall {
@@ -922,7 +595,11 @@ fn lower_agg_accum_to_plan_layout(accum: AggAccum, layout: &[Expr]) -> AggAccum 
     }
 }
 
-fn lower_agg_output_expr(expr: Expr, group_by: &[Expr], agg_output_layout: &[Expr]) -> Expr {
+pub(super) fn lower_agg_output_expr(
+    expr: Expr,
+    group_by: &[Expr],
+    agg_output_layout: &[Expr],
+) -> Expr {
     if let Some(index) = group_by.iter().position(|group_expr| *group_expr == expr) {
         return agg_output_layout[index].clone();
     }
@@ -1065,7 +742,7 @@ fn lower_agg_output_expr(expr: Expr, group_by: &[Expr], agg_output_layout: &[Exp
     }
 }
 
-fn rewrite_expr_against_layout(expr: Expr, layout: &[Expr]) -> Expr {
+pub(super) fn rewrite_expr_against_layout(expr: Expr, layout: &[Expr]) -> Expr {
     match expr {
         Expr::Column(index) => layout.get(index).cloned().unwrap_or(Expr::Column(index)),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
@@ -1323,7 +1000,7 @@ fn lower_expr_to_plan_layout(expr: Expr, layout: &[Expr]) -> Expr {
     }
 }
 
-fn expr_sql_type(expr: &Expr) -> SqlType {
+pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
     match expr {
         Expr::Var(var) => var.vartype,
         Expr::Aggref(aggref) => aggref.aggtype,

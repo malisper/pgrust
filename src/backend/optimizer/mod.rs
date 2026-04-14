@@ -8,17 +8,20 @@ use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
-use crate::include::nodes::parsenodes::Query;
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
-    PlannerGlobal, PlannerInfo, PlannerPath, RelOptInfo, RelOptKind, RestrictInfo,
+    PathTarget, PlannerGlobal, PlannerInfo, PlannerPath, RelOptInfo, RelOptKind, RestrictInfo,
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, BoolExprType, Expr, ExprArraySubscript, JoinType, OpExprKind, OrderByEntry,
     ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, SubLink, SubPlan, TargetEntry,
-    ToastRelationRef,
+    ToastRelationRef, Var,
 };
-use pathnodes::next_synthetic_slot_id;
+use pathnodes::{
+    aggregate_output_vars, expr_sql_type, lower_agg_output_expr, next_synthetic_slot_id,
+    rewrite_expr_against_layout, rewrite_project_set_target_against_layout,
+};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
@@ -71,41 +74,946 @@ fn create_plan(path: PlannerPath) -> Plan {
     path.into_plan()
 }
 
-fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
-    let mut final_rel = RelOptInfo::new(
-        root.all_query_relids(),
-        RelOptKind::UpperRel,
-        root.final_target.clone(),
-    );
-    if let Some(where_qual) = root.parse.where_qual.clone() {
-        final_rel
-            .baserestrictinfo
-            .push(RestrictInfo::new(where_qual));
+fn sort_clause_to_order_items(
+    sort_clause: &[crate::include::nodes::primnodes::SortGroupClause],
+) -> Vec<OrderByEntry> {
+    sort_clause
+        .iter()
+        .map(|clause| OrderByEntry {
+            expr: clause.expr.clone(),
+            descending: clause.descending,
+            nulls_first: clause.nulls_first,
+        })
+        .collect()
+}
+
+fn has_outer_joins(root: &PlannerInfo) -> bool {
+    !root.join_info_list.is_empty()
+}
+
+fn has_grouping(root: &PlannerInfo) -> bool {
+    !root.parse.group_by.is_empty()
+        || !root.parse.accumulators.is_empty()
+        || root.parse.having_qual.is_some()
+}
+
+fn relids_union(left: &[usize], right: &[usize]) -> Vec<usize> {
+    let mut relids = left.to_vec();
+    relids.extend(right.iter().copied());
+    relids.sort_unstable();
+    relids.dedup();
+    relids
+}
+
+fn relids_subset(required: &[usize], available: &[usize]) -> bool {
+    required.iter().all(|relid| available.contains(relid))
+}
+
+fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
+    !has_outer_joins(root)
+        && relids.len() == 1
+        && root
+            .simple_rel_array
+            .get(relids[0])
+            .and_then(Option::as_ref)
+            .is_some()
+}
+
+fn expr_relids(expr: &Expr) -> Vec<usize> {
+    fn collect(expr: &Expr, relids: &mut Vec<usize>) {
+        match expr {
+            Expr::Var(var) if var.varlevelsup == 0 => relids.push(var.varno),
+            Expr::Aggref(aggref) => {
+                for arg in &aggref.args {
+                    collect(arg, relids);
+                }
+            }
+            Expr::Op(op) => {
+                for arg in &op.args {
+                    collect(arg, relids);
+                }
+            }
+            Expr::Bool(bool_expr) => {
+                for arg in &bool_expr.args {
+                    collect(arg, relids);
+                }
+            }
+            Expr::Func(func) => {
+                for arg in &func.args {
+                    collect(arg, relids);
+                }
+            }
+            Expr::SubLink(sublink) => {
+                if let Some(testexpr) = &sublink.testexpr {
+                    collect(testexpr, relids);
+                }
+            }
+            Expr::SubPlan(subplan) => {
+                if let Some(testexpr) = &subplan.testexpr {
+                    collect(testexpr, relids);
+                }
+            }
+            Expr::ScalarArrayOp(saop) => {
+                collect(&saop.left, relids);
+                collect(&saop.right, relids);
+            }
+            Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+                collect(inner, relids)
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                escape,
+                ..
+            }
+            | Expr::Similar {
+                expr,
+                pattern,
+                escape,
+                ..
+            } => {
+                collect(expr, relids);
+                collect(pattern, relids);
+                if let Some(escape) = escape {
+                    collect(escape, relids);
+                }
+            }
+            Expr::IsDistinctFrom(left, right)
+            | Expr::IsNotDistinctFrom(left, right)
+            | Expr::Coalesce(left, right) => {
+                collect(left, relids);
+                collect(right, relids);
+            }
+            Expr::ArrayLiteral { elements, .. } => {
+                for element in elements {
+                    collect(element, relids);
+                }
+            }
+            Expr::ArraySubscript { array, subscripts } => {
+                collect(array, relids);
+                for subscript in subscripts {
+                    if let Some(lower) = &subscript.lower {
+                        collect(lower, relids);
+                    }
+                    if let Some(upper) = &subscript.upper {
+                        collect(upper, relids);
+                    }
+                }
+            }
+            Expr::Column(_)
+            | Expr::OuterColumn { .. }
+            | Expr::Const(_)
+            | Expr::Random
+            | Expr::CurrentDate
+            | Expr::CurrentTime { .. }
+            | Expr::CurrentTimestamp { .. }
+            | Expr::LocalTime { .. }
+            | Expr::LocalTimestamp { .. } => {}
+            Expr::Var(_) => {}
+        }
     }
-    if let Some(having_qual) = root.parse.having_qual.clone() {
-        final_rel.joininfo.push(RestrictInfo::new(having_qual));
+
+    let mut relids = Vec::new();
+    collect(expr, &mut relids);
+    relids.sort_unstable();
+    relids.dedup();
+    relids
+}
+
+fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return None;
+    };
+    let clauses = flatten_and_conjuncts(where_qual)
+        .into_iter()
+        .filter(|clause| {
+            let relids = expr_relids(clause);
+            has_outer_joins(root) || !is_pushable_base_clause(root, &relids)
+        })
+        .collect();
+    and_exprs(clauses)
+}
+
+fn assign_base_restrictinfo(root: &mut PlannerInfo) {
+    for rel in root.simple_rel_array.iter_mut().flatten() {
+        rel.baserestrictinfo.clear();
+        rel.joininfo.clear();
     }
-    // :HACK: The planner root now mirrors PostgreSQL's PlannerInfo/RelOptInfo boundary,
-    // but physical path generation still funnels through the existing PlannerPath bridge
-    // until grouped-query semantics are fully Var/Aggref-based.
-    final_rel.add_path(optimize_path(
-        PlannerPath::from_query(root.parse.clone()),
+    if has_outer_joins(root) {
+        return;
+    }
+    let Some(where_qual) = root.parse.where_qual.as_ref() else {
+        return;
+    };
+    for clause in flatten_and_conjuncts(where_qual) {
+        let restrict = RestrictInfo::new(clause);
+        if !is_pushable_base_clause(root, &restrict.required_relids) {
+            continue;
+        }
+        let relid = restrict.required_relids[0];
+        if let Some(rel) = root
+            .simple_rel_array
+            .get_mut(relid)
+            .and_then(Option::as_mut)
+        {
+            rel.baserestrictinfo.push(restrict);
+        }
+    }
+}
+
+fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
+    and_exprs(
+        rel.baserestrictinfo
+            .iter()
+            .map(|restrict| restrict.clause.clone())
+            .collect(),
+    )
+}
+
+fn build_aggregate_output_columns(group_by: &[Expr], accumulators: &[AggAccum]) -> Vec<QueryColumn> {
+    let mut output_columns = Vec::with_capacity(group_by.len() + accumulators.len());
+    for (index, expr) in group_by.iter().enumerate() {
+        output_columns.push(QueryColumn {
+            name: format!("group{}", index + 1),
+            sql_type: expr_sql_type(expr),
+        });
+    }
+    for (index, accum) in accumulators.iter().enumerate() {
+        output_columns.push(QueryColumn {
+            name: format!("agg{}", index + 1),
+            sql_type: accum.sql_type,
+        });
+    }
+    output_columns
+}
+
+fn project_to_slot_layout(
+    slot_id: usize,
+    desc: &RelationDesc,
+    input: PlannerPath,
+    target_exprs: Vec<Expr>,
+    catalog: &dyn CatalogLookup,
+) -> PlannerPath {
+    optimize_path(
+        PlannerPath::Projection {
+            plan_info: PlanEstimate::default(),
+            slot_id,
+            input: Box::new(input),
+            targets: desc
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    TargetEntry::new(
+                        column.name.clone(),
+                        target_exprs
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| Expr::Column(index)),
+                        column.sql_type,
+                        index + 1,
+                    )
+                })
+                .collect(),
+        },
         catalog,
-    ));
-    root.join_rel_list.push(final_rel.clone());
-    root.final_rel = Some(final_rel.clone());
-    final_rel
+    )
+}
+
+fn normalize_rte_path(
+    rtindex: usize,
+    desc: &RelationDesc,
+    input: PlannerPath,
+    catalog: &dyn CatalogLookup,
+) -> PlannerPath {
+    let desired_layout = PathTarget::new(
+        desc.columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                Expr::Var(Var {
+                    varno: rtindex,
+                    varattno: index + 1,
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                })
+            })
+            .collect(),
+    )
+    .exprs;
+    if input.output_vars() == desired_layout {
+        input
+    } else {
+        project_to_slot_layout(rtindex, desc, input.clone(), input.output_vars(), catalog)
+    }
+}
+
+fn lower_targets_for_path(path: &PlannerPath, targets: &[TargetEntry]) -> Vec<TargetEntry> {
+    let layout = path.output_vars();
+    match aggregate_group_by(path) {
+        Some(group_by) => targets
+            .iter()
+            .cloned()
+            .map(|target| TargetEntry {
+                expr: lower_agg_output_expr(target.expr, group_by, &layout),
+                ..target
+            })
+            .collect(),
+        None => targets
+            .iter()
+            .cloned()
+            .map(|target| TargetEntry {
+                expr: rewrite_expr_for_path(target.expr, path, &layout),
+                ..target
+            })
+            .collect(),
+    }
+}
+
+fn lower_order_items_for_path(path: &PlannerPath, items: &[OrderByEntry]) -> Vec<OrderByEntry> {
+    let layout = path.output_vars();
+    match aggregate_group_by(path) {
+        Some(group_by) => items
+            .iter()
+            .cloned()
+            .map(|item| OrderByEntry {
+                expr: lower_agg_output_expr(item.expr, group_by, &layout),
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+            })
+            .collect(),
+        None => items
+            .iter()
+            .cloned()
+            .map(|item| OrderByEntry {
+                expr: rewrite_expr_for_path(item.expr, path, &layout),
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+            })
+            .collect(),
+    }
+}
+
+fn projection_is_identity(path: &PlannerPath, targets: &[TargetEntry]) -> bool {
+    let input_columns = path.columns();
+    let layout = path.output_vars();
+    targets.len() == input_columns.len()
+        && targets.iter().enumerate().all(|(index, target)| {
+            target.expr == layout[index] && target.name == input_columns[index].name
+        })
+}
+
+fn projection_slot_var(slot_id: usize, attno: usize, vartype: SqlType) -> Expr {
+    Expr::Var(Var {
+        varno: slot_id,
+        varattno: attno,
+        varlevelsup: 0,
+        vartype,
+    })
+}
+
+fn rewrite_expr_for_path(expr: Expr, path: &PlannerPath, layout: &[Expr]) -> Expr {
+    match path {
+        PlannerPath::Projection {
+            slot_id, targets, ..
+        } => {
+            if let Some((index, target)) = targets
+                .iter()
+                .enumerate()
+                .find(|(_, target)| target.expr == expr)
+            {
+                projection_slot_var(*slot_id, index + 1, target.sql_type)
+            } else {
+                rewrite_expr_against_layout(expr, layout)
+            }
+        }
+        PlannerPath::Filter { input, .. }
+        | PlannerPath::OrderBy { input, .. }
+        | PlannerPath::Limit { input, .. } => rewrite_expr_for_path(expr, input, layout),
+        _ => rewrite_expr_against_layout(expr, layout),
+    }
+}
+
+fn aggregate_group_by(path: &PlannerPath) -> Option<&[Expr]> {
+    match path {
+        PlannerPath::Aggregate { group_by, .. } => Some(group_by),
+        PlannerPath::Filter { input, .. }
+        | PlannerPath::OrderBy { input, .. }
+        | PlannerPath::Limit { input, .. } => aggregate_group_by(input),
+        _ => None,
+    }
+}
+
+fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn CatalogLookup) {
+    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)).cloned() else {
+        return;
+    };
+    let Some(rel) = root
+        .simple_rel_array
+        .get_mut(rtindex)
+        .and_then(Option::as_mut)
+    else {
+        return;
+    };
+    if !rel.pathlist.is_empty() {
+        return;
+    }
+
+    match rte.kind {
+        RangeTblEntryKind::Result => rel.add_path(optimize_path(
+            PlannerPath::Result {
+                plan_info: PlanEstimate::default(),
+            },
+            catalog,
+        )),
+        RangeTblEntryKind::Relation {
+            rel: heap_rel,
+            relation_oid,
+            relkind: _,
+            toast,
+        } => {
+            let filter = base_filter_expr(rel);
+            let stats = relation_stats(catalog, relation_oid, &rte.desc);
+            rel.add_path(
+                estimate_seqscan_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_oid,
+                    toast,
+                    rte.desc.clone(),
+                    &stats,
+                    filter.clone(),
+                    None,
+                )
+                .plan,
+            );
+            for index in catalog.index_relations_for_heap(relation_oid).iter().filter(|index| {
+                index.index_meta.indisvalid
+                    && index.index_meta.indisready
+                    && !index.index_meta.indkey.is_empty()
+                    && index.index_meta.am_oid == BTREE_AM_OID
+            }) {
+                let Some(spec) = build_index_path_spec(filter.as_ref(), None, index) else {
+                    continue;
+                };
+                rel.add_path(
+                    estimate_index_candidate(
+                        rtindex,
+                        heap_rel,
+                        toast,
+                        rte.desc.clone(),
+                        &stats,
+                        spec,
+                        None,
+                        catalog,
+                    )
+                    .plan,
+                );
+            }
+        }
+        RangeTblEntryKind::Values {
+            rows,
+            output_columns,
+        } => {
+            let mut path = optimize_path(
+                PlannerPath::Values {
+                    plan_info: PlanEstimate::default(),
+                    slot_id: rtindex,
+                    rows,
+                    output_columns,
+                },
+                catalog,
+            );
+            if let Some(filter) = base_filter_expr(rel) {
+                path = optimize_path(
+                    PlannerPath::Filter {
+                        plan_info: PlanEstimate::default(),
+                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        input: Box::new(path),
+                    },
+                    catalog,
+                );
+            }
+            rel.add_path(path);
+        }
+        RangeTblEntryKind::Function { call } => {
+            let mut path = optimize_path(
+                PlannerPath::FunctionScan {
+                    plan_info: PlanEstimate::default(),
+                    slot_id: rtindex,
+                    call,
+                },
+                catalog,
+            );
+            if let Some(filter) = base_filter_expr(rel) {
+                path = optimize_path(
+                    PlannerPath::Filter {
+                        plan_info: PlanEstimate::default(),
+                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        input: Box::new(path),
+                    },
+                    catalog,
+                );
+            }
+            rel.add_path(path);
+        }
+        RangeTblEntryKind::Subquery { query } => {
+            let mut subroot = PlannerInfo::new(*query);
+            let scanjoin_rel = query_planner(&mut subroot, catalog);
+            let final_rel = grouping_planner(&mut subroot, scanjoin_rel, catalog);
+            let mut path = final_rel
+                .cheapest_total_path()
+                .cloned()
+                .unwrap_or(PlannerPath::Result {
+                    plan_info: PlanEstimate::default(),
+                });
+            path = normalize_rte_path(rtindex, &rte.desc, path, catalog);
+            if let Some(filter) = base_filter_expr(rel) {
+                path = optimize_path(
+                    PlannerPath::Filter {
+                        plan_info: PlanEstimate::default(),
+                        predicate: rewrite_expr_against_layout(filter, &path.output_vars()),
+                        input: Box::new(path),
+                    },
+                    catalog,
+                );
+            }
+            rel.add_path(path);
+        }
+        RangeTblEntryKind::Join { .. } => unreachable!("join RTEs are not base relations"),
+    }
+}
+
+fn set_base_rel_pathlists(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
+    let max_rtindex = root.simple_rel_array.len().saturating_sub(1);
+    for rtindex in 1..=max_rtindex {
+        if root
+            .simple_rel_array
+            .get(rtindex)
+            .and_then(Option::as_ref)
+            .is_some()
+        {
+            set_base_rel_pathlist(root, rtindex, catalog);
+        }
+    }
+}
+
+fn build_join_qual(
+    root: &PlannerInfo,
+    kind: JoinType,
+    explicit_qual: Expr,
+    left_relids: &[usize],
+    right_relids: &[usize],
+) -> Expr {
+    let mut clauses = vec![explicit_qual];
+    if matches!(kind, JoinType::Inner | JoinType::Cross) && !has_outer_joins(root) {
+        if let Some(where_qual) = root.parse.where_qual.as_ref() {
+            let join_relids = relids_union(left_relids, right_relids);
+            for clause in flatten_and_conjuncts(where_qual) {
+                let clause_relids = expr_relids(&clause);
+                if clause_relids.len() <= 1 {
+                    continue;
+                }
+                if relids_subset(&clause_relids, &join_relids)
+                    && !relids_subset(&clause_relids, left_relids)
+                    && !relids_subset(&clause_relids, right_relids)
+                {
+                    clauses.push(clause);
+                }
+            }
+        }
+    }
+    and_exprs(clauses).unwrap_or(Expr::Const(Value::Bool(true)))
+}
+
+fn maybe_project_join_alias(
+    rtindex: usize,
+    input: PlannerPath,
+    root: &PlannerInfo,
+    catalog: &dyn CatalogLookup,
+) -> PlannerPath {
+    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
+        return input;
+    };
+    let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
+        return input;
+    };
+    let layout = input.output_vars();
+    let target_exprs = joinaliasvars
+        .iter()
+        .cloned()
+        .map(|expr| rewrite_expr_for_path(expr, &input, &layout))
+        .collect::<Vec<_>>();
+    if target_exprs == layout {
+        return input;
+    }
+    project_to_slot_layout(rtindex, &rte.desc, input, target_exprs, catalog)
+}
+
+fn build_join_tree_rel(
+    root: &mut PlannerInfo,
+    node: &JoinTreeNode,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    match node {
+        JoinTreeNode::RangeTblRef(rtindex) => {
+            set_base_rel_pathlist(root, *rtindex, catalog);
+            root.simple_rel_array[*rtindex]
+                .clone()
+                .expect("base relation for range table reference")
+        }
+        JoinTreeNode::JoinExpr {
+            left,
+            right,
+            kind,
+            quals,
+            rtindex,
+        } => {
+            let left_rel = build_join_tree_rel(root, left, catalog);
+            let right_rel = build_join_tree_rel(root, right, catalog);
+            let relids = relids_union(&left_rel.relids, &right_rel.relids);
+            let reltarget = root
+                .parse
+                .rtable
+                .get(rtindex.saturating_sub(1))
+                .map(|rte| PathTarget::from_rte(*rtindex, rte))
+                .unwrap_or_else(|| PathTarget::new(Vec::new()));
+            let join_qual =
+                build_join_qual(root, *kind, quals.clone(), &left_rel.relids, &right_rel.relids);
+            let mut join_rel = RelOptInfo::new(relids, RelOptKind::JoinRel, reltarget);
+            join_rel.joininfo.push(RestrictInfo::new(join_qual.clone()));
+            for left_path in &left_rel.pathlist {
+                for right_path in &right_rel.pathlist {
+                    let path = choose_join_plan(
+                        left_path.clone(),
+                        right_path.clone(),
+                        *kind,
+                        join_qual.clone(),
+                    );
+                    join_rel.add_path(maybe_project_join_alias(*rtindex, path, root, catalog));
+                }
+            }
+            root.join_rel_list.push(join_rel.clone());
+            join_rel
+        }
+    }
+}
+
+fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
+    assign_base_restrictinfo(root);
+    set_base_rel_pathlists(root, catalog);
+    match root.parse.jointree.clone() {
+        Some(jointree) => build_join_tree_rel(root, &jointree, catalog),
+        None => {
+            let mut rel = RelOptInfo::new(Vec::new(), RelOptKind::UpperRel, PathTarget::new(Vec::new()));
+            rel.add_path(optimize_path(
+                PlannerPath::Result {
+                    plan_info: PlanEstimate::default(),
+                },
+                catalog,
+            ));
+            rel
+        }
+    }
 }
 
 fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
     make_one_rel(root, catalog)
 }
 
-pub(crate) fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
+fn make_filter_rel(
+    input_rel: RelOptInfo,
+    predicate: Expr,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        input_rel.reltarget.clone(),
+    );
+    for path in input_rel.pathlist {
+        rel.add_path(optimize_path(
+            PlannerPath::Filter {
+                plan_info: PlanEstimate::default(),
+                predicate: rewrite_expr_against_layout(predicate.clone(), &path.output_vars()),
+                input: Box::new(path),
+            },
+            catalog,
+        ));
+    }
+    rel
+}
+
+fn make_aggregate_rel(
+    root: &PlannerInfo,
+    input_rel: RelOptInfo,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        root.final_target.clone(),
+    );
+    for path in input_rel.pathlist {
+        let input_layout = path.output_vars();
+        let group_by = root
+            .parse
+            .group_by
+            .iter()
+            .cloned()
+            .map(|expr| rewrite_expr_against_layout(expr, &input_layout))
+            .collect::<Vec<_>>();
+        let slot_id = next_synthetic_slot_id();
+        let agg_output_layout =
+            aggregate_output_vars(slot_id, &group_by, &root.parse.accumulators);
+        let having = root.parse.having_qual.clone().map(|expr| {
+            lower_agg_output_expr(
+                rewrite_expr_against_layout(expr, &input_layout),
+                &group_by,
+                &agg_output_layout,
+            )
+        });
+        rel.add_path(optimize_path(
+            PlannerPath::Aggregate {
+                plan_info: PlanEstimate::default(),
+                slot_id,
+                input: Box::new(path),
+                group_by: group_by.clone(),
+                accumulators: root.parse.accumulators.clone(),
+                having,
+                output_columns: build_aggregate_output_columns(
+                    &group_by,
+                    &root.parse.accumulators,
+                ),
+            },
+            catalog,
+        ));
+    }
+    rel
+}
+
+fn make_project_set_rel(
+    input_rel: RelOptInfo,
+    targets: &[ProjectSetTarget],
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        input_rel.reltarget.clone(),
+    );
+    for path in input_rel.pathlist {
+        let layout = path.output_vars();
+        rel.add_path(optimize_path(
+            PlannerPath::ProjectSet {
+                plan_info: PlanEstimate::default(),
+                slot_id: next_synthetic_slot_id(),
+                input: Box::new(path),
+                targets: targets
+                    .iter()
+                    .cloned()
+                    .map(|target| rewrite_project_set_target_against_layout(target, &layout))
+                    .collect(),
+            },
+            catalog,
+        ));
+    }
+    rel
+}
+
+fn maybe_add_ordered_base_paths(
+    root: &PlannerInfo,
+    input_rel: &RelOptInfo,
+    output_rel: &mut RelOptInfo,
+    catalog: &dyn CatalogLookup,
+) {
+    if input_rel.reloptkind != RelOptKind::BaseRel || input_rel.relids.len() != 1 {
+        return;
+    }
+    let rtindex = input_rel.relids[0];
+    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
+        return;
+    };
+    let RangeTblEntryKind::Relation {
+        rel,
+        relation_oid,
+        relkind: _,
+        toast,
+    } = rte.kind
+    else {
+        return;
+    };
+    let order_items = sort_clause_to_order_items(&root.parse.sort_clause);
+    let filter = base_filter_expr(input_rel);
+    let stats = relation_stats(catalog, relation_oid, &rte.desc);
+    output_rel.add_path(
+        estimate_seqscan_candidate(
+            rtindex,
+            rel,
+            relation_oid,
+            toast,
+            rte.desc.clone(),
+            &stats,
+            filter.clone(),
+            Some(order_items.clone()),
+        )
+        .plan,
+    );
+    for index in catalog.index_relations_for_heap(relation_oid).iter().filter(|index| {
+        index.index_meta.indisvalid
+            && index.index_meta.indisready
+            && !index.index_meta.indkey.is_empty()
+            && index.index_meta.am_oid == BTREE_AM_OID
+    }) {
+        let Some(spec) = build_index_path_spec(filter.as_ref(), Some(&order_items), index) else {
+            continue;
+        };
+        output_rel.add_path(
+            estimate_index_candidate(
+                rtindex,
+                rel,
+                toast,
+                rte.desc.clone(),
+                &stats,
+                spec,
+                Some(order_items.clone()),
+                catalog,
+            )
+            .plan,
+        );
+    }
+}
+
+fn make_ordered_rel(
+    root: &PlannerInfo,
+    input_rel: RelOptInfo,
+    order_items: &[OrderByEntry],
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        input_rel.reltarget.clone(),
+    );
+    maybe_add_ordered_base_paths(root, &input_rel, &mut rel, catalog);
+    for path in input_rel.pathlist {
+        rel.add_path(optimize_path(
+            PlannerPath::OrderBy {
+                plan_info: PlanEstimate::default(),
+                items: lower_order_items_for_path(&path, order_items),
+                input: Box::new(path),
+            },
+            catalog,
+        ));
+    }
+    rel
+}
+
+fn make_limit_rel(
+    input_rel: RelOptInfo,
+    limit: Option<usize>,
+    offset: usize,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        input_rel.reltarget.clone(),
+    );
+    for path in input_rel.pathlist {
+        rel.add_path(optimize_path(
+            PlannerPath::Limit {
+                plan_info: PlanEstimate::default(),
+                input: Box::new(path),
+                limit,
+                offset,
+            },
+            catalog,
+        ));
+    }
+    rel
+}
+
+fn make_projection_rel(
+    input_rel: RelOptInfo,
+    targets: &[TargetEntry],
+    catalog: &dyn CatalogLookup,
+    allow_identity_elision: bool,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        PathTarget::from_target_list(targets),
+    );
+    for path in input_rel.pathlist {
+        let lowered_targets = lower_targets_for_path(&path, targets);
+        if allow_identity_elision && projection_is_identity(&path, &lowered_targets) {
+            rel.add_path(path);
+            continue;
+        }
+        rel.add_path(optimize_path(
+            PlannerPath::Projection {
+                plan_info: PlanEstimate::default(),
+                slot_id: next_synthetic_slot_id(),
+                input: Box::new(path),
+                targets: lowered_targets,
+            },
+            catalog,
+        ));
+    }
+    rel
+}
+
+fn grouping_planner(
+    root: &mut PlannerInfo,
+    scanjoin_rel: RelOptInfo,
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut current_rel = scanjoin_rel;
+    if let Some(predicate) = residual_where_qual(root) {
+        current_rel = make_filter_rel(current_rel, predicate, catalog);
+    }
+
+    let has_grouping = has_grouping(root);
+    let mut projection_done = false;
+    if has_grouping {
+        current_rel = make_aggregate_rel(root, current_rel, catalog);
+    } else if let Some(project_set) = root.parse.project_set.clone() {
+        current_rel = make_project_set_rel(current_rel, &project_set, catalog);
+        current_rel = make_projection_rel(current_rel, &root.parse.target_list, catalog, false);
+        projection_done = true;
+    }
+
+    let order_items = sort_clause_to_order_items(&root.parse.sort_clause);
+    if !order_items.is_empty() {
+        current_rel = make_ordered_rel(root, current_rel, &order_items, catalog);
+    }
+
+    if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
+        current_rel = make_limit_rel(
+            current_rel,
+            root.parse.limit_count,
+            root.parse.limit_offset,
+            catalog,
+        );
+    }
+
+    if has_grouping {
+        current_rel = make_projection_rel(current_rel, &root.parse.target_list, catalog, false);
+    } else if !projection_done {
+        current_rel = make_projection_rel(current_rel, &root.parse.target_list, catalog, true);
+    }
+
+    root.final_rel = Some(current_rel.clone());
+    current_rel
+}
+
+fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
     let mut glob = PlannerGlobal::new();
     let mut root = PlannerInfo::new(query);
     let command_type = root.parse.command_type;
-    let final_rel = query_planner(&mut root, catalog);
+    let scanjoin_rel = query_planner(&mut root, catalog);
+    let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
     let best_path = final_rel
         .cheapest_total_path()
         .cloned()

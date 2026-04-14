@@ -1,5 +1,63 @@
 # Align pgrust's Query Pipeline and Names with PostgreSQL
 
+## Current Status
+
+### Done
+
+- Semantic `Query` / `RangeTblEntry` / `TargetEntry` / `SortGroupClause` live under `parsenodes` / `primnodes`.
+- SELECT-family analysis builds `Query` directly instead of `BoundSelectPlan` / `BoundFromPlan`.
+- Semantic expressions use PostgreSQL-shaped nodes:
+  - `Var`
+  - `OpExpr`
+  - `BoolExpr`
+  - `FuncExpr`
+  - `Aggref`
+  - `SubLink`
+  - `SubPlan`
+- Legacy semantic `Expr::*` operator/function variants are gone.
+- `SubLink` exists before planning and `SubPlan` only after planning.
+- `backend/rewrite` exists as an explicit `Query -> Vec<Query>` boundary.
+- View expansion moved to rewrite time.
+- The planner returns `PlannedStmt`.
+- `QueryDesc` exists and top-level execution goes through `PlannedStmt` / `QueryDesc`.
+- `PlannerInfo`, `RelOptInfo`, `RestrictInfo`, `PathTarget`, `PathKey`, and `SpecialJoinInfo` exist in `pathnodes`.
+- Planner paths now carry plain semantic `Expr`/`Var`.
+- The optimizer no longer uses `PlannerJoinExpr` or planner-only identity nodes like:
+  - `BaseColumn`
+  - `SyntheticColumn`
+  - `InputColumn`
+  - `LeftColumn`
+  - `RightColumn`
+- Costing/selectivity/index matching now inspect semantic `Expr::Var` directly.
+- Lowering to executor positional `Expr::Column(n)` now happens at `into_plan()` / create-plan time.
+- Base relation paths are generated directly into `RelOptInfo.pathlist`:
+  - seq scan
+  - index scan
+  - values/function/subquery base paths
+- `query_planner()` / `make_one_rel()` now assemble cheapest paths from relation pathlists rather than from a prebuilt recursive `PlannerPath::from_query(...)` skeleton.
+- Join relations are now built from planner state and child `pathlist`s instead of the old recursive planner-path builder.
+- Upper planning (`projection`, `aggregate`, `order`, `limit`, `project-set`) now runs as planner relation/pathlist construction on top of the scan/join relation.
+- The old recursive `PlannerPathBuilder` / `PlannerPath::from_query(...)` scaffold has been removed.
+
+### Partially Done
+
+- Planner state exists and drives path generation, but `RelOptInfo.pathlist` / joinrel search / upper-rel planning are still much simpler than PostgreSQL.
+- Join search still follows the parsed jointree recursively and compares local join alternatives; it is not yet PostgreSQL-style dynamic-programming joinrel enumeration across all legal relation subsets.
+- Upper-rel planning is now relation-driven, but it still works over the project-local `PlannerPath` variants rather than a fuller PostgreSQL-style `Path` hierarchy.
+- `plannodes.rs` is much narrower than before, but the planner still uses the project-local `PlannerPath` type rather than a fully PostgreSQL-shaped `Path` hierarchy.
+- Runtime entry is closer to PostgreSQL, but execution is still not a full `QueryDesc -> EState / PlanState / ExprState` match.
+
+### Remaining Major Milestones
+
+1. Replace recursive jointree-driven join construction with PostgreSQL-style joinrel enumeration over legal relation subsets.
+2. Make join legality and outer-join restrictions drive search more directly from `SpecialJoinInfo`, instead of mostly preserving syntactic join shape.
+3. Expand upper-rel planning toward PostgreSQL’s `grouping_planner` / upper-rel model instead of the current simpler relation wrappers.
+4. Rename the remaining planner types closer to PostgreSQL once semantics match well enough:
+   - `PlannerPath` -> `Path`
+   - more concrete PG-style path variants where helpful
+5. Continue narrowing `plannodes.rs` so it stays strictly final executable plan state.
+6. Decide how far to take runtime PG fidelity after planner architecture is stable.
+
 ## Summary
 
 Realign pgrust around PostgreSQL's actual query representations and stage names, using PostgreSQL's source as the contract:
@@ -12,6 +70,8 @@ Realign pgrust around PostgreSQL's actual query representations and stage names,
 - runtime `QueryDesc` / `PlanState` / tuple slots in `execdesc` + `execnodes`
 
 This is a hard cutover for SELECT-family planning. No analyzer path for `SELECT` should emit executor plans or positional `Column(n)` expressions before `create_plan`, and no planner identity should depend on tuple-position placeholders.
+
+The core stage-boundary cutover is now mostly done, and the planner already builds base/join/upper paths from `PlannerInfo` / `RelOptInfo`. The main unfinished planner work is now join-search fidelity and path-hierarchy fidelity, not semantic query representation or the old recursive path-builder cutover.
 
 ## Key Changes
 
