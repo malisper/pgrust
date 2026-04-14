@@ -350,7 +350,18 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
         },
         SqlExpr::Cast(inner, ty) => {
             let inner = literal_sql_expr_value(inner)?;
-            cast_value(inner, raw_type_name_hint(ty)).ok()
+            let target = raw_type_name_hint(ty);
+            if matches!(
+                target.kind,
+                SqlTypeKind::Date
+                    | SqlTypeKind::Time
+                    | SqlTypeKind::TimeTz
+                    | SqlTypeKind::Timestamp
+                    | SqlTypeKind::TimestampTz
+            ) {
+                return None;
+            }
+            cast_value(inner, target).ok()
         }
         SqlExpr::ArrayLiteral(items) => {
             let mut values = Vec::with_capacity(items.len());
