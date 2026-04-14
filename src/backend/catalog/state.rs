@@ -562,6 +562,45 @@ impl Catalog {
         Ok((name, old_entry, new_entry))
     }
 
+    pub fn rename_relation(
+        &mut self,
+        relation_oid: u32,
+        new_name: &str,
+    ) -> Result<(String, CatalogEntry, String, CatalogEntry), CatalogError> {
+        let old_name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&old_name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+
+        let new_relname = new_name.to_ascii_lowercase();
+        let qualified_new_name = old_name
+            .rsplit_once('.')
+            .map(|(schema, _)| format!("{schema}.{new_relname}"))
+            .unwrap_or_else(|| new_relname.clone());
+        if qualified_new_name != old_name && self.tables.contains_key(&qualified_new_name) {
+            return Err(CatalogError::TableAlreadyExists(new_relname));
+        }
+
+        let entry = self
+            .tables
+            .remove(&old_name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        self.tables.insert(qualified_new_name.clone(), entry.clone());
+        self.replace_constraint_rows_for_entry(&qualified_new_name, &entry);
+        self.replace_depend_rows_for_entry(&entry);
+        Ok((old_name, old_entry, qualified_new_name, entry))
+    }
+
     pub fn set_index_ready_valid(
         &mut self,
         relation_oid: u32,

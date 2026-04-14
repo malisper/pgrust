@@ -218,6 +218,79 @@ impl Database {
         Ok(removed.entry)
     }
 
+    pub(crate) fn rename_temp_relation_in_transaction(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        new_table_name: &str,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+    ) -> Result<RelCacheEntry, ExecError> {
+        let normalized_new = normalize_temp_lookup_name(new_table_name);
+        let old_name = {
+            let namespaces = self.temp_relations.read();
+            let namespace = namespaces.get(&client_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(normalized_new.clone()))
+            })?;
+            namespace
+                .tables
+                .iter()
+                .find_map(|(name, entry)| {
+                    (entry.entry.relation_oid == relation_oid).then(|| name.clone())
+                })
+                .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string())))?
+        };
+
+        if old_name != normalized_new {
+            let namespaces = self.temp_relations.read();
+            let namespace = namespaces.get(&client_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone()))
+            })?;
+            if namespace.tables.contains_key(&normalized_new) {
+                return Err(ExecError::Parse(ParseError::TableAlreadyExists(
+                    normalized_new.clone(),
+                )));
+            }
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .rename_relation_mvcc(relation_oid, &normalized_new, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+
+        let renamed = {
+            let mut namespaces = self.temp_relations.write();
+            let namespace = namespaces.get_mut(&client_id).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone()))
+            })?;
+            let entry = namespace.tables.remove(&old_name).ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(old_name.clone()))
+            })?;
+            let rel_entry = entry.entry.clone();
+            namespace.tables.insert(normalized_new.clone(), entry);
+            namespace.generation = namespace.generation.saturating_add(1);
+            rel_entry
+        };
+        temp_effects.push(TempMutationEffect::Rename {
+            old_name,
+            new_name: normalized_new,
+        });
+        self.invalidate_session_catalog_state(client_id);
+        Ok(renamed)
+    }
+
     pub(crate) fn apply_temp_on_commit(&self, client_id: ClientId) -> Result<(), ExecError> {
         let mut to_delete = Vec::new();
         let mut to_drop = Vec::new();
