@@ -12,7 +12,9 @@ use crate::backend::parser::analyze::BoundSelectPlan;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
-use crate::include::nodes::plannodes::JoinType;
+use crate::include::nodes::plannodes::{
+    AggAccum, DeferredSelectPlan, ExprArraySubscript, JoinType, ProjectSetTarget, SetReturningCall,
+};
 use pathnodes::{
     PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget, PlannerTargetEntry,
 };
@@ -65,7 +67,457 @@ struct AccessCandidate {
 }
 
 pub(crate) fn optimize_bound_query(plan: BoundSelectPlan, catalog: &dyn CatalogLookup) -> Plan {
-    optimize_path(PlannerPath::from_bound_select_plan(plan), catalog).into_plan()
+    finalize_plan_subqueries(
+        optimize_path(PlannerPath::from_bound_select_plan(plan), catalog).into_plan(),
+        catalog,
+    )
+}
+
+pub(crate) fn finalize_deferred_select_plan(
+    plan: DeferredSelectPlan,
+    catalog: &dyn CatalogLookup,
+) -> DeferredSelectPlan {
+    match plan {
+        DeferredSelectPlan::Bound(plan) => {
+            DeferredSelectPlan::Planned(Box::new(optimize_bound_query(*plan, catalog)))
+        }
+        DeferredSelectPlan::Planned(plan) => DeferredSelectPlan::Planned(plan),
+    }
+}
+
+pub(crate) fn finalize_expr_subqueries(expr: Expr, catalog: &dyn CatalogLookup) -> Expr {
+    match expr {
+        Expr::Column(_)
+        | Expr::OuterColumn { .. }
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => expr,
+        Expr::UnaryPlus(inner) => {
+            Expr::UnaryPlus(Box::new(finalize_expr_subqueries(*inner, catalog)))
+        }
+        Expr::Negate(inner) => Expr::Negate(Box::new(finalize_expr_subqueries(*inner, catalog))),
+        Expr::BitNot(inner) => Expr::BitNot(Box::new(finalize_expr_subqueries(*inner, catalog))),
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(finalize_expr_subqueries(*inner, catalog)), ty)
+        }
+        Expr::Not(inner) => Expr::Not(Box::new(finalize_expr_subqueries(*inner, catalog))),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(finalize_expr_subqueries(*inner, catalog))),
+        Expr::IsNotNull(inner) => {
+            Expr::IsNotNull(Box::new(finalize_expr_subqueries(*inner, catalog)))
+        }
+        Expr::Add(left, right) => finalize_binary_expr(Expr::Add, *left, *right, catalog),
+        Expr::Sub(left, right) => finalize_binary_expr(Expr::Sub, *left, *right, catalog),
+        Expr::BitAnd(left, right) => finalize_binary_expr(Expr::BitAnd, *left, *right, catalog),
+        Expr::BitOr(left, right) => finalize_binary_expr(Expr::BitOr, *left, *right, catalog),
+        Expr::BitXor(left, right) => finalize_binary_expr(Expr::BitXor, *left, *right, catalog),
+        Expr::Shl(left, right) => finalize_binary_expr(Expr::Shl, *left, *right, catalog),
+        Expr::Shr(left, right) => finalize_binary_expr(Expr::Shr, *left, *right, catalog),
+        Expr::Mul(left, right) => finalize_binary_expr(Expr::Mul, *left, *right, catalog),
+        Expr::Div(left, right) => finalize_binary_expr(Expr::Div, *left, *right, catalog),
+        Expr::Mod(left, right) => finalize_binary_expr(Expr::Mod, *left, *right, catalog),
+        Expr::Concat(left, right) => finalize_binary_expr(Expr::Concat, *left, *right, catalog),
+        Expr::Eq(left, right) => finalize_binary_expr(Expr::Eq, *left, *right, catalog),
+        Expr::NotEq(left, right) => finalize_binary_expr(Expr::NotEq, *left, *right, catalog),
+        Expr::Lt(left, right) => finalize_binary_expr(Expr::Lt, *left, *right, catalog),
+        Expr::LtEq(left, right) => finalize_binary_expr(Expr::LtEq, *left, *right, catalog),
+        Expr::Gt(left, right) => finalize_binary_expr(Expr::Gt, *left, *right, catalog),
+        Expr::GtEq(left, right) => finalize_binary_expr(Expr::GtEq, *left, *right, catalog),
+        Expr::RegexMatch(left, right) => {
+            finalize_binary_expr(Expr::RegexMatch, *left, *right, catalog)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(finalize_expr_subqueries(*expr, catalog)),
+            pattern: Box::new(finalize_expr_subqueries(*pattern, catalog)),
+            escape: escape.map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(finalize_expr_subqueries(*expr, catalog)),
+            pattern: Box::new(finalize_expr_subqueries(*pattern, catalog)),
+            escape: escape.map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog))),
+            negated,
+        },
+        Expr::And(left, right) => finalize_binary_expr(Expr::And, *left, *right, catalog),
+        Expr::Or(left, right) => finalize_binary_expr(Expr::Or, *left, *right, catalog),
+        Expr::IsDistinctFrom(left, right) => {
+            finalize_binary_expr(Expr::IsDistinctFrom, *left, *right, catalog)
+        }
+        Expr::IsNotDistinctFrom(left, right) => {
+            finalize_binary_expr(Expr::IsNotDistinctFrom, *left, *right, catalog)
+        }
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| finalize_expr_subqueries(element, catalog))
+                .collect(),
+            array_type,
+        },
+        Expr::ArrayOverlap(left, right) => {
+            finalize_binary_expr(Expr::ArrayOverlap, *left, *right, catalog)
+        }
+        Expr::JsonbContains(left, right) => {
+            finalize_binary_expr(Expr::JsonbContains, *left, *right, catalog)
+        }
+        Expr::JsonbContained(left, right) => {
+            finalize_binary_expr(Expr::JsonbContained, *left, *right, catalog)
+        }
+        Expr::JsonbExists(left, right) => {
+            finalize_binary_expr(Expr::JsonbExists, *left, *right, catalog)
+        }
+        Expr::JsonbExistsAny(left, right) => {
+            finalize_binary_expr(Expr::JsonbExistsAny, *left, *right, catalog)
+        }
+        Expr::JsonbExistsAll(left, right) => {
+            finalize_binary_expr(Expr::JsonbExistsAll, *left, *right, catalog)
+        }
+        Expr::JsonbPathExists(left, right) => {
+            finalize_binary_expr(Expr::JsonbPathExists, *left, *right, catalog)
+        }
+        Expr::JsonbPathMatch(left, right) => {
+            finalize_binary_expr(Expr::JsonbPathMatch, *left, *right, catalog)
+        }
+        Expr::ScalarSubquery(plan) => {
+            Expr::ScalarSubquery(Box::new(finalize_deferred_select_plan(*plan, catalog)))
+        }
+        Expr::ExistsSubquery(plan) => {
+            Expr::ExistsSubquery(Box::new(finalize_deferred_select_plan(*plan, catalog)))
+        }
+        Expr::Coalesce(left, right) => finalize_binary_expr(Expr::Coalesce, *left, *right, catalog),
+        Expr::AnySubquery { left, op, subquery } => Expr::AnySubquery {
+            left: Box::new(finalize_expr_subqueries(*left, catalog)),
+            op,
+            subquery: Box::new(finalize_deferred_select_plan(*subquery, catalog)),
+        },
+        Expr::AllSubquery { left, op, subquery } => Expr::AllSubquery {
+            left: Box::new(finalize_expr_subqueries(*left, catalog)),
+            op,
+            subquery: Box::new(finalize_deferred_select_plan(*subquery, catalog)),
+        },
+        Expr::AnyArray { left, op, right } => Expr::AnyArray {
+            left: Box::new(finalize_expr_subqueries(*left, catalog)),
+            op,
+            right: Box::new(finalize_expr_subqueries(*right, catalog)),
+        },
+        Expr::AllArray { left, op, right } => Expr::AllArray {
+            left: Box::new(finalize_expr_subqueries(*left, catalog)),
+            op,
+            right: Box::new(finalize_expr_subqueries(*right, catalog)),
+        },
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(finalize_expr_subqueries(*array, catalog)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| finalize_expr_subqueries(expr, catalog)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| finalize_expr_subqueries(expr, catalog)),
+                })
+                .collect(),
+        },
+        Expr::JsonGet(left, right) => finalize_binary_expr(Expr::JsonGet, *left, *right, catalog),
+        Expr::JsonGetText(left, right) => {
+            finalize_binary_expr(Expr::JsonGetText, *left, *right, catalog)
+        }
+        Expr::JsonPath(left, right) => finalize_binary_expr(Expr::JsonPath, *left, *right, catalog),
+        Expr::JsonPathText(left, right) => {
+            finalize_binary_expr(Expr::JsonPathText, *left, *right, catalog)
+        }
+        Expr::FuncCall {
+            func_oid,
+            func,
+            args,
+            func_variadic,
+        } => Expr::FuncCall {
+            func_oid,
+            func,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog))
+                .collect(),
+            func_variadic,
+        },
+    }
+}
+
+fn finalize_binary_expr(
+    ctor: fn(Box<Expr>, Box<Expr>) -> Expr,
+    left: Expr,
+    right: Expr,
+    catalog: &dyn CatalogLookup,
+) -> Expr {
+    ctor(
+        Box::new(finalize_expr_subqueries(left, catalog)),
+        Box::new(finalize_expr_subqueries(right, catalog)),
+    )
+}
+
+fn finalize_set_returning_call(
+    call: SetReturningCall,
+    catalog: &dyn CatalogLookup,
+) -> SetReturningCall {
+    match call {
+        SetReturningCall::GenerateSeries {
+            func_oid,
+            func_variadic,
+            start,
+            stop,
+            step,
+            output,
+        } => SetReturningCall::GenerateSeries {
+            func_oid,
+            func_variadic,
+            start: finalize_expr_subqueries(start, catalog),
+            stop: finalize_expr_subqueries(stop, catalog),
+            step: finalize_expr_subqueries(step, catalog),
+            output,
+        },
+        SetReturningCall::Unnest {
+            func_oid,
+            func_variadic,
+            args,
+            output_columns,
+        } => SetReturningCall::Unnest {
+            func_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog))
+                .collect(),
+            output_columns,
+        },
+        SetReturningCall::JsonTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+        } => SetReturningCall::JsonTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog))
+                .collect(),
+            output_columns,
+        },
+        SetReturningCall::RegexTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+        } => SetReturningCall::RegexTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog))
+                .collect(),
+            output_columns,
+        },
+        SetReturningCall::TextSearchTableFunction {
+            kind,
+            args,
+            output_columns,
+        } => SetReturningCall::TextSearchTableFunction {
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog))
+                .collect(),
+            output_columns,
+        },
+    }
+}
+
+fn finalize_agg_accum(accum: AggAccum, catalog: &dyn CatalogLookup) -> AggAccum {
+    let AggAccum {
+        aggfnoid,
+        agg_variadic,
+        func,
+        args,
+        distinct,
+        sql_type,
+    } = accum;
+    AggAccum {
+        aggfnoid,
+        agg_variadic,
+        func,
+        args: args
+            .into_iter()
+            .map(|arg| finalize_expr_subqueries(arg, catalog))
+            .collect(),
+        distinct,
+        sql_type,
+    }
+}
+
+pub(crate) fn finalize_plan_subqueries(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
+    match plan {
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
+        Plan::NestedLoopJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            on,
+        } => Plan::NestedLoopJoin {
+            plan_info,
+            left: Box::new(finalize_plan_subqueries(*left, catalog)),
+            right: Box::new(finalize_plan_subqueries(*right, catalog)),
+            kind,
+            on: finalize_expr_subqueries(on, catalog),
+        },
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate,
+        } => Plan::Filter {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog)),
+            predicate: finalize_expr_subqueries(predicate, catalog),
+        },
+        Plan::OrderBy {
+            plan_info,
+            input,
+            items,
+        } => Plan::OrderBy {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog)),
+            items: items
+                .into_iter()
+                .map(|item| crate::include::nodes::plannodes::OrderByEntry {
+                    expr: finalize_expr_subqueries(item.expr, catalog),
+                    descending: item.descending,
+                    nulls_first: item.nulls_first,
+                })
+                .collect(),
+        },
+        Plan::Limit {
+            plan_info,
+            input,
+            limit,
+            offset,
+        } => Plan::Limit {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog)),
+            limit,
+            offset,
+        },
+        Plan::Projection {
+            plan_info,
+            input,
+            targets,
+        } => Plan::Projection {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog)),
+            targets: targets
+                .into_iter()
+                .map(|target| crate::include::nodes::plannodes::TargetEntry {
+                    name: target.name,
+                    expr: finalize_expr_subqueries(target.expr, catalog),
+                    sql_type: target.sql_type,
+                })
+                .collect(),
+        },
+        Plan::Aggregate {
+            plan_info,
+            input,
+            group_by,
+            accumulators,
+            having,
+            output_columns,
+        } => Plan::Aggregate {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog)),
+            group_by: group_by
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog))
+                .collect(),
+            accumulators: accumulators
+                .into_iter()
+                .map(|accum| finalize_agg_accum(accum, catalog))
+                .collect(),
+            having: having.map(|expr| finalize_expr_subqueries(expr, catalog)),
+            output_columns,
+        },
+        Plan::FunctionScan { plan_info, call } => Plan::FunctionScan {
+            plan_info,
+            call: finalize_set_returning_call(call, catalog),
+        },
+        Plan::Values {
+            plan_info,
+            rows,
+            output_columns,
+        } => Plan::Values {
+            plan_info,
+            rows: rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| finalize_expr_subqueries(expr, catalog))
+                        .collect()
+                })
+                .collect(),
+            output_columns,
+        },
+        Plan::ProjectSet {
+            plan_info,
+            input,
+            targets,
+        } => Plan::ProjectSet {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog)),
+            targets: targets
+                .into_iter()
+                .map(|target| match target {
+                    ProjectSetTarget::Scalar(entry) => {
+                        ProjectSetTarget::Scalar(crate::include::nodes::plannodes::TargetEntry {
+                            name: entry.name,
+                            expr: finalize_expr_subqueries(entry.expr, catalog),
+                            sql_type: entry.sql_type,
+                        })
+                    }
+                    ProjectSetTarget::Set {
+                        name,
+                        call,
+                        sql_type,
+                        column_index,
+                    } => ProjectSetTarget::Set {
+                        name,
+                        call: finalize_set_returning_call(call, catalog),
+                        sql_type,
+                        column_index,
+                    },
+                })
+                .collect(),
+        },
+    }
 }
 
 pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> PlannerPath {

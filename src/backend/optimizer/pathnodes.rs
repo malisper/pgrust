@@ -2,12 +2,14 @@ use crate::RelFileLocator;
 use crate::backend::executor::{
     Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef,
 };
-use crate::backend::parser::analyze::{BoundFromPlan, BoundSelectPlan};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::parsenodes::SubqueryComparisonOp;
-use crate::include::nodes::plannodes::{AggAccum, ExprArraySubscript, JoinType, SetReturningCall};
+use crate::include::nodes::plannodes::{
+    AggAccum, BoundFromPlan, BoundSelectPlan, DeferredSelectPlan, ExprArraySubscript, JoinType,
+    SetReturningCall,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannerJoinExpr {
@@ -77,18 +79,18 @@ pub enum PlannerJoinExpr {
     JsonbExistsAll(Box<PlannerJoinExpr>, Box<PlannerJoinExpr>),
     JsonbPathExists(Box<PlannerJoinExpr>, Box<PlannerJoinExpr>),
     JsonbPathMatch(Box<PlannerJoinExpr>, Box<PlannerJoinExpr>),
-    ScalarSubquery(Box<Plan>),
-    ExistsSubquery(Box<Plan>),
+    ScalarSubquery(Box<DeferredSelectPlan>),
+    ExistsSubquery(Box<DeferredSelectPlan>),
     Coalesce(Box<PlannerJoinExpr>, Box<PlannerJoinExpr>),
     AnySubquery {
         left: Box<PlannerJoinExpr>,
         op: SubqueryComparisonOp,
-        subquery: Box<Plan>,
+        subquery: Box<DeferredSelectPlan>,
     },
     AllSubquery {
         left: Box<PlannerJoinExpr>,
         op: SubqueryComparisonOp,
-        subquery: Box<Plan>,
+        subquery: Box<DeferredSelectPlan>,
     },
     AnyArray {
         left: Box<PlannerJoinExpr>,

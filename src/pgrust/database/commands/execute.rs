@@ -124,7 +124,7 @@ impl Database {
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                let result = execute_insert(bound, &mut ctx, xid, 0);
+                let result = execute_insert(bound, &catalog, &mut ctx, xid, 0);
                 drop(ctx);
                 let result = self.finish_txn(client_id, xid, result, &[], &[]);
                 guard.disarm();
@@ -153,6 +153,7 @@ impl Database {
                 };
                 let result = execute_update_with_waiter(
                     bound,
+                    &catalog,
                     &mut ctx,
                     xid,
                     0,
@@ -186,6 +187,7 @@ impl Database {
                 };
                 let result = execute_delete_with_waiter(
                     bound,
+                    &catalog,
                     &mut ctx,
                     xid,
                     Some((&self.txns, &self.txn_waiter)),

@@ -7,6 +7,18 @@ fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<Bo
     child_outer
 }
 
+fn bind_deferred_subquery(
+    select: &SelectStatement,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    ctes: &[BoundCte],
+) -> Result<DeferredSelectPlan, ParseError> {
+    let child_outer = child_outer_scopes(scope, outer_scopes);
+    let (plan, _) = bind_select_query_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
+    Ok(DeferredSelectPlan::Bound(Box::new(plan)))
+}
+
 pub(super) fn bind_scalar_subquery_expr(
     select: &SelectStatement,
     scope: &BoundScope,
@@ -14,9 +26,8 @@ pub(super) fn bind_scalar_subquery_expr(
     outer_scopes: &[BoundScope],
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let child_outer = child_outer_scopes(scope, outer_scopes);
-    let plan = build_plan_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
-    ensure_single_column_subquery(&plan)?;
+    let plan = bind_deferred_subquery(select, scope, catalog, outer_scopes, ctes)?;
+    ensure_single_column_subquery(plan.columns().len())?;
     Ok(Expr::ScalarSubquery(Box::new(plan)))
 }
 
@@ -27,14 +38,12 @@ pub(super) fn bind_exists_subquery_expr(
     outer_scopes: &[BoundScope],
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let child_outer = child_outer_scopes(scope, outer_scopes);
-    Ok(Expr::ExistsSubquery(Box::new(build_plan_with_outer(
+    Ok(Expr::ExistsSubquery(Box::new(bind_deferred_subquery(
         select,
+        scope,
         catalog,
-        &child_outer,
-        None,
+        outer_scopes,
         ctes,
-        &[],
     )?)))
 }
 
@@ -48,9 +57,8 @@ pub(super) fn bind_in_subquery_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let child_outer = child_outer_scopes(scope, outer_scopes);
-    let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None, ctes, &[])?;
-    ensure_single_column_subquery(&subquery_plan)?;
+    let subquery_plan = bind_deferred_subquery(subquery, scope, catalog, outer_scopes, ctes)?;
+    ensure_single_column_subquery(subquery_plan.columns().len())?;
     let any_expr = Expr::AnySubquery {
         left: Box::new(bind_expr_with_outer_and_ctes(
             expr,
@@ -81,9 +89,8 @@ pub(super) fn bind_quantified_subquery_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let child_outer = child_outer_scopes(scope, outer_scopes);
-    let subquery_plan = build_plan_with_outer(subquery, catalog, &child_outer, None, ctes, &[])?;
-    ensure_single_column_subquery(&subquery_plan)?;
+    let subquery_plan = bind_deferred_subquery(subquery, scope, catalog, outer_scopes, ctes)?;
+    ensure_single_column_subquery(subquery_plan.columns().len())?;
     let left = Box::new(bind_expr_with_outer_and_ctes(
         left,
         scope,
