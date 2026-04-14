@@ -209,6 +209,14 @@ impl TransactionManager {
         })
     }
 
+    pub fn oldest_active_xid(&self) -> TransactionId {
+        self.in_progress
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or_else(|| self.next_xid.saturating_add(1).max(1))
+    }
+
     fn status_path(base_dir: PathBuf) -> PathBuf {
         base_dir.join("pg_xact").join("status")
     }

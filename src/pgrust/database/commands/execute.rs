@@ -390,7 +390,36 @@ impl Database {
             }
             Statement::Vacuum(ref vacuum_stmt) => {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                execute_vacuum(vacuum_stmt.clone(), &catalog)
+                let rels = vacuum_stmt
+                    .targets
+                    .iter()
+                    .filter_map(|target| catalog.lookup_relation(&target.table_name).map(|entry| entry.rel))
+                    .collect::<Vec<_>>();
+                lock_tables_interruptible(
+                    &self.table_locks,
+                    client_id,
+                    &rels,
+                    TableLockMode::ShareUpdateExclusive,
+                    interrupts.as_ref(),
+                )?;
+
+                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
+                let mut ctx = ExecutorContext {
+                    pool: std::sync::Arc::clone(&self.pool),
+                    txns: self.txns.clone(),
+                    txn_waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
+                    snapshot,
+                    client_id,
+                    next_command_id: 0,
+                    outer_rows: Vec::new(),
+                    subplans: Vec::new(),
+                    timed: false,
+                };
+                let result = execute_vacuum(vacuum_stmt.clone(), &catalog, &mut ctx);
+                drop(ctx);
+                unlock_relations(&self.table_locks, client_id, &rels);
+                result
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Ok(StatementResult::AffectedRows(0))

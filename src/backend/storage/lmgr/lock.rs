@@ -12,6 +12,7 @@ use crate::{ClientId, RelFileLocator};
 pub enum TableLockMode {
     AccessShare,
     RowExclusive,
+    ShareUpdateExclusive,
     AccessExclusive,
 }
 
@@ -19,7 +20,11 @@ impl TableLockMode {
     fn conflicts_with(self, other: TableLockMode) -> bool {
         matches!(
             (self, other),
-            (TableLockMode::AccessExclusive, _) | (_, TableLockMode::AccessExclusive)
+            (TableLockMode::AccessExclusive, _)
+                | (_, TableLockMode::AccessExclusive)
+                | (TableLockMode::ShareUpdateExclusive, TableLockMode::ShareUpdateExclusive)
+                | (TableLockMode::ShareUpdateExclusive, TableLockMode::RowExclusive)
+                | (TableLockMode::RowExclusive, TableLockMode::ShareUpdateExclusive)
         )
     }
 }
