@@ -796,7 +796,8 @@ fn execute_psql_describe_query(
     }
     if lower.starts_with("select c2.relname, i.indisprimary, i.indisunique")
         && lower.contains("pg_catalog.pg_get_indexdef(i.indexrelid, 0, true)")
-        && lower.contains("from pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i")
+        && lower
+            .contains("from pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i")
     {
         return psql_describe_indexes_query(db, session, sql);
     }
@@ -806,8 +807,7 @@ fn execute_psql_describe_query(
     {
         return psql_describe_constraints_query(db, session, sql);
     }
-    if lower.starts_with("select pg_catalog.pg_get_viewdef(")
-        && lower.contains("::pg_catalog.oid")
+    if lower.starts_with("select pg_catalog.pg_get_viewdef(") && lower.contains("::pg_catalog.oid")
     {
         return psql_get_viewdef_query(db, session, sql);
     }
@@ -1143,11 +1143,13 @@ fn psql_describe_columns_query(
                 row.push(Value::Text("".into()));
             }
             if include_attstorage {
-                row.push(Value::InternalChar(column.storage.attstorage.as_char() as u8));
+                row.push(Value::InternalChar(
+                    column.storage.attstorage.as_char() as u8
+                ));
             }
             if include_attcompression {
                 row.push(Value::InternalChar(
-                    column.storage.attcompression.as_char() as u8,
+                    column.storage.attcompression.as_char() as u8
                 ));
             }
             if include_attstattarget {
@@ -1263,12 +1265,14 @@ fn psql_describe_constraints_query(
             .collect::<Vec<_>>()
     };
     let mut rows = rows;
-    rows.sort_by(|left, right| match (
-        left.get(usize::from(include_sametable)),
-        right.get(usize::from(include_sametable)),
-    ) {
-        (Some(Value::Text(left)), Some(Value::Text(right))) => left.cmp(right),
-        _ => std::cmp::Ordering::Equal,
+    rows.sort_by(|left, right| {
+        match (
+            left.get(usize::from(include_sametable)),
+            right.get(usize::from(include_sametable)),
+        ) {
+            (Some(Value::Text(left)), Some(Value::Text(right))) => left.cmp(right),
+            _ => std::cmp::Ordering::Equal,
+        }
     });
     let columns = if include_sametable {
         vec![
@@ -1298,11 +1302,22 @@ fn constraint_def_for_row(
 ) -> Option<String> {
     match row.contype {
         crate::include::catalog::CONSTRAINT_NOTNULL => Some("NOT NULL".to_string()),
-        crate::include::catalog::CONSTRAINT_PRIMARY | crate::include::catalog::CONSTRAINT_UNIQUE => {
+        crate::include::catalog::CONSTRAINT_PRIMARY
+        | crate::include::catalog::CONSTRAINT_UNIQUE => {
             let relation = relation.cloned().or_else(|| {
-                db.describe_relation_by_oid(session.client_id, session.catalog_txn_ctx(), row.conrelid)
+                db.describe_relation_by_oid(
+                    session.client_id,
+                    session.catalog_txn_ctx(),
+                    row.conrelid,
+                )
             })?;
-            index_backed_constraint_def(db, session.client_id, session.catalog_txn_ctx(), &relation, row)
+            index_backed_constraint_def(
+                db,
+                session.client_id,
+                session.catalog_txn_ctx(),
+                &relation,
+                row,
+            )
         }
         crate::include::catalog::CONSTRAINT_FOREIGN => Some("FOREIGN KEY".to_string()),
         _ => None,
@@ -1356,9 +1371,9 @@ fn psql_describe_indexes_query(
         .index_relations_for_heap(oid)
         .into_iter()
         .map(|index| {
-            let constraint = constraints
-                .iter()
-                .find(|row| row.conindid == index.relation_oid && matches!(row.contype, 'p' | 'u' | 'x'));
+            let constraint = constraints.iter().find(|row| {
+                row.conindid == index.relation_oid && matches!(row.contype, 'p' | 'u' | 'x')
+            });
             let condef = constraint
                 .and_then(|row| constraint_def_for_row(db, session, Some(&relation), row))
                 .map(|text| Value::Text(text.into()))
@@ -1528,11 +1543,19 @@ fn psql_constraint_obj_description_query(
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let lower = sql.to_ascii_lowercase();
-    let value_column = if lower.contains(" as desc") { "desc" } else { "comment" };
+    let value_column = if lower.contains(" as desc") {
+        "desc"
+    } else {
+        "comment"
+    };
     if let Some(relation) = extract_quoted_literal_with_markers(sql, &["where conrelid = '"]) {
         let relation_oid = resolve_regclass_literal(db, session, relation)?;
         let mut rows = db
-            .constraint_rows_for_relation(session.client_id, session.catalog_txn_ctx(), relation_oid)
+            .constraint_rows_for_relation(
+                session.client_id,
+                session.catalog_txn_ctx(),
+                relation_oid,
+            )
             .into_iter()
             .map(|row| {
                 vec![
@@ -1552,7 +1575,10 @@ fn psql_constraint_obj_description_query(
             _ => std::cmp::Ordering::Equal,
         });
         return Some((
-            vec![QueryColumn::text("constraint"), QueryColumn::text(value_column)],
+            vec![
+                QueryColumn::text("constraint"),
+                QueryColumn::text(value_column),
+            ],
             rows,
         ));
     }
@@ -1579,7 +1605,10 @@ fn psql_constraint_obj_description_query(
         })
         .collect::<Vec<_>>();
     Some((
-        vec![QueryColumn::text("conname"), QueryColumn::text(value_column)],
+        vec![
+            QueryColumn::text("conname"),
+            QueryColumn::text(value_column),
+        ],
         rows,
     ))
 }
@@ -1712,7 +1741,12 @@ fn format_psql_indexdef(
         amname,
         column_names.join(", ")
     );
-    if let Some(predicate) = index.index_meta.indpred.as_deref().filter(|pred| !pred.is_empty()) {
+    if let Some(predicate) = index
+        .index_meta
+        .indpred
+        .as_deref()
+        .filter(|pred| !pred.is_empty())
+    {
         definition.push_str(" WHERE (");
         definition.push_str(predicate);
         definition.push(')');
@@ -1774,7 +1808,9 @@ fn extract_quoted_literal_with_markers<'a>(sql: &'a str, markers: &[&str]) -> Op
 }
 
 fn extract_quoted_oid_with_markers(sql: &str, markers: &[&str]) -> Option<u32> {
-    extract_quoted_literal_with_markers(sql, markers)?.parse::<u32>().ok()
+    extract_quoted_literal_with_markers(sql, markers)?
+        .parse::<u32>()
+        .ok()
 }
 
 fn extract_col_description_attnum(sql: &str) -> Option<i32> {
@@ -1782,7 +1818,11 @@ fn extract_col_description_attnum(sql: &str) -> Option<i32> {
     let marker = lower
         .find("::pg_catalog.regclass,")
         .map(|idx| idx + "::pg_catalog.regclass,".len())
-        .or_else(|| lower.find("::regclass,").map(|idx| idx + "::regclass,".len()))?;
+        .or_else(|| {
+            lower
+                .find("::regclass,")
+                .map(|idx| idx + "::regclass,".len())
+        })?;
     let rest = sql[marker..].trim_start();
     let end = rest.find(')')?;
     rest[..end].trim().parse::<i32>().ok()
@@ -2556,8 +2596,12 @@ mod tests {
     fn psql_describe_constraint_query_matches_r_alias_shape() {
         let db = Database::open(temp_dir("describe_constraints_r_alias"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (id int4 not null)").unwrap();
-        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+        db.execute(1, "create table widgets (id int4 not null)")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
 
         let sql = format!(
             "SELECT true as sametable, conname, \
@@ -2618,7 +2662,10 @@ mod tests {
         let session = Session::new(1);
         db.execute(1, "create table widgets (id int4, note text)")
             .unwrap();
-        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
 
         let sql = format!(
             "SELECT a.attname, \
@@ -2658,7 +2705,10 @@ mod tests {
             "create table widgets (id int4 primary key, code int4 unique)",
         )
         .unwrap();
-        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
 
         let sql = format!(
             "SELECT c2.relname, i.indisprimary, i.indisunique, \
@@ -2688,8 +2738,12 @@ mod tests {
     fn psql_describe_constraint_query_matches_referenced_by_partition_shape() {
         let db = Database::open(temp_dir("describe_constraints_referenced_by"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (id int4 not null)").unwrap();
-        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+        db.execute(1, "create table widgets (id int4 not null)")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("widgets")
+            .unwrap();
 
         let sql = format!(
             "SELECT conname, conrelid::pg_catalog.regclass AS ontable, \
@@ -2723,7 +2777,10 @@ mod tests {
             entry.relation_oid
         );
         let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
-        assert_eq!(rows, vec![vec![Value::Text("select id from widgets".into())]]);
+        assert_eq!(
+            rows,
+            vec![vec![Value::Text("select id from widgets".into())]]
+        );
     }
 
     #[test]

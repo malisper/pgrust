@@ -135,12 +135,17 @@ fn numeric_is_zero(value: &NumericValue) -> bool {
 }
 
 fn numeric_is_integral(value: &NumericValue) -> bool {
-    matches!(value.clone().normalize(), NumericValue::Finite { scale: 0, .. })
+    matches!(
+        value.clone().normalize(),
+        NumericValue::Finite { scale: 0, .. }
+    )
 }
 
 fn integral_is_odd(value: &NumericValue) -> bool {
     match value.clone().normalize() {
-        NumericValue::Finite { coeff, scale: 0, .. } => coeff.is_odd(),
+        NumericValue::Finite {
+            coeff, scale: 0, ..
+        } => coeff.is_odd(),
         _ => false,
     }
 }
@@ -209,11 +214,19 @@ fn clamp_numeric_to_scale(value: NumericValue, target_scale: i32) -> NumericValu
     }
 }
 
-fn add_numeric_clamped(left: &NumericValue, right: &NumericValue, target_scale: i32) -> NumericValue {
+fn add_numeric_clamped(
+    left: &NumericValue,
+    right: &NumericValue,
+    target_scale: i32,
+) -> NumericValue {
     clamp_numeric_to_scale(left.add(right), target_scale)
 }
 
-fn mul_numeric_clamped(left: &NumericValue, right: &NumericValue, target_scale: i32) -> NumericValue {
+fn mul_numeric_clamped(
+    left: &NumericValue,
+    right: &NumericValue,
+    target_scale: i32,
+) -> NumericValue {
     clamp_numeric_to_scale(left.mul(right), target_scale)
 }
 
@@ -345,7 +358,10 @@ fn bigint_sqrt_floor(value: &BigInt) -> BigInt {
     guess
 }
 
-fn sqrt_numeric_with_scale(value: &NumericValue, target_scale: i32) -> Result<NumericValue, ExecError> {
+fn sqrt_numeric_with_scale(
+    value: &NumericValue,
+    target_scale: i32,
+) -> Result<NumericValue, ExecError> {
     match value {
         NumericValue::NaN => Ok(NumericValue::NaN),
         NumericValue::PosInf => Ok(NumericValue::PosInf),
@@ -395,7 +411,9 @@ fn numeric_pow_integer(
     match base {
         NumericValue::Finite { coeff, .. } if coeff.is_zero() => {
             if exp < 0 {
-                return Err(numeric_domain_error("zero raised to a negative power is undefined"));
+                return Err(numeric_domain_error(
+                    "zero raised to a negative power is undefined",
+                ));
             }
             return Ok(NumericValue::zero().with_dscale(out_scale));
         }
@@ -425,7 +443,9 @@ fn numeric_pow_integer(
             return NumericValue::from_i64(1)
                 .div(base, out_scale)
                 .map(|value| value.with_dscale(out_scale))
-                .ok_or_else(|| numeric_domain_error("zero raised to a negative power is undefined"));
+                .ok_or_else(|| {
+                    numeric_domain_error("zero raised to a negative power is undefined")
+                });
         }
         2 => return Ok(mul_numeric_clamped(base, base, out_scale as i32).with_dscale(out_scale)),
         _ => {}
@@ -455,8 +475,8 @@ fn numeric_pow_integer(
 
         if mask & 1 == 1 {
             let mut local_scale = sig_digits - decimal_weight(&base_prod) - decimal_weight(&result);
-            local_scale = local_scale
-                .min((finite_dscale(&base_prod) + finite_dscale(&result)) as i32);
+            local_scale =
+                local_scale.min((finite_dscale(&base_prod) + finite_dscale(&result)) as i32);
             local_scale = local_scale.max(NUMERIC_MIN_DISPLAY_SCALE);
             result = mul_numeric_clamped(&base_prod, &result, local_scale);
         }
@@ -485,7 +505,10 @@ fn eval_sqrt_numeric(value: &NumericValue) -> Result<NumericValue, ExecError> {
     sqrt_numeric_with_scale(value, sqrt_result_scale(value) as i32)
 }
 
-fn eval_exp_numeric_with_scale(value: &NumericValue, rscale: u32) -> Result<NumericValue, ExecError> {
+fn eval_exp_numeric_with_scale(
+    value: &NumericValue,
+    rscale: u32,
+) -> Result<NumericValue, ExecError> {
     match value {
         NumericValue::NaN => Ok(NumericValue::NaN),
         NumericValue::PosInf => Ok(NumericValue::PosInf),
@@ -507,10 +530,7 @@ fn eval_exp_numeric_with_scale(value: &NumericValue, rscale: u32) -> Result<Nume
             }
 
             let dweight = (numeric_to_f64_approx(finite) * LOG10_E) as i32;
-            let sig_digits = (1
-                + dweight
-                + rscale as i32
-                + (f64::from(ndiv2) * LOG10_2) as i32)
+            let sig_digits = (1 + dweight + rscale as i32 + (f64::from(ndiv2) * LOG10_2) as i32)
                 .max(0)
                 + NUMERIC_GUARD_DIGITS;
             let mut local_scale = sig_digits - 1;
@@ -534,8 +554,8 @@ fn eval_exp_numeric_with_scale(value: &NumericValue, rscale: u32) -> Result<Nume
             }
 
             while ndiv2 > 0 {
-                local_scale = (sig_digits - 2 * decimal_weight(&result))
-                    .max(NUMERIC_MIN_DISPLAY_SCALE);
+                local_scale =
+                    (sig_digits - 2 * decimal_weight(&result)).max(NUMERIC_MIN_DISPLAY_SCALE);
                 result = mul_numeric_clamped(&result, &result, local_scale);
                 ndiv2 -= 1;
             }
@@ -555,7 +575,10 @@ fn eval_exp_numeric(value: &NumericValue) -> Result<NumericValue, ExecError> {
     eval_exp_numeric_with_scale(value, exp_result_scale(value))
 }
 
-fn eval_ln_numeric_with_scale(value: &NumericValue, rscale: u32) -> Result<NumericValue, ExecError> {
+fn eval_ln_numeric_with_scale(
+    value: &NumericValue,
+    rscale: u32,
+) -> Result<NumericValue, ExecError> {
     match value {
         NumericValue::NaN => Ok(NumericValue::NaN),
         NumericValue::PosInf => Ok(NumericValue::PosInf),
@@ -1035,11 +1058,14 @@ pub(super) fn eval_numeric_inc_function(values: &[Value]) -> Result<Value, ExecE
                 NumericValue::PosInf => NumericValue::PosInf,
                 NumericValue::NegInf => NumericValue::NegInf,
                 NumericValue::NaN => NumericValue::NaN,
-                NumericValue::Finite { coeff, scale, dscale } => {
-                    NumericValue::finite(coeff + pow10_bigint(scale), scale)
-                        .with_dscale(dscale)
+                NumericValue::Finite {
+                    coeff,
+                    scale,
+                    dscale,
+                } => {
+                    { NumericValue::finite(coeff + pow10_bigint(scale), scale).with_dscale(dscale) }
+                        .normalize()
                 }
-                .normalize(),
             };
             Ok(Value::Numeric(result))
         }
@@ -1219,14 +1245,11 @@ fn eval_log_numeric_binary(
                 rscale + result_dweight - ln_base_dweight + NUMERIC_GUARD_DIGITS;
             ln_base_rscale = ln_base_rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
 
-            let mut ln_num_rscale =
-                rscale + result_dweight - ln_num_dweight + NUMERIC_GUARD_DIGITS;
+            let mut ln_num_rscale = rscale + result_dweight - ln_num_dweight + NUMERIC_GUARD_DIGITS;
             ln_num_rscale = ln_num_rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
 
-            let ln_base =
-                eval_ln_numeric_with_scale(base, clamp_display_scale(ln_base_rscale))?;
-            let ln_num =
-                eval_ln_numeric_with_scale(value, clamp_display_scale(ln_num_rscale))?;
+            let ln_base = eval_ln_numeric_with_scale(base, clamp_display_scale(ln_base_rscale))?;
+            let ln_num = eval_ln_numeric_with_scale(value, clamp_display_scale(ln_num_rscale))?;
 
             ln_num
                 .div(&ln_base, clamp_display_scale(rscale + NUMERIC_GUARD_DIGITS))
@@ -1396,9 +1419,11 @@ pub(super) fn eval_ceil_function(values: &[Value]) -> Result<Value, ExecError> {
                 NumericValue::PosInf => NumericValue::PosInf,
                 NumericValue::NegInf => NumericValue::NegInf,
                 NumericValue::NaN => NumericValue::NaN,
-                NumericValue::Finite { coeff, scale, dscale } if scale == 0 => {
-                    NumericValue::finite(coeff, 0).with_dscale(dscale)
-                }
+                NumericValue::Finite {
+                    coeff,
+                    scale,
+                    dscale,
+                } if scale == 0 => NumericValue::finite(coeff, 0).with_dscale(dscale),
                 NumericValue::Finite { coeff, scale, .. } => {
                     let factor = pow10_bigint(scale);
                     let quotient = &coeff / &factor;
@@ -1430,9 +1455,11 @@ pub(super) fn eval_floor_function(values: &[Value]) -> Result<Value, ExecError> 
                 NumericValue::PosInf => NumericValue::PosInf,
                 NumericValue::NegInf => NumericValue::NegInf,
                 NumericValue::NaN => NumericValue::NaN,
-                NumericValue::Finite { coeff, scale, dscale } if scale == 0 => {
-                    NumericValue::finite(coeff, 0).with_dscale(dscale)
-                }
+                NumericValue::Finite {
+                    coeff,
+                    scale,
+                    dscale,
+                } if scale == 0 => NumericValue::finite(coeff, 0).with_dscale(dscale),
                 NumericValue::Finite { coeff, scale, .. } => {
                     let factor = pow10_bigint(scale);
                     let quotient = &coeff / &factor;

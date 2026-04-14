@@ -195,7 +195,8 @@ fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
     if lowered.starts_with("create domain ") {
-        return build_create_domain_statement(trimmed).map(|stmt| Some(Statement::CreateDomain(stmt)));
+        return build_create_domain_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateDomain(stmt)));
     }
     if lowered.starts_with("drop domain ") {
         return build_drop_domain_statement(trimmed).map(|stmt| Some(Statement::DropDomain(stmt)));
@@ -216,15 +217,17 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
         });
     };
     let rest = rest.trim_start();
-    let domain_name_end = rest
-        .find(char::is_whitespace)
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "domain base type",
-            actual: sql.into(),
-        })?;
+    let domain_name_end =
+        rest.find(char::is_whitespace)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "domain base type",
+                actual: sql.into(),
+            })?;
     let domain_name = &rest[..domain_name_end];
     let mut type_sql = rest[domain_name_end..].trim_start();
-    if type_sql.get(..2).is_some_and(|s| s.eq_ignore_ascii_case("as"))
+    if type_sql
+        .get(..2)
+        .is_some_and(|s| s.eq_ignore_ascii_case("as"))
         && type_sql
             .get(2..3)
             .is_none_or(|s| s.chars().all(char::is_whitespace))
@@ -238,9 +241,8 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
         });
     }
     let normalized_type_sql = normalize_domain_type_sql(type_sql);
-    if normalized_type_sql
-        .split_whitespace()
-        .any(|tok| matches!(
+    if normalized_type_sql.split_whitespace().any(|tok| {
+        matches!(
             tok.to_ascii_lowercase().as_str(),
             "constraint"
                 | "default"
@@ -254,8 +256,8 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
                 | "generated"
                 | "deferrable"
                 | "no"
-        ))
-    {
+        )
+    }) {
         return Err(ParseError::FeatureNotSupported(
             "CREATE DOMAIN constraints/defaults are not supported yet".into(),
         ));
@@ -299,7 +301,10 @@ fn build_drop_domain_statement(sql: &str) -> Result<DropDomainStatement, ParseEr
     let tokens = sql.split_whitespace().collect::<Vec<_>>();
     let mut index = 2usize;
     let mut if_exists = false;
-    if tokens.get(index).is_some_and(|tok| tok.eq_ignore_ascii_case("if")) {
+    if tokens
+        .get(index)
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("if"))
+    {
         if !tokens
             .get(index + 1)
             .zip(tokens.get(index + 2))

@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::backend::utils::misc::interrupts::{InterruptReason, InterruptState, check_for_interrupts};
+use crate::backend::utils::misc::interrupts::{
+    InterruptReason, InterruptState, check_for_interrupts,
+};
 use crate::{ClientId, RelFileLocator};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -4,7 +4,9 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlTypeKind;
 
-use super::{CatalogLookup, CreateTableStatement, ParseError, TableConstraint, resolve_raw_type_name};
+use super::{
+    CatalogLookup, CreateTableStatement, ParseError, TableConstraint, resolve_raw_type_name,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexBackedConstraintAction {
@@ -199,7 +201,10 @@ mod tests {
         };
 
         assert_eq!(
-            lower_create_table(&stmt, &crate::backend::parser::analyze::LiteralDefaultCatalog),
+            lower_create_table(
+                &stmt,
+                &crate::backend::parser::analyze::LiteralDefaultCatalog
+            ),
             Err(ParseError::UnsupportedType("anyarray".into()))
         );
     }

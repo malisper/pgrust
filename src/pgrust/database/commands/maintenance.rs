@@ -249,8 +249,7 @@ impl Database {
             relation.relation_oid,
             "ALTER TABLE on relation without dependent views",
         )?;
-        let column =
-            validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
+        let column = validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
