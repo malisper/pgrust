@@ -72,6 +72,30 @@ fn pets_rel() -> RelFileLocator {
     }
 }
 
+fn t1_rel() -> RelFileLocator {
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: 14020,
+    }
+}
+
+fn t2_rel() -> RelFileLocator {
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: 14021,
+    }
+}
+
+fn t3_rel() -> RelFileLocator {
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: 14022,
+    }
+}
+
 fn relation_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
@@ -138,9 +162,34 @@ fn pets_relation_desc() -> RelationDesc {
     }
 }
 
+fn join_name_n_desc() -> RelationDesc {
+    RelationDesc {
+        columns: vec![
+            crate::backend::catalog::catalog::column_desc(
+                "name",
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text),
+                false,
+            ),
+            crate::backend::catalog::catalog::column_desc(
+                "n",
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                false,
+            ),
+        ],
+    }
+}
+
 fn catalog_with_pets() -> Catalog {
     let mut catalog = catalog();
     catalog.insert("pets", test_catalog_entry(pets_rel(), pets_relation_desc()));
+    catalog
+}
+
+fn join_chain_catalog() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert("t1", test_catalog_entry(t1_rel(), join_name_n_desc()));
+    catalog.insert("t2", test_catalog_entry(t2_rel(), join_name_n_desc()));
+    catalog.insert("t3", test_catalog_entry(t3_rel(), join_name_n_desc()));
     catalog
 }
 
@@ -6310,6 +6359,135 @@ fn full_join_using_coalesces_join_column() {
             ],
             vec![Value::Int32(2), Value::Text("bob".into()), Value::Null],
             vec![Value::Int32(3), Value::Null, Value::Text("pixel".into())],
+        ],
+    );
+}
+
+fn seed_join_chain_tables(base: &PathBuf, txns: &mut TransactionManager) {
+    let xid = txns.begin();
+    run_sql_with_catalog(
+        base,
+        txns,
+        xid,
+        "insert into t1 (name, n) values ('bb', 11)",
+        join_chain_catalog(),
+    )
+    .unwrap();
+    run_sql_with_catalog(
+        base,
+        txns,
+        xid,
+        "insert into t2 (name, n) values ('bb', 12), ('cc', 22), ('ee', 42)",
+        join_chain_catalog(),
+    )
+    .unwrap();
+    run_sql_with_catalog(
+        base,
+        txns,
+        xid,
+        "insert into t3 (name, n) values ('bb', 13), ('cc', 23), ('dd', 33)",
+        join_chain_catalog(),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+}
+
+#[test]
+fn chained_full_join_using_keeps_merged_name_identity() {
+    let base = temp_dir("chained_full_join_using");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_join_chain_tables(&base, &mut txns);
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from t1 full join t2 using (name) full join t3 using (name) order by name",
+            join_chain_catalog(),
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Text("bb".into()),
+                Value::Int32(11),
+                Value::Int32(12),
+                Value::Int32(13),
+            ],
+            vec![
+                Value::Text("cc".into()),
+                Value::Null,
+                Value::Int32(22),
+                Value::Int32(23),
+            ],
+            vec![
+                Value::Text("dd".into()),
+                Value::Null,
+                Value::Null,
+                Value::Int32(33),
+            ],
+            vec![
+                Value::Text("ee".into()),
+                Value::Null,
+                Value::Int32(42),
+                Value::Null,
+            ],
+        ],
+    );
+}
+
+#[test]
+fn chained_natural_full_join_over_subqueries_keeps_join_outputs() {
+    let base = temp_dir("chained_natural_full_join_subqueries");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_join_chain_tables(&base, &mut txns);
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from (select name, n as s1_n, 1 as s1_1 from t1) as s1 natural full join (select name, n as s2_n, 2 as s2_2 from t2) as s2 natural full join (select name, n as s3_n, 3 as s3_2 from t3) s3 order by name",
+            join_chain_catalog(),
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Text("bb".into()),
+                Value::Int32(11),
+                Value::Int32(1),
+                Value::Int32(12),
+                Value::Int32(2),
+                Value::Int32(13),
+                Value::Int32(3),
+            ],
+            vec![
+                Value::Text("cc".into()),
+                Value::Null,
+                Value::Null,
+                Value::Int32(22),
+                Value::Int32(2),
+                Value::Int32(23),
+                Value::Int32(3),
+            ],
+            vec![
+                Value::Text("dd".into()),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Int32(33),
+                Value::Int32(3),
+            ],
+            vec![
+                Value::Text("ee".into()),
+                Value::Null,
+                Value::Null,
+                Value::Int32(42),
+                Value::Int32(2),
+                Value::Null,
+                Value::Null,
+            ],
         ],
     );
 }
