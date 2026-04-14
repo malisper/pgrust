@@ -26,16 +26,14 @@ use crate::include::catalog::{
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
+    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
+    ToastRelationRef,
 };
 
 use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
-pub(crate) use crate::include::nodes::plannodes::{
-    BoundFromPlan, BoundSelectPlan,
-};
 use agg::*;
 use agg_output::*;
 use coerce::*;
@@ -51,7 +49,11 @@ pub use modify::{
 };
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
-use query::{analyze_select_query_with_outer, analyze_values_query_with_outer};
+use query::{
+    AnalyzedFrom, analyze_select_query_with_outer, analyze_values_query_with_outer,
+    identity_target_list, normalize_target_list, rewrite_agg_accums, rewrite_expr_columns,
+    rewrite_order_by_entries, rewrite_project_set_targets, rewrite_target_entries,
+};
 pub use scope::BoundRelation;
 use scope::*;
 use system_views::*;
@@ -443,16 +445,6 @@ pub fn normalize_create_view_name(stmt: &CreateViewStatement) -> Result<String, 
     .map(|(name, _)| name)
 }
 
-fn relation_desc_from_bound_select_plan(plan: &BoundSelectPlan) -> RelationDesc {
-    RelationDesc {
-        columns: plan
-            .columns()
-            .into_iter()
-            .map(|col| column_desc(col.name, col.sql_type, true))
-            .collect(),
-    }
-}
-
 fn apply_cte_column_names(
     mut query: Query,
     desc: RelationDesc,
@@ -622,7 +614,7 @@ fn bind_values_query_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<(BoundSelectPlan, BoundScope), ParseError> {
+) -> Result<(Query, BoundScope), ParseError> {
     let local_ctes = bind_ctes(
         &stmt.with,
         catalog,
@@ -641,46 +633,57 @@ fn bind_values_query_with_outer(
         grouped_outer.as_ref(),
         &visible_ctes,
     )?;
-    let output_columns = base.columns();
-    let mut plan = BoundSelectPlan::From(base);
-    let targets = output_columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| {
-            TargetEntry::new(
-                column.name.clone(),
-                Expr::Column(index),
-                column.sql_type,
-                index + 1,
+    let target_list = normalize_target_list(identity_target_list(
+        &base.output_columns,
+        &base.output_exprs,
+    ));
+    let sort_inputs = if stmt.order_by.is_empty() {
+        Vec::new()
+    } else {
+        bind_order_by_items(&stmt.order_by, &target_list, |expr| {
+            bind_expr_with_outer_and_ctes(
+                expr,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
             )
+        })?
+    };
+    let sort_clause = rewrite_order_by_entries(sort_inputs, &base.output_exprs)
+        .into_iter()
+        .enumerate()
+        .map(|(index, item)| SortGroupClause {
+            expr: item.expr,
+            tle_sort_group_ref: index + 1,
+            descending: item.descending,
+            nulls_first: item.nulls_first,
         })
-        .collect::<Vec<_>>();
-
-    if !stmt.order_by.is_empty() {
-        plan = BoundSelectPlan::OrderBy {
-            input: Box::new(plan),
-            items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                bind_expr_with_outer_and_ctes(
-                    expr,
-                    &scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer.as_ref(),
-                    &visible_ctes,
-                )
-            })?,
-        };
-    }
-
-    if stmt.limit.is_some() || stmt.offset.is_some() {
-        plan = BoundSelectPlan::Limit {
-            input: Box::new(plan),
-            limit: stmt.limit,
-            offset: stmt.offset.unwrap_or(0),
-        };
-    }
-
-    Ok((plan, scope))
+        .collect();
+    let AnalyzedFrom {
+        rtable,
+        jointree,
+        output_columns: _,
+        output_exprs: _,
+    } = base;
+    Ok((
+        Query {
+            command_type: crate::include::executor::execdesc::CommandType::Select,
+            rtable,
+            jointree,
+            target_list,
+            where_qual: None,
+            group_by: Vec::new(),
+            accumulators: Vec::new(),
+            having_qual: None,
+            sort_clause,
+            limit_count: stmt.limit,
+            limit_offset: stmt.offset.unwrap_or(0),
+            project_set: None,
+        },
+        scope,
+    ))
 }
 
 fn build_values_plan_with_outer(
@@ -709,7 +712,7 @@ fn bind_select_query_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<(BoundSelectPlan, BoundScope), ParseError> {
+) -> Result<(Query, BoundScope), ParseError> {
     let local_ctes = bind_ctes(
         &stmt.with,
         catalog,
@@ -725,7 +728,7 @@ fn bind_select_query_with_outer(
         return Err(ParseError::EmptySelectList);
     }
 
-    let (base, scope) = if let Some(from) = &stmt.from {
+    let (mut base, scope) = if let Some(from) = &stmt.from {
         bind_from_item_with_ctes(
             from,
             catalog,
@@ -735,7 +738,7 @@ fn bind_select_query_with_outer(
             expanded_views,
         )?
     } else {
-        (BoundFromPlan::Result, empty_scope())
+        (AnalyzedFrom::result(), empty_scope())
     };
     if let Some(predicate) = &stmt.where_clause {
         if expr_contains_agg(predicate) {
@@ -743,21 +746,20 @@ fn bind_select_query_with_outer(
         }
     }
 
-    let filtered_plan = if let Some(predicate) = &stmt.where_clause {
-        BoundSelectPlan::Filter {
-            input: Box::new(BoundSelectPlan::From(base)),
-            predicate: bind_expr_with_outer_and_ctes(
+    let bound_where_qual = stmt
+        .where_clause
+        .as_ref()
+        .map(|predicate| {
+            bind_expr_with_outer_and_ctes(
                 predicate,
                 &scope,
                 catalog,
                 outer_scopes,
                 grouped_outer.as_ref(),
                 &visible_ctes,
-            )?,
-        }
-    } else {
-        BoundSelectPlan::From(base)
-    };
+            )
+        })
+        .transpose()?;
 
     let needs_agg =
         !stmt.group_by.is_empty() || targets_contain_agg(&stmt.targets) || stmt.having.is_some();
@@ -780,10 +782,14 @@ fn bind_select_query_with_outer(
             .iter()
             .all(|target| !expr_references_input_scope(&target.expr));
 
-    let mut plan = if can_skip_scan_for_degenerate_having {
-        BoundSelectPlan::From(BoundFromPlan::Result)
+    if can_skip_scan_for_degenerate_having {
+        base = AnalyzedFrom::result();
+    }
+
+    let where_qual = if can_skip_scan_for_degenerate_having {
+        None
     } else {
-        filtered_plan
+        bound_where_qual.map(|expr| rewrite_expr_columns(expr, &base.output_exprs))
     };
 
     if needs_agg {
@@ -917,14 +923,6 @@ fn bind_select_query_with_outer(
             })
             .transpose()?;
 
-        plan = BoundSelectPlan::Aggregate {
-            input: Box::new(plan),
-            group_by: group_keys,
-            accumulators,
-            having,
-            output_columns: output_columns.clone(),
-        };
-
         let targets: Vec<TargetEntry> = if stmt.targets.len() == 1
             && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
         {
@@ -967,37 +965,50 @@ fn bind_select_query_with_outer(
                 .collect::<Result<_, _>>()?
         };
 
-        if !stmt.order_by.is_empty() {
-            plan = BoundSelectPlan::OrderBy {
-                input: Box::new(plan),
-                items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                    bind_agg_output_expr_in_clause(
-                        expr,
-                        UngroupedColumnClause::SelectTarget,
-                        &stmt.group_by,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer.as_ref(),
-                        &aggs,
-                        n_keys,
-                    )
-                })?,
-            };
-        }
-
-        if stmt.limit.is_some() || stmt.offset.is_some() {
-            plan = BoundSelectPlan::Limit {
-                input: Box::new(plan),
-                limit: stmt.limit,
-                offset: stmt.offset.unwrap_or(0),
-            };
-        }
+        let sort_inputs = if stmt.order_by.is_empty() {
+            Vec::new()
+        } else {
+            bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                bind_agg_output_expr_in_clause(
+                    expr,
+                    UngroupedColumnClause::SelectTarget,
+                    &stmt.group_by,
+                    &scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.as_ref(),
+                    &aggs,
+                    n_keys,
+                )
+            })?
+        };
 
         Ok((
-            BoundSelectPlan::Projection {
-                input: Box::new(plan),
-                targets,
+            Query {
+                command_type: crate::include::executor::execdesc::CommandType::Select,
+                rtable: base.rtable,
+                jointree: base.jointree,
+                target_list: normalize_target_list(targets),
+                where_qual,
+                group_by: group_keys
+                    .into_iter()
+                    .map(|expr| rewrite_expr_columns(expr, &base.output_exprs))
+                    .collect(),
+                accumulators: rewrite_agg_accums(accumulators, &base.output_exprs),
+                having_qual: having,
+                sort_clause: sort_inputs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, item)| SortGroupClause {
+                        expr: item.expr,
+                        tle_sort_group_ref: index + 1,
+                        descending: item.descending,
+                        nulls_first: item.nulls_first,
+                    })
+                    .collect(),
+                limit_count: stmt.limit,
+                limit_offset: stmt.offset.unwrap_or(0),
+                project_set: None,
             },
             scope,
         ))
@@ -1013,83 +1024,106 @@ fn bind_select_query_with_outer(
 
         match bound_targets {
             BoundSelectTargets::Plain(targets) => {
-                if !stmt.order_by.is_empty() {
-                    plan = BoundSelectPlan::OrderBy {
-                        input: Box::new(plan),
-                        items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
-                            bind_expr_with_outer_and_ctes(
-                                expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })?,
-                    };
-                }
+                let sort_inputs = if stmt.order_by.is_empty() {
+                    Vec::new()
+                } else {
+                    bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                        bind_expr_with_outer_and_ctes(
+                            expr,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &visible_ctes,
+                        )
+                    })?
+                };
 
-                if stmt.limit.is_some() || stmt.offset.is_some() {
-                    plan = BoundSelectPlan::Limit {
-                        input: Box::new(plan),
-                        limit: stmt.limit,
-                        offset: stmt.offset.unwrap_or(0),
-                    };
-                }
-
-                let is_identity = targets.len() == scope.columns.len()
+                let is_identity = targets.len() == base.output_columns.len()
                     && targets.iter().enumerate().all(|(i, t)| {
                         matches!(t.expr, Expr::Column(c) if c == i)
-                            && t.name == scope.columns[i].output_name
+                            && t.name == base.output_columns[i].name
                     });
-
-                if is_identity {
-                    Ok((plan, scope))
+                let target_list = if is_identity {
+                    normalize_target_list(identity_target_list(&base.output_columns, &base.output_exprs))
                 } else {
-                    Ok((
-                        BoundSelectPlan::Projection {
-                            input: Box::new(plan),
-                            targets,
-                        },
-                        scope,
-                    ))
-                }
+                    normalize_target_list(rewrite_target_entries(targets, &base.output_exprs))
+                };
+
+                Ok((
+                    Query {
+                        command_type: crate::include::executor::execdesc::CommandType::Select,
+                        rtable: base.rtable,
+                        jointree: base.jointree,
+                        target_list,
+                        where_qual,
+                        group_by: Vec::new(),
+                        accumulators: Vec::new(),
+                        having_qual: None,
+                        sort_clause: rewrite_order_by_entries(sort_inputs, &base.output_exprs)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, item)| SortGroupClause {
+                                expr: item.expr,
+                                tle_sort_group_ref: index + 1,
+                                descending: item.descending,
+                                nulls_first: item.nulls_first,
+                            })
+                            .collect(),
+                        limit_count: stmt.limit,
+                        limit_offset: stmt.offset.unwrap_or(0),
+                        project_set: None,
+                    },
+                    scope,
+                ))
             }
             BoundSelectTargets::WithProjectSet {
                 project_targets,
                 final_targets,
             } => {
-                plan = BoundSelectPlan::ProjectSet {
-                    input: Box::new(plan),
-                    targets: project_targets,
+                let sort_inputs = if stmt.order_by.is_empty() {
+                    Vec::new()
+                } else {
+                    bind_order_by_items(&stmt.order_by, &final_targets, |expr| {
+                        bind_expr_with_outer_and_ctes(
+                            expr,
+                            &scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer.as_ref(),
+                            &visible_ctes,
+                        )
+                    })?
                 };
-                plan = BoundSelectPlan::Projection {
-                    input: Box::new(plan),
-                    targets: final_targets.clone(),
-                };
-                if !stmt.order_by.is_empty() {
-                    plan = BoundSelectPlan::OrderBy {
-                        input: Box::new(plan),
-                        items: bind_order_by_items(&stmt.order_by, &final_targets, |expr| {
-                            bind_expr_with_outer_and_ctes(
-                                expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })?,
-                    };
-                }
-                if stmt.limit.is_some() || stmt.offset.is_some() {
-                    plan = BoundSelectPlan::Limit {
-                        input: Box::new(plan),
-                        limit: stmt.limit,
-                        offset: stmt.offset.unwrap_or(0),
-                    };
-                }
-                Ok((plan, scope))
+                Ok((
+                    Query {
+                        command_type: crate::include::executor::execdesc::CommandType::Select,
+                        rtable: base.rtable,
+                        jointree: base.jointree,
+                        target_list: normalize_target_list(final_targets),
+                        where_qual,
+                        group_by: Vec::new(),
+                        accumulators: Vec::new(),
+                        having_qual: None,
+                        sort_clause: sort_inputs
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, item)| SortGroupClause {
+                                expr: item.expr,
+                                tle_sort_group_ref: index + 1,
+                                descending: item.descending,
+                                nulls_first: item.nulls_first,
+                            })
+                            .collect(),
+                        limit_count: stmt.limit,
+                        limit_offset: stmt.offset.unwrap_or(0),
+                        project_set: Some(rewrite_project_set_targets(
+                            project_targets,
+                            &base.output_exprs,
+                        )),
+                    },
+                    scope,
+                ))
             }
         }
     }

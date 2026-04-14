@@ -1,4 +1,5 @@
 use super::*;
+use super::query::AnalyzedFrom;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::nodes::plannodes::JoinType;
 
@@ -62,7 +63,7 @@ pub(super) fn bind_values_rows(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
-) -> Result<(BoundFromPlan, BoundScope), ParseError> {
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     let width = rows.first().map(Vec::len).unwrap_or(0);
     for row in rows {
         if row.len() != width {
@@ -180,13 +181,7 @@ pub(super) fn bind_values_rows(
             .map(|col| column_desc(col.name.clone(), col.sql_type, true))
             .collect(),
     };
-    Ok((
-        BoundFromPlan::Values {
-            rows: bound_rows,
-            output_columns,
-        },
-        scope_for_relation(None, &desc),
-    ))
+    Ok((AnalyzedFrom::values(bound_rows, output_columns), scope_for_relation(None, &desc)))
 }
 
 pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, ParseError> {
@@ -322,12 +317,12 @@ pub(super) fn bind_from_item_with_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
     expanded_views: &[u32],
-) -> Result<(BoundFromPlan, BoundScope), ParseError> {
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     match stmt {
         FromItem::Table { name } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
                 return Ok((
-                    BoundFromPlan::Subquery(Box::new(cte.plan.clone())),
+                    AnalyzedFrom::subquery(cte.plan.clone()),
                     scope_for_relation(Some(name), &cte.desc),
                 ));
             }
@@ -356,12 +351,7 @@ pub(super) fn bind_from_item_with_ctes(
             }
             let desc = entry.desc.clone();
             Ok((
-                BoundFromPlan::SeqScan {
-                    rel: entry.rel,
-                    relation_oid: entry.relation_oid,
-                    toast: entry.toast,
-                    desc: desc.clone(),
-                },
+                AnalyzedFrom::relation(entry.rel, entry.relation_oid, entry.toast, desc.clone()),
                 scope_for_relation(Some(name), &desc),
             ))
         }
@@ -463,19 +453,17 @@ pub(super) fn bind_from_item_with_ctes(
                     };
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
-                        BoundFromPlan::FunctionScan {
-                            call: SetReturningCall::GenerateSeries {
-                                func_oid: resolved_proc_oid,
-                                func_variadic: resolved_func_variadic,
-                                start: coerce_bound_expr(start, start_type, common),
-                                stop: coerce_bound_expr(stop, stop_type, common),
-                                step,
-                                output: QueryColumn {
-                                    name: "generate_series".to_string(),
-                                    sql_type: common,
-                                },
+                        AnalyzedFrom::function(SetReturningCall::GenerateSeries {
+                            func_oid: resolved_proc_oid,
+                            func_variadic: resolved_func_variadic,
+                            start: coerce_bound_expr(start, start_type, common),
+                            stop: coerce_bound_expr(stop, stop_type, common),
+                            step,
+                            output: QueryColumn {
+                                name: "generate_series".to_string(),
+                                sql_type: common,
                             },
-                        },
+                        }),
                         scope,
                     ))
                 }
@@ -533,14 +521,12 @@ pub(super) fn bind_from_item_with_ctes(
                     };
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
-                        BoundFromPlan::FunctionScan {
-                            call: SetReturningCall::Unnest {
-                                func_oid: resolved_proc_oid,
-                                func_variadic: resolved_func_variadic,
-                                args: bound_args,
-                                output_columns,
-                            },
-                        },
+                        AnalyzedFrom::function(SetReturningCall::Unnest {
+                            func_oid: resolved_proc_oid,
+                            func_variadic: resolved_func_variadic,
+                            args: bound_args,
+                            output_columns,
+                        }),
                         scope,
                     ))
                 }
@@ -603,9 +589,7 @@ pub(super) fn bind_from_item_with_ctes(
                     };
                     let scope = scope_for_relation(Some(name), &desc);
                     Ok((
-                        BoundFromPlan::Projection {
-                            input: Box::new(BoundFromPlan::Result),
-                            targets: vec![
+                        AnalyzedFrom::result().with_projection(vec![
                                 TargetEntry::new(
                                     "message",
                                     Expr::FuncCall {
@@ -650,8 +634,7 @@ pub(super) fn bind_from_item_with_ctes(
                                     text_type,
                                     4,
                                 ),
-                            ],
-                        },
+                            ]),
                         scope,
                     ))
                 }
@@ -724,15 +707,13 @@ pub(super) fn bind_from_item_with_ctes(
                         };
                         let scope = scope_for_relation(Some(name), &desc);
                         Ok((
-                            BoundFromPlan::FunctionScan {
-                                call: SetReturningCall::JsonTableFunction {
-                                    func_oid: resolved_proc_oid,
-                                    func_variadic: resolved_func_variadic,
-                                    kind,
-                                    args: bound_args,
-                                    output_columns,
-                                },
-                            },
+                            AnalyzedFrom::function(SetReturningCall::JsonTableFunction {
+                                func_oid: resolved_proc_oid,
+                                func_variadic: resolved_func_variadic,
+                                kind,
+                                args: bound_args,
+                                output_columns,
+                            }),
                             scope,
                         ))
                     } else if let Some(kind) = resolve_regex_table_function(other) {
@@ -768,15 +749,13 @@ pub(super) fn bind_from_item_with_ctes(
                         };
                         let scope = scope_for_relation(Some(name), &desc);
                         Ok((
-                            BoundFromPlan::FunctionScan {
-                                call: SetReturningCall::RegexTableFunction {
-                                    func_oid: resolved_proc_oid,
-                                    func_variadic: resolved_func_variadic,
-                                    kind,
-                                    args: bound_args,
-                                    output_columns,
-                                },
-                            },
+                            AnalyzedFrom::function(SetReturningCall::RegexTableFunction {
+                                func_oid: resolved_proc_oid,
+                                func_variadic: resolved_func_variadic,
+                                kind,
+                                args: bound_args,
+                                output_columns,
+                            }),
                             scope,
                         ))
                     } else {
@@ -788,8 +767,8 @@ pub(super) fn bind_from_item_with_ctes(
         FromItem::DerivedTable(select) => {
             let (plan, _) =
                 analyze_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
-            let bound = BoundFromPlan::Subquery(Box::new(plan));
-            let desc = synthetic_desc_from_bound_from_plan(&bound);
+            let bound = AnalyzedFrom::subquery(plan);
+            let desc = synthetic_desc_from_analyzed_from(&bound);
             Ok((bound, scope_for_relation(None, &desc)))
         }
         FromItem::Join {
@@ -826,20 +805,9 @@ pub(super) fn bind_from_item_with_ctes(
                 grouped_outer,
                 ctes,
             )?;
-            let plan = BoundFromPlan::NestedLoopJoin {
-                left: Box::new(left_plan),
-                right: Box::new(right_plan),
-                kind: plan_join_type(*kind),
-                on,
-            };
+            let plan = AnalyzedFrom::join(left_plan, right_plan, plan_join_type(*kind), on);
             if let Some((targets, scope)) = projection {
-                Ok((
-                    BoundFromPlan::Projection {
-                        input: Box::new(plan),
-                        targets,
-                    },
-                    scope,
-                ))
+                Ok((plan.with_projection(targets), scope))
             } else {
                 Ok((plan, raw_scope))
             }
@@ -1071,24 +1039,18 @@ fn bind_join_using_projection(
     Ok((on, Some((targets, scope))))
 }
 
-fn synthetic_desc_from_bound_from_plan(plan: &BoundFromPlan) -> RelationDesc {
-    RelationDesc {
-        columns: plan
-            .columns()
-            .into_iter()
-            .map(|col| column_desc(col.name, col.sql_type, true))
-            .collect(),
-    }
+fn synthetic_desc_from_analyzed_from(plan: &AnalyzedFrom) -> RelationDesc {
+    plan.desc()
 }
 
 fn apply_relation_alias(
-    mut plan: BoundFromPlan,
+    mut plan: AnalyzedFrom,
     scope: BoundScope,
     alias: &str,
     column_aliases: &[String],
     preserve_source_names: bool,
     source_is_alias: bool,
-) -> Result<(BoundFromPlan, BoundScope), ParseError> {
+) -> Result<(AnalyzedFrom, BoundScope), ParseError> {
     if column_aliases.len() > scope.columns.len() {
         return Err(ParseError::UnexpectedToken {
             expected: "table alias column count to match source columns",
@@ -1167,9 +1129,8 @@ fn apply_relation_alias(
     }
 
     if renamed {
-        plan = BoundFromPlan::Projection {
-            input: Box::new(plan),
-            targets: columns
+        plan = plan.with_projection(
+            columns
                 .iter()
                 .enumerate()
                 .map(|(index, column)| {
@@ -1181,7 +1142,7 @@ fn apply_relation_alias(
                     )
                 })
                 .collect(),
-        };
+        );
     }
 
     Ok((plan, BoundScope { desc, columns }))
