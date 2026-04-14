@@ -9,11 +9,11 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgStatisticRow, PgTablespaceRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     bootstrap_composite_type_rows, builtin_type_rows,
 };
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{ArrayValue, Value};
 
 pub(crate) fn catalog_row_values_for_kind(
     rows: &PhysicalCatalogRows,
@@ -159,6 +159,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_index_row_values)
             .collect(),
+        BootstrapCatalogKind::PgStatistic => rows
+            .statistics
+            .iter()
+            .cloned()
+            .map(pg_statistic_row_values)
+            .collect(),
         BootstrapCatalogKind::PgOpclass => rows
             .opclasses
             .iter()
@@ -227,6 +233,8 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relpersistence,
         relkind,
         relnatts: expect_int16(&values[11])?,
+        relpages: expect_int32(&values[12])?,
+        reltuples: expect_float64(&values[13])?,
     })
 }
 
@@ -515,6 +523,7 @@ pub(crate) fn pg_attribute_row_from_values(
             .ok_or(CatalogError::Corrupt("unknown attstorage"))?,
         attcompression: AttributeCompression::from_char(attcompression)
             .ok_or(CatalogError::Corrupt("unknown attcompression"))?,
+        attstattarget: expect_int16(&values[10])?,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -626,6 +635,54 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
     })
 }
 
+pub(crate) fn pg_statistic_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgStatisticRow, CatalogError> {
+    Ok(PgStatisticRow {
+        starelid: expect_oid(&values[0])?,
+        staattnum: expect_int16(&values[1])?,
+        stainherit: expect_bool(&values[2])?,
+        stanullfrac: expect_float64(&values[3])?,
+        stawidth: expect_int32(&values[4])?,
+        stadistinct: expect_float64(&values[5])?,
+        stakind: [
+            expect_int16(&values[6])?,
+            expect_int16(&values[7])?,
+            expect_int16(&values[8])?,
+            expect_int16(&values[9])?,
+            expect_int16(&values[10])?,
+        ],
+        staop: [
+            expect_oid(&values[11])?,
+            expect_oid(&values[12])?,
+            expect_oid(&values[13])?,
+            expect_oid(&values[14])?,
+            expect_oid(&values[15])?,
+        ],
+        stacoll: [
+            expect_oid(&values[16])?,
+            expect_oid(&values[17])?,
+            expect_oid(&values[18])?,
+            expect_oid(&values[19])?,
+            expect_oid(&values[20])?,
+        ],
+        stanumbers: [
+            expect_nullable_array(&values[21])?,
+            expect_nullable_array(&values[22])?,
+            expect_nullable_array(&values[23])?,
+            expect_nullable_array(&values[24])?,
+            expect_nullable_array(&values[25])?,
+        ],
+        stavalues: [
+            expect_nullable_array(&values[26])?,
+            expect_nullable_array(&values[27])?,
+            expect_nullable_array(&values[28])?,
+            expect_nullable_array(&values[29])?,
+            expect_nullable_array(&values[30])?,
+        ],
+    })
+}
+
 fn namespace_row_values(row: PgNamespaceRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -648,6 +705,8 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
         Value::Int16(row.relnatts),
+        Value::Int32(row.relpages),
+        Value::Float64(row.reltuples),
     ]
 }
 
@@ -909,6 +968,7 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::InternalChar(row.attalign.as_char() as u8),
         Value::InternalChar(row.attstorage.as_char() as u8),
         Value::InternalChar(row.attcompression.as_char() as u8),
+        Value::Int16(row.attstattarget),
     ]
 }
 
@@ -922,6 +982,42 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::InternalChar(row.typalign.as_char() as u8),
         Value::InternalChar(row.typstorage.as_char() as u8),
         Value::Int32(row.typrelid as i32),
+    ]
+}
+
+fn pg_statistic_row_values(row: PgStatisticRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.starelid as i32),
+        Value::Int16(row.staattnum),
+        Value::Bool(row.stainherit),
+        Value::Float64(row.stanullfrac),
+        Value::Int32(row.stawidth),
+        Value::Float64(row.stadistinct),
+        Value::Int16(row.stakind[0]),
+        Value::Int16(row.stakind[1]),
+        Value::Int16(row.stakind[2]),
+        Value::Int16(row.stakind[3]),
+        Value::Int16(row.stakind[4]),
+        Value::Int32(row.staop[0] as i32),
+        Value::Int32(row.staop[1] as i32),
+        Value::Int32(row.staop[2] as i32),
+        Value::Int32(row.staop[3] as i32),
+        Value::Int32(row.staop[4] as i32),
+        Value::Int32(row.stacoll[0] as i32),
+        Value::Int32(row.stacoll[1] as i32),
+        Value::Int32(row.stacoll[2] as i32),
+        Value::Int32(row.stacoll[3] as i32),
+        Value::Int32(row.stacoll[4] as i32),
+        nullable_array_value(row.stanumbers[0].clone()),
+        nullable_array_value(row.stanumbers[1].clone()),
+        nullable_array_value(row.stanumbers[2].clone()),
+        nullable_array_value(row.stanumbers[3].clone()),
+        nullable_array_value(row.stanumbers[4].clone()),
+        nullable_array_value(row.stavalues[0].clone()),
+        nullable_array_value(row.stavalues[1].clone()),
+        nullable_array_value(row.stavalues[2].clone()),
+        nullable_array_value(row.stavalues[3].clone()),
+        nullable_array_value(row.stavalues[4].clone()),
     ]
 }
 
@@ -1091,6 +1187,18 @@ fn expect_float64(value: &Value) -> Result<f64, CatalogError> {
         Value::Float64(v) => Ok(*v),
         _ => Err(CatalogError::Corrupt("expected float value")),
     }
+}
+
+fn expect_nullable_array(value: &Value) -> Result<Option<ArrayValue>, CatalogError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::PgArray(array) => Ok(Some(array.clone())),
+        _ => Err(CatalogError::Corrupt("expected nullable array value")),
+    }
+}
+
+fn nullable_array_value(value: Option<ArrayValue>) -> Value {
+    value.map(Value::PgArray).unwrap_or(Value::Null)
 }
 
 fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError> {

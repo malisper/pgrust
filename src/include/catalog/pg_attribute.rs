@@ -48,6 +48,7 @@ pub struct PgAttributeRow {
     pub attalign: AttributeAlign,
     pub attstorage: AttributeStorage,
     pub attcompression: AttributeCompression,
+    pub attstattarget: i16,
     pub sql_type: SqlType,
 }
 
@@ -68,6 +69,7 @@ pub fn pg_attribute_desc() -> RelationDesc {
                 SqlType::new(SqlTypeKind::InternalChar),
                 false,
             ),
+            column_desc("attstattarget", SqlType::new(SqlTypeKind::Int2), false),
         ],
     }
 }
@@ -177,6 +179,7 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
             attalign: column.storage.attalign,
             attstorage: column.storage.attstorage,
             attcompression: column.storage.attcompression,
+            attstattarget: column.attstattarget,
             sql_type: column.sql_type,
         })
         .collect()

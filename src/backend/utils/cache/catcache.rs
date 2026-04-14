@@ -41,8 +41,8 @@ use crate::include::catalog::{
     POINT_TYPE_OID, POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgStatisticRow, PgTablespaceRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
     REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
     TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
@@ -87,6 +87,7 @@ pub struct CatCache {
     collation_rows: Vec<PgCollationRow>,
     database_rows: Vec<PgDatabaseRow>,
     tablespace_rows: Vec<PgTablespaceRow>,
+    statistic_rows: Vec<PgStatisticRow>,
     types_by_name: BTreeMap<String, PgTypeRow>,
     types_by_oid: BTreeMap<u32, PgTypeRow>,
 }
@@ -194,6 +195,8 @@ impl CatCache {
                 relpersistence: entry.relpersistence,
                 relkind: entry.relkind,
                 relnatts: entry.desc.columns.len() as i16,
+                relpages: entry.relpages,
+                reltuples: entry.reltuples,
             };
             cache.classes_by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),
@@ -237,6 +240,7 @@ impl CatCache {
                     attalign: column.storage.attalign,
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,
+                    attstattarget: column.attstattarget,
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();
@@ -327,6 +331,7 @@ impl CatCache {
             rows.collations,
             rows.databases,
             rows.tablespaces,
+            rows.statistics,
             rows.types,
         ))
     }
@@ -354,6 +359,7 @@ impl CatCache {
         collation_rows: Vec<PgCollationRow>,
         database_rows: Vec<PgDatabaseRow>,
         tablespace_rows: Vec<PgTablespaceRow>,
+        statistic_rows: Vec<PgStatisticRow>,
         type_rows: Vec<PgTypeRow>,
     ) -> Self {
         let mut cache = Self::default();
@@ -428,6 +434,7 @@ impl CatCache {
         sort_pg_database_rows(&mut cache.database_rows);
         cache.tablespace_rows = tablespace_rows;
         sort_pg_tablespace_rows(&mut cache.tablespace_rows);
+        cache.statistic_rows = statistic_rows;
         cache
     }
 
@@ -619,6 +626,10 @@ impl CatCache {
 
     pub fn tablespace_rows(&self) -> Vec<PgTablespaceRow> {
         self.tablespace_rows.clone()
+    }
+
+    pub fn statistic_rows(&self) -> Vec<PgStatisticRow> {
+        self.statistic_rows.clone()
     }
 }
 pub fn normalize_catalog_name(name: &str) -> &str {

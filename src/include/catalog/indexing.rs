@@ -1,6 +1,7 @@
 use crate::include::catalog::{
-    BootstrapCatalogKind, CHAR_BTREE_OPCLASS_OID, INT2_BTREE_OPCLASS_OID, INT4_BTREE_OPCLASS_OID,
-    NAME_BTREE_OPCLASS_OID, OID_BTREE_OPCLASS_OID, OIDVECTOR_BTREE_OPCLASS_OID,
+    BOOL_BTREE_OPCLASS_OID, BootstrapCatalogKind, CHAR_BTREE_OPCLASS_OID,
+    INT2_BTREE_OPCLASS_OID, INT4_BTREE_OPCLASS_OID, NAME_BTREE_OPCLASS_OID,
+    OID_BTREE_OPCLASS_OID, OIDVECTOR_BTREE_OPCLASS_OID,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +75,7 @@ const PG_COLLATION_NAME_ENC_NSP_INDEX_KEYS: [i16; 3] = [2, 7, 3];
 const PG_COLLATION_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TABLESPACE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TABLESPACE_SPCNAME_INDEX_KEYS: [i16; 1] = [2];
+const PG_STATISTIC_RELID_ATTNUM_INH_INDEX_KEYS: [i16; 3] = [1, 2, 3];
 
 const OID_OPCLASS_1: [u32; 1] = [OID_BTREE_OPCLASS_OID];
 const NAME_OPCLASS_1: [u32; 1] = [NAME_BTREE_OPCLASS_OID];
@@ -133,8 +135,13 @@ const OID_OID_OID_INT2_OPCLASS_4: [u32; 4] = [
     OID_BTREE_OPCLASS_OID,
     INT2_BTREE_OPCLASS_OID,
 ];
+const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
+    OID_BTREE_OPCLASS_OID,
+    INT2_BTREE_OPCLASS_OID,
+    BOOL_BTREE_OPCLASS_OID,
+];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 61] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 62] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -622,6 +629,14 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 61] = [
         unique: true,
         key_attnums: &PG_TABLESPACE_SPCNAME_INDEX_KEYS,
         opclass_oids: &NAME_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 2696,
+        relation_name: "pg_statistic_relid_att_inh_index",
+        heap_kind: BootstrapCatalogKind::PgStatistic,
+        unique: true,
+        key_attnums: &PG_STATISTIC_RELID_ATTNUM_INH_INDEX_KEYS,
+        opclass_oids: &OID_INT2_BOOL_OPCLASS_3,
     },
 ];
 

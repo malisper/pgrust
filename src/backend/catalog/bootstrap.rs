@@ -5,7 +5,7 @@ use crate::include::catalog::{
     bootstrap_namespace_oid, bootstrap_relation_desc,
 };
 
-pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 28] {
+pub fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 29] {
     shared_bootstrap_catalog_kinds()
 }
 
@@ -22,6 +22,8 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relpages: 0,
+        reltuples: 0.0,
         desc: bootstrap_relation_desc(kind),
         index_meta: None,
     }

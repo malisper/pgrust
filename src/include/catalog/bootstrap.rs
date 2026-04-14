@@ -26,6 +26,7 @@ pub const PG_CONSTRAINT_RELATION_OID: u32 = 2606;
 pub const PG_DEPEND_RELATION_OID: u32 = 2608;
 pub const PG_DESCRIPTION_RELATION_OID: u32 = 2609;
 pub const PG_INDEX_RELATION_OID: u32 = 2610;
+pub const PG_STATISTIC_RELATION_OID: u32 = 2619;
 pub const PG_LANGUAGE_RELATION_OID: u32 = 2612;
 pub const PG_NAMESPACE_RELATION_OID: u32 = 2615;
 pub const PG_OPCLASS_RELATION_OID: u32 = 2616;
@@ -41,6 +42,7 @@ pub const PG_AM_ROWTYPE_OID: u32 = 0;
 pub const PG_ATTRDEF_ROWTYPE_OID: u32 = 0;
 pub const PG_DEPEND_ROWTYPE_OID: u32 = 0;
 pub const PG_INDEX_ROWTYPE_OID: u32 = 0;
+pub const PG_STATISTIC_ROWTYPE_OID: u32 = 0;
 
 pub const BOOL_TYPE_OID: u32 = 16;
 pub const BYTEA_TYPE_OID: u32 = 17;
@@ -146,6 +148,7 @@ pub enum BootstrapCatalogKind {
     PgDepend,
     PgDescription,
     PgIndex,
+    PgStatistic,
     PgOpclass,
     PgOpfamily,
 }
@@ -179,6 +182,7 @@ impl BootstrapCatalogKind {
             Self::PgDepend => PG_DEPEND_RELATION_OID,
             Self::PgDescription => PG_DESCRIPTION_RELATION_OID,
             Self::PgIndex => PG_INDEX_RELATION_OID,
+            Self::PgStatistic => PG_STATISTIC_RELATION_OID,
             Self::PgOpclass => PG_OPCLASS_RELATION_OID,
             Self::PgOpfamily => PG_OPFAMILY_RELATION_OID,
         }
@@ -212,6 +216,7 @@ impl BootstrapCatalogKind {
             Self::PgDepend => "pg_depend",
             Self::PgDescription => "pg_description",
             Self::PgIndex => "pg_index",
+            Self::PgStatistic => "pg_statistic",
             Self::PgOpclass => "pg_opclass",
             Self::PgOpfamily => "pg_opfamily",
         }
@@ -245,13 +250,14 @@ impl BootstrapCatalogKind {
             Self::PgDepend => PG_DEPEND_ROWTYPE_OID,
             Self::PgDescription => 0,
             Self::PgIndex => PG_INDEX_ROWTYPE_OID,
+            Self::PgStatistic => PG_STATISTIC_ROWTYPE_OID,
             Self::PgOpclass => 0,
             Self::PgOpfamily => 0,
         }
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 28] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 29] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -280,13 +286,14 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 28] = [
     BootstrapCatalogKind::PgDepend,
     BootstrapCatalogKind::PgDescription,
     BootstrapCatalogKind::PgIndex,
+    BootstrapCatalogKind::PgStatistic,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 28] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 29] {
     CORE_BOOTSTRAP_KINDS
 }
 
-use crate::include::catalog::pg_description_desc;
+use crate::include::catalog::{pg_description_desc, pg_statistic_desc};
 
 pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
     match kind {
@@ -316,6 +323,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgDepend => pg_depend_desc(),
         BootstrapCatalogKind::PgDescription => pg_description_desc(),
         BootstrapCatalogKind::PgIndex => pg_index_desc(),
+        BootstrapCatalogKind::PgStatistic => pg_statistic_desc(),
         BootstrapCatalogKind::PgOpclass => pg_opclass_desc(),
         BootstrapCatalogKind::PgOpfamily => pg_opfamily_desc(),
     }

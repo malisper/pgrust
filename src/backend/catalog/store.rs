@@ -65,7 +65,7 @@ pub struct CatalogMutationEffect {
     pub full_reset: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CreateTableResult {
     pub entry: CatalogEntry,
     pub toast: Option<ToastCatalogChanges>,
@@ -179,6 +179,7 @@ impl CatalogStore {
             rows.collations,
             rows.databases,
             rows.tablespaces,
+            rows.statistics,
             rows.types,
         ))
     }

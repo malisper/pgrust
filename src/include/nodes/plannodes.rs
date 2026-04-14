@@ -44,6 +44,7 @@ pub struct ColumnDesc {
     pub storage: AttributeDesc,
     pub ty: ScalarType,
     pub sql_type: SqlType,
+    pub attstattarget: i16,
     pub not_null_constraint_oid: Option<u32>,
     pub attrdef_oid: Option<u32>,
     pub default_expr: Option<String>,

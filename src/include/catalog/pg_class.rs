@@ -6,7 +6,7 @@ use crate::include::catalog::{
     PG_CATALOG_NAMESPACE_OID, bootstrap_relation_desc,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PgClassRow {
     pub oid: u32,
     pub relname: String,
@@ -20,6 +20,8 @@ pub struct PgClassRow {
     pub relpersistence: char,
     pub relkind: char,
     pub relnatts: i16,
+    pub relpages: i32,
+    pub reltuples: f64,
 }
 
 pub fn pg_class_desc() -> RelationDesc {
@@ -41,6 +43,8 @@ pub fn pg_class_desc() -> RelationDesc {
             ),
             column_desc("relkind", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("relnatts", SqlType::new(SqlTypeKind::Int2), false),
+            column_desc("relpages", SqlType::new(SqlTypeKind::Int4), false),
+            column_desc("reltuples", SqlType::new(SqlTypeKind::Float4), false),
         ],
     }
 }
@@ -52,7 +56,7 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 18] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 19] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
@@ -72,6 +76,7 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 18] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgConstraint),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgDepend),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgIndex),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgStatistic),
     ]
 }
 
@@ -89,5 +94,7 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relpersistence: 'p',
         relkind: 'r',
         relnatts: bootstrap_relation_desc(kind).columns.len() as i16,
+        relpages: 0,
+        reltuples: 0.0,
     }
 }

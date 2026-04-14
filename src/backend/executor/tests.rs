@@ -101,6 +101,8 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relpages: 0,
+        reltuples: 0.0,
         rel,
         desc,
         index_meta: None,

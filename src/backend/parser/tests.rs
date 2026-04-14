@@ -25,6 +25,8 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relpages: 0,
+        reltuples: 0.0,
         desc,
         index_meta: None,
     }
@@ -64,6 +66,8 @@ fn catalog_with_people_id_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relpages: 0,
+            reltuples: 0.0,
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
@@ -122,6 +126,7 @@ fn visible_catalog_without_text_input_cast(
         base.collation_rows(),
         base.database_rows(),
         base.tablespace_rows(),
+        base.statistic_rows(),
         base.type_rows(),
     );
     crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(relcache, Some(filtered))
@@ -163,6 +168,7 @@ fn visible_catalog_without_operator(
         base.collation_rows(),
         base.database_rows(),
         base.tablespace_rows(),
+        base.statistic_rows(),
         base.type_rows(),
     );
     crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(relcache, Some(filtered))

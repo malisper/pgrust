@@ -8,10 +8,11 @@ use crate::include::catalog::{
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow,
     PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct PhysicalCatalogRows {
     pub namespaces: Vec<PgNamespaceRow>,
     pub classes: Vec<PgClassRow>,
@@ -40,6 +41,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub collations: Vec<PgCollationRow>,
     pub databases: Vec<PgDatabaseRow>,
     pub tablespaces: Vec<PgTablespaceRow>,
+    pub statistics: Vec<PgStatisticRow>,
     pub types: Vec<PgTypeRow>,
 }
 
@@ -135,6 +137,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.collations.extend(source.collations);
     target.databases.extend(source.databases);
     target.tablespaces.extend(source.tablespaces);
+    target.statistics.extend(source.statistics);
     target.types.extend(source.types);
 }
 
@@ -167,6 +170,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         collations: catcache.collation_rows(),
         databases: catcache.database_rows(),
         tablespaces: catcache.tablespace_rows(),
+        statistics: catcache.statistic_rows(),
         types: catcache.type_rows(),
     }
 }
@@ -195,6 +199,8 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relnatts: entry.desc.columns.len() as i16,
+        relpages: entry.relpages,
+        reltuples: entry.reltuples,
     });
 
     if entry.row_type_oid != 0 {
@@ -229,6 +235,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     attalign: column.storage.attalign,
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,
+                    attstattarget: column.attstattarget,
                     sql_type: column.sql_type,
                 }),
         );
