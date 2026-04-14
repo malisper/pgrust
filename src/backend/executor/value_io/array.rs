@@ -345,7 +345,7 @@ fn decode_array_bytes_internal(
 ) -> Result<Value, ExecError> {
     let header = decode_flat_array_header(bytes, column)?;
     if let Some(expected) = expected_element_type
-        && header.element_type != expected
+        && !array_header_type_matches_expected(header.element_type, expected)
     {
         return Err(ExecError::InvalidStorageValue {
             column: column.into(),
@@ -375,6 +375,10 @@ fn decode_array_bytes_internal(
         ArrayValue::from_dimensions(header.dimensions, items)
             .with_element_type_oid(header.element_oid),
     ))
+}
+
+fn array_header_type_matches_expected(actual: SqlType, expected: SqlType) -> bool {
+    actual.kind == expected.kind && actual.is_array == expected.is_array
 }
 
 fn decode_array_element_datum(

@@ -316,7 +316,13 @@ fn literal_sql_expr_value(expr: &SqlExpr) -> Option<Value> {
 pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
     match raw {
         RawTypeName::Builtin(ty) => *ty,
-        RawTypeName::Named { .. } => SqlType::new(SqlTypeKind::Composite),
+        RawTypeName::Named { array_bounds, .. } => {
+            let mut ty = SqlType::new(SqlTypeKind::Composite);
+            for _ in 0..*array_bounds {
+                ty = SqlType::array_of(ty);
+            }
+            ty
+        }
         RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
     }
 }
@@ -328,12 +334,18 @@ pub(crate) fn resolve_raw_type_name(
     match raw {
         RawTypeName::Builtin(ty) => Ok(*ty),
         RawTypeName::Record => Ok(SqlType::record(RECORD_TYPE_OID)),
-        RawTypeName::Named { name } => catalog
-            .type_rows()
-            .into_iter()
-            .find(|row| row.typname.eq_ignore_ascii_case(name))
-            .map(|row| row.sql_type)
-            .ok_or_else(|| ParseError::UnsupportedType(name.clone())),
+        RawTypeName::Named { name, array_bounds } => {
+            let mut ty = catalog
+                .type_rows()
+                .into_iter()
+                .find(|row| row.typname.eq_ignore_ascii_case(name))
+                .map(|row| row.sql_type)
+                .ok_or_else(|| ParseError::UnsupportedType(name.clone()))?;
+            for _ in 0..*array_bounds {
+                ty = SqlType::array_of(ty);
+            }
+            Ok(ty)
+        }
     }
 }
 
