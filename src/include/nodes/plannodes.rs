@@ -146,9 +146,6 @@ pub enum Plan {
 // either semantic Query trees or executable Plan trees. PostgreSQL does not use
 // a single enum like this: expression subqueries stay as semantic SubLink/Query
 // until planning, then become SubPlan references into PlannedStmt.subplans.
-// PostgreSQL also identifies functions and aggregates in semantic nodes by OID
-// (for example FuncExpr.funcid and Aggref.aggfnoid), not by pgrust-specific
-// builtin enums such as BuiltinScalarFunction or AggFunc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeferredSelectPlan {
     Bound(Box<Query>),

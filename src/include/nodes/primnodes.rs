@@ -1,6 +1,9 @@
 use crate::RelFileLocator;
 use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::access::htup::AttributeDesc;
+use crate::include::catalog::{
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::plannodes::DeferredSelectPlan;
 
@@ -481,7 +484,6 @@ pub enum ProjectSetTarget {
 pub struct AggAccum {
     pub aggfnoid: u32,
     pub agg_variadic: bool,
-    pub func: AggFunc,
     pub args: Vec<Expr>,
     pub distinct: bool,
     pub sql_type: SqlType,
@@ -563,7 +565,6 @@ pub struct OpExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuncExpr {
     pub funcid: u32,
-    pub func: BuiltinScalarFunction,
     pub funcresulttype: Option<SqlType>,
     pub funcvariadic: bool,
     pub args: Vec<Expr>,
@@ -1184,8 +1185,16 @@ impl Expr {
                 args,
                 func_variadic,
             } => Expr::Func(Box::new(FuncExpr {
-                funcid: func_oid,
-                func,
+                funcid: if func_oid != 0 {
+                    func_oid
+                } else {
+                    proc_oid_for_builtin_scalar_function(func).unwrap_or_else(|| {
+                        panic!(
+                            "builtin scalar function {:?} lacks pg_proc OID mapping",
+                            func
+                        )
+                    })
+                },
                 funcresulttype: None,
                 funcvariadic: func_variadic,
                 args: args.into_iter().map(Expr::into_pg_semantic_shape).collect(),
@@ -1223,7 +1232,12 @@ impl Expr {
                 let func = *func;
                 Expr::FuncCall {
                     func_oid: func.funcid,
-                    func: func.func,
+                    func: builtin_scalar_function_for_proc_oid(func.funcid).unwrap_or_else(|| {
+                        panic!(
+                            "semantic FuncExpr {:?} lacks builtin implementation mapping",
+                            func.funcid
+                        )
+                    }),
                     args: func.args.into_iter().map(Expr::into_legacy_shape).collect(),
                     func_variadic: func.funcvariadic,
                 }
