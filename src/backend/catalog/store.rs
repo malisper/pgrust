@@ -874,6 +874,34 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_table_rename_column_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        new_column_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (name, old_entry, new_entry) =
+            catalog.alter_table_rename_column(relation_oid, column_name, new_column_name)?;
+
+        let kinds = vec![
+            BootstrapCatalogKind::PgAttribute,
+            BootstrapCatalogKind::PgConstraint,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn rename_relation_mvcc(
         &mut self,
         relation_oid: u32,

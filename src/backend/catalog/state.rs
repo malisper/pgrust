@@ -620,6 +620,58 @@ impl Catalog {
         Ok((name, old_entry, new_entry))
     }
 
+    pub fn alter_table_rename_column(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        new_column_name: &str,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        if old_entry.desc.columns.iter().any(|column| {
+            !column.dropped
+                && !column.name.eq_ignore_ascii_case(column_name)
+                && column.name.eq_ignore_ascii_case(new_column_name)
+        }) {
+            return Err(CatalogError::TableAlreadyExists(new_column_name.to_string()));
+        }
+        let column_index = old_entry
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(index, column)| {
+                (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+            })
+            .ok_or_else(|| CatalogError::UnknownColumn(column_name.to_string()))?;
+
+        let mut new_entry = old_entry.clone();
+        let column = &mut new_entry.desc.columns[column_index];
+        column.name = new_column_name.to_string();
+        column.storage.name = column.name.clone();
+
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
+    }
+
     pub fn rename_relation(
         &mut self,
         relation_oid: u32,

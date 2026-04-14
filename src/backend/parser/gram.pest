@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_drop_column_stmt | alter_table_rename_stmt | alter_table_set_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_table_stmt | drop_view_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_drop_column_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_table_set_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_table_stmt | drop_view_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -48,6 +48,7 @@ create_index_where_clause = { kw_where ~ expr }
 create_index_with_clause = { kw_with ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
 alter_table_add_column_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_add ~ kw_column? ~ column_def }
 alter_table_drop_column_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_drop ~ kw_column? ~ identifier }
+alter_table_rename_column_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_rename ~ kw_column ~ identifier ~ kw_to ~ identifier }
 alter_table_rename_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_rename ~ kw_to ~ identifier }
 alter_table_set_stmt = { kw_alter ~ kw_table ~ identifier ~ kw_set ~ "(" ~ reloption ~ ("," ~ reloption)* ~ ")" }
 comment_on_table_stmt = { kw_comment ~ kw_on ~ kw_table ~ identifier ~ kw_is ~ (quoted_string_literal | kw_null) }
