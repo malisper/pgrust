@@ -6014,6 +6014,43 @@ fn join_using_projects_merged_column_once() {
 }
 
 #[test]
+fn grouped_join_using_counts_rhs_values() {
+    let base = temp_dir("grouped_join_using_counts_rhs_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        catalog_with_pets(),
+    )
+    .unwrap();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "insert into pets (id, name, owner_id) values (1, 'mocha', 1), (3, 'pixel', 2)",
+        catalog_with_pets(),
+    )
+    .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select id, count(owner_id) from people left join pets using (id) group by id order by id",
+            catalog_with_pets(),
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int64(1)],
+            vec![Value::Int32(2), Value::Int64(0)],
+        ],
+    );
+}
+
+#[test]
 fn full_join_using_coalesces_join_column() {
     let base = temp_dir("full_join_using");
     let txns = TransactionManager::new_durable(&base).unwrap();

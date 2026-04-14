@@ -145,17 +145,24 @@ impl Path {
             } => {
                 let layout = input.output_vars();
                 let aggregate_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
+                let rewritten_group_by = group_by
+                    .iter()
+                    .cloned()
+                    .map(|expr| rewrite_semantic_expr_for_input_path(expr, &input, &layout))
+                    .collect::<Vec<_>>();
+                let rewritten_accumulators = accumulators
+                    .iter()
+                    .cloned()
+                    .map(|accum| lower_agg_accum_to_plan_layout(accum, &input, &layout))
+                    .collect::<Vec<_>>();
                 Plan::Aggregate {
                     plan_info,
                     input: Box::new(input.into_plan()),
-                    group_by: group_by
+                    group_by: rewritten_group_by
                         .into_iter()
                         .map(|expr| lower_expr_to_plan_layout(expr, &layout))
                         .collect(),
-                    accumulators: accumulators
-                        .into_iter()
-                        .map(|accum| lower_agg_accum_to_plan_layout(accum, &layout))
-                        .collect(),
+                    accumulators: rewritten_accumulators,
                     having: having.map(|expr| lower_expr_to_plan_layout(expr, &aggregate_layout)),
                     output_columns,
                 }
@@ -642,14 +649,199 @@ fn lower_set_returning_call_to_plan_layout(
     }
 }
 
-fn lower_agg_accum_to_plan_layout(accum: AggAccum, layout: &[Expr]) -> AggAccum {
+fn lower_agg_accum_to_plan_layout(accum: AggAccum, path: &Path, layout: &[Expr]) -> AggAccum {
     AggAccum {
         args: accum
             .args
             .into_iter()
-            .map(|arg| lower_expr_to_plan_layout(arg, layout))
+            .map(|arg| {
+                lower_expr_to_plan_layout(
+                    rewrite_semantic_expr_for_input_path(arg, path, layout),
+                    layout,
+                )
+            })
             .collect(),
         ..accum
+    }
+}
+
+fn rewrite_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
+    match path {
+        Path::Projection {
+            slot_id,
+            input,
+            targets,
+            ..
+        } => {
+            if let Some((index, target)) = targets
+                .iter()
+                .enumerate()
+                .find(|(_, target)| target.expr == expr)
+            {
+                slot_var(*slot_id, index + 1, target.sql_type)
+            } else {
+                let rewritten_input_expr =
+                    rewrite_expr_for_input_path(expr.clone(), input, &input.output_vars());
+                if let Some((index, target)) = targets
+                    .iter()
+                    .enumerate()
+                    .find(|(_, target)| target.expr == rewritten_input_expr)
+                {
+                    slot_var(*slot_id, index + 1, target.sql_type)
+                } else {
+                    rewrite_expr_against_layout(expr, layout)
+                }
+            }
+        }
+        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
+            rewrite_expr_for_input_path(expr, input, layout)
+        }
+        Path::NestedLoopJoin { left, right, .. } => {
+            let left_layout = left.output_vars();
+            let rewritten_left = rewrite_expr_for_input_path(expr.clone(), left, &left_layout);
+            if rewritten_left != expr || left_layout.contains(&expr) {
+                return rewritten_left;
+            }
+            let right_layout = right.output_vars();
+            let rewritten_right = rewrite_expr_for_input_path(expr.clone(), right, &right_layout);
+            if rewritten_right != expr || right_layout.contains(&expr) {
+                return rewritten_right;
+            }
+            rewrite_expr_against_layout(expr, layout)
+        }
+        _ => rewrite_expr_against_layout(expr, layout),
+    }
+}
+
+fn rewrite_semantic_expr_for_input_path(expr: Expr, path: &Path, layout: &[Expr]) -> Expr {
+    let rewritten = rewrite_expr_for_input_path(expr.clone(), path, layout);
+    if rewritten != expr {
+        return rewritten;
+    }
+    match expr {
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| rewrite_semantic_expr_for_input_path(arg, path, layout))
+                .collect(),
+            ..*aggref
+        })),
+        Expr::Op(op) => Expr::Op(Box::new(OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_semantic_expr_for_input_path(arg, path, layout))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_semantic_expr_for_input_path(arg, path, layout))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_semantic_expr_for_input_path(arg, path, layout))
+                .collect(),
+            ..*func
+        })),
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
+            testexpr: sublink.testexpr.map(|expr| {
+                Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))
+            }),
+            ..*sublink
+        })),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+            testexpr: subplan.testexpr.map(|expr| {
+                Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))
+            }),
+            ..*subplan
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
+            left: Box::new(rewrite_semantic_expr_for_input_path(*saop.left, path, layout)),
+            right: Box::new(rewrite_semantic_expr_for_input_path(*saop.right, path, layout)),
+            ..*saop
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(rewrite_semantic_expr_for_input_path(*inner, path, layout)),
+            ty,
+        ),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout)),
+            pattern: Box::new(rewrite_semantic_expr_for_input_path(*pattern, path, layout)),
+            escape: escape
+                .map(|expr| Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout)),
+            pattern: Box::new(rewrite_semantic_expr_for_input_path(*pattern, path, layout)),
+            escape: escape
+                .map(|expr| Box::new(rewrite_semantic_expr_for_input_path(*expr, path, layout))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_semantic_expr_for_input_path(
+            *inner, path, layout,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(
+            rewrite_semantic_expr_for_input_path(*inner, path, layout),
+        )),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(rewrite_semantic_expr_for_input_path(*left, path, layout)),
+            Box::new(rewrite_semantic_expr_for_input_path(*right, path, layout)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(rewrite_semantic_expr_for_input_path(*left, path, layout)),
+            Box::new(rewrite_semantic_expr_for_input_path(*right, path, layout)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| rewrite_semantic_expr_for_input_path(element, path, layout))
+                .collect(),
+            array_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(rewrite_semantic_expr_for_input_path(*left, path, layout)),
+            Box::new(rewrite_semantic_expr_for_input_path(*right, path, layout)),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(rewrite_semantic_expr_for_input_path(*array, path, layout)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| rewrite_semantic_expr_for_input_path(expr, path, layout)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| rewrite_semantic_expr_for_input_path(expr, path, layout)),
+                })
+                .collect(),
+        },
+        other => other,
     }
 }
 
