@@ -720,15 +720,24 @@ fn read_relation_block(
     rel: crate::RelFileLocator,
     block: u32,
 ) -> [u8; crate::backend::storage::smgr::BLCKSZ] {
+    read_relation_fork_block(
+        db,
+        rel,
+        crate::backend::storage::smgr::ForkNumber::Main,
+        block,
+    )
+}
+
+fn read_relation_fork_block(
+    db: &Database,
+    rel: crate::RelFileLocator,
+    fork: crate::backend::storage::smgr::ForkNumber,
+    block: u32,
+) -> [u8; crate::backend::storage::smgr::BLCKSZ] {
     let mut page = [0u8; crate::backend::storage::smgr::BLCKSZ];
     db.pool
         .with_storage_mut(|storage| {
-            storage.smgr.read_block(
-                rel,
-                crate::backend::storage::smgr::ForkNumber::Main,
-                block,
-                &mut page,
-            )
+            storage.smgr.read_block(rel, fork, block, &mut page)
         })
         .unwrap();
     page
@@ -3335,6 +3344,50 @@ fn reopening_database_replays_btree_wal() {
     assert_eq!(
         query_rows(&reopened, 1, "select count(*) from items where id >= 890"),
         vec![vec![Value::Int64(10)]]
+    );
+}
+
+#[test]
+fn vacuum_records_recyclable_btree_pages_in_fsm() {
+    let base = temp_dir("vacuum_recycles_btree_pages");
+    let db = Database::open(&base, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null, note text)")
+        .unwrap();
+    for i in 0..1500 {
+        session
+            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
+            .unwrap();
+    }
+    session
+        .execute(&db, "create index items_id_idx on items (id)")
+        .unwrap();
+
+    let index_rel = relation_locator_for(&db, 1, "items_id_idx");
+    for i in 0..900 {
+        session
+            .execute(&db, &format!("delete from items where id = {i}"))
+            .unwrap();
+    }
+    session.execute(&db, "vacuum items").unwrap();
+
+    let fsm_page = read_relation_fork_block(
+        &db,
+        index_rel,
+        crate::backend::storage::smgr::ForkNumber::Fsm,
+        0,
+    );
+    let free_count = u32::from_le_bytes(fsm_page[0..4].try_into().unwrap());
+    assert!(
+        free_count > 0,
+        "expected VACUUM to record reusable index pages in _fsm"
+    );
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items where id >= 900"),
+        vec![vec![Value::Int64(600)]]
     );
 }
 

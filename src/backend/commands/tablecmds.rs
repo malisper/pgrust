@@ -534,8 +534,46 @@ pub fn execute_analyze(
 pub fn execute_vacuum(
     stmt: VacuumStatement,
     catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     validate_maintenance_targets(&stmt.targets, catalog)?;
+    let mut processed = 0u64;
+    for target in stmt.targets {
+        let Some(entry) = catalog.lookup_relation(&target.table_name) else {
+            continue;
+        };
+        let indexes = catalog.index_relations_for_heap(entry.relation_oid);
+        for index in indexes {
+            let vacuum_ctx = crate::include::access::amapi::IndexVacuumContext {
+                pool: ctx.pool.clone(),
+                txns: ctx.txns.clone(),
+                client_id: ctx.client_id,
+                interrupts: ctx.interrupts.clone(),
+                heap_relation: entry.rel,
+                heap_desc: entry.desc.clone(),
+                index_relation: index.rel,
+                index_name: index.name.clone(),
+                index_desc: index.desc.clone(),
+                index_meta: index.index_meta.clone(),
+            };
+            let stats = indexam::index_bulk_delete(&vacuum_ctx, index.index_meta.am_oid, None)
+                .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "VACUUM bulk delete",
+                    actual: format!("{err:?}"),
+                }))?;
+            let _ = indexam::index_vacuum_cleanup(
+                &vacuum_ctx,
+                index.index_meta.am_oid,
+                Some(stats),
+            )
+            .map_err(|err| ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "VACUUM cleanup",
+                actual: format!("{err:?}"),
+            }))?;
+        }
+        processed += 1;
+    }
+    let _ = processed;
     Ok(StatementResult::AffectedRows(0))
 }
 

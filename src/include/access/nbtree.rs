@@ -15,6 +15,7 @@ pub const BTP_SPLIT_END: u16 = 1 << 5;
 pub const BTP_HAS_GARBAGE: u16 = 1 << 6;
 pub const BTP_INCOMPLETE_SPLIT: u16 = 1 << 7;
 pub const BTP_HAS_FULLXID: u16 = 1 << 8;
+pub const BTP_HAS_HIKEY: u16 = 1 << 9;
 
 pub const BTREE_METAPAGE: u32 = 0;
 pub const BTREE_MAGIC: u32 = 0x053162;
@@ -25,6 +26,9 @@ pub const BTREE_DEFAULT_FILLFACTOR: u16 = 90;
 pub const BTREE_NONLEAF_FILLFACTOR: u16 = 70;
 pub const BTREE_SINGLEVAL_FILLFACTOR: u16 = 96;
 pub const P_NONE: u32 = 0;
+pub const P_HIKEY: u16 = 1;
+pub const P_FIRSTKEY: u16 = 1;
+pub const P_FIRSTDATAKEY: u16 = 2;
 
 pub const BT_LESS_STRATEGY_NUMBER: u16 = 1;
 pub const BT_LESS_EQUAL_STRATEGY_NUMBER: u16 = 2;
@@ -61,6 +65,12 @@ pub struct BTMetaPageData {
     pub btm_last_cleanup_num_delpages: u32,
     pub btm_last_cleanup_num_heap_tuples: f64,
     pub btm_allequalimage: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct BTDeletedPageData {
+    pub safexid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +198,23 @@ impl BTMetaPageData {
     }
 }
 
+impl BTDeletedPageData {
+    pub const SIZE: usize = 4;
+
+    pub fn encode(&self) -> [u8; Self::SIZE] {
+        self.safexid.to_le_bytes()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, BtPageError> {
+        if bytes.len() < Self::SIZE {
+            return Err(BtPageError::Corrupt("bt deleted page payload too small"));
+        }
+        Ok(Self {
+            safexid: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+        })
+    }
+}
+
 pub fn bt_max_item_size() -> usize {
     let page_overhead = max_align(
         crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA
@@ -272,6 +299,23 @@ pub fn bt_page_items(page: &[u8; BLCKSZ]) -> Result<Vec<IndexTupleData>, BtPageE
     Ok(items)
 }
 
+pub fn bt_page_high_key(page: &[u8; BLCKSZ]) -> Result<Option<IndexTupleData>, BtPageError> {
+    let opaque = bt_page_get_opaque(page)?;
+    if opaque.is_meta() || opaque.btpo_flags & BTP_HAS_HIKEY == 0 {
+        return Ok(None);
+    }
+    Ok(bt_page_items(page)?.into_iter().next())
+}
+
+pub fn bt_page_data_items(page: &[u8; BLCKSZ]) -> Result<Vec<IndexTupleData>, BtPageError> {
+    let opaque = bt_page_get_opaque(page)?;
+    let mut items = bt_page_items(page)?;
+    if !opaque.is_meta() && opaque.btpo_flags & BTP_HAS_HIKEY != 0 && !items.is_empty() {
+        items.remove(0);
+    }
+    Ok(items)
+}
+
 pub fn bt_page_append_tuple(
     page: &mut [u8; BLCKSZ],
     tuple: &IndexTupleData,
@@ -298,12 +342,57 @@ pub fn bt_page_set_high_key(
     page: &mut [u8; BLCKSZ],
     high_key: &IndexTupleData,
     mut items: Vec<IndexTupleData>,
-    opaque: BTPageOpaqueData,
+    mut opaque: BTPageOpaqueData,
 ) -> Result<(), BtPageError> {
+    opaque.btpo_flags |= BTP_HAS_HIKEY;
     let mut rebuilt = Vec::with_capacity(items.len() + 1);
     rebuilt.push(high_key.clone());
     rebuilt.append(&mut items);
     bt_page_replace_items(page, &rebuilt, opaque)
+}
+
+pub fn bt_page_set_deleted(
+    page: &mut [u8; BLCKSZ],
+    mut opaque: BTPageOpaqueData,
+    safexid: u32,
+) -> Result<(), BtPageError> {
+    let header = page_header(page)?;
+    let special_size = BLCKSZ - usize::from(header.pd_special);
+    page_init(page, special_size);
+    opaque.btpo_flags |= BTP_DELETED;
+    opaque.btpo_flags &= !(BTP_HALF_DEAD | BTP_HAS_GARBAGE | BTP_INCOMPLETE_SPLIT);
+    bt_page_set_opaque(page, opaque)?;
+    let start = crate::backend::storage::page::bufpage::max_align(
+        crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA,
+    );
+    let end = start + BTDeletedPageData::SIZE;
+    page[start..end].copy_from_slice(&BTDeletedPageData { safexid }.encode());
+    let mut header = page_header(page)?;
+    header.pd_lower = end as u16;
+    super_write_page_header(page, header);
+    Ok(())
+}
+
+pub fn bt_page_delete_xid(page: &[u8; BLCKSZ]) -> Result<Option<u32>, BtPageError> {
+    let opaque = bt_page_get_opaque(page)?;
+    if opaque.btpo_flags & BTP_DELETED == 0 {
+        return Ok(None);
+    }
+    let start = crate::backend::storage::page::bufpage::max_align(
+        crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA,
+    );
+    let end = start + BTDeletedPageData::SIZE;
+    Ok(Some(BTDeletedPageData::decode(&page[start..end])?.safexid))
+}
+
+pub fn bt_page_is_recyclable(
+    page: &[u8; BLCKSZ],
+    oldest_active_xid: u32,
+) -> Result<bool, BtPageError> {
+    let Some(safexid) = bt_page_delete_xid(page)? else {
+        return Ok(false);
+    };
+    Ok(safexid != 0 && (oldest_active_xid == 0 || safexid < oldest_active_xid))
 }
 
 fn super_write_page_header(

@@ -20,6 +20,14 @@ pub struct IndexBuildResult {
     pub index_tuples: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndexBulkDeleteResult {
+    pub num_pages: u64,
+    pub num_index_tuples: u64,
+    pub num_removed_tuples: u64,
+    pub num_deleted_pages: u64,
+}
+
 #[derive(Clone)]
 pub struct IndexBuildContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
@@ -76,6 +84,20 @@ pub struct IndexBeginScanContext {
     pub direction: ScanDirection,
 }
 
+#[derive(Clone)]
+pub struct IndexVacuumContext {
+    pub pool: Arc<BufferPool<SmgrStorageBackend>>,
+    pub txns: Arc<parking_lot::RwLock<TransactionManager>>,
+    pub client_id: ClientId,
+    pub interrupts: Arc<InterruptState>,
+    pub heap_relation: RelFileLocator,
+    pub heap_desc: RelationDesc,
+    pub index_relation: RelFileLocator,
+    pub index_name: String,
+    pub index_desc: RelationDesc,
+    pub index_meta: IndexRelCacheEntry,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexUniqueCheck {
     No,
@@ -90,6 +112,10 @@ pub type AmRescanFn =
     fn(&mut IndexScanDesc, &[ScanKeyData], ScanDirection) -> Result<(), CatalogError>;
 pub type AmGetTupleFn = fn(&mut IndexScanDesc) -> Result<bool, CatalogError>;
 pub type AmEndScanFn = fn(IndexScanDesc) -> Result<(), CatalogError>;
+pub type AmBulkDeleteFn =
+    fn(&IndexVacuumContext, Option<IndexBulkDeleteResult>) -> Result<IndexBulkDeleteResult, CatalogError>;
+pub type AmVacuumCleanupFn =
+    fn(&IndexVacuumContext, Option<IndexBulkDeleteResult>) -> Result<IndexBulkDeleteResult, CatalogError>;
 
 #[derive(Debug, Clone)]
 pub struct IndexAmRoutine {
@@ -115,4 +141,6 @@ pub struct IndexAmRoutine {
     pub amrescan: Option<AmRescanFn>,
     pub amgettuple: Option<AmGetTupleFn>,
     pub amendscan: Option<AmEndScanFn>,
+    pub ambulkdelete: Option<AmBulkDeleteFn>,
+    pub amvacuumcleanup: Option<AmVacuumCleanupFn>,
 }

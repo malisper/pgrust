@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod fsm;
 pub mod lmgr;
 pub mod page;
 pub mod smgr;
