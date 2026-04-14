@@ -348,6 +348,193 @@ fn analyze_column_list_replaces_existing_pg_statistic_rows() {
     assert_eq!(int_value(&rows[1][0]), 3);
 }
 
+#[test]
+fn create_view_selects_and_persists_rewrite_rule() {
+    let dir = temp_dir("create_view_selects");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items(id int4, name text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into items values (1, 'alpha'), (2, 'beta')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create view item_names as select id, name from items")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from item_names order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("alpha".into())],
+            vec![Value::Int32(2), Value::Text("beta".into())],
+        ]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select rulename, ev_action from pg_rewrite where ev_class = (select oid from pg_class where relname = 'item_names')",
+        ),
+        vec![vec![
+            Value::Text("_RETURN".into()),
+            Value::Text("select id, name from items".into()),
+        ]]
+    );
+}
+
+#[test]
+fn nested_views_and_pg_views_work() {
+    let dir = temp_dir("nested_views");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table base_items(id int4)").unwrap();
+    session
+        .execute(&db, "insert into base_items values (1), (2), (3)")
+        .unwrap();
+    session
+        .execute(&db, "create view first_view as select id from base_items")
+        .unwrap();
+    session
+        .execute(&db, "create view second_view as select id from first_view")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from second_view order by id"),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select schemaname, viewname, viewowner, definition from pg_views order by viewname",
+        ),
+        vec![
+            vec![
+                Value::Text("public".into()),
+                Value::Text("first_view".into()),
+                Value::Text("postgres".into()),
+                Value::Text("select id from base_items".into()),
+            ],
+            vec![
+                Value::Text("public".into()),
+                Value::Text("second_view".into()),
+                Value::Text("postgres".into()),
+                Value::Text("select id from first_view".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn view_relfilenode_is_zero_and_drop_table_rejects_view_name() {
+    let dir = temp_dir("view_relfilenode_zero");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table items(id int4)").unwrap();
+    session
+        .execute(&db, "create view item_view as select id from items")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relfilenode from pg_class where relname = 'item_view'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    match session.execute(&db, "drop table item_view") {
+        Err(ExecError::Parse(ParseError::WrongObjectType { name, expected }))
+            if name == "item_view" && expected == "table" => {}
+        other => panic!("expected drop-table wrong-object-type error, got {other:?}"),
+    }
+}
+
+#[test]
+fn dependent_views_block_alter_and_drop() {
+    let dir = temp_dir("dependent_views_block_ddl");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table base_items(id int4)").unwrap();
+    session
+        .execute(&db, "create view base_view as select id from base_items")
+        .unwrap();
+
+    match session.execute(&db, "alter table base_items add column note text") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("view depends on it: base_view") => {}
+        other => panic!("expected dependent-view alter-table error, got {other:?}"),
+    }
+
+    match session.execute(&db, "drop table base_items") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("view depends on it: base_view") => {}
+        other => panic!("expected dependent-view drop-table error, got {other:?}"),
+    }
+}
+
+#[test]
+fn drop_view_rejects_depended_on_view() {
+    let dir = temp_dir("drop_view_rejects_depended_on_view");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table base_items(id int4)").unwrap();
+    session
+        .execute(&db, "create view first_view as select id from base_items")
+        .unwrap();
+    session
+        .execute(&db, "create view second_view as select id from first_view")
+        .unwrap();
+
+    match session.execute(&db, "drop view first_view") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
+            if actual.contains("view depends on it: second_view") => {}
+        other => panic!("expected dependent-view drop-view error, got {other:?}"),
+    }
+}
+
+#[test]
+fn table_only_commands_reject_views() {
+    let dir = temp_dir("table_only_commands_reject_views");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table items(id int4)").unwrap();
+    session
+        .execute(&db, "create view item_view as select id from items")
+        .unwrap();
+
+    for sql in [
+        "comment on table item_view is 'nope'",
+        "create index item_view_idx on item_view (id)",
+        "analyze item_view",
+        "vacuum item_view",
+        "truncate item_view",
+    ] {
+        match session.execute(&db, sql) {
+            Err(ExecError::Parse(ParseError::WrongObjectType { name, expected }))
+                if name == "item_view" && expected == "table" => {}
+            other => panic!("expected wrong-object-type error for `{sql}`, got {other:?}"),
+        }
+    }
+}
+
 fn read_relation_block(
     db: &Database,
     rel: crate::RelFileLocator,
@@ -1013,12 +1200,14 @@ fn create_index_and_alter_table_set_are_noops() {
             other => panic!("expected query result, got {:?}", other),
         }
 
-    assert!(matches!(
-        db.execute(1, "select * from num_exp_add_idx"),
+    match db.execute(1, "select * from num_exp_add_idx") {
         Err(ExecError::Parse(ParseError::UnknownTable(name)))
-            | Err(ExecError::Parse(ParseError::TableDoesNotExist(name)))
-            if name == "num_exp_add_idx"
-    ));
+        | Err(ExecError::Parse(ParseError::TableDoesNotExist(name)))
+            if name == "num_exp_add_idx" => {}
+        Err(ExecError::Parse(ParseError::WrongObjectType { name, expected }))
+            if name == "num_exp_add_idx" && expected == "table" => {}
+        other => panic!("expected missing-table or wrong-object-type error, got {other:?}"),
+    }
 
     assert_eq!(
         db.execute(1, "alter table num_exp_add set (parallel_workers = 4)",)

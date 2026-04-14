@@ -7,9 +7,9 @@ use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgTablespaceRow,
-    PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
+    PgTablespaceRow, PgStatisticRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -21,6 +21,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub depends: Vec<PgDependRow>,
     pub descriptions: Vec<PgDescriptionRow>,
     pub indexes: Vec<PgIndexRow>,
+    pub rewrites: Vec<PgRewriteRow>,
     pub ams: Vec<PgAmRow>,
     pub amops: Vec<PgAmopRow>,
     pub amprocs: Vec<PgAmprocRow>,
@@ -80,6 +81,16 @@ pub(crate) fn create_index_sync_kinds() -> Vec<BootstrapCatalogKind> {
     ]
 }
 
+pub(crate) fn create_view_sync_kinds() -> Vec<BootstrapCatalogKind> {
+    vec![
+        BootstrapCatalogKind::PgClass,
+        BootstrapCatalogKind::PgType,
+        BootstrapCatalogKind::PgAttribute,
+        BootstrapCatalogKind::PgDepend,
+        BootstrapCatalogKind::PgRewrite,
+    ]
+}
+
 pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
     vec![
         BootstrapCatalogKind::PgClass,
@@ -90,6 +101,7 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgDepend,
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgIndex,
+        BootstrapCatalogKind::PgRewrite,
     ]
 }
 
@@ -103,6 +115,7 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgClass,
         BootstrapCatalogKind::PgDepend,
         BootstrapCatalogKind::PgDescription,
+        BootstrapCatalogKind::PgRewrite,
     ]
 }
 
@@ -117,6 +130,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.depends.extend(source.depends);
     target.descriptions.extend(source.descriptions);
     target.indexes.extend(source.indexes);
+    target.rewrites.extend(source.rewrites);
     target.ams.extend(source.ams);
     target.amops.extend(source.amops);
     target.amprocs.extend(source.amprocs);
@@ -150,6 +164,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         depends: catcache.depend_rows(),
         descriptions: Vec::new(),
         indexes: catcache.index_rows(),
+        rewrites: catcache.rewrite_rows(),
         ams: catcache.am_rows(),
         amops: catcache.amop_rows(),
         amprocs: catcache.amproc_rows(),
@@ -184,7 +199,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         .rsplit_once('.')
         .map(|(_, object)| object)
         .unwrap_or(relation_name);
-    let object_oids = entry_object_oids(entry);
+    let mut object_oids = entry_object_oids(entry);
     let mut rows = PhysicalCatalogRows::default();
     rows.classes.push(PgClassRow {
         oid: entry.relation_oid,
@@ -255,6 +270,14 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                 })
             }),
     );
+
+    rows.rewrites.extend(
+        catalog
+            .rewrite_rows_for_relation(entry.relation_oid)
+            .iter()
+            .cloned(),
+    );
+    object_oids.extend(rows.rewrites.iter().map(|row| row.oid));
 
     if entry.relkind == 'r' {
         rows.constraints.extend(

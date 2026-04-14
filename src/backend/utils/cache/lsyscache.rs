@@ -13,13 +13,14 @@ use crate::backend::catalog::rowcodec::{
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
-    catalog_snapshot_for_lookup, ensure_class_rows, ensure_constraint_rows, ensure_type_rows,
+    catalog_snapshot_for_lookup, ensure_class_rows, ensure_constraint_rows, ensure_namespace_rows,
+    ensure_rewrite_rows, ensure_type_rows,
 };
 use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgOpclassRow,
-    PgOpfamilyRow, PgTypeRow,
+    PgOpfamilyRow, PgRewriteRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{Database, TempNamespace};
@@ -767,6 +768,43 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn type_rows(&self) -> Vec<PgTypeRow> {
         ensure_type_rows(self.db, self.client_id, self.txn_ctx)
+    }
+
+    fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
+        ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .filter(|row| row.ev_class == relation_oid)
+            .collect()
+    }
+
+    fn pg_views_rows(&self) -> Vec<Vec<Value>> {
+        let namespace_names = ensure_namespace_rows(self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .map(|row| (row.oid, row.nspname))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let rewrite_by_view = ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .filter(|row| row.rulename == "_RETURN")
+            .map(|row| (row.ev_class, row.ev_action))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        ensure_class_rows(self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .filter(|class| class.relkind == 'v')
+            .filter_map(|class| {
+                let definition = rewrite_by_view.get(&class.oid)?.clone();
+                let schemaname = namespace_names
+                    .get(&class.relnamespace)
+                    .cloned()
+                    .unwrap_or_else(|| "public".to_string());
+                Some(vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(class.relname.into()),
+                    Value::Text("postgres".into()),
+                    Value::Text(definition.into()),
+                ])
+            })
+            .collect()
     }
 
     fn index_relations_for_heap(

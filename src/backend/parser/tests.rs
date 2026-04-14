@@ -103,6 +103,7 @@ fn visible_catalog_without_text_input_cast(
         base.attrdef_rows(),
         base.depend_rows(),
         base.index_rows(),
+        base.rewrite_rows(),
         base.am_rows(),
         base.authid_rows(),
         base.auth_members_rows(),
@@ -147,6 +148,7 @@ fn visible_catalog_without_operator(
         base.attrdef_rows(),
         base.depend_rows(),
         base.index_rows(),
+        base.rewrite_rows(),
         base.am_rows(),
         base.authid_rows(),
         base.auth_members_rows(),
@@ -1719,6 +1721,12 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
+    );
+    assert!(
+        matches!(parse_statement("create view item_names as select id, name from people").unwrap(), Statement::CreateView(CreateViewStatement { schema_name: None, view_name, query_sql, .. }) if view_name == "item_names" && query_sql == "select id, name from people")
+    );
+    assert!(
+        matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
     );
     assert!(
         matches!(parse_statement("truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])

@@ -52,11 +52,12 @@ pub fn pg_class_desc() -> RelationDesc {
 pub const fn relam_for_relkind(relkind: char) -> u32 {
     match relkind {
         'i' => BTREE_AM_OID,
+        'v' => 0,
         _ => HEAP_TABLE_AM_OID,
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 19] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 20] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
@@ -76,6 +77,7 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 19] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgConstraint),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgDepend),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgIndex),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgRewrite),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgStatistic),
     ]
 }

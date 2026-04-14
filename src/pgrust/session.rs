@@ -655,6 +655,18 @@ impl Session {
                     &mut txn.temp_effects,
                 )
             }
+            Statement::CreateView(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_view_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CreateTableAs(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -666,6 +678,34 @@ impl Session {
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
+                )
+            }
+            Statement::DropView(ref drop_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let rels = {
+                    drop_stmt
+                        .view_names
+                        .iter()
+                        .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
+                        .collect::<Vec<_>>()
+                };
+                for rel in rels {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    if !txn.held_table_locks.contains(&rel) {
+                        db.table_locks
+                            .lock_table(rel, TableLockMode::AccessExclusive, client_id);
+                        txn.held_table_locks.push(rel);
+                    }
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_view_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
                 )
             }
             Statement::DropTable(ref drop_stmt) => {

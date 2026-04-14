@@ -321,13 +321,36 @@ pub(super) fn bind_from_item_with_ctes(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
+    expanded_views: &[u32],
 ) -> Result<(Plan, BoundScope), ParseError> {
     match stmt {
         FromItem::Table { name } => {
             if let Some(cte) = ctes.iter().find(|cte| cte.name.eq_ignore_ascii_case(name)) {
                 return Ok((cte.plan.clone(), scope_for_relation(Some(name), &cte.desc)));
             }
-            let entry = lookup_relation(catalog, name)?;
+            if let Some(bound) = bind_builtin_system_view(name, catalog) {
+                return Ok(bound);
+            }
+            let entry = catalog
+                .lookup_any_relation(name)
+                .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
+            if entry.relkind == 'v' {
+                return bind_view_reference(
+                    name,
+                    &entry,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    expanded_views,
+                );
+            }
+            if entry.relkind != 'r' {
+                return Err(ParseError::WrongObjectType {
+                    name: name.to_string(),
+                    expected: "table",
+                });
+            }
             let desc = entry.desc.clone();
             Ok((
                 Plan::SeqScan {
@@ -756,7 +779,7 @@ pub(super) fn bind_from_item_with_ctes(
             }
         }
         FromItem::DerivedTable(select) => {
-            let plan = build_plan_with_outer(select, catalog, &[], None, ctes)?;
+            let plan = build_plan_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
             let desc = synthetic_desc_from_plan(&plan);
             Ok((plan, scope_for_relation(None, &desc)))
         }
@@ -767,9 +790,23 @@ pub(super) fn bind_from_item_with_ctes(
             constraint,
         } => {
             let (left_plan, left_scope) =
-                bind_from_item_with_ctes(left, catalog, outer_scopes, grouped_outer, ctes)?;
+                bind_from_item_with_ctes(
+                    left,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    expanded_views,
+                )?;
             let (right_plan, right_scope) =
-                bind_from_item_with_ctes(right, catalog, outer_scopes, grouped_outer, ctes)?;
+                bind_from_item_with_ctes(
+                    right,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    expanded_views,
+                )?;
             let raw_scope = combine_scopes(&left_scope, &right_scope);
             let (on, projection) = bind_join_constraint_with_ctes(
                 kind,
@@ -807,7 +844,14 @@ pub(super) fn bind_from_item_with_ctes(
             preserve_source_names,
         } => {
             let (plan, scope) =
-                bind_from_item_with_ctes(source, catalog, outer_scopes, grouped_outer, ctes)?;
+                bind_from_item_with_ctes(
+                    source,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                    expanded_views,
+                )?;
             apply_relation_alias(
                 plan,
                 scope,
@@ -824,9 +868,14 @@ pub(super) fn lookup_relation(
     catalog: &dyn CatalogLookup,
     name: &str,
 ) -> Result<BoundRelation, ParseError> {
-    catalog
-        .lookup_relation(name)
-        .ok_or_else(|| ParseError::UnknownTable(name.to_string()))
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if entry.relkind == 'r' => Ok(entry),
+        Some(_) => Err(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        }),
+        None => Err(ParseError::UnknownTable(name.to_string())),
+    }
 }
 
 pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDesc) -> BoundScope {

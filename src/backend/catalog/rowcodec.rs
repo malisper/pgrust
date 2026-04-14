@@ -9,9 +9,9 @@ use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgStatisticRow, PgTablespaceRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
+    PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -158,6 +158,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_index_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgRewrite => rows
+            .rewrites
+            .iter()
+            .cloned()
+            .map(pg_rewrite_row_values)
             .collect(),
         BootstrapCatalogKind::PgStatistic => rows
             .statistics
@@ -683,6 +689,19 @@ pub(crate) fn pg_statistic_row_from_values(
     })
 }
 
+pub(crate) fn pg_rewrite_row_from_values(values: Vec<Value>) -> Result<PgRewriteRow, CatalogError> {
+    Ok(PgRewriteRow {
+        oid: expect_oid(&values[0])?,
+        rulename: expect_text(&values[1])?,
+        ev_class: expect_oid(&values[2])?,
+        ev_type: expect_char(&values[3], "ev_type")?,
+        ev_enabled: expect_char(&values[4], "ev_enabled")?,
+        is_instead: expect_bool(&values[5])?,
+        ev_qual: expect_text(&values[6])?,
+        ev_action: expect_text(&values[7])?,
+    })
+}
+
 fn namespace_row_values(row: PgNamespaceRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -982,6 +1001,19 @@ fn pg_type_row_values(row: PgTypeRow) -> Vec<Value> {
         Value::InternalChar(row.typalign.as_char() as u8),
         Value::InternalChar(row.typstorage.as_char() as u8),
         Value::Int32(row.typrelid as i32),
+    ]
+}
+
+fn pg_rewrite_row_values(row: PgRewriteRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Text(row.rulename.into()),
+        Value::Int32(row.ev_class as i32),
+        Value::Text(row.ev_type.to_string().into()),
+        Value::Text(row.ev_enabled.to_string().into()),
+        Value::Bool(row.is_instead),
+        Value::Text(row.ev_qual.into()),
+        Value::Text(row.ev_action.into()),
     ]
 }
 

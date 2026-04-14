@@ -21,6 +21,7 @@ use crate::backend::catalog::loader::{
     load_catalog_from_physical, load_catalog_from_visible_physical,
     load_physical_catalog_rows_visible,
 };
+use crate::backend::catalog::pg_depend::view_rewrite_depend_rows;
 use crate::backend::catalog::toasting::{ToastCatalogChanges, new_relation_create_toast_table};
 use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
@@ -31,8 +32,9 @@ use crate::backend::catalog::rowcodec::{
 };
 use crate::backend::catalog::rows::{
     PhysicalCatalogRows, create_index_sync_kinds, create_table_sync_kinds,
-    drop_relation_delete_kinds, drop_relation_sync_kinds, extend_physical_catalog_rows,
-    physical_catalog_rows_for_catalog_entry, physical_catalog_rows_from_catcache,
+    create_view_sync_kinds, drop_relation_delete_kinds, drop_relation_sync_kinds,
+    extend_physical_catalog_rows, physical_catalog_rows_for_catalog_entry,
+    physical_catalog_rows_from_catcache,
 };
 use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
@@ -42,7 +44,8 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID,
-    PgDependRow, PgDescriptionRow, PgNamespaceRow, PgStatisticRow, bootstrap_catalog_kinds,
+    PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
+    bootstrap_catalog_kinds,
 };
 use crate::include::nodes::datum::Value;
 
@@ -166,6 +169,7 @@ impl CatalogStore {
             rows.attrdefs,
             rows.depends,
             rows.indexes,
+            rows.rewrites,
             rows.ams,
             rows.authids,
             rows.auth_members,
@@ -520,6 +524,50 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn create_view_mvcc(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+        namespace_oid: u32,
+        definition: String,
+        referenced_relation_oids: &[u32],
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        let name = name.into();
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let entry =
+            catalog.create_table_with_relkind(name.clone(), desc, namespace_oid, 1, 'p', 'v')?;
+        let rewrite_row = PgRewriteRow {
+            oid: catalog.next_oid(),
+            rulename: "_RETURN".to_string(),
+            ev_class: entry.relation_oid,
+            ev_type: '1',
+            ev_enabled: 'O',
+            is_instead: true,
+            ev_qual: String::new(),
+            ev_action: definition,
+        };
+        catalog.add_rewrite_row(rewrite_row.clone());
+        let mut referenced = referenced_relation_oids.to_vec();
+        referenced.sort_unstable();
+        referenced.dedup();
+        for row in view_rewrite_depend_rows(rewrite_row.oid, entry.relation_oid, &referenced) {
+            catalog.add_depend_row(row);
+        }
+
+        let kinds = create_view_sync_kinds();
+        self.persist_control_state(&catalog)?;
+        let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
+        insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        Ok((entry, effect))
+    }
+
     pub fn create_index_for_relation_mvcc(
         &mut self,
         index_name: impl Into<String>,
@@ -687,6 +735,33 @@ impl CatalogStore {
             effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
         }
         Ok((dropped, effect))
+    }
+
+    pub fn drop_view_by_oid_mvcc(
+        &mut self,
+        relation_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (name, entry) = catalog
+            .entries()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, entry)| (name.to_string(), entry.clone()))
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if entry.relkind != 'v' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &entry);
+        let kinds = drop_relation_delete_kinds();
+        delete_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
+        let _ = catalog.remove_by_oid(relation_oid);
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, entry.relation_oid);
+        effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
+        effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        Ok((entry, effect))
     }
 
     pub fn set_index_ready_valid_mvcc(

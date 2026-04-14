@@ -13,6 +13,7 @@ use crate::backend::catalog::namespace::{
     effective_search_path as namespace_effective_search_path,
     normalize_create_table_as_stmt_with_search_path as namespace_normalize_create_table_as_stmt_with_search_path,
     normalize_create_table_stmt_with_search_path as namespace_normalize_create_table_stmt_with_search_path,
+    normalize_create_view_stmt_with_search_path as namespace_normalize_create_view_stmt_with_search_path,
 };
 use crate::backend::catalog::store::{
     CatalogMutationEffect, CatalogWriteContext, CreateTableResult,
@@ -26,9 +27,10 @@ use crate::backend::executor::{
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
     AlterTableAddColumnStatement, AnalyzeStatement, CatalogLookup, CommentOnTableStatement,
-    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction,
-    ParseError, TablePersistence, BoundIndexRelation, bind_delete, bind_insert, bind_update, build_plan,
-    create_relation_desc, derive_literal_default_value, lower_create_table,
+    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, CreateViewStatement,
+    DropViewStatement, OnCommitAction, ParseError, TablePersistence, BoundIndexRelation,
+    bind_delete, bind_insert, bind_update, build_plan, create_relation_desc,
+    derive_literal_default_value, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
@@ -47,9 +49,13 @@ use crate::backend::utils::cache::lsyscache::{
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
 use crate::backend::utils::cache::syscache::{
-    SessionCatalogState, invalidate_session_catalog_state,
+    SessionCatalogState, ensure_class_rows, ensure_depend_rows, ensure_namespace_rows,
+    ensure_rewrite_rows, invalidate_session_catalog_state,
 };
-use crate::include::catalog::{BTREE_AM_OID, PgConstraintRow};
+use crate::include::catalog::{
+    BTREE_AM_OID, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PUBLIC_NAMESPACE_OID, PgConstraintRow,
+};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
@@ -135,6 +141,90 @@ pub(crate) enum TempMutationEffect {
         entry: RelCacheEntry,
         on_commit: OnCommitAction,
     },
+}
+
+fn lookup_heap_relation_for_ddl(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if entry.relkind == 'r' => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(name.to_string()))),
+    }
+}
+
+fn namespace_oid_for_relation_name(name: &str) -> u32 {
+    match name.split_once('.') {
+        Some(("pg_catalog", _)) => crate::include::catalog::PG_CATALOG_NAMESPACE_OID,
+        Some(("public", _)) | None => PUBLIC_NAMESPACE_OID,
+        _ => PUBLIC_NAMESPACE_OID,
+    }
+}
+
+fn dependent_view_names_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+) -> Vec<String> {
+    let namespaces = ensure_namespace_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let classes = ensure_class_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let rewrites = ensure_rewrite_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut names = ensure_depend_rows(db, client_id, txn_ctx)
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_REWRITE_RELATION_OID
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == relation_oid
+                && row.deptype == DEPENDENCY_NORMAL
+        })
+        .filter_map(|row| {
+            let rewrite = rewrites.get(&row.objid)?;
+            let class = classes.get(&rewrite.ev_class)?;
+            let schema = namespaces
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            Some(match schema.as_str() {
+                "public" | "pg_catalog" => class.relname.clone(),
+                _ => format!("{schema}.{}", class.relname),
+            })
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn reject_relation_with_dependent_views(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    relation_oid: u32,
+    operation: &'static str,
+) -> Result<(), ExecError> {
+    let dependent_views = dependent_view_names_for_relation(db, client_id, txn_ctx, relation_oid);
+    if dependent_views.is_empty() {
+        return Ok(());
+    }
+    Err(ExecError::Parse(ParseError::UnexpectedToken {
+        expected: operation,
+        actual: format!("cannot {operation}; view depends on it: {}", dependent_views.join(", ")),
+    }))
 }
 
 impl Database {
@@ -288,6 +378,24 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<(String, TablePersistence), ParseError> {
         namespace_normalize_create_table_as_stmt_with_search_path(stmt, configured_search_path)
+    }
+
+    fn normalize_create_view_stmt_with_search_path(
+        &self,
+        stmt: &CreateViewStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<String, ParseError> {
+        if stmt
+            .schema_name
+            .as_deref()
+            .is_some_and(|schema| schema.eq_ignore_ascii_case("pg_temp"))
+        {
+            return Err(ParseError::UnexpectedToken {
+                expected: "permanent view",
+                actual: "temporary view".into(),
+            });
+        }
+        namespace_normalize_create_view_stmt_with_search_path(stmt, configured_search_path)
     }
 
     pub(crate) fn lazy_catalog_lookup(
@@ -717,20 +825,36 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_create_view_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateViewStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_view_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        guard.disarm();
+        result
+    }
+
     pub(crate) fn execute_comment_on_table_stmt_with_search_path(
         &self,
         client_id: ClientId,
         comment_stmt: &CommentOnTableStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let relation = self
-            .lazy_catalog_lookup(client_id, None, configured_search_path)
-            .lookup_relation(&comment_stmt.table_name)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(
-                    comment_stmt.table_name.clone(),
-                ))
-            })?;
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
         self.table_locks
             .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
         let xid = self.txns.write().begin();
@@ -756,12 +880,8 @@ impl Database {
         alter_stmt: &AlterTableAddColumnStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let relation = self
-            .lazy_catalog_lookup(client_id, None, configured_search_path)
-            .lookup_relation(&alter_stmt.table_name)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.table_name.clone()))
-            })?;
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
         self.table_locks
             .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
         let xid = self.txns.write().begin();
@@ -792,13 +912,10 @@ impl Database {
             .iter()
             .map(|target| target.table_name.clone())
             .collect::<Vec<_>>();
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let rels = relation_names
             .iter()
-            .map(|name| {
-                self.lazy_catalog_lookup(client_id, None, configured_search_path)
-                    .lookup_relation(name)
-                    .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(name.clone())))
-            })
+            .map(|name| lookup_heap_relation_for_ddl(&catalog, name))
             .collect::<Result<Vec<_>, _>>()?;
         for rel in &rels {
             self.table_locks
@@ -889,13 +1006,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = catalog
-            .lookup_relation(&comment_stmt.table_name)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(
-                    comment_stmt.table_name.clone(),
-                ))
-            })?;
+        let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for COMMENT ON TABLE",
@@ -930,17 +1041,20 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = catalog
-            .lookup_relation(&alter_stmt.table_name)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.table_name.clone()))
-            })?;
+        let relation = lookup_heap_relation_for_ddl(&catalog, &alter_stmt.table_name)?;
         if relation.relpersistence == 't' {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "permanent table for ALTER TABLE ADD COLUMN",
                 actual: "temporary table".into(),
             }));
         }
+        reject_relation_with_dependent_views(
+            self,
+            client_id,
+            Some((xid, cid)),
+            relation.relation_oid,
+            "ALTER TABLE on relation without dependent views",
+        )?;
         let column = validate_alter_table_add_column(&relation.desc, &alter_stmt.column)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -1118,6 +1232,58 @@ impl Database {
                 Ok(StatementResult::AffectedRows(0))
             }
         }
+    }
+
+    pub(crate) fn execute_create_view_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateViewStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let view_name =
+            self.normalize_create_view_stmt_with_search_path(create_stmt, configured_search_path)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let plan = build_plan(&create_stmt.query, &catalog)?;
+        let desc = crate::backend::executor::RelationDesc {
+            columns: plan
+                .column_names()
+                .into_iter()
+                .zip(plan.columns())
+                .map(|(name, column)| column_desc(name, column.sql_type, true))
+                .collect(),
+        };
+        let mut referenced_relation_oids = std::collections::BTreeSet::new();
+        collect_direct_relation_oids_from_select(
+            &create_stmt.query,
+            &catalog,
+            &mut Vec::new(),
+            &mut referenced_relation_oids,
+        );
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+        };
+        let (_entry, effect) = self
+            .catalog
+            .write()
+            .create_view_mvcc(
+                view_name.clone(),
+                desc,
+                namespace_oid_for_relation_name(&view_name),
+                create_stmt.query_sql.clone(),
+                &referenced_relation_oids.into_iter().collect::<Vec<_>>(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn resolve_simple_btree_build_options(
@@ -1422,9 +1588,10 @@ impl Database {
             }));
         }
         if entry.relkind != 'r' {
-            return Err(ExecError::Parse(ParseError::TableDoesNotExist(
-                create_stmt.table_name.clone(),
-            )));
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: create_stmt.table_name.clone(),
+                expected: "table",
+            }));
         }
         if create_stmt
             .using_method
@@ -1523,14 +1690,31 @@ impl Database {
 
             let relation_oid = match maybe_entry.as_ref() {
                 Some(entry) if entry.relkind == 'r' => entry.relation_oid,
-                Some(_) | None if drop_stmt.if_exists => continue,
-                Some(_) | None => {
+                Some(_) => {
+                    result = Err(ExecError::Parse(ParseError::WrongObjectType {
+                        name: table_name.clone(),
+                        expected: "table",
+                    }));
+                    break;
+                }
+                None if drop_stmt.if_exists => continue,
+                None => {
                     result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
                         table_name.clone(),
                     )));
                     break;
                 }
             };
+            if let Err(err) = reject_relation_with_dependent_views(
+                self,
+                client_id,
+                Some((xid, cid)),
+                relation_oid,
+                "DROP TABLE on relation without dependent views",
+            ) {
+                result = Err(err);
+                break;
+            }
             let mut catalog_guard = self.catalog.write();
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
@@ -1558,6 +1742,98 @@ impl Database {
                 Err(other) => {
                     result = Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "droppable table",
+                        actual: format!("{other:?}"),
+                    }));
+                    break;
+                }
+            }
+        }
+
+        for rel in rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
+
+        if result.is_ok() {
+            Ok(StatementResult::AffectedRows(dropped))
+        } else {
+            result
+        }
+    }
+
+    pub(crate) fn execute_drop_view_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropViewStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let rels = drop_stmt
+            .view_names
+            .iter()
+            .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
+            .collect::<Vec<_>>();
+        for rel in &rels {
+            self.table_locks
+                .lock_table(*rel, TableLockMode::AccessExclusive, client_id);
+        }
+
+        let mut dropped = 0usize;
+        let mut result = Ok(StatementResult::AffectedRows(0));
+        for view_name in &drop_stmt.view_names {
+            let maybe_entry = catalog.lookup_any_relation(view_name);
+            let relation_oid = match maybe_entry.as_ref() {
+                Some(entry) if entry.relkind == 'v' => entry.relation_oid,
+                Some(_) => {
+                    result = Err(ExecError::Parse(ParseError::WrongObjectType {
+                        name: view_name.clone(),
+                        expected: "view",
+                    }));
+                    break;
+                }
+                None if drop_stmt.if_exists => continue,
+                None => {
+                    result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                        view_name.clone(),
+                    )));
+                    break;
+                }
+            };
+            if let Err(err) = reject_relation_with_dependent_views(
+                self,
+                client_id,
+                Some((xid, cid)),
+                relation_oid,
+                "DROP VIEW on relation without dependent views",
+            ) {
+                result = Err(err);
+                break;
+            }
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+            };
+            match self.catalog.write().drop_view_by_oid_mvcc(relation_oid, &ctx) {
+                Ok((_entry, effect)) => {
+                    catalog_effects.push(effect);
+                    dropped += 1;
+                }
+                Err(CatalogError::UnknownTable(_)) if drop_stmt.if_exists => {}
+                Err(CatalogError::UnknownTable(_)) => {
+                    result = Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                        view_name.clone(),
+                    )));
+                    break;
+                }
+                Err(other) => {
+                    result = Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "droppable view",
                         actual: format!("{other:?}"),
                     }));
                     break;
@@ -1994,6 +2270,11 @@ impl Database {
                     configured_search_path,
                 )
             }
+            Statement::CreateView(ref create_stmt) => self.execute_create_view_stmt_with_search_path(
+                client_id,
+                create_stmt,
+                configured_search_path,
+            ),
 
             Statement::CreateTableAs(ref create_stmt) => {
                 self.execute_create_table_as_stmt_with_search_path(
@@ -2020,6 +2301,22 @@ impl Database {
                     &mut temp_effects,
                 );
                 let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects);
+                guard.disarm();
+                result
+            }
+            Statement::DropView(ref drop_stmt) => {
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let mut catalog_effects = Vec::new();
+                let result = self.execute_drop_view_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    0,
+                    configured_search_path,
+                    &mut catalog_effects,
+                );
+                let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
                 guard.disarm();
                 result
             }
@@ -2493,6 +2790,257 @@ fn collect_rels_from_plan(
                     }
                 }
             }
+        }
+    }
+}
+
+fn collect_direct_relation_oids_from_select(
+    select: &crate::backend::parser::SelectStatement,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut std::collections::BTreeSet<u32>,
+) {
+    let cte_base = visible_ctes.len();
+    for cte in &select.with {
+        match &cte.body {
+            crate::backend::parser::CteBody::Select(subquery) => {
+                collect_direct_relation_oids_from_select(subquery, catalog, visible_ctes, rels);
+            }
+            crate::backend::parser::CteBody::Values(values) => {
+                collect_direct_relation_oids_from_values(values, catalog, visible_ctes, rels);
+            }
+        }
+        visible_ctes.push(cte.name.to_ascii_lowercase());
+    }
+
+    if let Some(from) = &select.from {
+        collect_direct_relation_oids_from_from_item(from, catalog, visible_ctes, rels);
+    }
+    for target in &select.targets {
+        collect_direct_relation_oids_from_sql_expr(&target.expr, catalog, visible_ctes, rels);
+    }
+    if let Some(expr) = &select.where_clause {
+        collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+    }
+    for expr in &select.group_by {
+        collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+    }
+    if let Some(expr) = &select.having {
+        collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+    }
+    for item in &select.order_by {
+        collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+    }
+
+    visible_ctes.truncate(cte_base);
+}
+
+fn collect_direct_relation_oids_from_values(
+    values: &crate::backend::parser::ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut std::collections::BTreeSet<u32>,
+) {
+    let cte_base = visible_ctes.len();
+    for cte in &values.with {
+        match &cte.body {
+            crate::backend::parser::CteBody::Select(subquery) => {
+                collect_direct_relation_oids_from_select(subquery, catalog, visible_ctes, rels);
+            }
+            crate::backend::parser::CteBody::Values(inner) => {
+                collect_direct_relation_oids_from_values(inner, catalog, visible_ctes, rels);
+            }
+        }
+        visible_ctes.push(cte.name.to_ascii_lowercase());
+    }
+    for row in &values.rows {
+        for expr in row {
+            collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+        }
+    }
+    for item in &values.order_by {
+        collect_direct_relation_oids_from_sql_expr(&item.expr, catalog, visible_ctes, rels);
+    }
+    visible_ctes.truncate(cte_base);
+}
+
+fn collect_direct_relation_oids_from_from_item(
+    from: &crate::backend::parser::FromItem,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut std::collections::BTreeSet<u32>,
+) {
+    use crate::backend::parser::{FromItem, JoinConstraint};
+
+    match from {
+        FromItem::Table { name } => {
+            if !name.contains('.') && visible_ctes.iter().any(|cte| cte == &name.to_ascii_lowercase()) {
+                return;
+            }
+            if let Some(entry) = catalog.lookup_any_relation(name) {
+                rels.insert(entry.relation_oid);
+            }
+        }
+        FromItem::Values { rows } => {
+            for row in rows {
+                for expr in row {
+                    collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+                }
+            }
+        }
+        FromItem::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
+            }
+        }
+        FromItem::DerivedTable(select) => {
+            collect_direct_relation_oids_from_select(select, catalog, visible_ctes, rels);
+        }
+        FromItem::Join {
+            left,
+            right,
+            constraint,
+            ..
+        } => {
+            collect_direct_relation_oids_from_from_item(left, catalog, visible_ctes, rels);
+            collect_direct_relation_oids_from_from_item(right, catalog, visible_ctes, rels);
+            if let JoinConstraint::On(expr) = constraint {
+                collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+            }
+        }
+        FromItem::Alias { source, .. } => {
+            collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
+        }
+    }
+}
+
+fn collect_direct_relation_oids_from_sql_expr(
+    expr: &crate::backend::parser::SqlExpr,
+    catalog: &dyn CatalogLookup,
+    visible_ctes: &mut Vec<String>,
+    rels: &mut std::collections::BTreeSet<u32>,
+) {
+    use crate::backend::parser::SqlExpr;
+
+    match expr {
+        SqlExpr::Column(_)
+        | SqlExpr::Default
+        | SqlExpr::Const(_)
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => {}
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::Subscript { expr: inner, .. }
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::Not(inner)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. } => {
+            collect_direct_relation_oids_from_sql_expr(inner, catalog, visible_ctes, rels);
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::BinaryOperator { left, right, .. }
+        | SqlExpr::GeometryBinaryOp { left, right, .. }
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => {
+            collect_direct_relation_oids_from_sql_expr(left, catalog, visible_ctes, rels);
+            collect_direct_relation_oids_from_sql_expr(right, catalog, visible_ctes, rels);
+        }
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+            collect_direct_relation_oids_from_sql_expr(pattern, catalog, visible_ctes, rels);
+            if let Some(escape) = escape {
+                collect_direct_relation_oids_from_sql_expr(escape, catalog, visible_ctes, rels);
+            }
+        }
+        SqlExpr::ArrayLiteral(elements) => {
+            for element in elements {
+                collect_direct_relation_oids_from_sql_expr(element, catalog, visible_ctes, rels);
+            }
+        }
+        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
+            for arg in args {
+                collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
+            }
+        }
+        SqlExpr::ScalarSubquery(select) | SqlExpr::Exists(select) => {
+            collect_direct_relation_oids_from_select(select, catalog, visible_ctes, rels);
+        }
+        SqlExpr::InSubquery { expr, subquery, .. } => {
+            collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
+            collect_direct_relation_oids_from_select(subquery, catalog, visible_ctes, rels);
+        }
+        SqlExpr::QuantifiedSubquery { left, subquery, .. } => {
+            collect_direct_relation_oids_from_sql_expr(left, catalog, visible_ctes, rels);
+            collect_direct_relation_oids_from_select(subquery, catalog, visible_ctes, rels);
+        }
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            collect_direct_relation_oids_from_sql_expr(left, catalog, visible_ctes, rels);
+            collect_direct_relation_oids_from_sql_expr(array, catalog, visible_ctes, rels);
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            collect_direct_relation_oids_from_sql_expr(array, catalog, visible_ctes, rels);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_direct_relation_oids_from_sql_expr(lower, catalog, visible_ctes, rels);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_direct_relation_oids_from_sql_expr(upper, catalog, visible_ctes, rels);
+                }
+            }
+        }
+        SqlExpr::GeometryUnaryOp { expr, .. } => {
+            collect_direct_relation_oids_from_sql_expr(expr, catalog, visible_ctes, rels);
         }
     }
 }

@@ -73,7 +73,15 @@ pub fn execute_statement(
             expected: "create table handled by database/session layer",
             actual: "CREATE TABLE AS".into(),
         })),
+        Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE VIEW handled by database/session layer",
+            actual: "CREATE VIEW".into(),
+        })),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
+        Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP VIEW handled by database/session layer",
+            actual: "DROP VIEW".into(),
+        })),
         Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx, xid),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog),
         Statement::Insert(stmt) => execute_insert(bind_insert(&stmt, catalog)?, ctx, xid, cid),
@@ -114,7 +122,15 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
         })),
+        Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE VIEW".into(),
+        })),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog),
+        Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP VIEW".into(),
+        })),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: format!("{other:?}"),

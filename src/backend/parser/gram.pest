@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_set_stmt | comment_on_table_stmt | create_table_stmt | drop_table_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | show_stmt | set_stmt | reset_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_set_stmt | comment_on_table_stmt | create_table_stmt | create_view_stmt | drop_table_stmt | drop_view_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -39,6 +39,7 @@ insert_stmt = { cte_clause? ~ kw_insert ~ kw_into ~ identifier ~ ("(" ~ assignme
 insert_values_source = { kw_values ~ values_row ~ ("," ~ values_row)* }
 insert_default_values_source = { kw_default ~ kw_values }
 create_table_stmt = { kw_create ~ temp_clause? ~ kw_table ~ if_not_exists_clause? ~ identifier ~ create_table_tail ~ table_storage_clause? }
+create_view_stmt = { kw_create ~ kw_view ~ identifier ~ kw_as ~ select_stmt }
 create_index_stmt = { kw_create ~ kw_unique? ~ kw_index ~ identifier ~ kw_on ~ identifier ~ create_index_using_clause? ~ "(" ~ create_index_item ~ ("," ~ create_index_item)* ~ ")" ~ create_index_include_clause? ~ create_index_where_clause? ~ create_index_with_clause? }
 create_index_using_clause = { kw_using ~ identifier }
 create_index_item = { identifier ~ (kw_asc | kw_desc)? ~ nulls_ordering? }
@@ -65,6 +66,7 @@ table_with_item = { identifier ~ ("=" ~ (identifier | integer))? }
 without_oids_clause = { kw_without ~ kw_oids }
 table_storage_clause = { table_with_clause | without_oids_clause }
 drop_table_stmt = { kw_drop ~ kw_table ~ if_exists_clause? ~ ident_list }
+drop_view_stmt = { kw_drop ~ kw_view ~ if_exists_clause? ~ ident_list }
 truncate_table_stmt = { kw_truncate ~ kw_table? ~ ident_list }
 vacuum_stmt = { kw_vacuum ~ (kw_analyze ~ maintenance_target_list | vacuum_option_block ~ maintenance_target_list? | maintenance_target_list) }
 analyze_option_block = { "(" ~ analyze_option ~ ("," ~ analyze_option)* ~ ")" }
@@ -327,6 +329,7 @@ kw_include = _{ kw_include_atom }
 kw_alter = _{ kw_alter_atom }
 kw_comment = _{ kw_comment_atom }
 kw_table = _{ kw_table_atom }
+kw_view = _{ kw_view_atom }
 kw_drop = _{ kw_drop_atom }
 kw_truncate = _{ kw_truncate_atom }
 kw_vacuum = _{ kw_vacuum_atom }
@@ -499,6 +502,7 @@ kw_include_atom = @{ ^"include" ~ keyword_end }
 kw_alter_atom = @{ ^"alter" ~ keyword_end }
 kw_comment_atom = @{ ^"comment" ~ keyword_end }
 kw_table_atom = @{ ^"table" ~ keyword_end }
+kw_view_atom = @{ ^"view" ~ keyword_end }
 kw_drop_atom = @{ ^"drop" ~ keyword_end }
 kw_truncate_atom = @{ ^"truncate" ~ keyword_end }
 kw_vacuum_atom = @{ ^"vacuum" ~ keyword_end }

@@ -12,7 +12,8 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::include::catalog::{
-    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow, builtin_type_rows,
+    CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow, PgRewriteRow,
+    builtin_type_rows, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -73,6 +74,7 @@ pub struct Catalog {
     pub(crate) tables: BTreeMap<String, CatalogEntry>,
     pub(crate) constraints: Vec<PgConstraintRow>,
     pub(crate) depends: Vec<PgDependRow>,
+    pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) next_rel_number: u32,
     pub(crate) next_oid: u32,
 }
@@ -83,6 +85,7 @@ impl Default for Catalog {
             tables: BTreeMap::new(),
             constraints: Vec::new(),
             depends: Vec::new(),
+            rewrites: Vec::new(),
             next_rel_number: DEFAULT_FIRST_REL_NUMBER,
             next_oid: DEFAULT_FIRST_USER_OID,
         };
@@ -160,6 +163,20 @@ impl Catalog {
         &self.depends
     }
 
+    pub fn rewrite_rows(&self) -> &[PgRewriteRow] {
+        &self.rewrites
+    }
+
+    pub fn rewrite_rows_for_relation(&self, relation_oid: u32) -> &[PgRewriteRow] {
+        let start = self
+            .rewrites
+            .partition_point(|row| row.ev_class < relation_oid);
+        let end = start
+            + self.rewrites[start..]
+                .partition_point(|row| row.ev_class == relation_oid);
+        &self.rewrites[start..end]
+    }
+
     pub fn next_oid(&self) -> u32 {
         self.next_oid
     }
@@ -204,12 +221,17 @@ impl Catalog {
         if relkind == 'r' {
             allocate_relation_object_oids(&mut desc, &mut next_oid);
         }
+        let rel_number = if relkind == 'v' {
+            0
+        } else {
+            self.next_rel_number
+        };
 
         let entry = CatalogEntry {
             rel: RelFileLocator {
                 spc_oid: DEFAULT_SPC_OID,
                 db_oid,
-                rel_number: self.next_rel_number,
+                rel_number,
             },
             relation_oid,
             namespace_oid,
@@ -222,7 +244,9 @@ impl Catalog {
             desc,
             index_meta: None,
         };
-        self.next_rel_number = self.next_rel_number.saturating_add(1);
+        if relkind != 'v' {
+            self.next_rel_number = self.next_rel_number.saturating_add(1);
+        }
         self.next_oid = next_oid;
         self.replace_constraint_rows_for_entry(&name, &entry);
         self.replace_depend_rows_for_entry(&entry);
@@ -634,9 +658,18 @@ impl Catalog {
             .iter()
             .find_map(|(name, entry)| (entry.relation_oid == relation_oid).then(|| name.clone()))?;
         let entry = self.tables.remove(&name)?;
+        let rewrite_oids = self
+            .remove_rewrite_rows_for_relation(relation_oid)
+            .into_iter()
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
         self.constraints.retain(|row| row.conrelid != relation_oid);
-        self.depends
-            .retain(|row| row.objid != relation_oid && row.refobjid != relation_oid);
+        self.depends.retain(|row| {
+            row.objid != relation_oid
+                && row.refobjid != relation_oid
+                && !rewrite_oids.contains(&row.objid)
+                && !rewrite_oids.contains(&row.refobjid)
+        });
         Some((name, entry))
     }
 
@@ -646,6 +679,28 @@ impl Catalog {
         }
         self.depends.push(row);
         sort_pg_depend_rows(&mut self.depends);
+    }
+
+    pub fn add_rewrite_row(&mut self, row: PgRewriteRow) {
+        if self.rewrites.iter().any(|existing| existing == &row) {
+            return;
+        }
+        self.next_oid = self.next_oid.max(row.oid.saturating_add(1));
+        self.rewrites.push(row);
+        sort_pg_rewrite_rows(&mut self.rewrites);
+    }
+
+    pub fn remove_rewrite_rows_for_relation(&mut self, relation_oid: u32) -> Vec<PgRewriteRow> {
+        let mut removed = Vec::new();
+        self.rewrites.retain(|row| {
+            if row.ev_class == relation_oid {
+                removed.push(row.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
     }
 
     fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {

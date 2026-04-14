@@ -6,8 +6,9 @@ pub enum CatalogNamespace {
 }
 
 use crate::backend::parser::{
-    CreateTableAsStatement, CreateTableStatement, ParseError, TablePersistence,
-    normalize_create_table_as_name, normalize_create_table_name,
+    CreateTableAsStatement, CreateTableStatement, CreateViewStatement, ParseError,
+    TablePersistence, normalize_create_table_as_name, normalize_create_table_name,
+    normalize_create_view_name,
 };
 
 pub fn effective_search_path(
@@ -108,4 +109,20 @@ pub fn normalize_create_table_as_stmt_with_search_path(
         table_name.clone(),
         resolve_unqualified_create_persistence(&table_name, persistence, configured_search_path)?,
     ))
+}
+
+pub fn normalize_create_view_stmt_with_search_path(
+    stmt: &CreateViewStatement,
+    configured_search_path: Option<&[String]>,
+) -> Result<String, ParseError> {
+    let view_name = normalize_create_view_name(stmt)?;
+    if stmt.schema_name.is_some() {
+        return Ok(view_name);
+    }
+    resolve_unqualified_create_persistence(
+        &view_name,
+        TablePersistence::Permanent,
+        configured_search_path,
+    )?;
+    Ok(view_name)
 }

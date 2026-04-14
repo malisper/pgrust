@@ -53,6 +53,11 @@ pub enum ParseError {
     TempTableInNonTempSchema(String),
     OnlyTemporaryRelationsInTemporarySchemas(String),
     NoSchemaSelectedForCreate,
+    WrongObjectType {
+        name: String,
+        expected: &'static str,
+    },
+    RecursiveView(String),
 }
 
 impl fmt::Display for ParseError {
@@ -145,6 +150,12 @@ impl fmt::Display for ParseError {
             ParseError::NoSchemaSelectedForCreate => {
                 write!(f, "no schema has been selected to create in")
             }
+            ParseError::WrongObjectType { name, expected } => {
+                write!(f, "\"{name}\" is not a {expected}")
+            }
+            ParseError::RecursiveView(name) => {
+                write!(f, "infinite recursion detected in view \"{name}\"")
+            }
         }
     }
 }
@@ -179,11 +190,13 @@ pub enum Statement {
     Reset(ResetStatement),
     CreateTable(CreateTableStatement),
     CreateTableAs(CreateTableAsStatement),
+    CreateView(CreateViewStatement),
     CreateIndex(CreateIndexStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableSet(AlterTableSetStatement),
     CommentOnTable(CommentOnTableStatement),
     DropTable(DropTableStatement),
+    DropView(DropViewStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
     Insert(InsertStatement),
@@ -427,6 +440,14 @@ pub struct CreateTableAsStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateViewStatement {
+    pub schema_name: Option<String>,
+    pub view_name: String,
+    pub query: SelectStatement,
+    pub query_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateIndexStatement {
     pub unique: bool,
     pub index_name: String,
@@ -493,6 +514,12 @@ pub struct RelOption {
 pub struct DropTableStatement {
     pub if_exists: bool,
     pub table_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropViewStatement {
+    pub if_exists: bool,
+    pub view_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

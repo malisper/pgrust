@@ -284,7 +284,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
         Rule::create_table_stmt => build_create_table(inner),
+        Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
+        Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
@@ -1075,6 +1077,31 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     }
 }
 
+fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseError> {
+    let mut relation_name = None;
+    let mut query = None;
+    let mut query_sql = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if relation_name.is_none() => {
+                relation_name = Some(build_relation_name(part))
+            }
+            Rule::select_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(build_select(part)?);
+            }
+            _ => {}
+        }
+    }
+    let (schema_name, view_name) = relation_name.ok_or(ParseError::UnexpectedEof)?;
+    Ok(CreateViewStatement {
+        schema_name,
+        view_name,
+        query: query.ok_or(ParseError::UnexpectedEof)?,
+        query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
@@ -1346,6 +1373,28 @@ fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseErr
     Ok(DropTableStatement {
         if_exists,
         table_names,
+    })
+}
+
+fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError> {
+    let mut if_exists = false;
+    let mut view_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => {
+                view_names.extend(part.into_inner().map(build_identifier));
+            }
+            Rule::identifier => view_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if view_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropViewStatement {
+        if_exists,
+        view_names,
     })
 }
 

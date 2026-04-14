@@ -7,13 +7,15 @@ use crate::backend::access::transam::xact::{
 use crate::backend::catalog::loader::{
     load_visible_am_rows, load_visible_amop_rows, load_visible_amproc_rows,
     load_visible_attrdef_rows, load_visible_attribute_rows, load_visible_class_rows,
-    load_visible_collation_rows, load_visible_constraint_rows, load_visible_index_rows, load_visible_namespace_rows,
-    load_visible_opclass_rows, load_visible_opfamily_rows, load_visible_type_rows,
+    load_visible_collation_rows, load_visible_constraint_rows, load_visible_depend_rows,
+    load_visible_index_rows, load_visible_namespace_rows, load_visible_opclass_rows,
+    load_visible_opfamily_rows, load_visible_rewrite_rows, load_visible_type_rows,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow,
+    PgConstraintRow, PgDependRow, PgIndexRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
+    PgRewriteRow, PgTypeRow,
 };
 use crate::pgrust::database::Database;
 
@@ -27,6 +29,8 @@ pub struct SessionCatalogState {
     pub type_rows: Option<Vec<PgTypeRow>>,
     pub index_rows: Option<Vec<PgIndexRow>>,
     pub constraint_rows: Option<Vec<PgConstraintRow>>,
+    pub depend_rows: Option<Vec<PgDependRow>>,
+    pub rewrite_rows: Option<Vec<PgRewriteRow>>,
     pub am_rows: Option<Vec<PgAmRow>>,
     pub amop_rows: Option<Vec<PgAmopRow>>,
     pub amproc_rows: Option<Vec<PgAmprocRow>>,
@@ -157,6 +161,66 @@ pub fn ensure_constraint_rows(
         .entry(client_id)
         .or_default()
         .constraint_rows = Some(rows.clone());
+    rows
+}
+
+pub fn ensure_depend_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgDependRow> {
+    if let Some(rows) = db
+        .session_catalog_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.depend_rows.clone())
+    {
+        return rows;
+    }
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    let rows = {
+        let catalog = db.catalog.read();
+        let txns = db.txns.read();
+        load_visible_depend_rows(catalog.base_dir(), &db.pool, &txns, &snapshot, client_id)
+            .unwrap_or_default()
+    };
+    db.session_catalog_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .depend_rows = Some(rows.clone());
+    rows
+}
+
+pub fn ensure_rewrite_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) -> Vec<PgRewriteRow> {
+    if let Some(rows) = db
+        .session_catalog_states
+        .read()
+        .get(&client_id)
+        .and_then(|state| state.rewrite_rows.clone())
+    {
+        return rows;
+    }
+    let Some(snapshot) = catalog_snapshot_for_lookup(db, client_id, txn_ctx) else {
+        return Vec::new();
+    };
+    let rows = {
+        let catalog = db.catalog.read();
+        let txns = db.txns.read();
+        load_visible_rewrite_rows(catalog.base_dir(), &db.pool, &txns, &snapshot, client_id)
+            .unwrap_or_default()
+    };
+    db.session_catalog_states
+        .write()
+        .entry(client_id)
+        .or_default()
+        .rewrite_rows = Some(rows.clone());
     rows
 }
 

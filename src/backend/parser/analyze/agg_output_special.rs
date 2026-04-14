@@ -444,5 +444,6 @@ fn build_grouped_subquery_plan(
             group_by_exprs: group_by_exprs.to_vec(),
         }),
         &[],
+        &[],
     )
 }
