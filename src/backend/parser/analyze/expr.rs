@@ -1380,6 +1380,23 @@ fn bind_scalar_function_call(
         Expr::resolved_builtin_func(func, func_oid, result_type, funcvariadic, args)
     };
     match func {
+        BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller => {
+            let money = SqlType::new(SqlTypeKind::Money);
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .map(|(arg, ty)| coerce_bound_expr(arg, ty, money))
+                .collect();
+            Ok(build_func(false, coerced))
+        }
+        BuiltinScalarFunction::CashWords => Ok(build_func(
+            false,
+            vec![coerce_bound_expr(
+                bound_args[0].clone(),
+                arg_types[0],
+                SqlType::new(SqlTypeKind::Money),
+            )],
+        )),
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery

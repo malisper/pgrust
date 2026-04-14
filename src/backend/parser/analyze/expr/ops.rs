@@ -17,6 +17,23 @@ pub(super) fn bind_arithmetic_expr(
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !left_type.is_array
+        && !right_type.is_array
+        && (matches!(left_type.kind, SqlTypeKind::Money)
+            || matches!(right_type.kind, SqlTypeKind::Money))
+    {
+        let left =
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let right = bind_expr_with_outer_and_ctes(
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        return bind_money_arithmetic_expr(op, make, left, raw_left_type, left_type, right, raw_right_type, right_type);
+    }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
@@ -48,6 +65,30 @@ pub(super) fn bind_comparison_expr(
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
     let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !left_type.is_array
+        && !right_type.is_array
+        && matches!(left_type.kind, SqlTypeKind::Money)
+        && matches!(right_type.kind, SqlTypeKind::Money)
+    {
+        let left_bound =
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let right_bound = bind_expr_with_outer_and_ctes(
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        let money = SqlType::new(SqlTypeKind::Money);
+        return Ok(Expr::op_auto(
+            make,
+            vec![
+                coerce_bound_expr(left_bound, raw_left_type, money),
+                coerce_bound_expr(right_bound, raw_right_type, money),
+            ],
+        ));
+    }
     let left_bound =
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     let right_bound =
@@ -102,6 +143,64 @@ pub(super) fn bind_comparison_expr(
         (left, right)
     };
     Ok(Expr::op_auto(make, vec![left, right]))
+}
+
+fn bind_money_arithmetic_expr(
+    op: &'static str,
+    make: crate::include::nodes::primnodes::OpExprKind,
+    left: Expr,
+    raw_left_type: SqlType,
+    left_type: SqlType,
+    right: Expr,
+    raw_right_type: SqlType,
+    right_type: SqlType,
+) -> Result<Expr, ParseError> {
+    let money = SqlType::new(SqlTypeKind::Money);
+    let left_is_money = matches!(left_type.kind, SqlTypeKind::Money);
+    let right_is_money = matches!(right_type.kind, SqlTypeKind::Money);
+    if left_is_money && right_is_money {
+        let result = if op == "/" {
+            SqlType::new(SqlTypeKind::Float8)
+        } else {
+            money
+        };
+        return Ok(Expr::binary_op(
+            make,
+            result,
+            coerce_bound_expr(left, raw_left_type, money),
+            coerce_bound_expr(right, raw_right_type, money),
+        ));
+    }
+    let other = if left_is_money { right_type } else { left_type };
+    let supported_other = matches!(
+        other.kind,
+        SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Float8
+    );
+    if supported_other && matches!(op, "*" | "/") {
+        return Ok(Expr::binary_op(
+            make,
+            money,
+            if left_is_money {
+                coerce_bound_expr(left, raw_left_type, money)
+            } else {
+                coerce_bound_expr(left, raw_left_type, other)
+            },
+            if right_is_money {
+                coerce_bound_expr(right, raw_right_type, money)
+            } else {
+                coerce_bound_expr(right, raw_right_type, other)
+            },
+        ));
+    }
+    Err(ParseError::UndefinedOperator {
+        op,
+        left_type: sql_type_name(left_type),
+        right_type: sql_type_name(right_type),
+    })
 }
 
 fn supports_comparison_operator(
