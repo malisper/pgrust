@@ -16,7 +16,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::parsenodes::IndexColumnDef;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToastCatalogChanges {
     pub parent_name: String,
     pub old_parent: CatalogEntry,

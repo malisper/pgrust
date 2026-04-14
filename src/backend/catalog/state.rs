@@ -42,7 +42,7 @@ pub struct CatalogIndexBuildOptions {
     pub indoption: Vec<i16>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CatalogEntry {
     pub rel: RelFileLocator,
     pub relation_oid: u32,
@@ -51,6 +51,8 @@ pub struct CatalogEntry {
     pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
+    pub relpages: i32,
+    pub reltuples: f64,
     pub desc: RelationDesc,
     pub index_meta: Option<CatalogIndexMeta>,
 }
@@ -66,7 +68,7 @@ pub enum CatalogError {
     UniqueViolation(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Catalog {
     pub(crate) tables: BTreeMap<String, CatalogEntry>,
     pub(crate) constraints: Vec<PgConstraintRow>,
@@ -215,6 +217,8 @@ impl Catalog {
             reltoastrelid: 0,
             relpersistence,
             relkind,
+            relpages: 0,
+            reltuples: 0.0,
             desc,
             index_meta: None,
         };
@@ -343,6 +347,8 @@ impl Catalog {
             reltoastrelid: 0,
             relpersistence: table.relpersistence,
             relkind: 'i',
+            relpages: 0,
+            reltuples: 0.0,
             desc: RelationDesc {
                 columns: index_columns,
             },

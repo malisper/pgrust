@@ -21,6 +21,7 @@ use crate::backend::catalog::rowcodec::{
     pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
     pg_index_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
     pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
+    pg_statistic_row_from_values,
     pg_tablespace_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
     pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
     pg_type_row_from_values,
@@ -177,6 +178,7 @@ pub(crate) fn catalog_from_physical_rows(
                 desc.storage.attalign = attr.attalign;
                 desc.storage.attstorage = attr.attstorage;
                 desc.storage.attcompression = attr.attcompression;
+                desc.attstattarget = attr.attstattarget;
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
                     desc.default_expr = Some(attrdef.adbin.clone());
@@ -225,6 +227,8 @@ pub(crate) fn catalog_from_physical_rows(
                 reltoastrelid: row.reltoastrelid,
                 relpersistence: row.relpersistence,
                 relkind: row.relkind,
+                relpages: row.relpages,
+                reltuples: row.reltuples,
                 desc: RelationDesc { columns },
                 index_meta: indexes_by_relid
                     .get(&row.oid)
@@ -352,6 +356,7 @@ pub(crate) fn load_physical_catalog_rows(
     let mut missing_collation = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
+    let mut missing_statistic = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -437,6 +442,10 @@ pub(crate) fn load_physical_catalog_rows(
             }
             if kind == BootstrapCatalogKind::PgTablespace {
                 missing_tablespace = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgStatistic {
+                missing_statistic = true;
                 continue;
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
@@ -719,6 +728,18 @@ pub(crate) fn load_physical_catalog_rows(
         .map(pg_tablespace_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let statistic_rows = if missing_statistic {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgStatistic],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgStatistic),
+        )?
+        .into_iter()
+        .map(pg_statistic_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     let mut rows = PhysicalCatalogRows {
         namespaces: namespace_rows,
@@ -748,6 +769,7 @@ pub(crate) fn load_physical_catalog_rows(
         collations: collation_rows,
         databases: database_rows,
         tablespaces: tablespace_rows,
+        statistics: statistic_rows,
         types: type_rows,
     };
     restore_missing_first_class_catalog_rows(
@@ -788,6 +810,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
     let mut missing_collation = false;
     let mut missing_database = false;
     let mut missing_tablespace = false;
+    let mut missing_statistic = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -873,6 +896,10 @@ pub(crate) fn load_physical_catalog_rows_visible(
             }
             if kind == BootstrapCatalogKind::PgTablespace {
                 missing_tablespace = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgStatistic {
+                missing_statistic = true;
                 continue;
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
@@ -1226,6 +1253,21 @@ pub(crate) fn load_physical_catalog_rows_visible(
         .map(pg_tablespace_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let statistic_rows = if missing_statistic {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgStatistic],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgStatistic),
+        )?
+        .into_iter()
+        .map(pg_statistic_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     let mut rows = PhysicalCatalogRows {
         namespaces: namespace_rows,
@@ -1255,6 +1297,7 @@ pub(crate) fn load_physical_catalog_rows_visible(
         collations: collation_rows,
         databases: database_rows,
         tablespaces: tablespace_rows,
+        statistics: statistic_rows,
         types: type_rows,
     };
     restore_missing_first_class_catalog_rows(

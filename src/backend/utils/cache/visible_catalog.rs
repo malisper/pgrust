@@ -187,6 +187,7 @@ mod tests {
             base.collation_rows(),
             base.database_rows(),
             base.tablespace_rows(),
+            base.statistic_rows(),
             base.type_rows(),
         );
         let visible = VisibleCatalog::new(RelCache::default(), Some(filtered));

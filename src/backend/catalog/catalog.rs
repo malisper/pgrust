@@ -47,6 +47,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         },
         ty,
         sql_type,
+        attstattarget: -1,
         not_null_constraint_oid: None,
         attrdef_oid: None,
         default_expr: None,
