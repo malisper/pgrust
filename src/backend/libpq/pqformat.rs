@@ -4,19 +4,21 @@ use std::str::FromStr;
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::{
-    ExecError, QueryColumn, Value, geometry_input_error_message, render_datetime_value_text,
-    render_geometry_text, render_internal_char_text,
+    ExecError, QueryColumn, Value, geometry_input_error_message,
+    render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
 };
 use crate::backend::parser::SqlTypeKind;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
 use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_traits::One;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct FloatFormatOptions {
     pub(crate) extra_float_digits: i32,
     pub(crate) bytea_output: ByteaOutputFormat,
+    pub(crate) datetime_config: DateTimeConfig,
 }
 
 impl Default for FloatFormatOptions {
@@ -24,6 +26,7 @@ impl Default for FloatFormatOptions {
         Self {
             extra_float_digits: 1,
             bytea_output: ByteaOutputFormat::Hex,
+            datetime_config: DateTimeConfig::default(),
         }
     }
 }
@@ -172,7 +175,7 @@ pub(crate) fn send_query_result(
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
     for row in rows {
-        send_typed_data_row(stream, row, columns, &mut row_buf, float_format)?;
+        send_typed_data_row(stream, row, columns, &mut row_buf, float_format.clone())?;
     }
     send_command_complete(stream, tag)
 }
@@ -385,7 +388,11 @@ pub(crate) fn send_typed_data_row(
             | Value::TimeTz(_)
             | Value::Timestamp(_)
             | Value::TimestampTz(_) => {
-                let rendered = render_datetime_value_text(val).expect("datetime values render");
+                let rendered = render_datetime_value_text_with_config(
+                    val,
+                    &float_format.datetime_config,
+                )
+                .expect("datetime values render");
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -398,8 +405,8 @@ pub(crate) fn send_typed_data_row(
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
                 let rendered = match sql_type.map(|ty| ty.kind) {
-                    Some(SqlTypeKind::Float4) => format_float4_text(*v, float_format),
-                    _ => format_float8_text(*v, float_format),
+                    Some(SqlTypeKind::Float4) => format_float4_text(*v, float_format.clone()),
+                    _ => format_float8_text(*v, float_format.clone()),
                 };
                 buf.extend_from_slice(rendered.as_bytes());
                 let text_len = (buf.len() - start - 4) as i32;
@@ -462,7 +469,7 @@ pub(crate) fn send_typed_data_row(
             | Value::Box(_)
             | Value::Polygon(_)
             | Value::Circle(_) => {
-                let rendered = render_geometry_text(val, float_format).unwrap_or_default();
+                let rendered = render_geometry_text(val, float_format.clone()).unwrap_or_default();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -1162,12 +1169,16 @@ mod tests {
         let options = FloatFormatOptions {
             extra_float_digits: 0,
             bytea_output: ByteaOutputFormat::Hex,
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         };
         assert_eq!(
-            format_float8_text(31.690692639953454, options),
+            format_float8_text(31.690692639953454, options.clone()),
             "31.6906926399535"
         );
-        assert_eq!(format_float8_text(1004.3000000000004, options), "1004.3");
+        assert_eq!(
+            format_float8_text(1004.3000000000004, options.clone()),
+            "1004.3"
+        );
         assert_eq!(
             format_float4_text(1.2345679402097818e20, options),
             "1.23457e+20"

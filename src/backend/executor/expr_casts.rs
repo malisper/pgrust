@@ -3,7 +3,9 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, parse_bit_text, render_bit_text};
 use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
-use super::expr_datetime::{apply_time_precision, render_datetime_value_text};
+use super::expr_datetime::{
+    apply_time_precision, render_datetime_value_text_with_config,
+};
 use super::expr_geometry::{
     cast_geometry_value, geometry_input_error_message, parse_geometry_text,
 };
@@ -812,6 +814,14 @@ pub(crate) fn soft_input_error_info(
     text: &str,
     type_name: &str,
 ) -> Result<Option<InputErrorInfo>, ExecError> {
+    soft_input_error_info_with_config(text, type_name, &DateTimeConfig::default())
+}
+
+pub(crate) fn soft_input_error_info_with_config(
+    text: &str,
+    type_name: &str,
+    config: &DateTimeConfig,
+) -> Result<Option<InputErrorInfo>, ExecError> {
     if type_name.trim().eq_ignore_ascii_case("int2vector") {
         for item in text.split_ascii_whitespace() {
             match cast_text_to_int2(item) {
@@ -865,8 +875,8 @@ pub(crate) fn soft_input_error_info(
         | SqlTypeKind::VarBit
         | SqlTypeKind::Name
         | SqlTypeKind::Char
-        | SqlTypeKind::Varchar => cast_text_value(text, ty, false),
-        _ => cast_value(Value::Text(text.into()), ty),
+        | SqlTypeKind::Varchar => cast_text_value_with_config(text, ty, false, config),
+        _ => cast_value_with_config(Value::Text(text.into()), ty, config),
     };
     match parsed {
         Ok(_) => Ok(None),
@@ -875,6 +885,14 @@ pub(crate) fn soft_input_error_info(
 }
 
 pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
+    cast_value_with_config(value, ty, &DateTimeConfig::default())
+}
+
+pub(crate) fn cast_value_with_config(
+    value: Value,
+    ty: SqlType,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     if ty.is_array {
         return match value {
             Value::Null => Ok(Value::Null),
@@ -882,7 +900,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 let element_type = ty.element_type();
                 let mut casted = Vec::with_capacity(items.len());
                 for item in items {
-                    casted.push(cast_value(item, element_type)?);
+                    casted.push(cast_value_with_config(item, element_type, config)?);
                 }
                 Ok(Value::Array(casted))
             }
@@ -890,7 +908,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 let element_type = ty.element_type();
                 let mut casted = Vec::with_capacity(array.elements.len());
                 for item in array.elements {
-                    casted.push(cast_value(item, element_type)?);
+                    casted.push(cast_value_with_config(item, element_type, config)?);
                 }
                 Ok(Value::PgArray(ArrayValue::from_dimensions(
                     array.dimensions,
@@ -1170,10 +1188,12 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::Time
             | SqlTypeKind::TimeTz
             | SqlTypeKind::Timestamp
-            | SqlTypeKind::TimestampTz => cast_text_value(
-                &render_datetime_value_text(&Value::Date(v)).expect("datetime values render"),
+            | SqlTypeKind::TimestampTz => cast_text_value_with_config(
+                &render_datetime_value_text_with_config(&Value::Date(v), config)
+                    .expect("datetime values render"),
                 ty,
                 true,
+                config,
             ),
             _ => Err(ExecError::TypeMismatch {
                 op: "::date",
@@ -1192,10 +1212,12 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::JsonPath
             | SqlTypeKind::TimeTz
             | SqlTypeKind::Timestamp
-            | SqlTypeKind::TimestampTz => cast_text_value(
-                &render_datetime_value_text(&Value::Time(v)).expect("datetime values render"),
+            | SqlTypeKind::TimestampTz => cast_text_value_with_config(
+                &render_datetime_value_text_with_config(&Value::Time(v), config)
+                    .expect("datetime values render"),
                 ty,
                 true,
+                config,
             ),
             _ => Err(ExecError::TypeMismatch {
                 op: "::time",
@@ -1212,10 +1234,12 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::Json
             | SqlTypeKind::Jsonb
             | SqlTypeKind::JsonPath
-            | SqlTypeKind::Time => cast_text_value(
-                &render_datetime_value_text(&Value::TimeTz(v)).expect("datetime values render"),
+            | SqlTypeKind::Time => cast_text_value_with_config(
+                &render_datetime_value_text_with_config(&Value::TimeTz(v), config)
+                    .expect("datetime values render"),
                 ty,
                 true,
+                config,
             ),
             _ => Err(ExecError::TypeMismatch {
                 op: "::timetz",
@@ -1235,10 +1259,12 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::TimestampTz
             | SqlTypeKind::Date
             | SqlTypeKind::Time
-            | SqlTypeKind::TimeTz => cast_text_value(
-                &render_datetime_value_text(&Value::Timestamp(v)).expect("datetime values render"),
+            | SqlTypeKind::TimeTz => cast_text_value_with_config(
+                &render_datetime_value_text_with_config(&Value::Timestamp(v), config)
+                    .expect("datetime values render"),
                 ty,
                 true,
+                config,
             ),
             _ => Err(ExecError::TypeMismatch {
                 op: "::timestamp",
@@ -1258,11 +1284,12 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::Timestamp
             | SqlTypeKind::Date
             | SqlTypeKind::Time
-            | SqlTypeKind::TimeTz => cast_text_value(
-                &render_datetime_value_text(&Value::TimestampTz(v))
+            | SqlTypeKind::TimeTz => cast_text_value_with_config(
+                &render_datetime_value_text_with_config(&Value::TimestampTz(v), config)
                     .expect("datetime values render"),
                 ty,
                 true,
+                config,
             ),
             _ => Err(ExecError::TypeMismatch {
                 op: "::timestamptz",
@@ -1270,12 +1297,12 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 right: Value::Null,
             }),
         },
-        Value::Text(text) => cast_text_value(text.as_str(), ty, true),
+        Value::Text(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
         Value::TextRef(ptr, len) => {
             let text = unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
             };
-            cast_text_value(text, ty, true)
+            cast_text_value_with_config(text, ty, true, config)
         }
         Value::InternalChar(byte) => match ty.kind {
             SqlTypeKind::InternalChar => Ok(Value::InternalChar(byte)),
@@ -1303,7 +1330,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 Ok(Value::JsonPath(canonicalize_jsonpath_text(&rendered)?))
             }
             SqlTypeKind::Char | SqlTypeKind::Varchar => {
-                cast_text_value(&render_internal_char_text(byte), ty, true)
+                cast_text_value_with_config(&render_internal_char_text(byte), ty, true, config)
             }
             _ => Err(ExecError::TypeMismatch {
                 op: "::char",
@@ -1311,8 +1338,8 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 right: Value::Null,
             }),
         },
-        Value::JsonPath(text) => cast_text_value(text.as_str(), ty, true),
-        Value::Json(text) => cast_text_value(text.as_str(), ty, true),
+        Value::JsonPath(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
+        Value::Json(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
         Value::TsVector(vector) => match ty.kind {
             SqlTypeKind::TsVector => Ok(Value::TsVector(vector)),
             SqlTypeKind::Text
@@ -1385,7 +1412,9 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
             | SqlTypeKind::Timestamp
             | SqlTypeKind::TimestampTz
             | SqlTypeKind::Char
-            | SqlTypeKind::Varchar => cast_text_value(&render_jsonb_bytes(&bytes)?, ty, true),
+            | SqlTypeKind::Varchar => {
+                cast_text_value_with_config(&render_jsonb_bytes(&bytes)?, ty, true, config)
+            }
             _ => Err(ExecError::TypeMismatch {
                 op: "::jsonb",
                 left: Value::Jsonb(bytes),
@@ -1630,6 +1659,15 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
 }
 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
+    cast_text_value_with_config(text, ty, explicit, &DateTimeConfig::default())
+}
+
+pub(super) fn cast_text_value_with_config(
+    text: &str,
+    ty: SqlType,
+    explicit: bool,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
@@ -1637,7 +1675,7 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::PgNodeTree => Ok(Value::Text(CompactString::new(text))),
-        SqlTypeKind::Date => parse_date_text(text, &DateTimeConfig::default())
+        SqlTypeKind::Date => parse_date_text(text, config)
             .map(Value::Date)
             .ok_or_else(|| ExecError::InvalidStorageValue {
                 column: "date".into(),
@@ -1650,21 +1688,21 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
                 column: "time".into(),
                 details: format!("invalid input syntax for type time: \"{text}\""),
             }),
-        SqlTypeKind::TimeTz => parse_timetz_text(text, &DateTimeConfig::default())
+        SqlTypeKind::TimeTz => parse_timetz_text(text, config)
             .map(Value::TimeTz)
             .map(|value| apply_time_precision(value, ty.time_precision()))
             .ok_or_else(|| ExecError::InvalidStorageValue {
                 column: "timetz".into(),
                 details: format!("invalid input syntax for type time with time zone: \"{text}\""),
             }),
-        SqlTypeKind::Timestamp => parse_timestamp_text(text, &DateTimeConfig::default())
+        SqlTypeKind::Timestamp => parse_timestamp_text(text, config)
             .map(Value::Timestamp)
             .map(|value| apply_time_precision(value, ty.time_precision()))
             .map_err(|err| ExecError::InvalidStorageValue {
                 column: "timestamp".into(),
                 details: datetime_parse_error_details("timestamp", text, err),
             }),
-        SqlTypeKind::TimestampTz => parse_timestamptz_text(text, &DateTimeConfig::default())
+        SqlTypeKind::TimestampTz => parse_timestamptz_text(text, config)
             .map(Value::TimestampTz)
             .map(|value| apply_time_precision(value, ty.time_precision()))
             .map_err(|err| ExecError::InvalidStorageValue {
