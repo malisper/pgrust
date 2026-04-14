@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use super::{CatalogTxnContext, ClientId, Database};
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::executor::{ExecError, RelationDesc};
+use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, ColumnDef, ParseError, derive_literal_default_value,
-    resolve_raw_type_name,
+    BoundRelation, CatalogLookup, ColumnDef, ParseError, RawTypeName, SqlExpr, SqlType,
+    SqlTypeKind, bind_scalar_expr_in_scope, derive_literal_default_value, resolve_raw_type_name,
 };
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
@@ -156,7 +156,7 @@ pub(super) fn validate_alter_table_add_column(
     let mut desc = column_desc(column.name.clone(), sql_type, true);
     desc.default_expr = column.default_expr.clone();
     if let Some(sql) = desc.default_expr.as_deref() {
-    desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+        desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
     }
     Ok(desc)
 }
@@ -206,6 +206,220 @@ pub(super) fn validate_alter_table_rename_column(
     }
 
     Ok(normalized_new)
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AlterColumnTypePlan {
+    pub column_index: usize,
+    pub rewrite_expr: Expr,
+    pub new_column: ColumnDesc,
+}
+
+fn is_text_like_type(ty: SqlType) -> bool {
+    !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+}
+
+fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+    match sql_type.kind {
+        SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        SqlTypeKind::Int2 => "smallint",
+        SqlTypeKind::Int2Vector => "int2vector",
+        SqlTypeKind::Int4 => "integer",
+        SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Name => "name",
+        SqlTypeKind::Oid => "oid",
+        SqlTypeKind::OidVector => "oidvector",
+        SqlTypeKind::Bit => "bit",
+        SqlTypeKind::VarBit => "bit varying",
+        SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Float4 => "real",
+        SqlTypeKind::Float8 => "double precision",
+        SqlTypeKind::Money => "money",
+        SqlTypeKind::Numeric => "numeric",
+        SqlTypeKind::Json => "json",
+        SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::JsonPath => "jsonpath",
+        SqlTypeKind::Date => "date",
+        SqlTypeKind::Time => "time without time zone",
+        SqlTypeKind::TimeTz => "time with time zone",
+        SqlTypeKind::TsVector => "tsvector",
+        SqlTypeKind::TsQuery => "tsquery",
+        SqlTypeKind::RegConfig => "regconfig",
+        SqlTypeKind::RegDictionary => "regdictionary",
+        SqlTypeKind::Text => "text",
+        SqlTypeKind::Bool => "boolean",
+        SqlTypeKind::Point => "point",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
+        SqlTypeKind::Box => "box",
+        SqlTypeKind::Polygon => "polygon",
+        SqlTypeKind::Line => "line",
+        SqlTypeKind::Circle => "circle",
+        SqlTypeKind::Timestamp => "timestamp without time zone",
+        SqlTypeKind::TimestampTz => "timestamp with time zone",
+        SqlTypeKind::PgNodeTree => "pg_node_tree",
+        SqlTypeKind::InternalChar => "\"char\"",
+        SqlTypeKind::Char => "character",
+        SqlTypeKind::Varchar => "character varying",
+    }
+}
+
+fn automatic_alter_type_cast_allowed(
+    catalog: &dyn CatalogLookup,
+    from: SqlType,
+    to: SqlType,
+) -> bool {
+    if from == to {
+        return true;
+    }
+    if from.kind == to.kind && from.is_array == to.is_array {
+        return true;
+    }
+    if is_text_like_type(from) && is_text_like_type(to) {
+        return true;
+    }
+    let Some(source_oid) = catalog.type_oid_for_sql_type(from) else {
+        return false;
+    };
+    let Some(target_oid) = catalog.type_oid_for_sql_type(to) else {
+        return false;
+    };
+    catalog
+        .cast_by_source_target(source_oid, target_oid)
+        .is_some_and(|row| row.castcontext != 'e')
+}
+
+fn alter_column_type_error(
+    message: String,
+    hint: Option<String>,
+) -> Result<AlterColumnTypePlan, ExecError> {
+    Err(ExecError::DetailedError {
+        message,
+        detail: None,
+        hint,
+        sqlstate: "42804",
+    })
+}
+
+pub(super) fn validate_alter_table_alter_column_type(
+    catalog: &dyn CatalogLookup,
+    desc: &RelationDesc,
+    column_name: &str,
+    ty: &RawTypeName,
+    using_expr: Option<&SqlExpr>,
+) -> Result<AlterColumnTypePlan, ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN TYPE",
+            actual: column_name.to_string(),
+        }));
+    }
+
+    let column_index = desc
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+        })
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    let current_column = &desc.columns[column_index];
+    let target_sql_type = match ty {
+        RawTypeName::Builtin(sql_type) => *sql_type,
+        RawTypeName::Record => {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(
+                "record".into(),
+            )));
+        }
+        RawTypeName::Named { name, .. } => {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(name.clone())));
+        }
+    };
+
+    if let Some(default_sql) = current_column.default_expr.as_deref() {
+        let default_expr =
+            crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
+        let (_bound_default, default_type) =
+            bind_scalar_expr_in_scope(&default_expr, &[], catalog).map_err(ExecError::Parse)?;
+        if !automatic_alter_type_cast_allowed(catalog, default_type, target_sql_type) {
+            return alter_column_type_error(
+                format!(
+                    "default for column \"{}\" cannot be cast automatically to type {}",
+                    current_column.name,
+                    format_sql_type_name(target_sql_type),
+                ),
+                None,
+            );
+        }
+    }
+
+    let scope_columns = desc
+        .columns
+        .iter()
+        .map(|column| (column.name.clone(), column.sql_type))
+        .collect::<Vec<_>>();
+    let (rewrite_expr, rewrite_type) = match using_expr {
+        Some(expr) => {
+            let (bound, from_type) = bind_scalar_expr_in_scope(expr, &scope_columns, catalog)
+                .map_err(ExecError::Parse)?;
+            (bound, from_type)
+        }
+        None => (Expr::Column(column_index), current_column.sql_type),
+    };
+
+    if !automatic_alter_type_cast_allowed(catalog, rewrite_type, target_sql_type) {
+        if using_expr.is_some() {
+            return alter_column_type_error(
+                format!(
+                    "result of USING clause for column \"{}\" cannot be cast automatically to type {}",
+                    current_column.name,
+                    format_sql_type_name(target_sql_type),
+                ),
+                Some("You might need to add an explicit cast.".into()),
+            );
+        }
+        return alter_column_type_error(
+            format!(
+                "column \"{}\" cannot be cast automatically to type {}",
+                current_column.name,
+                format_sql_type_name(target_sql_type),
+            ),
+            Some(format!(
+                "You might need to specify \"USING {}::{}\".",
+                current_column.name,
+                format_sql_type_name(target_sql_type),
+            )),
+        );
+    }
+
+    let mut new_column = column_desc(
+        current_column.name.clone(),
+        target_sql_type,
+        current_column.storage.nullable,
+    );
+    new_column.attstattarget = current_column.attstattarget;
+    new_column.not_null_constraint_oid = current_column.not_null_constraint_oid;
+    new_column.attrdef_oid = current_column.attrdef_oid;
+    new_column.default_expr = current_column.default_expr.clone();
+    new_column.missing_default_value = current_column
+        .default_expr
+        .as_deref()
+        .and_then(|sql| derive_literal_default_value(sql, target_sql_type).ok());
+
+    Ok(AlterColumnTypePlan {
+        column_index,
+        rewrite_expr: if rewrite_type == target_sql_type {
+            rewrite_expr
+        } else {
+            Expr::Cast(Box::new(rewrite_expr), target_sql_type)
+        },
+        new_column,
+    })
 }
 
 pub(super) fn map_catalog_error(err: CatalogError) -> ExecError {

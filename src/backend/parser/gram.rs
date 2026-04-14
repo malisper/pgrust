@@ -57,14 +57,21 @@ fn parse_statement_with_options_inner(
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
-        if matches!(stmt, Statement::Unsupported(UnsupportedStatement { feature: "ROLE management", .. })) {
+        if matches!(
+            stmt,
+            Statement::Unsupported(UnsupportedStatement {
+                feature: "ROLE management",
+                ..
+            })
+        ) {
             return Ok(stmt);
         }
     }
     match SqlParser::parse(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
-        Err(err) => try_parse_unsupported_statement(&sql)
-            .ok_or_else(|| map_pest_error("statement", err)),
+        Err(err) => {
+            try_parse_unsupported_statement(&sql).ok_or_else(|| map_pest_error("statement", err))
+        }
     }
 }
 
@@ -530,12 +537,15 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_drop_column_stmt => Ok(Statement::AlterTableDropColumn(
             build_alter_table_drop_column(inner)?,
         )),
+        Rule::alter_table_alter_column_type_stmt => Ok(Statement::AlterTableAlterColumnType(
+            build_alter_table_alter_column_type(inner)?,
+        )),
         Rule::alter_table_rename_column_stmt => Ok(Statement::AlterTableRenameColumn(
             build_alter_table_rename_column(inner)?,
         )),
-        Rule::alter_table_rename_stmt => {
-            Ok(Statement::AlterTableRename(build_alter_table_rename(inner)?))
-        }
+        Rule::alter_table_rename_stmt => Ok(Statement::AlterTableRename(build_alter_table_rename(
+            inner,
+        )?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
@@ -2102,6 +2112,43 @@ fn build_alter_table_drop_column(
     })
 }
 
+fn build_alter_table_alter_column_type(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnTypeStatement, ParseError> {
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut ty = None;
+    let mut using_expr = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_type_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::type_name => ty = Some(build_type_name(inner)),
+                        Rule::alter_table_using_clause => {
+                            let expr = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            using_expr = Some(build_expr(expr)?);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnTypeStatement {
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        ty: ty.ok_or(ParseError::UnexpectedEof)?,
+        using_expr,
+    })
+}
+
 fn build_alter_table_rename(pair: Pair<'_, Rule>) -> Result<AlterTableRenameStatement, ParseError> {
     let mut parts = pair
         .into_inner()
@@ -2146,9 +2193,9 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
             }
             ty
         }
-        Rule::known_base_type_name => build_type_name(
-            pair.into_inner().next().expect("base_type_name inner"),
-        ),
+        Rule::known_base_type_name => {
+            build_type_name(pair.into_inner().next().expect("base_type_name inner"))
+        }
         Rule::qualified_known_base_type_name => {
             let mut inner = pair.into_inner();
             inner.next().expect("qualified_type_name schema");
@@ -2230,10 +2277,9 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 [precision] => {
                     RawTypeName::Builtin(SqlType::with_numeric_precision_scale(*precision, 0))
                 }
-                [precision, scale] => RawTypeName::Builtin(SqlType::with_numeric_precision_scale(
-                    *precision,
-                    *scale,
-                )),
+                [precision, scale] => {
+                    RawTypeName::Builtin(SqlType::with_numeric_precision_scale(*precision, *scale))
+                }
                 _ => unreachable!("unexpected numeric typmod arity"),
             }
         }
@@ -2245,9 +2291,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
         Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
-        Rule::kw_regdictionary => {
-            RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary))
-        }
+        Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
         Rule::date_type | Rule::kw_date => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Date)),
         Rule::time_type => {
