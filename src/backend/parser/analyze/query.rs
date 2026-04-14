@@ -1,4 +1,5 @@
 use super::*;
+use crate::include::nodes::primnodes::{SubLink, SubPlan};
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{ExprArraySubscript, SortGroupClause, Var};
@@ -714,21 +715,22 @@ fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),
         ),
-        Expr::ScalarSubquery(_) | Expr::ExistsSubquery(_) => expr,
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
+            testexpr: sublink
+                .testexpr
+                .map(|expr| Box::new(rewrite_expr_columns(*expr, output_exprs))),
+            ..*sublink
+        })),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
+            testexpr: subplan
+                .testexpr
+                .map(|expr| Box::new(rewrite_expr_columns(*expr, output_exprs))),
+            ..*subplan
+        })),
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),
         ),
-        Expr::AnySubquery { left, op, subquery } => Expr::AnySubquery {
-            left: Box::new(rewrite_expr_columns(*left, output_exprs)),
-            op,
-            subquery,
-        },
-        Expr::AllSubquery { left, op, subquery } => Expr::AllSubquery {
-            left: Box::new(rewrite_expr_columns(*left, output_exprs)),
-            op,
-            subquery,
-        },
         Expr::AnyArray { left, op, right } => Expr::AnyArray {
             left: Box::new(rewrite_expr_columns(*left, output_exprs)),
             op,
@@ -789,7 +791,7 @@ fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => expr,
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
             unreachable!("legacy rewrite should not see PG-shaped Expr")
         }
     };

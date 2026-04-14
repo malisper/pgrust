@@ -1,25 +1,28 @@
 use super::*;
 
-fn planned_subquery_plan<'a>(plan: &'a DeferredSelectPlan) -> Result<&'a Plan, ExecError> {
-    match plan {
-        DeferredSelectPlan::Planned(plan) => Ok(plan),
-        DeferredSelectPlan::Bound(_) => Err(ExecError::DetailedError {
+fn planned_subquery_plan(
+    subplan: &crate::include::nodes::primnodes::SubPlan,
+    ctx: &ExecutorContext,
+) -> Result<Plan, ExecError> {
+    ctx.subplans
+        .get(subplan.plan_id)
+        .cloned()
+        .ok_or(ExecError::DetailedError {
             message: "unplanned subquery reached executor".into(),
             detail: Some(
-                "the planner should have lowered bound subquery IR before execution".into(),
+                "the planner should have lowered SubLink nodes into valid SubPlan references".into(),
             ),
             hint: None,
             sqlstate: "XX000",
-        }),
-    }
+        })
 }
 
 pub(super) fn eval_scalar_subquery(
-    plan: &DeferredSelectPlan,
+    subplan: &crate::include::nodes::primnodes::SubPlan,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(plan)?;
+    let plan = planned_subquery_plan(subplan, ctx)?;
     let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
@@ -48,11 +51,11 @@ pub(super) fn eval_scalar_subquery(
 }
 
 pub(super) fn eval_exists_subquery(
-    plan: &DeferredSelectPlan,
+    subplan: &crate::include::nodes::primnodes::SubPlan,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(plan)?;
+    let plan = planned_subquery_plan(subplan, ctx)?;
     let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
@@ -68,11 +71,11 @@ pub(super) fn eval_quantified_subquery(
     left_value: &Value,
     op: SubqueryComparisonOp,
     is_all: bool,
-    plan: &DeferredSelectPlan,
+    subplan: &crate::include::nodes::primnodes::SubPlan,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let plan = planned_subquery_plan(plan)?;
+    let plan = planned_subquery_plan(subplan, ctx)?;
     // :HACK: `join.sql` currently hits a pathological executor path for the
     // specific uncorrelated `unique1 IN (SELECT unique1 FROM tenk1 b JOIN
     // tenk1 c USING (unique1) WHERE b.unique2 = 42)` shape. Fail fast until
@@ -80,7 +83,7 @@ pub(super) fn eval_quantified_subquery(
     // clone-heavy nested-loop evaluation.
     if matches!(op, SubqueryComparisonOp::Eq)
         && !is_all
-        && is_pathological_regress_join_in_subquery(plan)
+        && is_pathological_regress_join_in_subquery(&plan)
     {
         return Err(ExecError::DetailedError {
             message: "unsupported quantified subquery shape".into(),

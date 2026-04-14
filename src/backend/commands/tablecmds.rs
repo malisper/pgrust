@@ -15,7 +15,7 @@ use crate::backend::access::heap::heaptoast::{
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
-use crate::backend::optimizer::{finalize_deferred_select_plan, finalize_expr_subqueries};
+use crate::backend::optimizer::{finalize_expr_subqueries, planner};
 use crate::backend::parser::{
     AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
     BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
@@ -32,7 +32,7 @@ use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_e
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
-    DeferredSelectPlan, ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
+    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
     create_query_desc, executor_start,
 };
 use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
@@ -46,17 +46,18 @@ fn finalize_bound_insert(
     mut stmt: BoundInsertStatement,
     catalog: &dyn CatalogLookup,
 ) -> BoundInsertStatement {
+    let mut subplans = Vec::new();
     stmt.column_defaults = stmt
         .column_defaults
         .into_iter()
-        .map(|expr| finalize_expr_subqueries(expr, catalog))
+        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
         .collect();
     stmt.source = match stmt.source {
         BoundInsertSource::Values(rows) => BoundInsertSource::Values(
             rows.into_iter()
                 .map(|row| {
                     row.into_iter()
-                        .map(|expr| finalize_expr_subqueries(expr, catalog))
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
                         .collect()
                 })
                 .collect(),
@@ -64,13 +65,12 @@ fn finalize_bound_insert(
         BoundInsertSource::DefaultValues(defaults) => BoundInsertSource::DefaultValues(
             defaults
                 .into_iter()
-                .map(|expr| finalize_expr_subqueries(expr, catalog))
+                .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans))
                 .collect(),
         ),
-        BoundInsertSource::Select(plan) => {
-            BoundInsertSource::Select(Box::new(finalize_deferred_select_plan(*plan, catalog)))
-        }
+        BoundInsertSource::Select(query) => BoundInsertSource::Select(query),
     };
+    stmt.subplans = subplans;
     stmt
 }
 
@@ -78,12 +78,13 @@ fn finalize_bound_update(
     mut stmt: BoundUpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> BoundUpdateStatement {
+    let mut subplans = Vec::new();
     stmt.assignments = stmt
         .assignments
         .into_iter()
         .map(|assignment| BoundAssignment {
             column_index: assignment.column_index,
-            expr: finalize_expr_subqueries(assignment.expr, catalog),
+            expr: finalize_expr_subqueries(assignment.expr, catalog, &mut subplans),
             subscripts: assignment
                 .subscripts
                 .into_iter()
@@ -91,17 +92,18 @@ fn finalize_bound_update(
                     is_slice: subscript.is_slice,
                     lower: subscript
                         .lower
-                        .map(|expr| finalize_expr_subqueries(expr, catalog)),
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
                     upper: subscript
                         .upper
-                        .map(|expr| finalize_expr_subqueries(expr, catalog)),
+                        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
                 })
                 .collect(),
         })
         .collect();
     stmt.predicate = stmt
         .predicate
-        .map(|expr| finalize_expr_subqueries(expr, catalog));
+        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans));
+    stmt.subplans = subplans;
     stmt
 }
 
@@ -109,9 +111,11 @@ fn finalize_bound_delete(
     mut stmt: BoundDeleteStatement,
     catalog: &dyn CatalogLookup,
 ) -> BoundDeleteStatement {
+    let mut subplans = Vec::new();
     stmt.predicate = stmt
         .predicate
-        .map(|expr| finalize_expr_subqueries(expr, catalog));
+        .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans));
+    stmt.subplans = subplans;
     stmt
 }
 
@@ -136,15 +140,21 @@ pub(crate) fn execute_explain(
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
         ctx.timed = stmt.timing;
-        let mut state = executor_start(query_desc.planned_stmt.plan_tree.clone());
-        let plan_elapsed = plan_start.elapsed();
-        let mut row_count: u64 = 0;
-        let started_at = std::time::Instant::now();
-        while let Some(_slot) = state.exec_proc_node(ctx)? {
-            row_count += 1;
-        }
+        let saved_subplans =
+            std::mem::replace(&mut ctx.subplans, query_desc.planned_stmt.subplans.clone());
+        let exec_result: Result<(_, _, _, _), ExecError> = (|| {
+            let mut state = executor_start(query_desc.planned_stmt.plan_tree.clone());
+            let plan_elapsed = plan_start.elapsed();
+            let mut row_count: u64 = 0;
+            let started_at = std::time::Instant::now();
+            while let Some(_slot) = state.exec_proc_node(ctx)? {
+                row_count += 1;
+            }
+            Ok((state, plan_elapsed, row_count, started_at.elapsed()))
+        })();
+        ctx.subplans = saved_subplans;
         ctx.timed = false;
-        let elapsed = started_at.elapsed();
+        let (state, plan_elapsed, row_count, elapsed) = exec_result?;
         format_explain_lines(state.as_ref(), 0, true, &mut lines);
         lines.push(format!(
             "Planning Time: {:.3} ms",
@@ -637,20 +647,22 @@ pub fn execute_insert(
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_insert(stmt, catalog);
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
+    let result = (|| {
 
-    fn eval_insert_defaults(
-        defaults: &[crate::backend::executor::Expr],
-        width: usize,
-        ctx: &mut ExecutorContext,
-    ) -> Result<Vec<Value>, ExecError> {
-        let mut slot = TupleSlot::virtual_row(vec![Value::Null; width]);
-        defaults
-            .iter()
-            .map(|expr| eval_expr(expr, &mut slot, ctx))
-            .collect()
-    }
+        fn eval_insert_defaults(
+            defaults: &[crate::backend::executor::Expr],
+            width: usize,
+            ctx: &mut ExecutorContext,
+        ) -> Result<Vec<Value>, ExecError> {
+            let mut slot = TupleSlot::virtual_row(vec![Value::Null; width]);
+            defaults
+                .iter()
+                .map(|expr| eval_expr(expr, &mut slot, ctx))
+                .collect()
+        }
 
-    let values = match &stmt.source {
+        let values = match &stmt.source {
         BoundInsertSource::Values(rows) => rows
             .iter()
             .map(|row| {
@@ -681,44 +693,44 @@ pub fn execute_insert(
             }
             vec![values]
         }
-        BoundInsertSource::Select(plan) => {
-            let DeferredSelectPlan::Planned(plan) = plan.as_ref() else {
-                return Err(ExecError::DetailedError {
-                    message: "unplanned INSERT ... SELECT reached executor".into(),
-                    detail: Some(
-                        "the planner should have lowered the insert source before execution".into(),
-                    ),
-                    hint: None,
-                    sqlstate: "XX000",
-                });
-            };
-            let mut state = executor_start((**plan).clone());
-            let mut rows = Vec::new();
-            while let Some(slot) = state.exec_proc_node(ctx)? {
-                let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
-                let mut values =
-                    eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
-                for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
-                    apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
+        BoundInsertSource::Select(query) => {
+            let planned = planner((**query).clone(), catalog);
+            let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
+                let saved_subplans =
+                    std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
+                let mut state = executor_start(planned.plan_tree.clone());
+                let mut rows = Vec::new();
+                while let Some(slot) = state.exec_proc_node(ctx)? {
+                    let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                    let mut values =
+                        eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
+                    for (target, value) in stmt.target_columns.iter().zip(row_values.into_iter()) {
+                        apply_assignment_target(&stmt.desc, &mut values, target, value, slot, ctx)?;
+                    }
+                    rows.push(values);
                 }
-                rows.push(values);
-            }
-            rows
+                ctx.subplans = saved_subplans;
+                Ok(rows)
+            })();
+            result?
         }
-    };
+        };
 
-    let inserted = execute_insert_values(
-        stmt.rel,
-        stmt.toast,
-        stmt.toast_index.as_ref(),
-        &stmt.desc,
-        &stmt.indexes,
-        &values,
-        ctx,
-        xid,
-        cid,
-    )?;
-    Ok(StatementResult::AffectedRows(inserted))
+        let inserted = execute_insert_values(
+            stmt.rel,
+            stmt.toast,
+            stmt.toast_index.as_ref(),
+            &stmt.desc,
+            &stmt.indexes,
+            &values,
+            ctx,
+            xid,
+            cid,
+        )?;
+        Ok(StatementResult::AffectedRows(inserted))
+    })();
+    ctx.subplans = saved_subplans;
+    result
 }
 
 fn apply_assignment_target(
@@ -1053,6 +1065,8 @@ pub fn execute_update_with_waiter(
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_update(stmt, catalog);
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
+    let result = (|| {
     let mut affected_rows = 0;
 
     let desc = Rc::new(stmt.desc.clone());
@@ -1188,6 +1202,9 @@ pub fn execute_update_with_waiter(
     }
 
     Ok(StatementResult::AffectedRows(affected_rows))
+    })();
+    ctx.subplans = saved_subplans;
+    result
 }
 
 pub(crate) fn execute_delete(
@@ -1207,6 +1224,8 @@ pub fn execute_delete_with_waiter(
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
+    let result = (|| {
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
@@ -1303,4 +1322,7 @@ pub fn execute_delete_with_waiter(
     }
 
     Ok(StatementResult::AffectedRows(affected_rows))
+    })();
+    ctx.subplans = saved_subplans;
+    result
 }

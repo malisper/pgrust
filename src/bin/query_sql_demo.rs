@@ -161,6 +161,7 @@ fn main() -> Result<(), ExecError> {
         client_id: 11,
         next_command_id: 0,
         outer_rows: Vec::new(),
+        subplans: Vec::new(),
         timed: false,
     };
 

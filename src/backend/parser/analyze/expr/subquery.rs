@@ -1,4 +1,5 @@
 use super::*;
+use crate::include::nodes::primnodes::{SubLink, SubLinkType};
 
 fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
     let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
@@ -7,17 +8,17 @@ fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<Bo
     child_outer
 }
 
-fn bind_deferred_subquery(
+fn bind_subquery_query(
     select: &SelectStatement,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     ctes: &[BoundCte],
-) -> Result<DeferredSelectPlan, ParseError> {
+) -> Result<Query, ParseError> {
     let child_outer = child_outer_scopes(scope, outer_scopes);
     let (query, _) =
         analyze_select_query_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
-    Ok(DeferredSelectPlan::Bound(Box::new(query)))
+    Ok(query)
 }
 
 pub(super) fn bind_scalar_subquery_expr(
@@ -27,9 +28,13 @@ pub(super) fn bind_scalar_subquery_expr(
     outer_scopes: &[BoundScope],
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let plan = bind_deferred_subquery(select, scope, catalog, outer_scopes, ctes)?;
-    ensure_single_column_subquery(plan.columns().len())?;
-    Ok(Expr::ScalarSubquery(Box::new(plan)))
+    let query = bind_subquery_query(select, scope, catalog, outer_scopes, ctes)?;
+    ensure_single_column_subquery(query.columns().len())?;
+    Ok(Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::ExprSubLink,
+        testexpr: None,
+        subselect: Box::new(query),
+    })))
 }
 
 pub(super) fn bind_exists_subquery_expr(
@@ -39,13 +44,17 @@ pub(super) fn bind_exists_subquery_expr(
     outer_scopes: &[BoundScope],
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    Ok(Expr::ExistsSubquery(Box::new(bind_deferred_subquery(
-        select,
-        scope,
-        catalog,
-        outer_scopes,
-        ctes,
-    )?)))
+    Ok(Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::ExistsSubLink,
+        testexpr: None,
+        subselect: Box::new(bind_subquery_query(
+            select,
+            scope,
+            catalog,
+            outer_scopes,
+            ctes,
+        )?),
+    })))
 }
 
 pub(super) fn bind_in_subquery_expr(
@@ -58,20 +67,20 @@ pub(super) fn bind_in_subquery_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let subquery_plan = bind_deferred_subquery(subquery, scope, catalog, outer_scopes, ctes)?;
-    ensure_single_column_subquery(subquery_plan.columns().len())?;
-    let any_expr = Expr::AnySubquery {
-        left: Box::new(bind_expr_with_outer_and_ctes(
+    let subquery = bind_subquery_query(subquery, scope, catalog, outer_scopes, ctes)?;
+    ensure_single_column_subquery(subquery.columns().len())?;
+    let any_expr = Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::AnySubLink(SubqueryComparisonOp::Eq),
+        testexpr: Some(Box::new(bind_expr_with_outer_and_ctes(
             expr,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
             ctes,
-        )?),
-        op: SubqueryComparisonOp::Eq,
-        subquery: Box::new(subquery_plan),
-    };
+        )?)),
+        subselect: Box::new(subquery),
+    }));
     if negated {
         Ok(Expr::Not(Box::new(any_expr)))
     } else {
@@ -90,8 +99,8 @@ pub(super) fn bind_quantified_subquery_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let subquery_plan = bind_deferred_subquery(subquery, scope, catalog, outer_scopes, ctes)?;
-    ensure_single_column_subquery(subquery_plan.columns().len())?;
+    let subquery = bind_subquery_query(subquery, scope, catalog, outer_scopes, ctes)?;
+    ensure_single_column_subquery(subquery.columns().len())?;
     let left = Box::new(bind_expr_with_outer_and_ctes(
         left,
         scope,
@@ -100,19 +109,15 @@ pub(super) fn bind_quantified_subquery_expr(
         grouped_outer,
         ctes,
     )?);
-    Ok(if is_all {
-        Expr::AllSubquery {
-            left,
-            op,
-            subquery: Box::new(subquery_plan),
-        }
-    } else {
-        Expr::AnySubquery {
-            left,
-            op,
-            subquery: Box::new(subquery_plan),
-        }
-    })
+    Ok(Expr::SubLink(Box::new(SubLink {
+        sublink_type: if is_all {
+            SubLinkType::AllSubLink(op)
+        } else {
+            SubLinkType::AnySubLink(op)
+        },
+        testexpr: Some(left),
+        subselect: Box::new(subquery),
+    })))
 }
 
 pub(super) fn bind_quantified_array_expr(

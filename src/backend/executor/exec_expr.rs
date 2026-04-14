@@ -63,6 +63,7 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
+use crate::include::nodes::primnodes::SubLinkType;
 
 mod arrays;
 mod subquery;
@@ -85,9 +86,15 @@ pub fn eval_expr(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
             eval_expr(&expr.clone().into_legacy_shape(), slot, ctx)
         }
+        Expr::SubLink(_) => Err(ExecError::DetailedError {
+            message: "unplanned subquery reached executor".into(),
+            detail: Some("the planner should have lowered SubLink nodes before execution".into()),
+            hint: None,
+            sqlstate: "XX000",
+        }),
         Expr::Var(var) => {
             if var.varlevelsup > 0 {
                 let depth = var.varlevelsup - 1;
@@ -286,16 +293,30 @@ pub fn eval_expr(
         }
         Expr::JsonbPathExists(left, right) => eval_jsonpath_operator(left, right, false, slot, ctx),
         Expr::JsonbPathMatch(left, right) => eval_jsonpath_operator(left, right, true, slot, ctx),
-        Expr::ScalarSubquery(plan) => eval_scalar_subquery(plan, slot, ctx),
-        Expr::ExistsSubquery(plan) => eval_exists_subquery(plan, slot, ctx),
-        Expr::AnySubquery { left, op, subquery } => {
-            let left_value = eval_expr(left, slot, ctx)?;
-            eval_quantified_subquery(&left_value, *op, false, subquery, slot, ctx)
-        }
-        Expr::AllSubquery { left, op, subquery } => {
-            let left_value = eval_expr(left, slot, ctx)?;
-            eval_quantified_subquery(&left_value, *op, true, subquery, slot, ctx)
-        }
+        Expr::SubPlan(subplan) => match subplan.sublink_type {
+            SubLinkType::ExprSubLink => eval_scalar_subquery(subplan, slot, ctx),
+            SubLinkType::ExistsSubLink => eval_exists_subquery(subplan, slot, ctx),
+            SubLinkType::AnySubLink(op) => {
+                let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {
+                    message: "malformed ANY subplan".into(),
+                    detail: Some("ANY subplans must carry a test expression".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+                let left_value = eval_expr(left, slot, ctx)?;
+                eval_quantified_subquery(&left_value, op, false, subplan, slot, ctx)
+            }
+            SubLinkType::AllSubLink(op) => {
+                let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {
+                    message: "malformed ALL subplan".into(),
+                    detail: Some("ALL subplans must carry a test expression".into()),
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+                let left_value = eval_expr(left, slot, ctx)?;
+                eval_quantified_subquery(&left_value, op, true, subplan, slot, ctx)
+            }
+        },
         Expr::AnyArray { left, op, right } => {
             let left_value = eval_expr(left, slot, ctx)?;
             let right_value = eval_expr(right, slot, ctx)?;
@@ -331,9 +352,15 @@ pub fn eval_expr(
 
 pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
             eval_plpgsql_expr(&expr.clone().into_legacy_shape(), slot)
         }
+        Expr::SubLink(_) | Expr::SubPlan(_) => Err(ExecError::DetailedError {
+            message: "subqueries are not supported in PL/pgSQL expression evaluation".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        }),
         Expr::Var(var) => {
             if var.varlevelsup == 0 {
                 Ok(slot.get_attr(var.varattno.saturating_sub(1))?.clone())

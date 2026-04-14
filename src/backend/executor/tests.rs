@@ -463,6 +463,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         client_id: 1,
         next_command_id: 0,
         outer_rows: Vec::new(),
+        subplans: Vec::new(),
         timed: false,
     }
 }
@@ -483,6 +484,7 @@ fn run_plan(
         client_id: 42,
         next_command_id: 0,
         outer_rows: Vec::new(),
+        subplans: Vec::new(),
         timed: false,
     };
 
@@ -534,6 +536,7 @@ fn run_sql_with_catalog(
             client_id: 77,
             next_command_id: 0,
             outer_rows: Vec::new(),
+            subplans: Vec::new(),
             timed: false,
         };
         execute_sql(&sql, &mut catalog, &mut ctx, xid)
@@ -4106,6 +4109,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         client_id: 77,
         next_command_id: 0,
         outer_rows: Vec::new(),
+        subplans: Vec::new(),
         timed: false,
     };
 

@@ -1002,7 +1002,6 @@ impl PlannerJoinExpr {
             Expr::Op(_)
             | Expr::Bool(_)
             | Expr::Func(_)
-            | Expr::SubLink(_)
             | Expr::ScalarArrayOp(_) => {
                 Self::from_input_expr_with_layout(&expr.clone().into_legacy_shape(), layout)
             }
@@ -1196,22 +1195,12 @@ impl PlannerJoinExpr {
                 Box::new(Self::from_input_expr_with_layout(left, layout)),
                 Box::new(Self::from_input_expr_with_layout(right, layout)),
             ),
-            Expr::ScalarSubquery(plan) => Self::ScalarSubquery(plan.clone()),
-            Expr::ExistsSubquery(plan) => Self::ExistsSubquery(plan.clone()),
+            Expr::SubLink(sublink) => Self::SubLink(sublink.clone()),
+            Expr::SubPlan(subplan) => Self::SubPlan(subplan.clone()),
             Expr::Coalesce(left, right) => Self::Coalesce(
                 Box::new(Self::from_input_expr_with_layout(left, layout)),
                 Box::new(Self::from_input_expr_with_layout(right, layout)),
             ),
-            Expr::AnySubquery { left, op, subquery } => Self::AnySubquery {
-                left: Box::new(Self::from_input_expr_with_layout(left, layout)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
-            Expr::AllSubquery { left, op, subquery } => Self::AllSubquery {
-                left: Box::new(Self::from_input_expr_with_layout(left, layout)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
             Expr::AnyArray { left, op, right } => Self::AnyArray {
                 left: Box::new(Self::from_input_expr_with_layout(left, layout)),
                 op: *op,
@@ -1291,7 +1280,6 @@ impl PlannerJoinExpr {
             Expr::Op(_)
             | Expr::Bool(_)
             | Expr::Func(_)
-            | Expr::SubLink(_)
             | Expr::ScalarArrayOp(_) => Self::from_input_expr(&expr.clone().into_legacy_shape()),
             Expr::Var(var) => Self::from_var(var),
             Expr::Column(index) => Self::InputColumn(*index),
@@ -1464,22 +1452,12 @@ impl PlannerJoinExpr {
                 Box::new(Self::from_input_expr(left)),
                 Box::new(Self::from_input_expr(right)),
             ),
-            Expr::ScalarSubquery(plan) => Self::ScalarSubquery(plan.clone()),
-            Expr::ExistsSubquery(plan) => Self::ExistsSubquery(plan.clone()),
+            Expr::SubLink(sublink) => Self::SubLink(sublink.clone()),
+            Expr::SubPlan(subplan) => Self::SubPlan(subplan.clone()),
             Expr::Coalesce(left, right) => Self::Coalesce(
                 Box::new(Self::from_input_expr(left)),
                 Box::new(Self::from_input_expr(right)),
             ),
-            Expr::AnySubquery { left, op, subquery } => Self::AnySubquery {
-                left: Box::new(Self::from_input_expr(left)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
-            Expr::AllSubquery { left, op, subquery } => Self::AllSubquery {
-                left: Box::new(Self::from_input_expr(left)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
             Expr::AnyArray { left, op, right } => Self::AnyArray {
                 left: Box::new(Self::from_input_expr(left)),
                 op: *op,
@@ -1729,22 +1707,12 @@ impl PlannerJoinExpr {
                 Box::new(left.into_input_expr_with_layout(layout)),
                 Box::new(right.into_input_expr_with_layout(layout)),
             ),
-            Self::ScalarSubquery(plan) => Expr::ScalarSubquery(plan),
-            Self::ExistsSubquery(plan) => Expr::ExistsSubquery(plan),
+            Self::SubLink(sublink) => Expr::SubLink(sublink),
+            Self::SubPlan(subplan) => Expr::SubPlan(subplan),
             Self::Coalesce(left, right) => Expr::Coalesce(
                 Box::new(left.into_input_expr_with_layout(layout)),
                 Box::new(right.into_input_expr_with_layout(layout)),
             ),
-            Self::AnySubquery { left, op, subquery } => Expr::AnySubquery {
-                left: Box::new(left.into_input_expr_with_layout(layout)),
-                op,
-                subquery,
-            },
-            Self::AllSubquery { left, op, subquery } => Expr::AllSubquery {
-                left: Box::new(left.into_input_expr_with_layout(layout)),
-                op,
-                subquery,
-            },
             Self::AnyArray { left, op, right } => Expr::AnyArray {
                 left: Box::new(left.into_input_expr_with_layout(layout)),
                 op,
@@ -1814,7 +1782,6 @@ impl PlannerJoinExpr {
             Expr::Op(_)
             | Expr::Bool(_)
             | Expr::Func(_)
-            | Expr::SubLink(_)
             | Expr::ScalarArrayOp(_) => {
                 Self::from_base_input_expr(&expr.clone().into_legacy_shape(), relation_oid)
             }
@@ -2017,22 +1984,12 @@ impl PlannerJoinExpr {
                 Box::new(Self::from_base_input_expr(left, relation_oid)),
                 Box::new(Self::from_base_input_expr(right, relation_oid)),
             ),
-            Expr::ScalarSubquery(plan) => Self::ScalarSubquery(plan.clone()),
-            Expr::ExistsSubquery(plan) => Self::ExistsSubquery(plan.clone()),
+            Expr::SubLink(sublink) => Self::SubLink(sublink.clone()),
+            Expr::SubPlan(subplan) => Self::SubPlan(subplan.clone()),
             Expr::Coalesce(left, right) => Self::Coalesce(
                 Box::new(Self::from_base_input_expr(left, relation_oid)),
                 Box::new(Self::from_base_input_expr(right, relation_oid)),
             ),
-            Expr::AnySubquery { left, op, subquery } => Self::AnySubquery {
-                left: Box::new(Self::from_base_input_expr(left, relation_oid)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
-            Expr::AllSubquery { left, op, subquery } => Self::AllSubquery {
-                left: Box::new(Self::from_base_input_expr(left, relation_oid)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
             Expr::AnyArray { left, op, right } => Self::AnyArray {
                 left: Box::new(Self::from_base_input_expr(left, relation_oid)),
                 op: *op,
@@ -2277,22 +2234,12 @@ impl PlannerJoinExpr {
                 Box::new(left.into_input_expr()),
                 Box::new(right.into_input_expr()),
             ),
-            Self::ScalarSubquery(plan) => Expr::ScalarSubquery(plan),
-            Self::ExistsSubquery(plan) => Expr::ExistsSubquery(plan),
+            Self::SubLink(sublink) => Expr::SubLink(sublink),
+            Self::SubPlan(subplan) => Expr::SubPlan(subplan),
             Self::Coalesce(left, right) => Expr::Coalesce(
                 Box::new(left.into_input_expr()),
                 Box::new(right.into_input_expr()),
             ),
-            Self::AnySubquery { left, op, subquery } => Expr::AnySubquery {
-                left: Box::new(left.into_input_expr()),
-                op,
-                subquery,
-            },
-            Self::AllSubquery { left, op, subquery } => Expr::AllSubquery {
-                left: Box::new(left.into_input_expr()),
-                op,
-                subquery,
-            },
             Self::AnyArray { left, op, right } => Expr::AnyArray {
                 left: Box::new(left.into_input_expr()),
                 op,
@@ -2355,7 +2302,6 @@ impl PlannerJoinExpr {
             Expr::Op(_)
             | Expr::Bool(_)
             | Expr::Func(_)
-            | Expr::SubLink(_)
             | Expr::ScalarArrayOp(_) => {
                 Self::from_expr(&expr.clone().into_legacy_shape(), left_width)
             }
@@ -2545,22 +2491,12 @@ impl PlannerJoinExpr {
                 Box::new(Self::from_expr(left, left_width)),
                 Box::new(Self::from_expr(right, left_width)),
             ),
-            Expr::ScalarSubquery(plan) => Self::ScalarSubquery(plan.clone()),
-            Expr::ExistsSubquery(plan) => Self::ExistsSubquery(plan.clone()),
+            Expr::SubLink(sublink) => Self::SubLink(sublink.clone()),
+            Expr::SubPlan(subplan) => Self::SubPlan(subplan.clone()),
             Expr::Coalesce(left, right) => Self::Coalesce(
                 Box::new(Self::from_expr(left, left_width)),
                 Box::new(Self::from_expr(right, left_width)),
             ),
-            Expr::AnySubquery { left, op, subquery } => Self::AnySubquery {
-                left: Box::new(Self::from_expr(left, left_width)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
-            Expr::AllSubquery { left, op, subquery } => Self::AllSubquery {
-                left: Box::new(Self::from_expr(left, left_width)),
-                op: *op,
-                subquery: subquery.clone(),
-            },
             Expr::AnyArray { left, op, right } => Self::AnyArray {
                 left: Box::new(Self::from_expr(left, left_width)),
                 op: *op,
@@ -2807,22 +2743,12 @@ impl PlannerJoinExpr {
                 Box::new(left.into_expr(left_width)),
                 Box::new(right.into_expr(left_width)),
             ),
-            Self::ScalarSubquery(plan) => Expr::ScalarSubquery(plan),
-            Self::ExistsSubquery(plan) => Expr::ExistsSubquery(plan),
+            Self::SubLink(sublink) => Expr::SubLink(sublink),
+            Self::SubPlan(subplan) => Expr::SubPlan(subplan),
             Self::Coalesce(left, right) => Expr::Coalesce(
                 Box::new(left.into_expr(left_width)),
                 Box::new(right.into_expr(left_width)),
             ),
-            Self::AnySubquery { left, op, subquery } => Expr::AnySubquery {
-                left: Box::new(left.into_expr(left_width)),
-                op,
-                subquery,
-            },
-            Self::AllSubquery { left, op, subquery } => Expr::AllSubquery {
-                left: Box::new(left.into_expr(left_width)),
-                op,
-                subquery,
-            },
             Self::AnyArray { left, op, right } => Expr::AnyArray {
                 left: Box::new(left.into_expr(left_width)),
                 op,
@@ -3034,21 +2960,11 @@ impl PlannerJoinExpr {
             Self::JsonbPathMatch(left, right) => {
                 Self::JsonbPathMatch(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
             }
-            Self::ScalarSubquery(plan) => Self::ScalarSubquery(plan.clone()),
-            Self::ExistsSubquery(plan) => Self::ExistsSubquery(plan.clone()),
+            Self::SubLink(sublink) => Self::SubLink(sublink.clone()),
+            Self::SubPlan(subplan) => Self::SubPlan(subplan.clone()),
             Self::Coalesce(left, right) => {
                 Self::Coalesce(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
             }
-            Self::AnySubquery { left, op, subquery } => Self::AnySubquery {
-                left: Box::new(left.swap_inputs()),
-                op: *op,
-                subquery: subquery.clone(),
-            },
-            Self::AllSubquery { left, op, subquery } => Self::AllSubquery {
-                left: Box::new(left.swap_inputs()),
-                op: *op,
-                subquery: subquery.clone(),
-            },
             Self::AnyArray { left, op, right } => Self::AnyArray {
                 left: Box::new(left.swap_inputs()),
                 op: *op,

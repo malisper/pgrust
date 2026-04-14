@@ -4,12 +4,23 @@ use crate::RelFileLocator;
 use crate::backend::executor::{Expr, Plan};
 use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
-use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, DeferredSelectPlan};
+use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, PlannedStmt};
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
-        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
             collect_rels_from_expr(&expr.clone().into_legacy_shape(), rels)
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_rels_from_expr(testexpr, rels);
+            }
+            collect_rels_from_query(&sublink.subselect, rels);
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_rels_from_expr(testexpr, rels);
+            }
         }
         Expr::Var(_)
         | Expr::Column(_)
@@ -103,13 +114,6 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
         }
-        Expr::ScalarSubquery(plan) | Expr::ExistsSubquery(plan) => {
-            collect_rels_from_deferred_select_plan(plan, rels);
-        }
-        Expr::AnySubquery { left, subquery, .. } | Expr::AllSubquery { left, subquery, .. } => {
-            collect_rels_from_expr(left, rels);
-            collect_rels_from_deferred_select_plan(subquery, rels);
-        }
         Expr::AnyArray { left, right, .. } | Expr::AllArray { left, right, .. } => {
             collect_rels_from_expr(left, rels);
             collect_rels_from_expr(right, rels);
@@ -125,16 +129,6 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         }
-    }
-}
-
-fn collect_rels_from_deferred_select_plan(
-    plan: &DeferredSelectPlan,
-    rels: &mut BTreeSet<RelFileLocator>,
-) {
-    match plan {
-        DeferredSelectPlan::Bound(plan) => collect_rels_from_query(plan, rels),
-        DeferredSelectPlan::Planned(plan) => collect_rels_from_plan(plan, rels),
     }
 }
 
@@ -448,6 +442,16 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         }
+    }
+}
+
+pub(super) fn collect_rels_from_planned_stmt(
+    planned_stmt: &PlannedStmt,
+    rels: &mut BTreeSet<RelFileLocator>,
+) {
+    collect_rels_from_plan(&planned_stmt.plan_tree, rels);
+    for subplan in &planned_stmt.subplans {
+        collect_rels_from_plan(subplan, rels);
     }
 }
 

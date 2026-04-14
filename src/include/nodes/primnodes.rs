@@ -5,7 +5,7 @@ use crate::include::catalog::{
     builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::plannodes::DeferredSelectPlan;
+use crate::include::nodes::parsenodes::Query;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarType {
@@ -582,7 +582,15 @@ pub enum SubLinkType {
 pub struct SubLink {
     pub sublink_type: SubLinkType,
     pub testexpr: Option<Box<Expr>>,
-    pub subselect: Box<DeferredSelectPlan>,
+    pub subselect: Box<Query>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubPlan {
+    pub sublink_type: SubLinkType,
+    pub testexpr: Option<Box<Expr>>,
+    pub first_col_type: Option<SqlType>,
+    pub plan_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,6 +614,7 @@ pub enum Expr {
     Bool(Box<BoolExpr>),
     Func(Box<FuncExpr>),
     SubLink(Box<SubLink>),
+    SubPlan(Box<SubPlan>),
     ScalarArrayOp(Box<ScalarArrayOpExpr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
@@ -661,19 +670,7 @@ pub enum Expr {
     JsonbExistsAll(Box<Expr>, Box<Expr>),
     JsonbPathExists(Box<Expr>, Box<Expr>),
     JsonbPathMatch(Box<Expr>, Box<Expr>),
-    ScalarSubquery(Box<DeferredSelectPlan>),
-    ExistsSubquery(Box<DeferredSelectPlan>),
     Coalesce(Box<Expr>, Box<Expr>),
-    AnySubquery {
-        left: Box<Expr>,
-        op: SubqueryComparisonOp,
-        subquery: Box<DeferredSelectPlan>,
-    },
-    AllSubquery {
-        left: Box<Expr>,
-        op: SubqueryComparisonOp,
-        subquery: Box<DeferredSelectPlan>,
-    },
     AnyArray {
         left: Box<Expr>,
         op: SubqueryComparisonOp,
@@ -756,6 +753,12 @@ impl Expr {
                     .testexpr
                     .map(|expr| Box::new(expr.into_pg_semantic_shape())),
                 ..*sublink
+            })),
+            Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| Box::new(expr.into_pg_semantic_shape())),
+                ..*subplan
             })),
             Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
                 left: Box::new(saop.left.into_pg_semantic_shape()),
@@ -1088,30 +1091,10 @@ impl Expr {
                     right.into_pg_semantic_shape(),
                 ],
             })),
-            Expr::ScalarSubquery(plan) => Expr::SubLink(Box::new(SubLink {
-                sublink_type: SubLinkType::ExprSubLink,
-                testexpr: None,
-                subselect: plan,
-            })),
-            Expr::ExistsSubquery(plan) => Expr::SubLink(Box::new(SubLink {
-                sublink_type: SubLinkType::ExistsSubLink,
-                testexpr: None,
-                subselect: plan,
-            })),
             Expr::Coalesce(left, right) => Expr::Coalesce(
                 Box::new(left.into_pg_semantic_shape()),
                 Box::new(right.into_pg_semantic_shape()),
             ),
-            Expr::AnySubquery { left, op, subquery } => Expr::SubLink(Box::new(SubLink {
-                sublink_type: SubLinkType::AnySubLink(op),
-                testexpr: Some(Box::new(left.into_pg_semantic_shape())),
-                subselect: subquery,
-            })),
-            Expr::AllSubquery { left, op, subquery } => Expr::SubLink(Box::new(SubLink {
-                sublink_type: SubLinkType::AllSubLink(op),
-                testexpr: Some(Box::new(left.into_pg_semantic_shape())),
-                subselect: subquery,
-            })),
             Expr::AnyArray { left, op, right } => {
                 Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
                     op,
@@ -1242,33 +1225,18 @@ impl Expr {
                     func_variadic: func.funcvariadic,
                 }
             }
-            Expr::SubLink(sublink) => {
-                let sublink = *sublink;
-                match sublink.sublink_type {
-                    SubLinkType::ExprSubLink => Expr::ScalarSubquery(sublink.subselect),
-                    SubLinkType::ExistsSubLink => Expr::ExistsSubquery(sublink.subselect),
-                    SubLinkType::AnySubLink(op) => Expr::AnySubquery {
-                        left: Box::new(
-                            sublink
-                                .testexpr
-                                .map(|expr| expr.into_legacy_shape())
-                                .unwrap_or(Expr::Const(Value::Null)),
-                        ),
-                        op,
-                        subquery: sublink.subselect,
-                    },
-                    SubLinkType::AllSubLink(op) => Expr::AllSubquery {
-                        left: Box::new(
-                            sublink
-                                .testexpr
-                                .map(|expr| expr.into_legacy_shape())
-                                .unwrap_or(Expr::Const(Value::Null)),
-                        ),
-                        op,
-                        subquery: sublink.subselect,
-                    },
-                }
-            }
+            Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
+                testexpr: sublink
+                    .testexpr
+                    .map(|expr| Box::new(expr.into_legacy_shape())),
+                ..*sublink
+            })),
+            Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| Box::new(expr.into_legacy_shape())),
+                ..*subplan
+            })),
             Expr::ScalarArrayOp(saop) => {
                 let saop = *saop;
                 if saop.use_or {
@@ -1458,18 +1426,6 @@ impl Expr {
                 Box::new(left.into_legacy_shape()),
                 Box::new(right.into_legacy_shape()),
             ),
-            Expr::ScalarSubquery(plan) => Expr::ScalarSubquery(plan),
-            Expr::ExistsSubquery(plan) => Expr::ExistsSubquery(plan),
-            Expr::AnySubquery { left, op, subquery } => Expr::AnySubquery {
-                left: Box::new(left.into_legacy_shape()),
-                op,
-                subquery,
-            },
-            Expr::AllSubquery { left, op, subquery } => Expr::AllSubquery {
-                left: Box::new(left.into_legacy_shape()),
-                op,
-                subquery,
-            },
             Expr::AnyArray { left, op, right } => Expr::AnyArray {
                 left: Box::new(left.into_legacy_shape()),
                 op,
@@ -1656,14 +1612,35 @@ fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::JsonbExistsAll(_, _)
         | Expr::JsonbPathExists(_, _)
         | Expr::JsonbPathMatch(_, _)
-        | Expr::ExistsSubquery(_)
-        | Expr::AnySubquery { .. }
-        | Expr::AllSubquery { .. }
         | Expr::AnyArray { .. }
-        | Expr::AllArray { .. }
-        | Expr::SubLink(_) => Some(SqlType::new(SqlTypeKind::Bool)),
+        | Expr::AllArray { .. } => Some(SqlType::new(SqlTypeKind::Bool)),
+        Expr::SubLink(sublink)
+            if matches!(
+                sublink.sublink_type,
+                SubLinkType::ExistsSubLink
+                    | SubLinkType::AnySubLink(_)
+                    | SubLinkType::AllSubLink(_)
+            ) =>
+        {
+            Some(SqlType::new(SqlTypeKind::Bool))
+        }
+        Expr::SubLink(sublink) => sublink
+            .subselect
+            .target_list
+            .first()
+            .map(|target| target.sql_type),
+        Expr::SubPlan(subplan)
+            if matches!(
+                subplan.sublink_type,
+                SubLinkType::ExistsSubLink
+                    | SubLinkType::AnySubLink(_)
+                    | SubLinkType::AllSubLink(_)
+            ) =>
+        {
+            Some(SqlType::new(SqlTypeKind::Bool))
+        }
+        Expr::SubPlan(subplan) => subplan.first_col_type,
         Expr::FuncCall { .. }
-        | Expr::ScalarSubquery(_)
         | Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::UnaryPlus(_)

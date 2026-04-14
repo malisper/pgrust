@@ -34,7 +34,7 @@ pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 pub(crate) use crate::include::nodes::plannodes::{
-    BoundFromPlan, BoundSelectPlan, DeferredSelectPlan,
+    BoundFromPlan, BoundSelectPlan,
 };
 use agg::*;
 use agg_output::*;
