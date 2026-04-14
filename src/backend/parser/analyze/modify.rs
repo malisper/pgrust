@@ -233,9 +233,9 @@ pub fn bind_insert(
             BoundInsertSource::DefaultValues(column_defaults.clone()),
         ),
         InsertSource::Select(select) => {
-            let (plan, _) =
-                bind_select_query_with_outer(select, catalog, &[], None, &local_ctes, &[])?;
-            let actual = plan.columns().len();
+            let (query, _) =
+                analyze_select_query_with_outer(select, catalog, &[], None, &local_ctes, &[])?;
+            let actual = query.columns().len();
             let target_columns = if let Some(columns) = &stmt.columns {
                 columns
                     .iter()
@@ -263,7 +263,7 @@ pub fn bind_insert(
             }
             (
                 target_columns,
-                BoundInsertSource::Select(Box::new(DeferredSelectPlan::Bound(Box::new(plan)))),
+                BoundInsertSource::Select(Box::new(DeferredSelectPlan::Bound(Box::new(query)))),
             )
         }
     };

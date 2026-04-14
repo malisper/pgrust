@@ -429,7 +429,7 @@ fn build_grouped_subquery_plan(
     let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
     child_outer.push(input_scope.clone());
     child_outer.extend_from_slice(outer_scopes);
-    let (plan, _) = bind_select_query_with_outer(
+    let (query, _) = analyze_select_query_with_outer(
         select,
         catalog,
         &child_outer,
@@ -440,5 +440,5 @@ fn build_grouped_subquery_plan(
         &[],
         &[],
     )?;
-    Ok(DeferredSelectPlan::Bound(Box::new(plan)))
+    Ok(DeferredSelectPlan::Bound(Box::new(query)))
 }

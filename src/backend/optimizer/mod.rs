@@ -4,11 +4,11 @@ use std::collections::HashMap;
 mod pathnodes;
 
 use crate::RelFileLocator;
-use crate::backend::parser::analyze::BoundSelectPlan;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::parsenodes::Query;
 use crate::include::nodes::pathnodes::{
     PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget,
     PlannerTargetEntry,
@@ -73,20 +73,20 @@ fn create_plan(path: PlannerPath) -> Plan {
 }
 
 pub(crate) fn standard_planner(
-    plan: BoundSelectPlan,
+    query: Query,
     catalog: &dyn CatalogLookup,
 ) -> PlannedStmt {
     PlannedStmt {
         command_type: CommandType::Select,
         plan_tree: finalize_plan_subqueries(
-            create_plan(optimize_path(PlannerPath::from_bound_select_plan(plan), catalog)),
+            create_plan(optimize_path(PlannerPath::from_query(query), catalog)),
             catalog,
         ),
     }
 }
 
-pub(crate) fn planner(plan: BoundSelectPlan, catalog: &dyn CatalogLookup) -> PlannedStmt {
-    standard_planner(plan, catalog)
+pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
+    standard_planner(query, catalog)
 }
 
 pub(crate) fn finalize_deferred_select_plan(
@@ -94,8 +94,8 @@ pub(crate) fn finalize_deferred_select_plan(
     catalog: &dyn CatalogLookup,
 ) -> DeferredSelectPlan {
     match plan {
-        DeferredSelectPlan::Bound(plan) => {
-            DeferredSelectPlan::Planned(Box::new(planner(*plan, catalog).plan_tree))
+        DeferredSelectPlan::Bound(query) => {
+            DeferredSelectPlan::Planned(Box::new(planner(*query, catalog).plan_tree))
         }
         DeferredSelectPlan::Planned(plan) => DeferredSelectPlan::Planned(plan),
     }
@@ -103,6 +103,7 @@ pub(crate) fn finalize_deferred_select_plan(
 
 pub(crate) fn finalize_expr_subqueries(expr: Expr, catalog: &dyn CatalogLookup) -> Expr {
     match expr {
+        Expr::Var(_) |
         Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::Const(_)
@@ -458,6 +459,9 @@ pub(crate) fn finalize_plan_subqueries(plan: Plan, catalog: &dyn CatalogLookup) 
                     name: target.name,
                     expr: finalize_expr_subqueries(target.expr, catalog),
                     sql_type: target.sql_type,
+                    resno: target.resno,
+                    ressortgroupref: target.ressortgroupref,
+                    resjunk: target.resjunk,
                 })
                 .collect(),
         },
@@ -517,6 +521,9 @@ pub(crate) fn finalize_plan_subqueries(plan: Plan, catalog: &dyn CatalogLookup) 
                             name: entry.name,
                             expr: finalize_expr_subqueries(entry.expr, catalog),
                             sql_type: entry.sql_type,
+                            resno: entry.resno,
+                            ressortgroupref: entry.ressortgroupref,
+                            resjunk: entry.resjunk,
                         })
                     }
                     ProjectSetTarget::Set {
@@ -1183,6 +1190,9 @@ fn restore_join_output_order(
             name: column.name.clone(),
             expr: expr.clone(),
             sql_type: column.sql_type,
+            resno: targets.len() + 1,
+            ressortgroupref: 0,
+            resjunk: false,
         });
     }
     for (column, expr) in right_columns.iter().zip(right_vars.iter()) {
@@ -1190,6 +1200,9 @@ fn restore_join_output_order(
             name: column.name.clone(),
             expr: expr.clone(),
             sql_type: column.sql_type,
+            resno: targets.len() + 1,
+            ressortgroupref: 0,
+            resjunk: false,
         });
     }
     let width = targets

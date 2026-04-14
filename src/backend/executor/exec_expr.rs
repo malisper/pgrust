@@ -85,6 +85,21 @@ pub fn eval_expr(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup > 0 {
+                let depth = var.varlevelsup - 1;
+                let index = var.varattno.saturating_sub(1);
+                ctx.outer_rows
+                    .get(depth)
+                    .and_then(|row| row.get(index))
+                    .cloned()
+                    .ok_or(ExecError::UnboundOuterColumn { depth, index })
+            } else {
+                let index = var.varattno.saturating_sub(1);
+                let val = slot.get_attr(index)?;
+                Ok(val.clone())
+            }
+        }
         Expr::Column(index) => {
             let val = slot.get_attr(*index)?;
             Ok(val.clone())
@@ -313,6 +328,16 @@ pub fn eval_expr(
 
 pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, ExecError> {
     match expr {
+        Expr::Var(var) => {
+            if var.varlevelsup == 0 {
+                Ok(slot.get_attr(var.varattno.saturating_sub(1))?.clone())
+            } else {
+                Err(ExecError::UnboundOuterColumn {
+                    depth: var.varlevelsup - 1,
+                    index: var.varattno.saturating_sub(1),
+                })
+            }
+        }
         Expr::Column(index) => Ok(slot.get_attr(*index)?.clone()),
         Expr::Const(value) => Ok(value.clone()),
         Expr::Add(left, right) => add_values(

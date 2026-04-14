@@ -148,6 +148,9 @@ pub struct PlannerTargetEntry {
     pub name: String,
     pub expr: PlannerJoinExpr,
     pub sql_type: SqlType,
+    pub resno: usize,
+    pub ressortgroupref: usize,
+    pub resjunk: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

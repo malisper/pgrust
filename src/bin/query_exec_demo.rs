@@ -151,16 +151,18 @@ fn main() -> Result<(), ExecError> {
             ),
         }),
         targets: vec![
-            TargetEntry {
-                name: "name".into(),
-                expr: Expr::Column(1),
-                sql_type: SqlType::new(SqlTypeKind::Text),
-            },
-            TargetEntry {
-                name: "note".into(),
-                expr: Expr::Column(2),
-                sql_type: SqlType::new(SqlTypeKind::Text),
-            },
+            TargetEntry::new(
+                "name",
+                Expr::Column(1),
+                SqlType::new(SqlTypeKind::Text),
+                1,
+            ),
+            TargetEntry::new(
+                "note",
+                Expr::Column(2),
+                SqlType::new(SqlTypeKind::Text),
+                2,
+            ),
         ],
     };
 

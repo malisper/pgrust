@@ -1,4 +1,9 @@
 use crate::include::nodes::datum::Value;
+use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::primnodes::{
+    AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
+    SortGroupClause, TargetEntry, ToastRelationRef,
+};
 use crate::include::nodes::plannodes::AggFunc;
 use std::fmt;
 
@@ -208,6 +213,76 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Query {
+    pub command_type: CommandType,
+    pub rtable: Vec<RangeTblEntry>,
+    pub jointree: Option<JoinTreeNode>,
+    pub target_list: Vec<TargetEntry>,
+    pub where_qual: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub accumulators: Vec<AggAccum>,
+    pub having_qual: Option<Expr>,
+    pub sort_clause: Vec<SortGroupClause>,
+    pub limit_count: Option<usize>,
+    pub limit_offset: usize,
+    pub project_set: Option<Vec<ProjectSetTarget>>,
+}
+
+impl Query {
+    pub fn columns(&self) -> Vec<QueryColumn> {
+        self.target_list
+            .iter()
+            .map(|target| QueryColumn {
+                name: target.name.clone(),
+                sql_type: target.sql_type,
+            })
+            .collect()
+    }
+
+    pub fn column_names(&self) -> Vec<String> {
+        self.columns().into_iter().map(|column| column.name).collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeTblEntry {
+    pub alias: Option<String>,
+    pub desc: RelationDesc,
+    pub kind: RangeTblEntryKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeTblEntryKind {
+    Result,
+    Relation {
+        rel: crate::RelFileLocator,
+        relation_oid: u32,
+        toast: Option<ToastRelationRef>,
+    },
+    Values {
+        rows: Vec<Vec<Expr>>,
+        output_columns: Vec<QueryColumn>,
+    },
+    Function {
+        call: SetReturningCall,
+    },
+    Subquery {
+        query: Box<Query>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JoinTreeNode {
+    RangeTblRef(usize),
+    JoinExpr {
+        left: Box<JoinTreeNode>,
+        right: Box<JoinTreeNode>,
+        kind: JoinType,
+        quals: Expr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
