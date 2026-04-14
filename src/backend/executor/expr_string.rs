@@ -108,11 +108,10 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_) => crate::backend::executor::render_geometry_text(
-            value,
-            Default::default(),
-        )
-        .unwrap_or_default(),
+        | Value::Circle(_) => {
+            crate::backend::executor::render_geometry_text(value, Default::default())
+                .unwrap_or_default()
+        }
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Date(_)
         | Value::Time(_)

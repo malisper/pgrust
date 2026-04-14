@@ -29,12 +29,11 @@ pub(crate) fn detoast_value_bytes(
     toast: &ToastFetchContext,
     bytes: &[u8],
 ) -> Result<Vec<u8>, ExecError> {
-    let pointer = decode_ondisk_toast_pointer(bytes).ok_or_else(|| {
-        ExecError::InvalidStorageValue {
+    let pointer =
+        decode_ondisk_toast_pointer(bytes).ok_or_else(|| ExecError::InvalidStorageValue {
             column: "<toast>".into(),
             details: "invalid on-disk toast pointer".into(),
-        }
-    })?;
+        })?;
     let toastrelid = pointer.va_toastrelid;
     let value_id = pointer.va_valueid;
     if toastrelid != toast.relation.relation_oid {
@@ -84,13 +83,12 @@ pub(crate) fn detoast_value_bytes(
                     details: "toast chunk_seq must be 4 bytes".into(),
                 }
             })?);
-            let chunk_data = values
-                .get(2)
-                .and_then(|value| *value)
-                .ok_or_else(|| ExecError::InvalidStorageValue {
+            let chunk_data = values.get(2).and_then(|value| *value).ok_or_else(|| {
+                ExecError::InvalidStorageValue {
                     column: "chunk_data".into(),
                     details: "toast chunk missing data".into(),
-                })?;
+                }
+            })?;
             chunks.push((chunk_seq, chunk_data.to_vec()));
         }
     }

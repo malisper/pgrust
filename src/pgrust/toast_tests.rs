@@ -49,7 +49,9 @@ fn count_toast_chunks(
     txn_ctx: Option<(TransactionId, CommandId)>,
     toast_oid: u32,
 ) -> usize {
-    let toast_entry = db.describe_relation_by_oid(client_id, txn_ctx, toast_oid).unwrap();
+    let toast_entry = db
+        .describe_relation_by_oid(client_id, txn_ctx, toast_oid)
+        .unwrap();
     let mut scan = heap_scan_begin(&db.pool, toast_entry.rel).unwrap();
     let mut count = 0;
     while heap_scan_next(&db.pool, client_id, &mut scan)

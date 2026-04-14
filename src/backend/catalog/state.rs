@@ -171,9 +171,8 @@ impl Catalog {
         let start = self
             .rewrites
             .partition_point(|row| row.ev_class < relation_oid);
-        let end = start
-            + self.rewrites[start..]
-                .partition_point(|row| row.ev_class == relation_oid);
+        let end =
+            start + self.rewrites[start..].partition_point(|row| row.ev_class == relation_oid);
         &self.rewrites[start..end]
     }
 
@@ -704,8 +703,9 @@ impl Catalog {
     }
 
     fn replace_constraint_rows_for_entry(&mut self, relation_name: &str, entry: &CatalogEntry) {
-        self.constraints
-            .retain(|row| !(row.conrelid == entry.relation_oid && row.contype == CONSTRAINT_NOTNULL));
+        self.constraints.retain(|row| {
+            !(row.conrelid == entry.relation_oid && row.contype == CONSTRAINT_NOTNULL)
+        });
         if entry.relkind != 'r' {
             return;
         }
@@ -751,7 +751,8 @@ fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), CatalogError> {
     let builtin_rows = builtin_type_rows();
     for column in &desc.columns {
         let present = builtin_rows.iter().any(|row| {
-            row.sql_type.kind == column.sql_type.kind && row.sql_type.is_array == column.sql_type.is_array
+            row.sql_type.kind == column.sql_type.kind
+                && row.sql_type.is_array == column.sql_type.is_array
         });
         if !present {
             return Err(CatalogError::UnknownType(format!(
@@ -868,7 +869,9 @@ mod tests {
                 column_desc("tstz", SqlType::new(SqlTypeKind::TimestampTz), true),
             ],
         };
-        let entry = catalog.create_table("dt_test", desc).expect("datetime create table");
+        let entry = catalog
+            .create_table("dt_test", desc)
+            .expect("datetime create table");
         assert_eq!(entry.desc.columns.len(), 5);
     }
 }

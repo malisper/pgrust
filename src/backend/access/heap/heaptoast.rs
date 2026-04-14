@@ -44,10 +44,7 @@ fn toast_relation_desc() -> RelationDesc {
     }
 }
 
-fn next_toast_value_id(
-    ctx: &ExecutorContext,
-    toast: ToastRelationRef,
-) -> Result<u32, ExecError> {
+fn next_toast_value_id(ctx: &ExecutorContext, toast: ToastRelationRef) -> Result<u32, ExecError> {
     let mut scan = heap_scan_begin(&ctx.pool, toast.rel)?;
     let desc = toast_relation_desc();
     let attr_descs = desc.attribute_descs();
@@ -122,10 +119,7 @@ pub(crate) fn store_external_value(
     Ok(StoredToastValue {
         pointer: VarattExternal {
             va_rawsize: i32::try_from(data.len().saturating_add(VARHDRSZ)).unwrap_or(i32::MAX),
-            va_extinfo: varatt_external_set_size_and_compression_method(
-                data.len() as u32,
-                0,
-            ),
+            va_extinfo: varatt_external_set_size_and_compression_method(data.len() as u32, 0),
             va_valueid: value_id,
             va_toastrelid: toast.relation_oid,
         },

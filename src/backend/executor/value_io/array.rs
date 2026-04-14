@@ -7,21 +7,23 @@ pub(crate) fn encode_array_bytes(
     element_type: SqlType,
     array: &ArrayValue,
 ) -> Result<Vec<u8>, ExecError> {
-    let element_oid =
-        builtin_type_oid_for_sql_type(element_type).ok_or_else(|| ExecError::InvalidStorageValue {
+    let element_oid = builtin_type_oid_for_sql_type(element_type).ok_or_else(|| {
+        ExecError::InvalidStorageValue {
             column: "<array>".into(),
             details: format!("unsupported array element type {:?}", element_type),
-        })?;
+        }
+    })?;
     encode_flat_array_bytes(element_type, element_oid, array, "<array>")
 }
 
 pub(crate) fn encode_anyarray_bytes(array: &ArrayValue) -> Result<Vec<u8>, ExecError> {
     let element_type = anyarray_element_type(array)?;
-    let element_oid =
-        builtin_type_oid_for_sql_type(element_type).ok_or_else(|| ExecError::InvalidStorageValue {
+    let element_oid = builtin_type_oid_for_sql_type(element_type).ok_or_else(|| {
+        ExecError::InvalidStorageValue {
             column: "<anyarray>".into(),
             details: format!("unsupported anyarray element type {:?}", element_type),
-        })?;
+        }
+    })?;
     encode_flat_array_bytes(element_type, element_oid, array, "<anyarray>")
 }
 
@@ -33,13 +35,14 @@ fn encode_flat_array_bytes(
 ) -> Result<Vec<u8>, ExecError> {
     let layout = array_element_layout(element_type, column)?;
     let item_count = validate_array_shape(array, column)?;
-    let has_nulls = array.elements.iter().any(|item| matches!(item, Value::Null));
+    let has_nulls = array
+        .elements
+        .iter()
+        .any(|item| matches!(item, Value::Null));
     let data_start = flat_array_data_start(array.dimensions.len(), item_count, has_nulls);
     let mut bytes = Vec::with_capacity(data_start);
     bytes.extend_from_slice(&(array.dimensions.len() as i32).to_le_bytes());
-    bytes.extend_from_slice(
-        &(if has_nulls { data_start as i32 } else { 0_i32 }).to_le_bytes(),
-    );
+    bytes.extend_from_slice(&(if has_nulls { data_start as i32 } else { 0_i32 }).to_le_bytes());
     bytes.extend_from_slice(&element_oid.to_le_bytes());
     for dim in &array.dimensions {
         let length = i32::try_from(dim.length).map_err(|_| ExecError::InvalidStorageValue {
@@ -237,12 +240,11 @@ fn decode_flat_array_header<'a>(
         });
     }
     let element_oid = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    let element_type = sql_type_for_builtin_oid(element_oid).ok_or_else(|| {
-        ExecError::InvalidStorageValue {
+    let element_type =
+        sql_type_for_builtin_oid(element_oid).ok_or_else(|| ExecError::InvalidStorageValue {
             column: column.into(),
             details: format!("unknown array element oid {}", element_oid),
-        }
-    })?;
+        })?;
     let dims_offset = FLAT_ARRAY_HEADER_LEN;
     let dims_bytes = ndim
         .checked_mul(4)
@@ -369,7 +371,8 @@ fn decode_array_bytes_internal(
     }
 
     Ok(Value::PgArray(
-        ArrayValue::from_dimensions(header.dimensions, items).with_element_type_oid(header.element_oid),
+        ArrayValue::from_dimensions(header.dimensions, items)
+            .with_element_type_oid(header.element_oid),
     ))
 }
 
@@ -410,9 +413,11 @@ fn decode_array_element_datum(
 
 fn anyarray_element_type(array: &ArrayValue) -> Result<SqlType, ExecError> {
     if let Some(element_oid) = array.element_type_oid {
-        return sql_type_for_builtin_oid(element_oid).ok_or_else(|| ExecError::InvalidStorageValue {
-            column: "<anyarray>".into(),
-            details: format!("unknown anyarray element oid {}", element_oid),
+        return sql_type_for_builtin_oid(element_oid).ok_or_else(|| {
+            ExecError::InvalidStorageValue {
+                column: "<anyarray>".into(),
+                details: format!("unknown anyarray element oid {}", element_oid),
+            }
         });
     }
     array
@@ -491,10 +496,7 @@ fn array_element_layout(
         SqlTypeKind::Int2Vector | SqlTypeKind::OidVector => {
             return Err(ExecError::InvalidStorageValue {
                 column: column.into(),
-                details: format!(
-                    "unsupported array element type {:?}",
-                    element_type.kind
-                ),
+                details: format!("unsupported array element type {:?}", element_type.kind),
             });
         }
     };
@@ -523,19 +525,24 @@ fn array_item_count_from_dimensions(
     if dimensions.is_empty() {
         return Ok(0);
     }
-    dimensions
-        .iter()
-        .try_fold(1usize, |count, dim| {
-            count.checked_mul(dim.length).ok_or_else(|| ExecError::InvalidStorageValue {
+    dimensions.iter().try_fold(1usize, |count, dim| {
+        count
+            .checked_mul(dim.length)
+            .ok_or_else(|| ExecError::InvalidStorageValue {
                 column: column.into(),
                 details: "array item count overflow".into(),
             })
-        })
+    })
 }
 
 fn flat_array_data_start(ndim: usize, item_count: usize, has_nulls: bool) -> usize {
-    let base =
-        FLAT_ARRAY_HEADER_LEN + ndim * 8 + if has_nulls { array_bitmap_len(item_count) } else { 0 };
+    let base = FLAT_ARRAY_HEADER_LEN
+        + ndim * 8
+        + if has_nulls {
+            array_bitmap_len(item_count)
+        } else {
+            0
+        };
     max_align(base)
 }
 

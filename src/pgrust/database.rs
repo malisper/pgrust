@@ -53,7 +53,9 @@ use crate::backend::utils::cache::lsyscache::{
 };
 use crate::backend::utils::cache::plancache::PlanCache;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
-use crate::backend::utils::cache::syscache::{SessionCatalogState, invalidate_session_catalog_state};
+use crate::backend::utils::cache::syscache::{
+    SessionCatalogState, invalidate_session_catalog_state,
+};
 use crate::include::catalog::PgConstraintRow;
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};

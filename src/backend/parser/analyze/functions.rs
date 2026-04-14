@@ -298,7 +298,10 @@ fn match_proc_arg_type(
     arg_type_match_cost(actual_type, declared_type).map(|cost| (cost, declared_type))
 }
 
-fn resolve_proc_result_type(row: &crate::include::catalog::PgProcRow, candidate: &CandidateMatch) -> Option<SqlType> {
+fn resolve_proc_result_type(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<SqlType> {
     match row.prorettype {
         ANYOID => resolve_anyelement_result_type(row, candidate),
         ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
@@ -312,7 +315,10 @@ fn resolve_anyelement_result_type(
 ) -> Option<SqlType> {
     let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
     let mut resolved = None;
-    for (declared_oid, actual_type) in declared_oids.into_iter().zip(candidate.declared_arg_types.iter().copied()) {
+    for (declared_oid, actual_type) in declared_oids
+        .into_iter()
+        .zip(candidate.declared_arg_types.iter().copied())
+    {
         let inferred = match declared_oid {
             ANYOID => Some(actual_type),
             ANYARRAYOID if actual_type.is_array => Some(actual_type.element_type()),
@@ -335,7 +341,10 @@ fn resolve_anyarray_result_type(
 ) -> Option<SqlType> {
     let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
     let mut resolved = None;
-    for (declared_oid, actual_type) in declared_oids.into_iter().zip(candidate.declared_arg_types.iter().copied()) {
+    for (declared_oid, actual_type) in declared_oids
+        .into_iter()
+        .zip(candidate.declared_arg_types.iter().copied())
+    {
         let inferred = match declared_oid {
             ANYARRAYOID if actual_type.is_array => Some(actual_type),
             ANYOID if !actual_type.is_array && actual_type.kind != SqlTypeKind::AnyArray => {
@@ -435,7 +444,17 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ArrayLower
             | BuiltinScalarFunction::Cardinality
             | BuiltinScalarFunction::ArrayNdims
-            | BuiltinScalarFunction::ArrayDims => args.len() == if matches!(func, BuiltinScalarFunction::ArrayLength | BuiltinScalarFunction::ArrayLower) { 2 } else { 1 },
+            | BuiltinScalarFunction::ArrayDims => {
+                args.len()
+                    == if matches!(
+                        func,
+                        BuiltinScalarFunction::ArrayLength | BuiltinScalarFunction::ArrayLower
+                    ) {
+                        2
+                    } else {
+                        1
+                    }
+            }
             BuiltinScalarFunction::Concat => true,
             BuiltinScalarFunction::ConcatWs => !args.is_empty(),
             BuiltinScalarFunction::Format => !args.is_empty(),
@@ -501,8 +520,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ArrayToString
             | BuiltinScalarFunction::ArrayPosition
             | BuiltinScalarFunction::ArraySort => matches!(args.len(), 2 | 3),
-            BuiltinScalarFunction::ArrayPositions
-            | BuiltinScalarFunction::ArrayRemove => args.len() == 2,
+            BuiltinScalarFunction::ArrayPositions | BuiltinScalarFunction::ArrayRemove => {
+                args.len() == 2
+            }
             BuiltinScalarFunction::ArrayReplace => args.len() == 3,
             BuiltinScalarFunction::Gcd | BuiltinScalarFunction::Lcm => args.len() == 2,
             BuiltinScalarFunction::BTrim
@@ -1312,19 +1332,28 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::ArrayNdims)
         {
-            by_func.push((BuiltinScalarFunction::ArrayNdims, SqlType::new(SqlTypeKind::Int4)));
+            by_func.push((
+                BuiltinScalarFunction::ArrayNdims,
+                SqlType::new(SqlTypeKind::Int4),
+            ));
         }
         if by_func
             .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::ArrayDims)
         {
-            by_func.push((BuiltinScalarFunction::ArrayDims, SqlType::new(SqlTypeKind::Text)));
+            by_func.push((
+                BuiltinScalarFunction::ArrayDims,
+                SqlType::new(SqlTypeKind::Text),
+            ));
         }
         if by_func
             .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::ArrayLower)
         {
-            by_func.push((BuiltinScalarFunction::ArrayLower, SqlType::new(SqlTypeKind::Int4)));
+            by_func.push((
+                BuiltinScalarFunction::ArrayLower,
+                SqlType::new(SqlTypeKind::Int4),
+            ));
         }
         for func in [
             BuiltinScalarFunction::Now,
@@ -1340,7 +1369,10 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::TimeOfDay)
         {
-            by_func.push((BuiltinScalarFunction::TimeOfDay, SqlType::new(SqlTypeKind::Text)));
+            by_func.push((
+                BuiltinScalarFunction::TimeOfDay,
+                SqlType::new(SqlTypeKind::Text),
+            ));
         }
         by_func
     })

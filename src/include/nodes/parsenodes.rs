@@ -79,7 +79,10 @@ impl fmt::Display for ParseError {
                 write!(f, "column reference \"{name}\" is ambiguous")
             }
             ParseError::InvalidFromClauseReference(name) => {
-                write!(f, "invalid reference to FROM-clause entry for table \"{name}\"")
+                write!(
+                    f,
+                    "invalid reference to FROM-clause entry for table \"{name}\""
+                )
             }
             ParseError::MissingFromClauseEntry(name) => {
                 write!(f, "missing FROM-clause entry for table \"{name}\"")
@@ -555,12 +558,8 @@ pub enum CreateTableElement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TableConstraint {
-    PrimaryKey {
-        columns: Vec<String>,
-    },
-    Unique {
-        columns: Vec<String>,
-    },
+    PrimaryKey { columns: Vec<String> },
+    Unique { columns: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

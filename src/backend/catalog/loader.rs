@@ -21,10 +21,9 @@ use crate::backend::catalog::rowcodec::{
     pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
     pg_index_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
     pg_operator_row_from_values, pg_opfamily_row_from_values, pg_proc_row_from_values,
-    pg_rewrite_row_from_values, pg_statistic_row_from_values,
-    pg_tablespace_row_from_values, pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
-    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
-    pg_type_row_from_values,
+    pg_rewrite_row_from_values, pg_statistic_row_from_values, pg_tablespace_row_from_values,
+    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
+    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;

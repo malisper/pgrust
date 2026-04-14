@@ -757,10 +757,22 @@ pub(super) fn bind_agg_output_expr_in_clause(
             n_keys,
         ),
         SqlExpr::ArrayOverlap(l, r) => {
-            let raw_left_type =
-                infer_sql_expr_type_with_ctes(l, input_scope, catalog, outer_scopes, grouped_outer, &[]);
-            let raw_right_type =
-                infer_sql_expr_type_with_ctes(r, input_scope, catalog, outer_scopes, grouped_outer, &[]);
+            let raw_left_type = infer_sql_expr_type_with_ctes(
+                l,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                &[],
+            );
+            let raw_right_type = infer_sql_expr_type_with_ctes(
+                r,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                &[],
+            );
             let left = bind_agg_output_expr(
                 l,
                 group_by_exprs,

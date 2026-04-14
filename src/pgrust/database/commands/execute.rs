@@ -29,21 +29,18 @@ impl Database {
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
-            Statement::Analyze(ref analyze_stmt) => {
-                self.execute_analyze_stmt_with_search_path(
-                    client_id,
-                    analyze_stmt,
-                    configured_search_path,
-                )
-            }
-            Statement::CreateIndex(ref create_stmt) => {
-                self.execute_create_index_stmt_with_search_path(
+            Statement::Analyze(ref analyze_stmt) => self.execute_analyze_stmt_with_search_path(
+                client_id,
+                analyze_stmt,
+                configured_search_path,
+            ),
+            Statement::CreateIndex(ref create_stmt) => self
+                .execute_create_index_stmt_with_search_path(
                     client_id,
                     create_stmt,
                     configured_search_path,
                     65_536,
-                )
-            }
+                ),
             Statement::AlterTableAddColumn(ref alter_stmt) => self
                 .execute_alter_table_add_column_stmt_with_search_path(
                     client_id,
@@ -199,27 +196,26 @@ impl Database {
                 self.table_locks.unlock_table(rel, client_id);
                 result
             }
-            Statement::CreateTable(ref create_stmt) => {
-                self.execute_create_table_stmt_with_search_path(
+            Statement::CreateTable(ref create_stmt) => self
+                .execute_create_table_stmt_with_search_path(
                     client_id,
                     create_stmt,
                     configured_search_path,
-                )
-            }
-            Statement::CreateView(ref create_stmt) => self.execute_create_view_stmt_with_search_path(
-                client_id,
-                create_stmt,
-                configured_search_path,
-            ),
-            Statement::CreateTableAs(ref create_stmt) => {
-                self.execute_create_table_as_stmt_with_search_path(
+                ),
+            Statement::CreateView(ref create_stmt) => self
+                .execute_create_view_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
+            Statement::CreateTableAs(ref create_stmt) => self
+                .execute_create_table_as_stmt_with_search_path(
                     client_id,
                     create_stmt,
                     None,
                     0,
                     configured_search_path,
-                )
-            }
+                ),
             Statement::DropTable(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);

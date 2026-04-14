@@ -283,7 +283,7 @@ fn visit_nested_srfs(expr: &SqlExpr, info: &mut TargetSrfInfo) {
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
         | SqlExpr::PrefixOperator { expr: inner, .. }
         | SqlExpr::FieldSelect { expr: inner, .. } => visit_nested_srfs(inner, info),
-        | SqlExpr::Subscript { expr: inner, .. } => visit_nested_srfs(inner, info),
+        SqlExpr::Subscript { expr: inner, .. } => visit_nested_srfs(inner, info),
         SqlExpr::ArraySubscript { array, subscripts } => {
             visit_nested_srfs(array, info);
             for subscript in subscripts {

@@ -838,11 +838,14 @@ fn eval_geo_circle(values: &[Value]) -> Result<Value, ExecError> {
             Ok(Value::Circle(make_circle(center.clone(), *radius as f64)?))
         }
         [Value::Point(center), Value::Numeric(radius)] => {
-            let radius = radius.render().parse::<f64>().map_err(|_| ExecError::TypeMismatch {
-                op: "circle",
-                left: Value::Point(center.clone()),
-                right: Value::Numeric(radius.clone()),
-            })?;
+            let radius = radius
+                .render()
+                .parse::<f64>()
+                .map_err(|_| ExecError::TypeMismatch {
+                    op: "circle",
+                    left: Value::Point(center.clone()),
+                    right: Value::Numeric(radius.clone()),
+                })?;
             Ok(Value::Circle(make_circle(center.clone(), radius)?))
         }
         [Value::Box(geo_box)] => Ok(Value::Circle(box_to_circle(geo_box))),
@@ -1725,7 +1728,10 @@ fn point_mul(left: &GeoPoint, right: &GeoPoint) -> Result<GeoPoint, ExecError> {
 }
 
 fn point_div(left: &GeoPoint, right: &GeoPoint) -> Result<GeoPoint, ExecError> {
-    let div = checked_sum(checked_mul(right.x, right.x)?, checked_mul(right.y, right.y)?)?;
+    let div = checked_sum(
+        checked_mul(right.x, right.x)?,
+        checked_mul(right.y, right.y)?,
+    )?;
     let x = checked_div(checked_mul_add(left.x, right.x, left.y, right.y)?, div)?;
     let y = checked_div(checked_mul_sub(left.y, right.x, left.x, right.y)?, div)?;
     Ok(GeoPoint { x, y })
@@ -2227,16 +2233,16 @@ fn line_intersection(left: &GeoLine, right: &GeoLine) -> Option<GeoPoint> {
         if fp_eq(right.a, left.a * (right.b / left.b)) {
             return None;
         }
-        let x = ((left.b * right.c) - (right.b * left.c))
-            / ((left.a * right.b) - (right.a * left.b));
+        let x =
+            ((left.b * right.c) - (right.b * left.c)) / ((left.a * right.b) - (right.a * left.b));
         let y = -((left.a * x) + left.c) / left.b;
         (x, y)
     } else if !fp_zero(right.b) {
         if fp_eq(left.a, right.a * (left.b / right.b)) {
             return None;
         }
-        let x = ((right.b * left.c) - (left.b * right.c))
-            / ((right.a * left.b) - (left.a * right.b));
+        let x =
+            ((right.b * left.c) - (left.b * right.c)) / ((right.a * left.b) - (left.a * right.b));
         let y = -((right.a * x) + right.c) / right.b;
         (x, y)
     } else {
@@ -2252,8 +2258,7 @@ fn line_distance(left: &GeoLine, right: &GeoLine) -> f64 {
     if line_intersection(left, right).is_some() {
         return 0.0;
     }
-    let ratio = if !fp_zero(left.a) && !left.a.is_nan() && !fp_zero(right.a) && !right.a.is_nan()
-    {
+    let ratio = if !fp_zero(left.a) && !left.a.is_nan() && !fp_zero(right.a) && !right.a.is_nan() {
         left.a / right.a
     } else if !fp_zero(left.b) && !left.b.is_nan() && !fp_zero(right.b) && !right.b.is_nan() {
         left.b / right.b

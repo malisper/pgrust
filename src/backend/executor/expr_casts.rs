@@ -3,10 +3,10 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, parse_bit_text, render_bit_text};
 use super::expr_bool::cast_integer_to_bool;
 use super::expr_bool::parse_pg_bool_text;
+use super::expr_datetime::{apply_time_precision, render_datetime_value_text};
 use super::expr_geometry::{
     cast_geometry_value, geometry_input_error_message, parse_geometry_text,
 };
-use super::expr_datetime::{apply_time_precision, render_datetime_value_text};
 use super::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{parse_jsonb_text, render_jsonb_bytes};
@@ -324,12 +324,15 @@ pub(crate) fn parse_text_array_literal_with_options(
             });
         }
     };
-    let array = ArrayValue::from_nested_values(nested, bounds.lower_bounds.clone()).map_err(|_| {
-        invalid_array_literal(
-            raw,
-            Some("Multidimensional arrays must have sub-arrays with matching dimensions.".into()),
-        )
-    })?;
+    let array =
+        ArrayValue::from_nested_values(nested, bounds.lower_bounds.clone()).map_err(|_| {
+            invalid_array_literal(
+                raw,
+                Some(
+                    "Multidimensional arrays must have sub-arrays with matching dimensions.".into(),
+                ),
+            )
+        })?;
     if let Some(expected_lengths) = &bounds.lengths
         && (expected_lengths.len() != array.dimensions.len()
             || expected_lengths
