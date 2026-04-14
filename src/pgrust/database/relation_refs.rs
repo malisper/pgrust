@@ -210,12 +210,40 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
         Plan::SeqScan { rel, .. } | Plan::IndexScan { rel, .. } => {
             rels.insert(*rel);
         }
+        Plan::Hash {
+            input, hash_keys, ..
+        } => {
+            collect_rels_from_plan(input, rels);
+            for expr in hash_keys {
+                collect_rels_from_expr(expr, rels);
+            }
+        }
         Plan::NestedLoopJoin {
             left, right, on, ..
         } => {
             collect_rels_from_plan(left, rels);
             collect_rels_from_plan(right, rels);
             collect_rels_from_expr(on, rels);
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            ..
+        } => {
+            collect_rels_from_plan(left, rels);
+            collect_rels_from_plan(right, rels);
+            for expr in hash_clauses {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in hash_keys {
+                collect_rels_from_expr(expr, rels);
+            }
+            if let Some(expr) = join_qual {
+                collect_rels_from_expr(expr, rels);
+            }
         }
         Plan::Filter {
             input, predicate, ..

@@ -84,12 +84,26 @@ pub enum Plan {
         keys: Vec<ScanKeyData>,
         direction: ScanDirection,
     },
+    Hash {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        hash_keys: Vec<Expr>,
+    },
     NestedLoopJoin {
         plan_info: PlanEstimate,
         left: Box<Plan>,
         right: Box<Plan>,
         kind: JoinType,
         on: Expr,
+    },
+    HashJoin {
+        plan_info: PlanEstimate,
+        left: Box<Plan>,
+        right: Box<Plan>,
+        kind: JoinType,
+        hash_clauses: Vec<Expr>,
+        hash_keys: Vec<Expr>,
+        join_qual: Option<Expr>,
     },
     Filter {
         plan_info: PlanEstimate,
@@ -142,7 +156,9 @@ impl Plan {
             Plan::Result { plan_info }
             | Plan::SeqScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
+            | Plan::Hash { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
+            | Plan::HashJoin { plan_info, .. }
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
             | Plan::Limit { plan_info, .. }
@@ -159,7 +175,9 @@ impl Plan {
             Plan::Result { plan_info }
             | Plan::SeqScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
+            | Plan::Hash { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
+            | Plan::HashJoin { plan_info, .. }
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
             | Plan::Limit { plan_info, .. }
@@ -190,6 +208,7 @@ impl Plan {
                     sql_type: c.sql_type,
                 })
                 .collect(),
+            Plan::Hash { input, .. } => input.columns(),
             Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. } => input.columns(),
@@ -201,7 +220,7 @@ impl Plan {
                 })
                 .collect(),
             Plan::Aggregate { output_columns, .. } => output_columns.clone(),
-            Plan::NestedLoopJoin { left, right, .. } => {
+            Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());
                 cols

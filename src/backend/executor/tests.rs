@@ -143,6 +143,45 @@ fn catalog_with_pets() -> Catalog {
     catalog
 }
 
+fn people_scan_plan() -> Plan {
+    Plan::SeqScan {
+        plan_info: PlanEstimate::default(),
+        rel: rel(),
+        relation_oid: 0,
+        toast: None,
+        desc: relation_desc(),
+    }
+}
+
+fn pets_scan_plan() -> Plan {
+    Plan::SeqScan {
+        plan_info: PlanEstimate::default(),
+        rel: pets_rel(),
+        relation_oid: 0,
+        toast: None,
+        desc: pets_relation_desc(),
+    }
+}
+
+fn people_pets_hash_join_plan(kind: JoinType, join_qual: Option<Expr>) -> Plan {
+    Plan::HashJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(people_scan_plan()),
+        right: Box::new(Plan::Hash {
+            plan_info: PlanEstimate::default(),
+            input: Box::new(pets_scan_plan()),
+            hash_keys: vec![Expr::Column(2)],
+        }),
+        kind,
+        hash_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![Expr::Column(0), Expr::Column(5)],
+        )],
+        hash_keys: vec![Expr::Column(0)],
+        join_qual,
+    }
+}
+
 fn multidimensional_array_catalog() -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert(
@@ -499,6 +538,13 @@ fn run_plan(
     Ok(rows)
 }
 
+fn explain_lines(plan: Plan) -> Vec<String> {
+    let state = executor_start(plan);
+    let mut lines = Vec::new();
+    crate::backend::commands::explain::format_explain_lines(state.as_ref(), 0, false, &mut lines);
+    lines
+}
+
 fn run_sql(
     base: &PathBuf,
     txns: &TransactionManager,
@@ -805,6 +851,328 @@ fn seqscan_skips_superseded_versions() {
             ]
         )]
     );
+}
+
+#[test]
+fn manual_hash_join_inner_returns_matching_rows() {
+    let base = temp_dir("manual_hash_join_inner");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Inner, None)),
+        targets: vec![
+            TargetEntry::new(
+                "person_id",
+                Expr::Column(0),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                Expr::Column(3),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Int32(12)],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_hash_join_left_emits_null_extended_rows() {
+    let base = temp_dir("manual_hash_join_left");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Left, None)),
+        targets: vec![
+            TargetEntry::new(
+                "person_id",
+                Expr::Column(0),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                Expr::Column(3),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Int32(12)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(3), Value::Null],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_hash_join_right_emits_unmatched_inner_rows() {
+    let base = temp_dir("manual_hash_join_right");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Right, None)),
+        targets: vec![
+            TargetEntry::new(
+                "person_id",
+                Expr::Column(0),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                Expr::Column(3),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Int32(12)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Null, Value::Int32(13)],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
+    let base = temp_dir("manual_hash_join_full");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Full, None)),
+        targets: vec![
+            TargetEntry::new(
+                "person_id",
+                Expr::Column(0),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                Expr::Column(3),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(10)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Int32(12)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(3), Value::Null],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Null, Value::Int32(13)],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
+    let base = temp_dir("manual_hash_join_null_keys");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let int4 = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4);
+    let output_columns = vec![QueryColumn {
+        name: "id".into(),
+        sql_type: int4,
+    }];
+
+    let plan = Plan::HashJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![
+                vec![Expr::Const(Value::Null)],
+                vec![Expr::Const(Value::Int32(1))],
+            ],
+            output_columns: output_columns.clone(),
+        }),
+        right: Box::new(Plan::Hash {
+            plan_info: PlanEstimate::default(),
+            input: Box::new(Plan::Values {
+                plan_info: PlanEstimate::default(),
+                rows: vec![
+                    vec![Expr::Const(Value::Null)],
+                    vec![Expr::Const(Value::Int32(1))],
+                ],
+                output_columns,
+            }),
+            hash_keys: vec![Expr::Column(0)],
+        }),
+        kind: JoinType::Inner,
+        hash_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![Expr::Column(0), Expr::Column(1)],
+        )],
+        hash_keys: vec![Expr::Column(0)],
+        join_qual: None,
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![(
+            vec!["id".into(), "id".into()],
+            vec![Value::Int32(1), Value::Int32(1)],
+        )]
+    );
+}
+
+#[test]
+fn manual_hash_join_join_qual_preserves_left_outer_fill() {
+    let base = temp_dir("manual_hash_join_join_qual");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    seed_people_and_pets(&base, &mut txns);
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(
+            JoinType::Left,
+            Some(Expr::op_auto(
+                crate::include::nodes::primnodes::OpExprKind::Eq,
+                vec![Expr::Column(3), Expr::Const(Value::Int32(11))],
+            )),
+        )),
+        targets: vec![
+            TargetEntry::new(
+                "person_id",
+                Expr::Column(0),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                1,
+            ),
+            TargetEntry::new(
+                "pet_id",
+                Expr::Column(3),
+                crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                2,
+            ),
+        ],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(1), Value::Int32(11)],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(2), Value::Null],
+            ),
+            (
+                vec!["person_id".into(), "pet_id".into()],
+                vec![Value::Int32(3), Value::Null],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn manual_hash_join_explain_formats_hash_child() {
+    let lines = explain_lines(people_pets_hash_join_plan(JoinType::Inner, None));
+    assert!(lines.first().is_some_and(|line| line.contains("Hash Join")));
+    assert!(lines.iter().any(|line| line.contains("Hash  (cost=")));
+}
+
+#[test]
+#[should_panic(expected = "HashJoin right child must be Plan::Hash")]
+fn manual_hash_join_rejects_non_hash_inner_plan() {
+    let _ = executor_start(Plan::HashJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(people_scan_plan()),
+        right: Box::new(pets_scan_plan()),
+        kind: JoinType::Inner,
+        hash_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![Expr::Column(0), Expr::Column(5)],
+        )],
+        hash_keys: vec![Expr::Column(0)],
+        join_qual: None,
+    });
 }
 
 #[test]
