@@ -9,16 +9,27 @@ pub(crate) fn format_explain_lines(
 ) {
     let prefix = "  ".repeat(indent);
     let label = state.node_label();
+    let plan_info = state.plan_info();
     if analyze {
         let stats = state.node_stats();
         lines.push(format!(
-            "{prefix}{label} (actual rows={} loops={} time={:.3} ms)",
+            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={}) (actual rows={} loops={} time={:.3} ms)",
+            plan_info.startup_cost.as_f64(),
+            plan_info.total_cost.as_f64(),
+            plan_info.plan_rows.as_f64().round() as u64,
+            plan_info.plan_width,
             stats.rows,
             stats.loops,
             stats.total_time.as_secs_f64() * 1000.0
         ));
     } else {
-        lines.push(format!("{prefix}{label}"));
+        lines.push(format!(
+            "{prefix}{label}  (cost={:.2}..{:.2} rows={} width={})",
+            plan_info.startup_cost.as_f64(),
+            plan_info.total_cost.as_f64(),
+            plan_info.plan_rows.as_f64().round() as u64,
+            plan_info.plan_width
+        ));
     }
 
     state.explain_children(indent, analyze, lines);

@@ -14,148 +14,15 @@ struct IndexableQual {
     column: usize,
     strategy: u16,
     argument: Value,
-    expr: Expr,
 }
 
 #[derive(Debug, Clone)]
 struct ChosenIndexPath {
     index: BoundIndexRelation,
     keys: Vec<crate::include::access::scankey::ScanKeyData>,
-    residual: Option<Expr>,
-    direction: crate::include::access::relscan::ScanDirection,
     has_qual: bool,
     usable_prefix: usize,
     removes_order: bool,
-}
-
-pub(super) fn maybe_rewrite_index_scan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
-    let (rel, relation_oid, toast, desc, filter, order_items) = match plan {
-        Plan::SeqScan {
-            rel,
-            relation_oid,
-            toast,
-            desc,
-        } => (rel, relation_oid, toast, desc, None, None),
-        Plan::Filter { input, predicate } => match *input {
-            Plan::SeqScan {
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            } => (rel, relation_oid, toast, desc, Some(predicate), None),
-            other => {
-                return Plan::Filter {
-                    input: Box::new(other),
-                    predicate,
-                };
-            }
-        },
-        Plan::OrderBy { input, items } => match *input {
-            Plan::SeqScan {
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            } => (rel, relation_oid, toast, desc, None, Some(items)),
-            Plan::Filter { input, predicate } => match *input {
-                Plan::SeqScan {
-                    rel,
-                    relation_oid,
-                    toast,
-                    desc,
-                } => (rel, relation_oid, toast, desc, Some(predicate), Some(items)),
-                other => {
-                    return Plan::OrderBy {
-                        input: Box::new(Plan::Filter {
-                            input: Box::new(other),
-                            predicate,
-                        }),
-                        items,
-                    };
-                }
-            },
-            other => {
-                return Plan::OrderBy {
-                    input: Box::new(other),
-                    items,
-                };
-            }
-        },
-        other => return other,
-    };
-
-    let indexes = catalog.index_relations_for_heap(relation_oid);
-    choose_index_scan(rel, relation_oid, toast, desc, filter, order_items, indexes)
-}
-
-fn rebuild_scan_plan(
-    rel: RelFileLocator,
-    relation_oid: u32,
-    toast: Option<ToastRelationRef>,
-    desc: RelationDesc,
-    filter: Option<Expr>,
-    order_items: Option<Vec<OrderByEntry>>,
-) -> Plan {
-    let mut plan = Plan::SeqScan {
-        rel,
-        relation_oid,
-        toast,
-        desc,
-    };
-    if let Some(predicate) = filter {
-        plan = Plan::Filter {
-            input: Box::new(plan),
-            predicate,
-        };
-    }
-    if let Some(items) = order_items {
-        plan = Plan::OrderBy {
-            input: Box::new(plan),
-            items,
-        };
-    }
-    plan
-}
-
-fn choose_index_scan(
-    rel: RelFileLocator,
-    relation_oid: u32,
-    toast: Option<ToastRelationRef>,
-    desc: RelationDesc,
-    filter: Option<Expr>,
-    order_items: Option<Vec<OrderByEntry>>,
-    indexes: Vec<BoundIndexRelation>,
-) -> Plan {
-    let Some(chosen) = choose_index_path(filter.as_ref(), order_items.as_deref(), &indexes) else {
-        return rebuild_scan_plan(rel, relation_oid, toast, desc, filter, order_items);
-    };
-
-    let mut plan = Plan::IndexScan {
-        rel,
-        index_rel: chosen.index.rel,
-        am_oid: chosen.index.index_meta.am_oid,
-        toast,
-        desc: desc.clone(),
-        index_meta: chosen.index.index_meta.clone(),
-        keys: chosen.keys,
-        direction: chosen.direction,
-    };
-    if let Some(predicate) = chosen.residual {
-        plan = Plan::Filter {
-            input: Box::new(plan),
-            predicate,
-        };
-    }
-    if !chosen.removes_order
-        && let Some(items) = order_items
-    {
-        plan = Plan::OrderBy {
-            input: Box::new(plan),
-            items,
-        };
-    }
-
-    plan
 }
 
 fn choose_index_path(
@@ -218,33 +85,9 @@ fn choose_index_path(
         if !has_qual && order_match.is_none() {
             continue;
         }
-        let residual = {
-            let used_exprs = parsed_quals
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, qual)| {
-                    used.get(idx)
-                        .copied()
-                        .unwrap_or(false)
-                        .then_some(&qual.expr)
-                })
-                .collect::<Vec<_>>();
-            let residual = conjuncts
-                .iter()
-                .filter(|expr| !used_exprs.iter().any(|used_expr| *used_expr == *expr))
-                .cloned()
-                .collect::<Vec<_>>();
-            and_exprs(residual)
-        };
-
         let chosen = ChosenIndexPath {
             index: index.clone(),
             keys,
-            residual,
-            direction: order_match
-                .as_ref()
-                .map(|(_, direction)| *direction)
-                .unwrap_or(crate::include::access::relscan::ScanDirection::Forward),
             has_qual,
             usable_prefix,
             removes_order: order_match.is_some(),
@@ -339,55 +182,42 @@ fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
 }
 
 fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
-    fn mk(column: usize, strategy: u16, argument: &Value, expr: &Expr) -> Option<IndexableQual> {
+    fn mk(column: usize, strategy: u16, argument: &Value) -> Option<IndexableQual> {
         Some(IndexableQual {
             column,
             strategy,
             argument: argument.clone(),
-            expr: expr.clone(),
         })
     }
 
     match expr {
         Expr::Eq(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 3, value, expr),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 3, value, expr),
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 3, value),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 3, value),
             _ => None,
         },
         Expr::Lt(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 1, value, expr),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 5, value, expr),
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 1, value),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 5, value),
             _ => None,
         },
         Expr::LtEq(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 2, value, expr),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 4, value, expr),
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 2, value),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 4, value),
             _ => None,
         },
         Expr::Gt(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 5, value, expr),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 1, value, expr),
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 5, value),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 1, value),
             _ => None,
         },
         Expr::GtEq(left, right) => match (&**left, &**right) {
-            (Expr::Column(column), Expr::Const(value)) => mk(*column, 4, value, expr),
-            (Expr::Const(value), Expr::Column(column)) => mk(*column, 2, value, expr),
+            (Expr::Column(column), Expr::Const(value)) => mk(*column, 4, value),
+            (Expr::Const(value), Expr::Column(column)) => mk(*column, 2, value),
             _ => None,
         },
         _ => None,
     }
-}
-
-fn and_exprs(mut exprs: Vec<Expr>) -> Option<Expr> {
-    if exprs.is_empty() {
-        return None;
-    }
-    let first = exprs.remove(0);
-    Some(
-        exprs
-            .into_iter()
-            .fold(first, |acc, expr| Expr::And(Box::new(acc), Box::new(expr))),
-    )
 }
 
 pub(super) fn bind_order_by_items(

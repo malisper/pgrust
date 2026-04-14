@@ -33,6 +33,7 @@ pub(super) fn bind_builtin_system_view(
 
         return Some((
             Plan::Values {
+                plan_info: crate::backend::executor::PlanEstimate::default(),
                 rows,
                 output_columns,
             },
@@ -119,6 +120,7 @@ pub(super) fn bind_builtin_system_view(
 
     Some((
         Plan::Values {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             rows,
             output_columns,
         },

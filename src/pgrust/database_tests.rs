@@ -270,7 +270,9 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table analyze_t(a int4, b text)").unwrap();
+    session
+        .execute(&db, "create table analyze_t(a int4, b text)")
+        .unwrap();
     session
         .execute(
             &db,
@@ -357,7 +359,9 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table stats_view_t(a int4, b text)").unwrap();
+    session
+        .execute(&db, "create table stats_view_t(a int4, b text)")
+        .unwrap();
     session
         .execute(
             &db,
@@ -429,9 +433,11 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
          order by 1",
     );
     assert!(!histogram_dims.is_empty());
-    assert!(histogram_dims
-        .iter()
-        .all(|row| row.as_slice() == [Value::Int32(1)]));
+    assert!(
+        histogram_dims
+            .iter()
+            .all(|row| row.as_slice() == [Value::Int32(1)])
+    );
 }
 
 #[test]
@@ -444,10 +450,7 @@ fn create_view_selects_and_persists_rewrite_rule() {
         .execute(&db, "create table items(id int4, name text)")
         .unwrap();
     session
-        .execute(
-            &db,
-            "insert into items values (1, 'alpha'), (2, 'beta')",
-        )
+        .execute(&db, "insert into items values (1, 'alpha'), (2, 'beta')")
         .unwrap();
     session
         .execute(&db, "create view item_names as select id, name from items")
@@ -480,7 +483,9 @@ fn nested_views_and_pg_views_work() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table base_items(id int4)").unwrap();
+    session
+        .execute(&db, "create table base_items(id int4)")
+        .unwrap();
     session
         .execute(&db, "insert into base_items values (1), (2), (3)")
         .unwrap();
@@ -556,7 +561,9 @@ fn dependent_views_block_alter_and_drop() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table base_items(id int4)").unwrap();
+    session
+        .execute(&db, "create table base_items(id int4)")
+        .unwrap();
     session
         .execute(&db, "create view base_view as select id from base_items")
         .unwrap();
@@ -580,7 +587,9 @@ fn drop_view_rejects_depended_on_view() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table base_items(id int4)").unwrap();
+    session
+        .execute(&db, "create table base_items(id int4)")
+        .unwrap();
     session
         .execute(&db, "create view first_view as select id from base_items")
         .unwrap();
@@ -1576,7 +1585,9 @@ fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
 
     let lines = explain_lines(&db, 1, "select * from pg_proc where proname ~ 'abc'");
     assert!(
-        lines.iter().any(|line| line == "Seq Scan on pg_proc"),
+        lines
+            .iter()
+            .any(|line| line.starts_with("Seq Scan on pg_proc  (cost=")),
         "expected bootstrap relation name in EXPLAIN, got {lines:?}"
     );
     assert!(
@@ -1584,6 +1595,89 @@ fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
             .iter()
             .any(|line| line == "  Filter: (proname ~ 'abc'::text)"),
         "expected pushed-down seqscan filter in EXPLAIN, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_inner_join_can_reorder_commutative_inputs() {
+    let base = temp_dir("explain_inner_join_reorder");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table big_items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "create table small_items (id int4 not null, note text)")
+        .unwrap();
+
+    for id in 0..64 {
+        db.execute(
+            1,
+            &format!("insert into big_items values ({id}, 'big{id}')"),
+        )
+        .unwrap();
+    }
+    for id in 0..4 {
+        db.execute(
+            1,
+            &format!("insert into small_items values ({id}, 'small{id}')"),
+        )
+        .unwrap();
+    }
+
+    db.execute(1, "analyze big_items").unwrap();
+    db.execute(1, "analyze small_items").unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "select * from big_items join small_items on big_items.id = small_items.id",
+    );
+    let big_rel = relfilenode_for(&db, 1, "big_items");
+    let small_rel = relfilenode_for(&db, 1, "small_items");
+    let big_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {big_rel}")))
+        .unwrap();
+    let small_pos = lines
+        .iter()
+        .position(|line| line.contains(&format!("Seq Scan on rel {small_rel}")))
+        .unwrap();
+    assert!(
+        small_pos < big_pos,
+        "expected smaller relation to be scanned first after join reordering, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from big_items join small_items on big_items.id = small_items.id order by 1",
+        ),
+        vec![
+            vec![
+                Value::Int32(0),
+                Value::Text("big0".into()),
+                Value::Int32(0),
+                Value::Text("small0".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("big1".into()),
+                Value::Int32(1),
+                Value::Text("small1".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("big2".into()),
+                Value::Int32(2),
+                Value::Text("small2".into()),
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Text("big3".into()),
+                Value::Int32(3),
+                Value::Text("small3".into()),
+            ],
+        ]
     );
 }
 
@@ -1670,20 +1764,20 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
     let base = temp_dir("create_table_primary_key_unique");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4 primary key, code int4 unique)")
-        .unwrap();
+    db.execute(
+        1,
+        "create table items (id int4 primary key, code int4 unique)",
+    )
+    .unwrap();
 
     match db.execute(1, "insert into items values (null, 10)") {
         Err(ExecError::MissingRequiredColumn(name)) if name == "id" => {}
         other => panic!("expected primary-key NOT NULL rejection, got {other:?}"),
     }
 
-    db.execute(1, "insert into items values (1, 10)")
-        .unwrap();
-    db.execute(1, "insert into items values (2, null)")
-        .unwrap();
-    db.execute(1, "insert into items values (3, null)")
-        .unwrap();
+    db.execute(1, "insert into items values (1, 10)").unwrap();
+    db.execute(1, "insert into items values (2, null)").unwrap();
+    db.execute(1, "insert into items values (3, null)").unwrap();
 
     match db.execute(1, "insert into items values (1, 11)") {
         Err(ExecError::UniqueViolation { constraint }) => {
@@ -1711,7 +1805,10 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
     assert_eq!(constraint_rows[0][0], Value::Text("items_code_key".into()));
     assert_eq!(constraint_rows[0][1], Value::Text("u".into()));
     assert!(int_value(&constraint_rows[0][2]) > 0);
-    assert_eq!(constraint_rows[1][0], Value::Text("items_id_not_null".into()));
+    assert_eq!(
+        constraint_rows[1][0],
+        Value::Text("items_id_not_null".into())
+    );
     assert_eq!(constraint_rows[1][1], Value::Text("n".into()));
     assert_eq!(int_value(&constraint_rows[1][2]), 0);
     assert_eq!(constraint_rows[2][0], Value::Text("items_pkey".into()));
@@ -1746,8 +1843,14 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
              order by conname",
         ),
         vec![
-            vec![Value::Text("items_code_key".into()), Value::Text("u".into())],
-            vec![Value::Text("items_id_not_null".into()), Value::Text("n".into())],
+            vec![
+                Value::Text("items_code_key".into()),
+                Value::Text("u".into())
+            ],
+            vec![
+                Value::Text("items_id_not_null".into()),
+                Value::Text("n".into())
+            ],
             vec![Value::Text("items_pkey".into()), Value::Text("p".into())],
         ]
     );

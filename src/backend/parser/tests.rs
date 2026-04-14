@@ -1142,14 +1142,8 @@ fn parse_create_table_with_numeric_types() {
             let columns = create.columns().collect::<Vec<_>>();
             assert_eq!(columns[0].ty, SqlType::new(SqlTypeKind::Numeric));
             assert_eq!(columns[1].ty, SqlType::new(SqlTypeKind::Numeric));
-            assert_eq!(
-                columns[2].ty,
-                SqlType::with_numeric_precision_scale(10, 0)
-            );
-            assert_eq!(
-                columns[3].ty,
-                SqlType::with_numeric_precision_scale(12, 4)
-            );
+            assert_eq!(columns[2].ty, SqlType::with_numeric_precision_scale(10, 0));
+            assert_eq!(columns[3].ty, SqlType::with_numeric_precision_scale(12, 4));
             assert_eq!(
                 columns[4].ty,
                 SqlType::array_of(SqlType::new(SqlTypeKind::Numeric))
@@ -1286,7 +1280,10 @@ fn parse_array_subscript_expressions_and_targets() {
     }
 
     match parse_statement("insert into widgets (a[1], b[1:2]) values (1, array[1,2])").unwrap() {
-        Statement::Insert(InsertStatement { columns: Some(columns), .. }) => {
+        Statement::Insert(InsertStatement {
+            columns: Some(columns),
+            ..
+        }) => {
             assert_eq!(columns[0].column, "a");
             assert_eq!(columns[0].subscripts.len(), 1);
             assert_eq!(columns[1].column, "b");
@@ -1395,10 +1392,8 @@ fn build_plan_accepts_same_type_array_comparisons() {
 #[test]
 fn build_plan_coerces_unknown_string_literals_for_array_ops() {
     let plan = build_plan(
-        &parse_select(
-            "select ARRAY[1, 2] = '{1,2}', ARRAY[1, 2] && '{2,3}', 2 = any ('{1,2,3}')"
-        )
-        .unwrap(),
+        &parse_select("select ARRAY[1, 2] = '{1,2}', ARRAY[1, 2] && '{2,3}', 2 = any ('{1,2,3}')")
+            .unwrap(),
         &catalog(),
     )
     .unwrap();
@@ -1500,10 +1495,12 @@ fn build_plan_resolves_columns() {
     let stmt = parse_select("select name, note from people where id > 1").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, targets } => {
+        Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             match *input {
-                Plan::Filter { input, predicate } => {
+                Plan::Filter {
+                    input, predicate, ..
+                } => {
                     assert!(matches!(predicate, Expr::Gt(_, _)));
                     assert!(matches!(*input, Plan::SeqScan { .. }));
                 }
@@ -1519,7 +1516,7 @@ fn build_plan_resolves_aliased_columns() {
     let stmt = parse_select("select s.name from people s where s.id > 1").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, targets } => {
+        Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 1);
             assert_eq!(targets[0].name, "name");
             match *input {
@@ -1543,7 +1540,7 @@ fn build_join_plan_resolves_qualified_columns() {
     .unwrap();
     let plan = build_plan(&stmt, &catalog).unwrap();
     match plan {
-        Plan::Projection { input, targets } => {
+        Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             match *input {
                 Plan::NestedLoopJoin { on, .. } => assert!(matches!(on, Expr::Eq(_, _))),
@@ -1581,18 +1578,19 @@ fn build_plan_wraps_order_by_and_limit() {
             .unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, targets } => {
+        Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 1);
             match *input {
                 Plan::Limit {
                     input,
                     limit,
                     offset,
+                    ..
                 } => {
                     assert_eq!(limit, Some(2));
                     assert_eq!(offset, 1);
                     match *input {
-                        Plan::OrderBy { input, items } => {
+                        Plan::OrderBy { input, items, .. } => {
                             assert_eq!(items.len(), 1);
                             assert!(items[0].descending);
                             assert!(matches!(*input, Plan::Filter { .. }));
@@ -1943,8 +1941,7 @@ fn lower_create_table_rejects_invalid_key_constraints() {
         Err(ParseError::UnexpectedToken { expected, .. }) if expected == "at most one PRIMARY KEY"
     ));
 
-    let stmt =
-        parse_statement("create table items (id int4, note text, unique (id, id))").unwrap();
+    let stmt = parse_statement("create table items (id int4, note text, unique (id, id))").unwrap();
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
@@ -1965,8 +1962,7 @@ fn lower_create_table_rejects_invalid_key_constraints() {
         Err(ParseError::UnknownColumn(name)) if name == "missing"
     ));
 
-    let stmt =
-        parse_statement("create table items (id int4 primary key, unique (id))").unwrap();
+    let stmt = parse_statement("create table items (id int4 primary key, unique (id))").unwrap();
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
@@ -1977,10 +1973,10 @@ fn lower_create_table_rejects_invalid_key_constraints() {
                 && actual == "duplicate key definition on (id)"
     ));
 
-    assert!(parse_statement(
-        "create table items (id int4, constraint named_pk primary key (id))"
-    )
-    .is_err());
+    assert!(
+        parse_statement("create table items (id int4, constraint named_pk primary key (id))")
+            .is_err()
+    );
 }
 
 #[test]
@@ -2140,7 +2136,7 @@ fn build_plan_with_aggregate() {
     let stmt = parse_select("select name, count(*) from people group by name").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
-        Plan::Projection { input, targets } => {
+        Plan::Projection { input, targets, .. } => {
             assert_eq!(targets.len(), 2);
             assert_eq!(targets[0].name, "name");
             assert_eq!(targets[1].name, "count");
@@ -2267,6 +2263,7 @@ fn build_plan_for_unnest_uses_array_element_types() {
     match plan {
         Plan::FunctionScan {
             call: crate::include::nodes::plannodes::SetReturningCall::Unnest { output_columns, .. },
+            ..
         } => {
             assert_eq!(output_columns.len(), 2);
             assert_eq!(
@@ -2531,8 +2528,8 @@ fn parse_natural_left_join_clause() {
 
 #[test]
 fn parse_join_alias_without_parentheses() {
-    let stmt = parse_select("select * from people join pets on people.id = pets.owner_id as j")
-        .unwrap();
+    let stmt =
+        parse_select("select * from people join pets on people.id = pets.owner_id as j").unwrap();
     assert!(matches!(
         stmt.from,
         Some(FromItem::Alias {
@@ -2704,10 +2701,7 @@ fn build_plan_lowers_coalesce_to_nested_expr() {
         Plan::Projection { targets, .. } => {
             assert_eq!(targets.len(), 1);
             assert_eq!(targets[0].sql_type, SqlType::new(SqlTypeKind::Int4));
-            assert!(matches!(
-                targets[0].expr,
-                Expr::Coalesce(_, _)
-            ));
+            assert!(matches!(targets[0].expr, Expr::Coalesce(_, _)));
         }
         other => panic!("expected projection, got {:?}", other),
     }

@@ -12,16 +12,16 @@ use crate::backend::catalog::rowcodec::{
 };
 use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCacheEntry};
-use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::backend::utils::cache::syscache::{
     catalog_snapshot_for_lookup, ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows,
     ensure_namespace_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
 };
+use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    PgAmRow, PgAmopRow, PgAmprocRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgOpclassRow,
-    PgOpfamilyRow, PgRewriteRow, PgTypeRow,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
+    PgOpclassRow, PgOpfamilyRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{Database, TempNamespace};
@@ -775,6 +775,17 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
             .into_iter()
             .filter(|row| row.ev_class == relation_oid)
+            .collect()
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+        class_row_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
+        ensure_statistic_rows(self.db, self.client_id, self.txn_ctx)
+            .into_iter()
+            .filter(|row| row.starelid == relation_oid)
             .collect()
     }
 

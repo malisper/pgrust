@@ -20,9 +20,10 @@ use crate::backend::executor::{
     ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
     Value, cast_value,
 };
+use crate::backend::optimizer::optimize_plan;
 use crate::include::catalog::{
-    PgCastRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgTypeRow, bootstrap_pg_cast_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
+    PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
 };
 
 use super::parsenodes::*;
@@ -43,7 +44,7 @@ pub use modify::{
     bind_insert, bind_insert_prepared, bind_update,
 };
 pub use paths::BoundModifyRowSource;
-use paths::{bind_order_by_items, maybe_rewrite_index_scan};
+use paths::bind_order_by_items;
 pub use scope::BoundRelation;
 use scope::*;
 use system_views::*;
@@ -128,6 +129,14 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn class_row_by_oid(&self, _relation_oid: u32) -> Option<PgClassRow> {
+        None
+    }
+
+    fn statistic_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgStatisticRow> {
+        Vec::new()
+    }
+
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -170,6 +179,20 @@ impl CatalogLookup for Catalog {
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
         self.rewrite_rows_for_relation(relation_oid).to_vec()
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        catcache.class_by_oid(relation_oid).cloned()
+    }
+
+    fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        catcache
+            .statistic_rows()
+            .into_iter()
+            .filter(|row| row.starelid == relation_oid)
+            .collect()
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
@@ -456,6 +479,7 @@ fn apply_cte_column_names(
             .collect(),
     };
     let projection = Plan::Projection {
+        plan_info: crate::backend::executor::PlanEstimate::default(),
         input: Box::new(plan),
         targets: renamed_desc
             .columns
@@ -613,6 +637,7 @@ fn build_values_plan_with_outer(
 
     if !stmt.order_by.is_empty() {
         plan = Plan::OrderBy {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(plan),
             items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
                 bind_expr_with_outer_and_ctes(
@@ -629,13 +654,14 @@ fn build_values_plan_with_outer(
 
     if stmt.limit.is_some() || stmt.offset.is_some() {
         plan = Plan::Limit {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(plan),
             limit: stmt.limit,
             offset: stmt.offset.unwrap_or(0),
         };
     }
 
-    Ok(plan)
+    Ok(optimize_plan(plan, catalog))
 }
 
 fn build_plan_with_outer(
@@ -671,7 +697,12 @@ fn build_plan_with_outer(
             expanded_views,
         )?
     } else {
-        (Plan::Result, empty_scope())
+        (
+            Plan::Result {
+                plan_info: crate::backend::executor::PlanEstimate::default(),
+            },
+            empty_scope(),
+        )
     };
 
     if let Some(predicate) = &stmt.where_clause {
@@ -682,6 +713,7 @@ fn build_plan_with_outer(
 
     let filtered_plan = if let Some(predicate) = &stmt.where_clause {
         Plan::Filter {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(base),
             predicate: bind_expr_with_outer_and_ctes(
                 predicate,
@@ -718,7 +750,9 @@ fn build_plan_with_outer(
             .all(|target| !expr_references_input_scope(&target.expr));
 
     let mut plan = if can_skip_scan_for_degenerate_having {
-        Plan::Result
+        Plan::Result {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
+        }
     } else {
         filtered_plan
     };
@@ -852,6 +886,7 @@ fn build_plan_with_outer(
             .transpose()?;
 
         plan = Plan::Aggregate {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(plan),
             group_by: group_keys,
             accumulators,
@@ -903,6 +938,7 @@ fn build_plan_with_outer(
 
         if !stmt.order_by.is_empty() {
             plan = Plan::OrderBy {
+                plan_info: crate::backend::executor::PlanEstimate::default(),
                 input: Box::new(plan),
                 items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
                     bind_agg_output_expr_in_clause(
@@ -922,16 +958,18 @@ fn build_plan_with_outer(
 
         if stmt.limit.is_some() || stmt.offset.is_some() {
             plan = Plan::Limit {
+                plan_info: crate::backend::executor::PlanEstimate::default(),
                 input: Box::new(plan),
                 limit: stmt.limit,
                 offset: stmt.offset.unwrap_or(0),
             };
         }
 
-        Ok(Plan::Projection {
+        Ok(optimize_plan(Plan::Projection {
+            plan_info: crate::backend::executor::PlanEstimate::default(),
             input: Box::new(plan),
             targets,
-        })
+        }, catalog))
     } else {
         let bound_targets = bind_select_targets(
             &stmt.targets,
@@ -946,6 +984,7 @@ fn build_plan_with_outer(
             BoundSelectTargets::Plain(targets) => {
                 if !stmt.order_by.is_empty() {
                     plan = Plan::OrderBy {
+                        plan_info: crate::backend::executor::PlanEstimate::default(),
                         input: Box::new(plan),
                         items: bind_order_by_items(&stmt.order_by, &targets, |expr| {
                             bind_expr_with_outer_and_ctes(
@@ -960,10 +999,9 @@ fn build_plan_with_outer(
                     };
                 }
 
-                plan = maybe_rewrite_index_scan(plan, catalog);
-
                 if stmt.limit.is_some() || stmt.offset.is_some() {
                     plan = Plan::Limit {
+                        plan_info: crate::backend::executor::PlanEstimate::default(),
                         input: Box::new(plan),
                         limit: stmt.limit,
                         offset: stmt.offset.unwrap_or(0),
@@ -977,29 +1015,32 @@ fn build_plan_with_outer(
                     });
 
                 if is_identity {
-                    Ok(plan)
+                    Ok(optimize_plan(plan, catalog))
                 } else {
-                    Ok(Plan::Projection {
+                    Ok(optimize_plan(Plan::Projection {
+                        plan_info: crate::backend::executor::PlanEstimate::default(),
                         input: Box::new(plan),
                         targets,
-                    })
+                    }, catalog))
                 }
             }
             BoundSelectTargets::WithProjectSet {
                 project_targets,
                 final_targets,
             } => {
-                plan = maybe_rewrite_index_scan(plan, catalog);
                 plan = Plan::ProjectSet {
+                    plan_info: crate::backend::executor::PlanEstimate::default(),
                     input: Box::new(plan),
                     targets: project_targets,
                 };
                 plan = Plan::Projection {
+                    plan_info: crate::backend::executor::PlanEstimate::default(),
                     input: Box::new(plan),
                     targets: final_targets.clone(),
                 };
                 if !stmt.order_by.is_empty() {
                     plan = Plan::OrderBy {
+                        plan_info: crate::backend::executor::PlanEstimate::default(),
                         input: Box::new(plan),
                         items: bind_order_by_items(&stmt.order_by, &final_targets, |expr| {
                             bind_expr_with_outer_and_ctes(
@@ -1015,12 +1056,13 @@ fn build_plan_with_outer(
                 }
                 if stmt.limit.is_some() || stmt.offset.is_some() {
                     plan = Plan::Limit {
+                        plan_info: crate::backend::executor::PlanEstimate::default(),
                         input: Box::new(plan),
                         limit: stmt.limit,
                         offset: stmt.offset.unwrap_or(0),
                     };
                 }
-                Ok(plan)
+                Ok(optimize_plan(plan, catalog))
             }
         }
     }
