@@ -297,7 +297,9 @@ fn statement_timeout_interrupts_waiting_tuple_update() {
     holder.execute(&db, "insert into t values (1)").unwrap();
 
     holder.execute(&db, "begin").unwrap();
-    holder.execute(&db, "update t set id = 2 where id = 1").unwrap();
+    holder
+        .execute(&db, "update t set id = 2 where id = 1")
+        .unwrap();
 
     waiter
         .execute(&db, "set statement_timeout = '20ms'")
@@ -323,7 +325,9 @@ fn statement_timeout_interrupts_unique_index_conflict_wait() {
     let mut waiter = Session::new(2);
 
     holder.execute(&db, "create table t (id int)").unwrap();
-    holder.execute(&db, "create unique index t_id_idx on t(id)").unwrap();
+    holder
+        .execute(&db, "create unique index t_id_idx on t(id)")
+        .unwrap();
 
     holder.execute(&db, "begin").unwrap();
     holder.execute(&db, "insert into t values (1)").unwrap();
@@ -331,9 +335,7 @@ fn statement_timeout_interrupts_unique_index_conflict_wait() {
     waiter
         .execute(&db, "set statement_timeout = '20ms'")
         .unwrap();
-    let err = waiter
-        .execute(&db, "insert into t values (1)")
-        .unwrap_err();
+    let err = waiter.execute(&db, "insert into t values (1)").unwrap_err();
     assert!(
         matches!(
             err,
@@ -969,8 +971,7 @@ fn create_index_and_alter_table_set_are_noops() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    let proc_sql =
-        "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname, l.lanname \
+    let proc_sql = "select p.proname, p.prokind, p.pronargs, p.proretset, t.typname, l.lanname \
              from pg_proc p \
              join pg_type t on t.oid = p.prorettype \
              join pg_language l on l.oid = p.prolang \
@@ -1019,18 +1020,14 @@ fn create_index_and_alter_table_set_are_noops() {
         other => panic!("expected query result, got {:?}", other),
     }
 
-    let op_sql =
-        "select o.oprname, l.typname, r.typname, p.proname \
+    let op_sql = "select o.oprname, l.typname, r.typname, p.proname \
              from pg_operator o \
              join pg_type l on l.oid = o.oprleft \
              join pg_type r on r.oid = o.oprright \
              join pg_proc p on p.oid = o.oprcode \
              where o.oid in (91, 96, 98, 531, 1694, 3877) \
              order by o.oid";
-    match db
-        .execute(1, op_sql)
-        .unwrap()
-    {
+    match db.execute(1, op_sql).unwrap() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
                 rows,
@@ -1628,8 +1625,11 @@ fn alter_table_drop_column_hides_column_and_retargets_inserts() {
     let base = temp_dir("alter_table_drop_column");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (a int4 not null, b int4, c int4 not null, d int4)")
-        .unwrap();
+    db.execute(
+        1,
+        "create table items (a int4 not null, b int4, c int4 not null, d int4)",
+    )
+    .unwrap();
     db.execute(1, "insert into items values (1, 2, 3, 4)")
         .unwrap();
     db.execute(1, "alter table items drop a").unwrap();
@@ -1650,7 +1650,8 @@ fn alter_table_drop_column_hides_column_and_retargets_inserts() {
         other => panic!("expected visible-column insert width check, got {other:?}"),
     }
 
-    db.execute(1, "insert into items values (11, 12, 13)").unwrap();
+    db.execute(1, "insert into items values (11, 12, 13)")
+        .unwrap();
     assert_eq!(
         query_rows(&db, 1, "select * from items order by b"),
         vec![
@@ -1696,7 +1697,10 @@ fn alter_table_rename_updates_name_and_rolls_back() {
         .execute(&db, "alter table items rename to renamed_items")
         .unwrap();
 
-    match session.execute(&db, "select count(*) from renamed_items").unwrap() {
+    match session
+        .execute(&db, "select count(*) from renamed_items")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
@@ -1741,7 +1745,10 @@ fn alter_table_rename_unmasks_permanent_table_after_temp_rename() {
         }
         other => panic!("expected permanent table after temp rename, got {other:?}"),
     }
-    match session.execute(&db, "select count(*) from items_temp").unwrap() {
+    match session
+        .execute(&db, "select count(*) from items_temp")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
@@ -1755,7 +1762,10 @@ fn alter_table_rename_unmasks_permanent_table_after_temp_rename() {
         Err(ExecError::Parse(ParseError::UnknownTable(name))) if name == "items" => {}
         other => panic!("expected old permanent name to disappear, got {other:?}"),
     }
-    match session.execute(&db, "select count(*) from items_perm").unwrap() {
+    match session
+        .execute(&db, "select count(*) from items_perm")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
@@ -1776,7 +1786,10 @@ fn alter_table_rename_temp_table_rolls_back() {
     session
         .execute(&db, "alter table items rename to renamed_items")
         .unwrap();
-    match session.execute(&db, "select count(*) from renamed_items").unwrap() {
+    match session
+        .execute(&db, "select count(*) from renamed_items")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
         }
@@ -1857,6 +1870,89 @@ fn alter_table_rename_column_persists_after_reopen() {
     match reopened.execute(1, "select note from items") {
         Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "note" => {}
         other => panic!("expected persisted renamed column to hide old name, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_column_type_rewrites_rows_with_using_expr() {
+    let base = temp_dir("alter_table_alter_column_type_using");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, '7'), (2, '42')")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table items alter column note type int4 using note::int4",
+    )
+    .unwrap();
+
+    match db.execute(1, "select note from items order by id").unwrap() {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
+            assert_eq!(rows, vec![vec![Value::Int32(7)], vec![Value::Int32(42)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_column_type_rejects_nonautomatic_cast_without_using() {
+    let base = temp_dir("alter_table_alter_column_type_needs_using");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (note text)").unwrap();
+
+    match db.execute(1, "alter table items alter column note type int4") {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) if message == "column \"note\" cannot be cast automatically to type integer"
+            && hint.as_deref() == Some("You might need to specify \"USING note::integer\".")
+            && sqlstate == "42804" => {}
+        other => panic!("expected automatic-cast rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_column_type_allows_textlike_cast_without_using() {
+    let base = temp_dir("alter_table_alter_column_type_textlike");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (note text)").unwrap();
+    db.execute(1, "insert into items values ('hello')").unwrap();
+    db.execute(1, "alter table items alter column note type varchar(10)")
+        .unwrap();
+
+    match db.execute(1, "select note from items").unwrap() {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(
+                columns[0].sql_type,
+                SqlType::with_char_len(SqlTypeKind::Varchar, 10)
+            );
+            assert_eq!(rows, vec![vec![Value::Text("hello".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_alter_column_type_rejects_indexed_target_column() {
+    let base = temp_dir("alter_table_alter_column_type_index_guard");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note int4)")
+        .unwrap();
+    db.execute(1, "create index items_note_idx on items (note)")
+        .unwrap();
+
+    match db.execute(1, "alter table items alter column note type int8") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "ALTER TABLE ALTER COLUMN TYPE with dependent indexes" => {}
+        other => panic!("expected dependent-index rejection, got {other:?}"),
     }
 }
 
@@ -2200,13 +2296,16 @@ fn explain_left_join_can_reassociate_strict_rhs() {
     db.execute(1, "create table c (id int4 not null)").unwrap();
 
     for id in 0..16 {
-        db.execute(1, &format!("insert into a values ({id})")).unwrap();
+        db.execute(1, &format!("insert into a values ({id})"))
+            .unwrap();
     }
     for id in 0..4 {
-        db.execute(1, &format!("insert into b values ({id})")).unwrap();
+        db.execute(1, &format!("insert into b values ({id})"))
+            .unwrap();
     }
     for id in 0..64 {
-        db.execute(1, &format!("insert into c values ({id})")).unwrap();
+        db.execute(1, &format!("insert into c values ({id})"))
+            .unwrap();
     }
 
     db.execute(1, "analyze a").unwrap();
@@ -4577,7 +4676,10 @@ fn copy_from_rows_into_failed_implicit_transaction_cleans_session_state() {
 
     match session.copy_from_rows_into(&db, "items", Some(&["a".into()]), &[vec!["10".into()]]) {
         Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "a" => {}
-        other => panic!("expected dropped-column COPY target failure, got {:?}", other),
+        other => panic!(
+            "expected dropped-column COPY target failure, got {:?}",
+            other
+        ),
     }
 
     assert!(!session.in_transaction());
