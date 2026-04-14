@@ -1797,6 +1797,70 @@ fn alter_table_rename_temp_table_rolls_back() {
 }
 
 #[test]
+fn alter_table_rename_column_updates_lookup_and_rolls_back() {
+    let base = temp_dir("alter_table_rename_column_txn");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 not null, note text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (1, 'hello')")
+        .unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter table items rename column note to body")
+        .unwrap();
+
+    match session.execute(&db, "select body from items").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("hello".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    match session.execute(&db, "select note from items") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "note" => {}
+        other => panic!("expected old column name to disappear, got {other:?}"),
+    }
+
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select note from items"),
+        vec![vec![Value::Text("hello".into())]]
+    );
+    match db.execute(1, "select body from items") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "body" => {}
+        other => panic!("expected rollback to restore old column name, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_rename_column_persists_after_reopen() {
+    let base = temp_dir("alter_table_rename_column_reopen");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, note text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'hello')")
+        .unwrap();
+    db.execute(1, "alter table items rename column note to body")
+        .unwrap();
+    drop(db);
+
+    let reopened = Database::open(&base, 16).unwrap();
+    assert_eq!(
+        query_rows(&reopened, 1, "select body from items"),
+        vec![vec![Value::Text("hello".into())]]
+    );
+    match reopened.execute(1, "select note from items") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "note" => {}
+        other => panic!("expected persisted renamed column to hide old name, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_index_builds_ready_valid_btree_and_explain_uses_it() {
     let base = temp_dir("btree_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();

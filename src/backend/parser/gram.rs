@@ -351,6 +351,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_drop_column_stmt => Ok(Statement::AlterTableDropColumn(
             build_alter_table_drop_column(inner)?,
         )),
+        Rule::alter_table_rename_column_stmt => Ok(Statement::AlterTableRenameColumn(
+            build_alter_table_rename_column(inner)?,
+        )),
         Rule::alter_table_rename_stmt => {
             Ok(Statement::AlterTableRename(build_alter_table_rename(inner)?))
         }
@@ -1927,6 +1930,20 @@ fn build_alter_table_rename(pair: Pair<'_, Rule>) -> Result<AlterTableRenameStat
     Ok(AlterTableRenameStatement {
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
         new_table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_rename_column(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableRenameColumnStatement, ParseError> {
+    let mut parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier);
+    Ok(AlterTableRenameColumnStatement {
+        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
+        new_column_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
