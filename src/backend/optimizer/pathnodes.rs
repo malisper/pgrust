@@ -200,9 +200,9 @@ pub enum PlannerPath {
     Aggregate {
         plan_info: PlanEstimate,
         input: Box<PlannerPath>,
-        group_by: Vec<Expr>,
+        group_by: Vec<PlannerJoinExpr>,
         accumulators: Vec<AggAccum>,
-        having: Option<Expr>,
+        having: Option<PlannerJoinExpr>,
         output_columns: Vec<QueryColumn>,
     },
     Values {
@@ -331,9 +331,12 @@ impl PlannerPath {
             } => Self::Aggregate {
                 plan_info,
                 input: Box::new(Self::from_plan(*input)),
-                group_by,
+                group_by: group_by
+                    .iter()
+                    .map(PlannerJoinExpr::from_input_expr)
+                    .collect(),
                 accumulators,
-                having,
+                having: having.as_ref().map(PlannerJoinExpr::from_input_expr),
                 output_columns,
             },
             Plan::Values {
@@ -465,9 +468,12 @@ impl PlannerPath {
             } => Plan::Aggregate {
                 plan_info,
                 input: Box::new(input.into_plan()),
-                group_by,
+                group_by: group_by
+                    .into_iter()
+                    .map(PlannerJoinExpr::into_input_expr)
+                    .collect(),
                 accumulators,
-                having,
+                having: having.map(PlannerJoinExpr::into_input_expr),
                 output_columns,
             },
             Self::Values {
