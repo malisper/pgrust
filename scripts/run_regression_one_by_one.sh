@@ -80,6 +80,43 @@ cleanup() {
 }
 trap cleanup EXIT
 
+run_pgrust_setup_one_by_one() {
+    if [[ "$USE_PGRUST_SETUP" != true ]]; then
+        return 0
+    fi
+
+    PGRUST_SETUP_SQL="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
+    PGRUST_SETUP_OUT="$RESULTS_DIR/output/test_setup_pgrust.out"
+    PGRUST_SETUP_RAW="$RESULTS_DIR/output_raw/test_setup_pgrust.out"
+    PGRUST_SETUP_TIMINGS="$RESULTS_DIR/timings/test_setup_pgrust.tsv"
+    PGRUST_SETUP_TMP="$RESULTS_DIR/tmp/test_setup_pgrust"
+
+    if [[ ! -f "$PGRUST_SETUP_SQL" ]]; then
+        echo "ERROR: pgrust setup file not found: $PGRUST_SETUP_SQL"
+        exit 1
+    fi
+
+    echo "Running pgrust setup bootstrap one statement at a time..."
+    if ! run_sql_one_by_one \
+        "$PGRUST_SETUP_SQL" \
+        "$PGRUST_SETUP_OUT" \
+        "$PGRUST_SETUP_RAW" \
+        "$PGRUST_SETUP_TIMINGS" \
+        "$PGRUST_SETUP_TMP" \
+        true >/dev/null; then
+        :
+    fi
+
+    if grep -qi "statement timeout\|could not connect\|server closed the connection unexpectedly" "$PGRUST_SETUP_RAW"; then
+        echo "ERROR: pgrust setup bootstrap failed"
+        echo "See:"
+        echo "  output:  $PGRUST_SETUP_OUT"
+        echo "  raw:     $PGRUST_SETUP_RAW"
+        echo "  timings: $PGRUST_SETUP_TIMINGS"
+        exit 1
+    fi
+}
+
 wait_for_server_ready() {
     local pid="$1"
 
@@ -226,12 +263,22 @@ split_sql_statements() {
 build_driver_script() {
     local split_dir="$1"
     local driver_path="$2"
+    local start_idx="$3"
+    local skipped_ids_path="$4"
 
     {
         echo "\\timing on"
         while IFS= read -r stmt_path; do
             stmt_name="$(basename "$stmt_path")"
             stmt_id="${stmt_name%.sql}"
+            stmt_num=$((10#$stmt_id))
+            if [[ -f "$skipped_ids_path" ]] && grep -qx "$stmt_id" "$skipped_ids_path"; then
+                continue
+            fi
+            if [[ $stmt_num -lt $start_idx ]]; then
+                echo "\\i ${stmt_path}"
+                continue
+            fi
             echo "\\echo __PGRUST_QUERY_BEGIN__ ${stmt_id}"
             echo "\\i ${stmt_path}"
             echo "\\echo __PGRUST_QUERY_END__ ${stmt_id}"
@@ -250,32 +297,33 @@ extract_clean_output_and_timings() {
 
         my ($raw_path, $clean_path, $timings_path) = @ARGV;
         open my $in, "<", $raw_path or die "open $raw_path: $!";
-        open my $clean, ">", $clean_path or die "open $clean_path: $!";
-        open my $timings, ">", $timings_path or die "open $timings_path: $!";
+        my $append = -e $clean_path;
+        open my $clean, ($append ? ">>" : ">"), $clean_path or die "open $clean_path: $!";
+        open my $timings, ($append ? ">>" : ">"), $timings_path or die "open $timings_path: $!";
 
-        print {$timings} "query_id\tstatus\telapsed_ms\n";
+        print {$timings} "query_id\tstatus\telapsed_ms\n" if !$append;
 
         my $current;
         my %timing = ();
 
         sub flush_query {
-            my ($fh, $timing_ref, $query_id) = @_;
+            my ($fh, $timing_ref, $query_id, $final_status) = @_;
             return if !defined $query_id;
-            my $status = $timing_ref->{status} // "ok";
+            my $status = $timing_ref->{status} // $final_status // "ok";
             my $elapsed = defined $timing_ref->{elapsed_ms} ? $timing_ref->{elapsed_ms} : "";
             print {$fh} "$query_id\t$status\t$elapsed\n";
         }
 
         while (my $line = <$in>) {
             if ($line =~ /^__PGRUST_QUERY_BEGIN__\s+(\S+)/) {
-                flush_query($timings, \%timing, $current);
+                flush_query($timings, \%timing, $current, undef);
                 $current = $1;
                 %timing = ();
                 next;
             }
 
             if ($line =~ /^__PGRUST_QUERY_END__\s+(\S+)/) {
-                flush_query($timings, \%timing, $current);
+                flush_query($timings, \%timing, $current, undef);
                 $current = undef;
                 %timing = ();
                 next;
@@ -300,7 +348,7 @@ extract_clean_output_and_timings() {
             print {$clean} $line;
         }
 
-        flush_query($timings, \%timing, $current);
+        flush_query($timings, \%timing, $current, "crash");
 
         close $in or die "close $raw_path: $!";
         close $clean or die "close $clean_path: $!";
@@ -318,56 +366,65 @@ run_sql_one_by_one() {
 
     local stmt_count
     stmt_count="$(split_sql_statements "$sql_path" "$split_dir")"
+    : > "$clean_output"
+    : > "$raw_output"
+    rm -f "$timings_output"
 
-    local driver_path="$split_dir/driver.sql"
-    build_driver_script "$split_dir" "$driver_path"
+    local skipped_ids_path="$split_dir/skipped_ids.txt"
+    : > "$skipped_ids_path"
+    local start_idx=1
 
-    if [[ "$on_error_stop" == true ]]; then
-        if ! psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q -f "$driver_path" > "$raw_output" 2>&1; then
-            :
+    while [[ $start_idx -le $stmt_count ]]; do
+        local driver_path="$split_dir/driver.sql"
+        local chunk_raw="$split_dir/chunk_${start_idx}.raw"
+        local chunk_clean="$split_dir/chunk_${start_idx}.clean"
+        local chunk_timings="$split_dir/chunk_${start_idx}.tsv"
+
+        rm -f "$chunk_raw" "$chunk_clean" "$chunk_timings"
+        build_driver_script "$split_dir" "$driver_path" "$start_idx" "$skipped_ids_path"
+
+        if [[ "$on_error_stop" == true ]]; then
+            if ! psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q -f "$driver_path" > "$chunk_raw" 2>&1; then
+                :
+            fi
+        else
+            if ! psql "${PG_ARGS[@]}" -a -q -f "$driver_path" > "$chunk_raw" 2>&1; then
+                :
+            fi
         fi
-    else
-        if ! psql "${PG_ARGS[@]}" -a -q -f "$driver_path" > "$raw_output" 2>&1; then
-            :
-        fi
-    fi
 
-    extract_clean_output_and_timings "$raw_output" "$clean_output" "$timings_output"
+        extract_clean_output_and_timings "$chunk_raw" "$chunk_clean" "$chunk_timings"
+        cat "$chunk_raw" >> "$raw_output"
+        cat "$chunk_clean" >> "$clean_output"
+        tail -n +2 "$chunk_timings" >> "$timings_output"
+
+        local crash_id=""
+        crash_id="$(awk -F'\t' 'NR > 1 && $2 == "crash" { print $1; exit }' "$chunk_timings")"
+        if [[ -z "$crash_id" ]]; then
+            break
+        fi
+
+        echo "$crash_id" >> "$skipped_ids_path"
+
+        if [[ "$SKIP_SERVER" == false ]]; then
+            if ! restart_server; then
+                break
+            fi
+            if [[ "$on_error_stop" == true ]]; then
+                break
+            fi
+            run_pgrust_setup_one_by_one
+        else
+            break
+        fi
+
+        start_idx=$((10#$crash_id + 1))
+    done
+
     echo "$stmt_count"
 }
 
-if [[ "$USE_PGRUST_SETUP" == true ]]; then
-    PGRUST_SETUP_SQL="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
-    PGRUST_SETUP_OUT="$RESULTS_DIR/output/test_setup_pgrust.out"
-    PGRUST_SETUP_RAW="$RESULTS_DIR/output_raw/test_setup_pgrust.out"
-    PGRUST_SETUP_TIMINGS="$RESULTS_DIR/timings/test_setup_pgrust.tsv"
-    PGRUST_SETUP_TMP="$RESULTS_DIR/tmp/test_setup_pgrust"
-
-    if [[ ! -f "$PGRUST_SETUP_SQL" ]]; then
-        echo "ERROR: pgrust setup file not found: $PGRUST_SETUP_SQL"
-        exit 1
-    fi
-
-    echo "Running pgrust setup bootstrap one statement at a time..."
-    if ! run_sql_one_by_one \
-        "$PGRUST_SETUP_SQL" \
-        "$PGRUST_SETUP_OUT" \
-        "$PGRUST_SETUP_RAW" \
-        "$PGRUST_SETUP_TIMINGS" \
-        "$PGRUST_SETUP_TMP" \
-        true >/dev/null; then
-        :
-    fi
-
-    if grep -qi "statement timeout\|could not connect\|server closed the connection unexpectedly" "$PGRUST_SETUP_RAW"; then
-        echo "ERROR: pgrust setup bootstrap failed"
-        echo "See:"
-        echo "  output:  $PGRUST_SETUP_OUT"
-        echo "  raw:     $PGRUST_SETUP_RAW"
-        echo "  timings: $PGRUST_SETUP_TIMINGS"
-        exit 1
-    fi
-fi
+run_pgrust_setup_one_by_one
 
 if [[ -n "$SINGLE_TEST" ]]; then
     TEST_FILES=("$SQL_DIR/${SINGLE_TEST}.sql")
