@@ -2513,6 +2513,61 @@ fn select_date_subtraction_returns_day_count() {
 }
 
 #[test]
+fn select_date_part_extracts_date_fields() {
+    let base = temp_dir("select_date_part_fields");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date_part('week', date '2020-08-11'), date_part('isodow', date '2020-08-16'), date_part('year', date '2020-08-11 BC')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Float64(33.0),
+            Value::Float64(7.0),
+            Value::Float64(-2020.0),
+        ]],
+    );
+}
+
+#[test]
+fn select_date_part_handles_infinity() {
+    let base = temp_dir("select_date_part_infinity");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select date_part('day', date 'infinity'), date_part('epoch', date 'infinity')",
+        )
+        .unwrap(),
+        vec![vec![Value::Null, Value::Float64(f64::INFINITY)]],
+    );
+}
+
+#[test]
+fn select_extract_uses_date_part_runtime() {
+    let base = temp_dir("select_extract_date_part");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select extract(week from date '2020-08-11'), extract(isodow from date '2020-08-16')",
+        )
+        .unwrap(),
+        vec![vec![Value::Float64(33.0), Value::Float64(7.0)]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_supports_oidvector_tokens() {
     let valid = expr_casts::soft_input_error_info(" 1 2  4 ", "oidvector").unwrap();
     assert!(valid.is_none());
