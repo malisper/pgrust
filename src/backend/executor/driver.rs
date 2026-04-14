@@ -119,6 +119,12 @@ fn execute_statement_with_source(
             expected: "ALTER TABLE RENAME handled by database/session layer",
             actual: "ALTER TABLE RENAME".into(),
         })),
+        Statement::AlterTableRenameColumn(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "ALTER TABLE RENAME COLUMN handled by database/session layer",
+                actual: "ALTER TABLE RENAME COLUMN".into(),
+            }))
+        }
         Statement::AlterTableAddColumn(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE ADD COLUMN handled by database/session layer",
             actual: "ALTER TABLE ADD COLUMN".into(),
@@ -182,6 +188,7 @@ pub fn execute_readonly_statement(
         | Statement::Set(_)
         | Statement::Reset(_)
         | Statement::AlterTableSet(_)
+        | Statement::AlterTableRenameColumn(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableDropColumn(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),

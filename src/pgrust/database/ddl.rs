@@ -162,9 +162,56 @@ pub(super) fn validate_alter_table_add_column(
     let mut desc = column_desc(column.name.clone(), sql_type, true);
     desc.default_expr = column.default_expr.clone();
     if let Some(sql) = desc.default_expr.as_deref() {
-        desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
+    desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
     }
     Ok(desc)
+}
+
+pub(super) fn validate_alter_table_rename_column(
+    desc: &RelationDesc,
+    column_name: &str,
+    new_column_name: &str,
+) -> Result<String, ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for RENAME COLUMN",
+            actual: column_name.to_string(),
+        }));
+    }
+    if is_system_column_name(new_column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "new non-system column name",
+            actual: new_column_name.to_string(),
+        }));
+    }
+    if new_column_name.contains('.') {
+        return Err(ExecError::Parse(ParseError::UnsupportedQualifiedName(
+            new_column_name.to_string(),
+        )));
+    }
+    if !desc
+        .columns
+        .iter()
+        .any(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+    {
+        return Err(ExecError::Parse(ParseError::UnknownColumn(
+            column_name.to_string(),
+        )));
+    }
+
+    let normalized_new = new_column_name.to_ascii_lowercase();
+    if desc.columns.iter().any(|column| {
+        !column.dropped
+            && !column.name.eq_ignore_ascii_case(column_name)
+            && column.name.eq_ignore_ascii_case(&normalized_new)
+    }) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "new column name",
+            actual: format!("column already exists: {new_column_name}"),
+        }));
+    }
+
+    Ok(normalized_new)
 }
 
 pub(super) fn map_catalog_error(err: CatalogError) -> ExecError {
