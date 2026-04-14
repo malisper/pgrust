@@ -39,6 +39,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &drop_stmt.table_name)?;
         if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID {
@@ -73,6 +74,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts,
         };
         let effect = self
             .catalog
