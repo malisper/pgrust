@@ -81,14 +81,14 @@ pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
         })
 }
 
-pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
+pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
     let lowered = sql.trim().to_ascii_lowercase();
     match lowered.as_str() {
-        "int2vector" => return Ok(SqlType::new(SqlTypeKind::Int2Vector)),
-        "oidvector" => return Ok(SqlType::new(SqlTypeKind::OidVector)),
-        "name" => return Ok(SqlType::new(SqlTypeKind::Name)),
-        "pg_node_tree" => return Ok(SqlType::new(SqlTypeKind::PgNodeTree)),
+        "int2vector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2Vector))),
+        "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
+        "name" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Name))),
+        "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
         _ => {}
     }
     SqlParser::parse(Rule::type_name, &sql)
@@ -101,7 +101,7 @@ pub fn parse_type_name(sql: &str) -> Result<SqlType, ParseError> {
                     actual: sql.clone(),
                 });
             }
-            Ok(build_type(pair))
+            Ok(build_type_name(pair))
         })
 }
 
@@ -818,15 +818,14 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::from_list_item => {
             let mut source = None;
             let mut alias = None;
-            let mut column_aliases = Vec::new();
+            let mut column_aliases = AliasColumnSpec::None;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::joined_from_item => source = Some(build_from_item(part)?),
                     Rule::relation_alias => {
-                        let mut identifiers = Vec::new();
-                        collect_identifiers(part, &mut identifiers);
-                        alias = identifiers.first().cloned();
-                        column_aliases = identifiers.into_iter().skip(1).collect();
+                        let (parsed_alias, parsed_column_aliases) = build_relation_alias(part)?;
+                        alias = Some(parsed_alias);
+                        column_aliases = parsed_column_aliases;
                     }
                     _ => {}
                 }
@@ -876,7 +875,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::aliased_from_item => {
             let mut source = None;
             let mut alias = None;
-            let mut column_aliases = Vec::new();
+            let mut column_aliases = AliasColumnSpec::None;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::table_from_item
@@ -887,10 +886,9 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                     | Rule::parenthesized_from_item
                     | Rule::from_primary => source = Some(build_from_item(part)?),
                     Rule::relation_alias => {
-                        let mut identifiers = Vec::new();
-                        collect_identifiers(part, &mut identifiers);
-                        alias = identifiers.first().cloned();
-                        column_aliases = identifiers.into_iter().skip(1).collect();
+                        let (parsed_alias, parsed_column_aliases) = build_relation_alias(part)?;
+                        alias = Some(parsed_alias);
+                        column_aliases = parsed_column_aliases;
                     }
                     _ => {}
                 }
@@ -1036,6 +1034,50 @@ fn collect_identifiers(pair: Pair<'_, Rule>, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+fn build_relation_alias(pair: Pair<'_, Rule>) -> Result<(String, AliasColumnSpec), ParseError> {
+    let mut alias = None;
+    let mut column_aliases = AliasColumnSpec::None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if alias.is_none() => alias = Some(build_identifier(part)),
+            Rule::bare_relation_alias if alias.is_none() => {
+                alias = Some(build_identifier(
+                    part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
+                ));
+            }
+            Rule::alias_column_spec => column_aliases = build_alias_column_spec(part)?,
+            _ => {}
+        }
+    }
+    Ok((alias.ok_or(ParseError::UnexpectedEof)?, column_aliases))
+}
+
+fn build_alias_column_spec(pair: Pair<'_, Rule>) -> Result<AliasColumnSpec, ParseError> {
+    let mut defs = Vec::new();
+    let mut names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alias_column_def => defs.push(build_alias_column_def(part)?),
+            Rule::ident_list => collect_identifiers(part, &mut names),
+            _ => {}
+        }
+    }
+    if !defs.is_empty() {
+        return Ok(AliasColumnSpec::Definitions(defs));
+    }
+    if !names.is_empty() {
+        return Ok(AliasColumnSpec::Names(names));
+    }
+    Ok(AliasColumnSpec::None)
+}
+
+fn build_alias_column_def(pair: Pair<'_, Rule>) -> Result<AliasColumnDef, ParseError> {
+    let mut inner = pair.into_inner();
+    let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    Ok(AliasColumnDef { name, ty })
 }
 
 fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
@@ -1187,6 +1229,10 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
 fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
+        Rule::named_table_constraint => Err(ParseError::UnexpectedToken {
+            expected: "unnamed PRIMARY KEY or UNIQUE table constraint",
+            actual: inner.as_str().to_string(),
+        }),
         Rule::primary_key_table_constraint => Ok(TableConstraint::PrimaryKey {
             columns: inner
                 .into_inner()
@@ -1649,8 +1695,9 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             SqlExpr::Cast(grand_inner, _) if matches!(grand_inner.as_ref(), SqlExpr::Column(_)) => {
                 select_item_name(inner, index)
             }
-            _ => sql_type_output_name(*ty).to_string(),
+            _ => raw_type_output_name(ty).to_string(),
         },
+        SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::Random => "random".to_string(),
         SqlExpr::FuncCall { name, .. } => name.clone(),
@@ -1660,6 +1707,8 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
 
 fn sql_type_output_name(ty: SqlType) -> &'static str {
     match ty.kind {
+        SqlTypeKind::Record => "record",
+        SqlTypeKind::Composite => "record",
         SqlTypeKind::Int2 => "int2",
         SqlTypeKind::Int2Vector => "int2vector",
         SqlTypeKind::Int4 => "int4",
@@ -1699,6 +1748,14 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::InternalChar => "char",
         SqlTypeKind::Char => "bpchar",
         SqlTypeKind::Varchar => "varchar",
+    }
+}
+
+fn raw_type_output_name(ty: &RawTypeName) -> &str {
+    match ty {
+        RawTypeName::Builtin(sql_type) => sql_type_output_name(*sql_type),
+        RawTypeName::Named { name } => name.as_str(),
+        RawTypeName::Record => "record",
     }
 }
 
@@ -1764,7 +1821,7 @@ fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseEr
 fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     let mut inner = pair.into_inner();
     let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
-    let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
+    let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let mut default_expr = None;
     let mut nullable = true;
     let mut primary_key = false;
@@ -1834,20 +1891,24 @@ fn build_alter_table_rename(pair: Pair<'_, Rule>) -> Result<AlterTableRenameStat
     })
 }
 
-fn build_type(pair: Pair<'_, Rule>) -> SqlType {
+fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
     match pair.as_rule() {
-        Rule::type_name => {
+        Rule::type_name | Rule::known_type_name => {
             let mut inner = pair.into_inner();
-            let mut ty = build_type(inner.next().expect("type_name base"));
-            // :HACK: SqlType only tracks whether a value is an array, not its full
-            // dimensionality, so repeated [] suffixes collapse to the same array type.
-            // The value layer still preserves nested array contents for transient cases.
+            let mut ty = build_type_name(inner.next().expect("type_name base"));
             for _ in inner {
-                ty = SqlType::array_of(ty);
+                ty = match ty {
+                    RawTypeName::Builtin(inner_ty) => {
+                        RawTypeName::Builtin(SqlType::array_of(inner_ty))
+                    }
+                    other => other,
+                };
             }
             ty
         }
-        Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
+        Rule::known_base_type_name => build_type_name(
+            pair.into_inner().next().expect("base_type_name inner"),
+        ),
         Rule::array_type_alias => {
             let base = match pair
                 .as_str()
@@ -1871,13 +1932,16 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
                 "jsonpath" => SqlType::new(SqlTypeKind::JsonPath),
                 other => panic!("unsupported array type alias: {other}"),
             };
-            SqlType::array_of(base)
+            RawTypeName::Builtin(SqlType::array_of(base))
         }
-        Rule::kw_int2 | Rule::kw_smallint => SqlType::new(SqlTypeKind::Int2),
-        Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => SqlType::new(SqlTypeKind::Int4),
-        Rule::kw_int8 | Rule::kw_bigint => SqlType::new(SqlTypeKind::Int8),
-        Rule::kw_name => SqlType::new(SqlTypeKind::Name),
-        Rule::kw_oid => SqlType::new(SqlTypeKind::Oid),
+        Rule::kw_record => RawTypeName::Record,
+        Rule::kw_int2 | Rule::kw_smallint => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2)),
+        Rule::kw_int4 | Rule::kw_int | Rule::kw_integer => {
+            RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))
+        }
+        Rule::kw_int8 | Rule::kw_bigint => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
+        Rule::kw_name => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Name)),
+        Rule::kw_oid => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
         Rule::bit_type => {
             let len = pair
                 .into_inner()
@@ -1886,8 +1950,8 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
                 .transpose()
                 .expect("bit length");
             match len {
-                Some(len) => SqlType::with_bit_len(SqlTypeKind::Bit, len),
-                None => SqlType::with_bit_len(SqlTypeKind::Bit, 1),
+                Some(len) => RawTypeName::Builtin(SqlType::with_bit_len(SqlTypeKind::Bit, len)),
+                None => RawTypeName::Builtin(SqlType::with_bit_len(SqlTypeKind::Bit, 1)),
             }
         }
         Rule::varbit_type => {
@@ -1898,13 +1962,15 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
                 .transpose()
                 .expect("varbit length");
             match len {
-                Some(len) => SqlType::with_bit_len(SqlTypeKind::VarBit, len),
-                None => SqlType::new(SqlTypeKind::VarBit),
+                Some(len) => RawTypeName::Builtin(SqlType::with_bit_len(SqlTypeKind::VarBit, len)),
+                None => RawTypeName::Builtin(SqlType::new(SqlTypeKind::VarBit)),
             }
         }
-        Rule::kw_bytea => SqlType::new(SqlTypeKind::Bytea),
-        Rule::kw_float4 | Rule::kw_real => SqlType::new(SqlTypeKind::Float4),
-        Rule::kw_float8 | Rule::double_precision_type => SqlType::new(SqlTypeKind::Float8),
+        Rule::kw_bytea => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+        Rule::kw_float4 | Rule::kw_real => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float4)),
+        Rule::kw_float8 | Rule::double_precision_type => {
+            RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float8))
+        }
         Rule::numeric_type => {
             let dims = pair
                 .into_inner()
@@ -1913,22 +1979,29 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
                 .collect::<Result<Vec<_>, _>>()
                 .expect("numeric precision/scale");
             match dims.as_slice() {
-                [] => SqlType::new(SqlTypeKind::Numeric),
-                [precision] => SqlType::with_numeric_precision_scale(*precision, 0),
-                [precision, scale] => SqlType::with_numeric_precision_scale(*precision, *scale),
+                [] => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Numeric)),
+                [precision] => {
+                    RawTypeName::Builtin(SqlType::with_numeric_precision_scale(*precision, 0))
+                }
+                [precision, scale] => RawTypeName::Builtin(SqlType::with_numeric_precision_scale(
+                    *precision,
+                    *scale,
+                )),
                 _ => unreachable!("unexpected numeric typmod arity"),
             }
         }
-        Rule::kw_text => SqlType::new(SqlTypeKind::Text),
-        Rule::kw_json => SqlType::new(SqlTypeKind::Json),
-        Rule::kw_jsonb => SqlType::new(SqlTypeKind::Jsonb),
-        Rule::kw_jsonpath => SqlType::new(SqlTypeKind::JsonPath),
-        Rule::kw_tsvector => SqlType::new(SqlTypeKind::TsVector),
-        Rule::kw_tsquery => SqlType::new(SqlTypeKind::TsQuery),
-        Rule::kw_regconfig => SqlType::new(SqlTypeKind::RegConfig),
-        Rule::kw_regdictionary => SqlType::new(SqlTypeKind::RegDictionary),
-        Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),
-        Rule::date_type | Rule::kw_date => SqlType::new(SqlTypeKind::Date),
+        Rule::kw_text => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+        Rule::kw_json => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Json)),
+        Rule::kw_jsonb => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Jsonb)),
+        Rule::kw_jsonpath => RawTypeName::Builtin(SqlType::new(SqlTypeKind::JsonPath)),
+        Rule::kw_tsvector => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsVector)),
+        Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
+        Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
+        Rule::kw_regdictionary => {
+            RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary))
+        }
+        Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
+        Rule::date_type | Rule::kw_date => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Date)),
         Rule::time_type => {
             let precision = pair
                 .clone()
@@ -1947,9 +2020,11 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
             } else {
                 SqlTypeKind::Time
             };
-            precision
-                .map(|precision| SqlType::with_time_precision(kind, precision))
-                .unwrap_or_else(|| SqlType::new(kind))
+            RawTypeName::Builtin(
+                precision
+                    .map(|precision| SqlType::with_time_precision(kind, precision))
+                    .unwrap_or_else(|| SqlType::new(kind)),
+            )
         }
         Rule::timestamp_type | Rule::kw_timestamp => {
             let precision = pair
@@ -1969,18 +2044,20 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
             } else {
                 SqlTypeKind::Timestamp
             };
-            precision
-                .map(|precision| SqlType::with_time_precision(kind, precision))
-                .unwrap_or_else(|| SqlType::new(kind))
+            RawTypeName::Builtin(
+                precision
+                    .map(|precision| SqlType::with_time_precision(kind, precision))
+                    .unwrap_or_else(|| SqlType::new(kind)),
+            )
         }
-        Rule::kw_point => SqlType::new(SqlTypeKind::Point),
-        Rule::kw_lseg => SqlType::new(SqlTypeKind::Lseg),
-        Rule::kw_path => SqlType::new(SqlTypeKind::Path),
-        Rule::kw_box => SqlType::new(SqlTypeKind::Box),
-        Rule::kw_polygon => SqlType::new(SqlTypeKind::Polygon),
-        Rule::kw_line => SqlType::new(SqlTypeKind::Line),
-        Rule::kw_circle => SqlType::new(SqlTypeKind::Circle),
-        Rule::internal_char_type => SqlType::new(SqlTypeKind::InternalChar),
+        Rule::kw_point => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Point)),
+        Rule::kw_lseg => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Lseg)),
+        Rule::kw_path => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path)),
+        Rule::kw_box => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Box)),
+        Rule::kw_polygon => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Polygon)),
+        Rule::kw_line => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Line)),
+        Rule::kw_circle => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Circle)),
+        Rule::internal_char_type => RawTypeName::Builtin(SqlType::new(SqlTypeKind::InternalChar)),
         Rule::char_type => {
             let len = pair
                 .into_inner()
@@ -1989,8 +2066,8 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
                 .transpose()
                 .expect("char length");
             match len {
-                Some(len) => SqlType::with_char_len(SqlTypeKind::Char, len),
-                None => SqlType::new(SqlTypeKind::Char),
+                Some(len) => RawTypeName::Builtin(SqlType::with_char_len(SqlTypeKind::Char, len)),
+                None => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)),
             }
         }
         Rule::varchar_type | Rule::character_varying_type => {
@@ -2001,10 +2078,15 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
                 .transpose()
                 .expect("varchar length");
             match len {
-                Some(len) => SqlType::with_char_len(SqlTypeKind::Varchar, len),
-                None => SqlType::new(SqlTypeKind::Varchar),
+                Some(len) => {
+                    RawTypeName::Builtin(SqlType::with_char_len(SqlTypeKind::Varchar, len))
+                }
+                None => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Varchar)),
             }
         }
+        Rule::named_type_name => RawTypeName::Named {
+            name: build_identifier(pair.into_inner().next().expect("named_type_name inner")),
+        },
         _ => unreachable!("unexpected type rule {:?}", pair.as_rule()),
     }
 }
@@ -2059,7 +2141,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             for suffix in inner {
                 match suffix.as_rule() {
                     Rule::cast_suffix => {
-                        let ty = build_type(
+                        let ty = build_type_name(
                             suffix
                                 .into_inner()
                                 .find(|part| part.as_rule() == Rule::type_name)
@@ -2449,7 +2531,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::expr => expr = Some(build_expr(part)?),
-                    Rule::type_name => ty = Some(build_type(part)),
+                    Rule::type_name => ty = Some(build_type_name(part)),
                     _ => {}
                 }
             }
@@ -2458,6 +2540,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 ty.ok_or(ParseError::UnexpectedEof)?,
             ))
         }
+        Rule::row_expr => Ok(SqlExpr::Row(
+            pair.into_inner()
+                .find(|part| part.as_rule() == Rule::expr_list)
+                .map(|list| {
+                    list.into_inner()
+                        .filter(|part| part.as_rule() == Rule::expr)
+                        .map(build_expr)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default(),
+        )),
         Rule::agg_call => build_agg_call(pair),
         Rule::func_call => {
             let mut inner = pair.into_inner();
@@ -2608,7 +2702,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::trim_expr => build_trim_expr(pair),
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
-            let ty = build_type(inner.next().ok_or(ParseError::UnexpectedEof)?);
+            let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
             let literal =
                 decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
             Ok(SqlExpr::Cast(
@@ -3057,7 +3151,7 @@ fn decode_string_literal(raw: &str) -> Result<String, ParseError> {
 fn expr_is_array_syntax(expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::ArrayLiteral(_) => true,
-        SqlExpr::Cast(_, ty) => ty.is_array,
+        SqlExpr::Cast(_, RawTypeName::Builtin(ty)) => ty.is_array,
         SqlExpr::Const(Value::Array(_) | Value::PgArray(_)) => true,
         _ => false,
     }
@@ -3065,7 +3159,9 @@ fn expr_is_array_syntax(expr: &SqlExpr) -> bool {
 
 fn expr_is_jsonb_syntax(expr: &SqlExpr) -> bool {
     match expr {
-        SqlExpr::Cast(_, ty) => !ty.is_array && matches!(ty.kind, SqlTypeKind::Jsonb),
+        SqlExpr::Cast(_, RawTypeName::Builtin(ty)) => {
+            !ty.is_array && matches!(ty.kind, SqlTypeKind::Jsonb)
+        }
         SqlExpr::Const(Value::Jsonb(_)) => true,
         _ => false,
     }
@@ -3073,7 +3169,9 @@ fn expr_is_jsonb_syntax(expr: &SqlExpr) -> bool {
 
 fn expr_is_jsonpath_syntax(expr: &SqlExpr) -> bool {
     match expr {
-        SqlExpr::Cast(_, ty) => !ty.is_array && matches!(ty.kind, SqlTypeKind::JsonPath),
+        SqlExpr::Cast(_, RawTypeName::Builtin(ty)) => {
+            !ty.is_array && matches!(ty.kind, SqlTypeKind::JsonPath)
+        }
         SqlExpr::Const(Value::JsonPath(_))
         | SqlExpr::Const(Value::Text(_))
         | SqlExpr::Const(Value::TextRef(_, _)) => true,

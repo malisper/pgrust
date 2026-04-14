@@ -70,7 +70,18 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::ident => name = Some(build_ident(part)),
-            Rule::type_name_text => ty = Some(parse_type_name(part.as_str().trim())?),
+            Rule::type_name_text => {
+                let parsed = parse_type_name(part.as_str().trim())?;
+                ty = Some(match parsed {
+                    crate::backend::parser::RawTypeName::Builtin(sql_type) => sql_type,
+                    crate::backend::parser::RawTypeName::Record => {
+                        return Err(ParseError::UnsupportedType("record".into()));
+                    }
+                    crate::backend::parser::RawTypeName::Named { name } => {
+                        return Err(ParseError::UnsupportedType(name));
+                    }
+                });
+            }
             Rule::default_clause => {
                 default_expr = part
                     .into_inner()

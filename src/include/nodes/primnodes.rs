@@ -33,6 +33,7 @@ pub enum ScalarType {
     TsVector,
     TsQuery,
     Text,
+    Record,
     Bool,
     Array(Box<ScalarType>),
 }

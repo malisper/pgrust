@@ -190,9 +190,16 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
 }
 
 fn sql_type_oid(sql_type: SqlType) -> u32 {
+    if !sql_type.is_array && sql_type.type_oid != 0 {
+        return sql_type.type_oid;
+    }
     match (sql_type.kind, sql_type.is_array) {
         (SqlTypeKind::AnyArray, false) => ANYARRAYOID,
         (SqlTypeKind::AnyArray, true) => unreachable!("anyarray arrays are unsupported"),
+        (SqlTypeKind::Record, false) => sql_type.type_oid,
+        (SqlTypeKind::Record, true) => unreachable!("record arrays are unsupported"),
+        (SqlTypeKind::Composite, false) => sql_type.type_oid,
+        (SqlTypeKind::Composite, true) => unreachable!("composite arrays are unsupported"),
         (SqlTypeKind::Bool, false) => BOOL_TYPE_OID,
         (SqlTypeKind::Bool, true) => BOOL_ARRAY_TYPE_OID,
         (SqlTypeKind::Bit, false) => BIT_TYPE_OID,
@@ -280,7 +287,7 @@ mod tests {
     #[test]
     fn bootstrap_pg_attribute_rows_cover_core_catalog_columns() {
         let rows = bootstrap_pg_attribute_rows();
-        assert_eq!(rows.len(), 212);
+        assert_eq!(rows.len(), 215);
         assert!(rows.iter().any(|row| {
             row.attrelid == PG_CLASS_RELATION_OID
                 && row.attname == "relkind"

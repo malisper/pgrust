@@ -50,6 +50,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
             expected: "expression",
             actual: "DEFAULT".into(),
         }),
+        SqlExpr::Row(_) => Err(ParseError::UnexpectedToken {
+            expected: "implemented row expression",
+            actual: "ROW(...)".into(),
+        }),
         SqlExpr::AggCall {
             func,
             args,
@@ -489,7 +493,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             )
                         })
                         .collect::<Result<_, _>>()?,
-                    array_type: *ty,
+                    array_type: raw_type_name_hint(ty),
                 }
             } else {
                 bind_agg_output_expr(
@@ -504,7 +508,10 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     n_keys,
                 )?
             };
-            Ok(Expr::Cast(Box::new(bound_inner), *ty))
+            Ok(Expr::Cast(
+                Box::new(bound_inner),
+                raw_type_name_hint(ty),
+            ))
         }
         SqlExpr::Eq(l, r) => Ok(Expr::op_auto(
             OpExprKind::Eq,

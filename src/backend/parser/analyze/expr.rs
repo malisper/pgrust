@@ -66,6 +66,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::Const(value) => Expr::Const(value.clone()),
         SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
         SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),
+        SqlExpr::Row(_) => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "implemented row expression",
+                actual: "ROW(...)".into(),
+            });
+        }
         SqlExpr::BinaryOperator { op, left, right } => match op.as_str() {
             "@@" => bind_overloaded_binary_expr(
                 "@@",
@@ -411,7 +417,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                             )
                         })
                         .collect::<Result<_, _>>()?,
-                    array_type: *ty,
+                    array_type: raw_type_name_hint(ty),
                 }
             } else {
                 bind_expr_with_outer_and_ctes(
@@ -423,8 +429,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             };
-            validate_catalog_backed_explicit_cast(source_type, *ty, catalog)?;
-            Expr::Cast(Box::new(bound_inner), *ty)
+            let target_type = raw_type_name_hint(ty);
+            validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
+            Expr::Cast(Box::new(bound_inner), target_type)
         }
         SqlExpr::Eq(left, right) => {
             if let Some(result) = bind_maybe_geometry_comparison(

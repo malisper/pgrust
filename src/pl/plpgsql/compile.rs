@@ -246,5 +246,11 @@ fn compile_expr_text(
 
 #[allow(dead_code)]
 pub(crate) fn compile_decl_type(type_name: &str) -> Result<SqlType, ParseError> {
-    parse_type_name(type_name)
+    parse_type_name(type_name).and_then(|ty| match ty {
+        crate::backend::parser::RawTypeName::Builtin(sql_type) => Ok(sql_type),
+        crate::backend::parser::RawTypeName::Record => {
+            Err(ParseError::UnsupportedType("record".into()))
+        }
+        crate::backend::parser::RawTypeName::Named { name } => Err(ParseError::UnsupportedType(name)),
+    })
 }

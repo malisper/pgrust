@@ -39,6 +39,15 @@ fn unsupported_anyarray_input() -> ExecError {
     }
 }
 
+fn unsupported_record_input() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot accept a value of type record".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
 fn parse_pg_integer_text(text: &str, ty: &'static str) -> Result<i128, ExecError> {
     let trimmed = text.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
@@ -598,6 +607,9 @@ fn parse_input_type_name(type_name: &str) -> Result<Option<SqlType>, ExecError> 
         Ok(ty) => ty,
         Err(_) => return Ok(None),
     };
+    let Some(parsed) = parsed.as_builtin() else {
+        return Ok(None);
+    };
     Ok(input_type_name_supported(parsed).then_some(parsed))
 }
 
@@ -981,6 +993,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
+            SqlType {
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                ..
+            } => Err(unsupported_record_input()),
         },
         Value::Int32(v) => match ty {
             SqlType {
@@ -1064,6 +1080,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
+            SqlType {
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                ..
+            } => Err(unsupported_record_input()),
         },
         Value::Bool(v) => match ty {
             SqlType {
@@ -1123,6 +1143,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
+            SqlType {
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                ..
+            } => Err(unsupported_record_input()),
         },
         Value::Date(v) => match ty.kind {
             SqlTypeKind::Date => Ok(Value::Date(v)),
@@ -1442,6 +1466,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
+            SqlType {
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                ..
+            } => Err(unsupported_record_input()),
         },
         Value::Float64(v) => match ty {
             SqlType {
@@ -1528,6 +1556,10 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
                 kind: SqlTypeKind::AnyArray,
                 ..
             } => Err(unsupported_anyarray_input()),
+            SqlType {
+                kind: SqlTypeKind::Record | SqlTypeKind::Composite,
+                ..
+            } => Err(unsupported_record_input()),
         },
         Value::Numeric(numeric) => cast_numeric_value(numeric, ty, true),
         Value::Bit(bits) => match ty.kind {
@@ -1564,6 +1596,7 @@ pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> 
 pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
+        SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
@@ -1659,6 +1692,7 @@ pub(super) fn cast_numeric_value(
 ) -> Result<Value, ExecError> {
     match ty.kind {
         SqlTypeKind::AnyArray => Err(unsupported_anyarray_input()),
+        SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
         SqlTypeKind::Text
         | SqlTypeKind::Int2Vector
