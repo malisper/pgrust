@@ -7,11 +7,11 @@ use crate::RelFileLocator;
 use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
-use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::parsenodes::Query;
 use crate::include::nodes::pathnodes::{
-    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget, PlannerTargetEntry,
+    PlannerGlobal, PlannerInfo, PlannerJoinExpr, PlannerOrderByEntry, PlannerPath,
+    PlannerProjectSetTarget, PlannerTargetEntry, RelOptInfo, RelOptKind, RestrictInfo,
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -71,16 +71,50 @@ fn create_plan(path: PlannerPath) -> Plan {
     path.into_plan()
 }
 
+fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
+    let mut final_rel = RelOptInfo::new(
+        root.all_query_relids(),
+        RelOptKind::UpperRel,
+        root.final_target.clone(),
+    );
+    if let Some(where_qual) = root.parse.where_qual.clone() {
+        final_rel.baserestrictinfo.push(RestrictInfo::new(where_qual));
+    }
+    if let Some(having_qual) = root.parse.having_qual.clone() {
+        final_rel.joininfo.push(RestrictInfo::new(having_qual));
+    }
+    // :HACK: The planner root now mirrors PostgreSQL's PlannerInfo/RelOptInfo boundary,
+    // but physical path generation still funnels through the existing PlannerPath bridge
+    // until grouped-query semantics are fully Var/Aggref-based.
+    final_rel.add_path(optimize_path(PlannerPath::from_query(root.parse.clone()), catalog));
+    root.join_rel_list.push(final_rel.clone());
+    root.final_rel = Some(final_rel.clone());
+    final_rel
+}
+
+fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
+    make_one_rel(root, catalog)
+}
+
 pub(crate) fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
-    let mut subplans = Vec::new();
+    let mut glob = PlannerGlobal::new();
+    let mut root = PlannerInfo::new(query);
+    let command_type = root.parse.command_type;
+    let final_rel = query_planner(&mut root, catalog);
+    let best_path = final_rel
+        .cheapest_total_path()
+        .cloned()
+        .unwrap_or(PlannerPath::Result {
+            plan_info: PlanEstimate::default(),
+        });
     PlannedStmt {
-        command_type: CommandType::Select,
+        command_type,
         plan_tree: finalize_plan_subqueries(
-            create_plan(optimize_path(PlannerPath::from_query(query), catalog)),
+            create_plan(best_path),
             catalog,
-            &mut subplans,
+            &mut glob.subplans,
         ),
-        subplans,
+        subplans: glob.subplans,
     }
 }
 
@@ -585,7 +619,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             items: items
                 .into_iter()
-                .map(|item| crate::include::nodes::plannodes::OrderByEntry {
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
                     expr: rebase_expr_subplan_ids(item.expr, base),
                     descending: item.descending,
                     nulls_first: item.nulls_first,
@@ -612,7 +646,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             input: Box::new(rebase_plan_subplan_ids(*input, base)),
             targets: targets
                 .into_iter()
-                .map(|target| crate::include::nodes::plannodes::TargetEntry {
+                .map(|target| crate::include::nodes::primnodes::TargetEntry {
                     expr: rebase_expr_subplan_ids(target.expr, base),
                     ..target
                 })
@@ -670,7 +704,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|target| match target {
                     ProjectSetTarget::Scalar(entry) => {
-                        ProjectSetTarget::Scalar(crate::include::nodes::plannodes::TargetEntry {
+                        ProjectSetTarget::Scalar(crate::include::nodes::primnodes::TargetEntry {
                             expr: rebase_expr_subplan_ids(entry.expr, base),
                             ..entry
                         })
@@ -730,7 +764,7 @@ pub(crate) fn finalize_plan_subqueries(
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             items: items
                 .into_iter()
-                .map(|item| crate::include::nodes::plannodes::OrderByEntry {
+                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
                     expr: finalize_expr_subqueries(item.expr, catalog, subplans),
                     descending: item.descending,
                     nulls_first: item.nulls_first,
@@ -757,7 +791,7 @@ pub(crate) fn finalize_plan_subqueries(
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             targets: targets
                 .into_iter()
-                .map(|target| crate::include::nodes::plannodes::TargetEntry {
+                .map(|target| crate::include::nodes::primnodes::TargetEntry {
                     name: target.name,
                     expr: finalize_expr_subqueries(target.expr, catalog, subplans),
                     sql_type: target.sql_type,
@@ -819,7 +853,7 @@ pub(crate) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|target| match target {
                     ProjectSetTarget::Scalar(entry) => {
-                        ProjectSetTarget::Scalar(crate::include::nodes::plannodes::TargetEntry {
+                        ProjectSetTarget::Scalar(crate::include::nodes::primnodes::TargetEntry {
                             name: entry.name,
                             expr: finalize_expr_subqueries(entry.expr, catalog, subplans),
                             sql_type: entry.sql_type,

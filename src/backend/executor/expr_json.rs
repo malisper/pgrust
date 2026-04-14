@@ -13,7 +13,7 @@ use crate::backend::executor::jsonpath::{
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
-use crate::include::nodes::plannodes::BuiltinScalarFunction;
+use crate::include::nodes::primnodes::BuiltinScalarFunction;
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use serde_json::Value as SerdeJsonValue;

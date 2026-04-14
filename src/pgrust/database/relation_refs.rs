@@ -143,10 +143,10 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
     if let Some(targets) = &query.project_set {
         for target in targets {
             match target {
-                crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                     collect_rels_from_expr(&entry.expr, rels);
                 }
-                crate::include::nodes::plannodes::ProjectSetTarget::Set { call, .. } => {
+                crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
                     collect_rels_from_set_returning_call(call, rels);
                 }
             }
@@ -171,11 +171,11 @@ fn collect_rels_from_jointree(jointree: &JoinTreeNode, rels: &mut BTreeSet<RelFi
 }
 
 fn collect_rels_from_set_returning_call(
-    call: &crate::include::nodes::plannodes::SetReturningCall,
+    call: &crate::include::nodes::primnodes::SetReturningCall,
     rels: &mut BTreeSet<RelFileLocator>,
 ) {
     match call {
-        crate::include::nodes::plannodes::SetReturningCall::GenerateSeries {
+        crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
             start,
             stop,
             step,
@@ -185,10 +185,10 @@ fn collect_rels_from_set_returning_call(
             collect_rels_from_expr(stop, rels);
             collect_rels_from_expr(step, rels);
         }
-        crate::include::nodes::plannodes::SetReturningCall::Unnest { args, .. }
-        | crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction { args, .. }
-        | crate::include::nodes::plannodes::SetReturningCall::RegexTableFunction { args, .. }
-        | crate::include::nodes::plannodes::SetReturningCall::TextSearchTableFunction {
+        crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
+        | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction { args, .. }
+        | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction { args, .. }
+        | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
             args,
             ..
         } => {
@@ -252,7 +252,7 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             }
         }
         Plan::FunctionScan { call, .. } => match call {
-            crate::include::nodes::plannodes::SetReturningCall::GenerateSeries {
+            crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
                 start,
                 stop,
                 step,
@@ -262,14 +262,14 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(stop, rels);
                 collect_rels_from_expr(step, rels);
             }
-            crate::include::nodes::plannodes::SetReturningCall::Unnest { args, .. }
-            | crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction {
+            crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
+            | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
                 args, ..
             }
-            | crate::include::nodes::plannodes::SetReturningCall::RegexTableFunction {
+            | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
                 args, ..
             }
-            | crate::include::nodes::plannodes::SetReturningCall::TextSearchTableFunction {
+            | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
                 args,
                 ..
             } => {
@@ -289,12 +289,12 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             collect_rels_from_plan(input, rels);
             for target in targets {
                 match target {
-                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                         collect_rels_from_expr(&entry.expr, rels);
                     }
-                    crate::include::nodes::plannodes::ProjectSetTarget::Set { call, .. } => {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
                         match call {
-                            crate::include::nodes::plannodes::SetReturningCall::GenerateSeries {
+                            crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
                                 start,
                                 stop,
                                 step,
@@ -304,16 +304,16 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                                 collect_rels_from_expr(stop, rels);
                                 collect_rels_from_expr(step, rels);
                             }
-                            crate::include::nodes::plannodes::SetReturningCall::Unnest {
+                            crate::include::nodes::primnodes::SetReturningCall::Unnest {
                                 args, ..
                             }
-                            | crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction {
+                            | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
                                 args, ..
                             }
-                            | crate::include::nodes::plannodes::SetReturningCall::RegexTableFunction {
+                            | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
                                 args, ..
                             }
-                            | crate::include::nodes::plannodes::SetReturningCall::TextSearchTableFunction {
+                            | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
                                 args, ..
                             } => {
                                 for arg in args {

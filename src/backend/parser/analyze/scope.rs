@@ -1,7 +1,7 @@
 use super::*;
 use super::query::{AnalyzedFrom, JoinAliasInfo};
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::include::nodes::plannodes::JoinType;
+use crate::include::nodes::primnodes::JoinType;
 
 #[derive(Debug, Clone)]
 pub(crate) struct BoundScope {
@@ -726,13 +726,13 @@ pub(super) fn bind_from_item_with_ctes(
                             })
                             .collect::<Result<Vec<_>, _>>()?;
                         let output_columns = match kind {
-                            crate::include::nodes::plannodes::RegexTableFunction::Matches => {
+                            crate::include::nodes::primnodes::RegexTableFunction::Matches => {
                                 vec![QueryColumn {
                                     name: "regexp_matches".into(),
                                     sql_type: SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
                                 }]
                             }
-                            crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+                            crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
                                 vec![QueryColumn::text("regexp_split_to_table")]
                             }
                         };

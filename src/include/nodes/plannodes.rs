@@ -3,15 +3,9 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
-pub use crate::include::nodes::pathnodes::{
-    PlannerJoinArraySubscript, PlannerJoinExpr, PlannerOrderByEntry, PlannerProjectSetTarget,
-    PlannerTargetEntry,
-};
-pub use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, ExprArraySubscript, JoinType,
-    JsonTableFunction, OrderByEntry, ProjectSetTarget, QueryColumn, RegexTableFunction,
-    RelationDesc, ScalarType, SetReturningCall, SortGroupClause, TargetEntry,
-    TextSearchTableFunction, ToastRelationRef, Var,
+use crate::include::nodes::primnodes::{
+    AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
+    SetReturningCall, TargetEntry, ToastRelationRef,
 };
 
 #[derive(Debug, Clone, Copy, Default)]

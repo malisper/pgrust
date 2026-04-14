@@ -96,11 +96,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             on,
         } => {
             let cross_right_outer =
-                matches!(kind, crate::include::nodes::plannodes::JoinType::Cross)
+                matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
                     && !matches!(
                         &*left,
                         Plan::NestedLoopJoin {
-                            kind: crate::include::nodes::plannodes::JoinType::Cross,
+                            kind: crate::include::nodes::primnodes::JoinType::Cross,
                             ..
                         }
                     );
@@ -301,10 +301,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let column_names = targets
                 .iter()
                 .map(|target| match target {
-                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                         entry.name.clone()
                     }
-                    crate::include::nodes::plannodes::ProjectSetTarget::Set { name, .. } => {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Set { name, .. } => {
                         name.clone()
                     }
                 })

@@ -1263,7 +1263,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             subscripts: subscripts
                 .iter()
                 .map(|subscript| {
-                    Ok(crate::include::nodes::plannodes::ExprArraySubscript {
+                    Ok(crate::include::nodes::primnodes::ExprArraySubscript {
                         is_slice: subscript.is_slice,
                         lower: subscript
                             .lower

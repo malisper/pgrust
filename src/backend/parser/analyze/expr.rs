@@ -834,7 +834,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 subscripts: subscripts
                     .iter()
                     .map(|subscript| {
-                        Ok(crate::include::nodes::plannodes::ExprArraySubscript {
+                        Ok(crate::include::nodes::primnodes::ExprArraySubscript {
                             is_slice: subscript.is_slice,
                             lower: subscript
                                 .lower

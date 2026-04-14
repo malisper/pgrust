@@ -58,46 +58,46 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
         SetReturningCall::GenerateSeries { .. } => "generate_series",
         SetReturningCall::Unnest { .. } => "unnest",
         SetReturningCall::JsonTableFunction { kind, .. } => match kind {
-            crate::include::nodes::plannodes::JsonTableFunction::ObjectKeys => "json_object_keys",
-            crate::include::nodes::plannodes::JsonTableFunction::Each => "json_each",
-            crate::include::nodes::plannodes::JsonTableFunction::EachText => "json_each_text",
-            crate::include::nodes::plannodes::JsonTableFunction::ArrayElements => {
+            crate::include::nodes::primnodes::JsonTableFunction::ObjectKeys => "json_object_keys",
+            crate::include::nodes::primnodes::JsonTableFunction::Each => "json_each",
+            crate::include::nodes::primnodes::JsonTableFunction::EachText => "json_each_text",
+            crate::include::nodes::primnodes::JsonTableFunction::ArrayElements => {
                 "json_array_elements"
             }
-            crate::include::nodes::plannodes::JsonTableFunction::ArrayElementsText => {
+            crate::include::nodes::primnodes::JsonTableFunction::ArrayElementsText => {
                 "json_array_elements_text"
             }
-            crate::include::nodes::plannodes::JsonTableFunction::JsonbPathQuery => {
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQuery => {
                 "jsonb_path_query"
             }
-            crate::include::nodes::plannodes::JsonTableFunction::JsonbObjectKeys => {
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbObjectKeys => {
                 "jsonb_object_keys"
             }
-            crate::include::nodes::plannodes::JsonTableFunction::JsonbEach => "jsonb_each",
-            crate::include::nodes::plannodes::JsonTableFunction::JsonbEachText => "jsonb_each_text",
-            crate::include::nodes::plannodes::JsonTableFunction::JsonbArrayElements => {
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbEach => "jsonb_each",
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbEachText => "jsonb_each_text",
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbArrayElements => {
                 "jsonb_array_elements"
             }
-            crate::include::nodes::plannodes::JsonTableFunction::JsonbArrayElementsText => {
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbArrayElementsText => {
                 "jsonb_array_elements_text"
             }
         },
         SetReturningCall::RegexTableFunction { kind, .. } => match kind {
-            crate::include::nodes::plannodes::RegexTableFunction::Matches => "regexp_matches",
-            crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+            crate::include::nodes::primnodes::RegexTableFunction::Matches => "regexp_matches",
+            crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
                 "regexp_split_to_table"
             }
         },
         SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
-            crate::include::nodes::plannodes::TextSearchTableFunction::TokenType => "ts_token_type",
-            crate::include::nodes::plannodes::TextSearchTableFunction::Parse => "ts_parse",
-            crate::include::nodes::plannodes::TextSearchTableFunction::Debug => "ts_debug",
+            crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
+            crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
+            crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
         },
     }
 }
 
 fn eval_regex_table_function(
-    kind: crate::include::nodes::plannodes::RegexTableFunction,
+    kind: crate::include::nodes::primnodes::RegexTableFunction,
     args: &[Expr],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
@@ -107,10 +107,10 @@ fn eval_regex_table_function(
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
     let rows = match kind {
-        crate::include::nodes::plannodes::RegexTableFunction::Matches => {
+        crate::include::nodes::primnodes::RegexTableFunction::Matches => {
             eval_regexp_matches_rows(&values)?
         }
-        crate::include::nodes::plannodes::RegexTableFunction::SplitToTable => {
+        crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
             eval_regexp_split_to_table_rows(&values)?
         }
     };

@@ -15,9 +15,10 @@ use std::time::Duration;
 use crate::backend::executor::{AccumState, ExecError, ExecutorContext};
 pub use crate::include::nodes::datum::{NumericValue, Value};
 pub use crate::include::nodes::parsenodes::SqlType;
-pub use crate::include::nodes::plannodes::{
+pub use crate::include::nodes::plannodes::Plan;
+pub use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, ColumnDesc, Expr, JoinType, JsonTableFunction,
-    OrderByEntry, Plan, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall,
+    OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, ScalarType, SetReturningCall,
     TargetEntry, ToastRelationRef,
 };
 

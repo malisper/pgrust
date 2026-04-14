@@ -17,7 +17,7 @@ use crate::include::nodes::execnodes::{
     NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, SlotKind, ToastRelationRef, TupleSlot, ValuesState,
 };
-use crate::include::nodes::plannodes::{Expr, JoinType};
+use crate::include::nodes::primnodes::{Expr, JoinType};
 
 use std::time::Instant;
 
@@ -1008,7 +1008,7 @@ impl PlanNode for ProjectSetState {
                 let mut srf_rows = Vec::new();
                 let mut max_rows = 0usize;
                 for target in &self.targets {
-                    if let crate::include::nodes::plannodes::ProjectSetTarget::Set {
+                    if let crate::include::nodes::primnodes::ProjectSetTarget::Set {
                         call, ..
                     } = target
                     {
@@ -1040,10 +1040,10 @@ impl PlanNode for ProjectSetState {
             let mut srf_idx = 0usize;
             for target in &self.targets {
                 match target {
-                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
                         values.push(eval_expr(&entry.expr, input_slot, ctx)?.to_owned_value());
                     }
-                    crate::include::nodes::plannodes::ProjectSetTarget::Set { .. } => {
+                    crate::include::nodes::primnodes::ProjectSetTarget::Set { .. } => {
                         values.push(
                             self.current_srf_rows[srf_idx]
                                 .get(row_idx)

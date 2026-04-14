@@ -49,7 +49,7 @@ pub(super) fn eval_quantified_array(
 
 pub(super) fn eval_array_subscript(
     value: Value,
-    subscripts: &[crate::include::nodes::plannodes::ExprArraySubscript],
+    subscripts: &[crate::include::nodes::primnodes::ExprArraySubscript],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
@@ -76,7 +76,7 @@ pub(super) fn eval_array_subscript(
 
 pub(super) fn eval_array_subscript_plpgsql(
     value: Value,
-    subscripts: &[crate::include::nodes::plannodes::ExprArraySubscript],
+    subscripts: &[crate::include::nodes::primnodes::ExprArraySubscript],
     slot: &mut TupleSlot,
 ) -> Result<Value, ExecError> {
     let resolved = subscripts

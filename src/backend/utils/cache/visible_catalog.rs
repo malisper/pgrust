@@ -77,7 +77,7 @@ impl CatalogLookup for VisibleCatalog {
             toast: (entry.reltoastrelid != 0)
                 .then(|| self.relcache.get_by_oid(entry.reltoastrelid))
                 .flatten()
-                .map(|toast| crate::include::nodes::plannodes::ToastRelationRef {
+                .map(|toast| crate::include::nodes::primnodes::ToastRelationRef {
                     rel: toast.rel,
                     relation_oid: toast.relation_oid,
                 }),
