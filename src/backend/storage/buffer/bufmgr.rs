@@ -574,7 +574,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
     /// Write a modified page image into the buffer frame.
     ///
     /// If this pool has a WAL writer, a full-page-image WAL record is appended
-    /// and the page's `pd_lsn` (bytes 0-7) is stamped with the assigned LSN.
+    /// and the page's `pd_lsn` (bytes 0-7) is stamped with the record end LSN.
     /// The page is marked dirty and left in the buffer cache; the caller must
     /// flush WAL before committing and the data page will reach disk via
     /// eviction or an explicit `flush_buffer` + `complete_write`.
@@ -1690,17 +1690,20 @@ mod tests {
         // Use a zeroed page so pd_lsn starts at 0.
         let new_page = [0u8; PAGE_SIZE];
         pool.write_page_image(0, 1, &new_page).unwrap();
+        pool.flush_wal().unwrap();
 
         let page_after = pool.read_page(0).unwrap();
         let lsn_after = u64::from_le_bytes(page_after[0..8].try_into().unwrap());
 
         // LSN must be non-zero: the WAL writer stamped the assigned record LSN.
         assert_ne!(lsn_after, 0, "pd_lsn should be stamped with the WAL LSN");
-        // The first (and only) record lands at offset WAL_RECORD_LEN.
-        use crate::backend::access::transam::xlog::WAL_RECORD_LEN;
+
+        let mut reader =
+            crate::backend::access::transam::xlog::WalReader::open(&base.join("pg_wal")).unwrap();
+        let record = reader.next_decoded_record().unwrap().unwrap();
         assert_eq!(
-            lsn_after, WAL_RECORD_LEN as u64,
-            "first WAL record LSN should equal WAL_RECORD_LEN"
+            lsn_after, record.end_lsn,
+            "pd_lsn should match the decoded WAL record end LSN"
         );
     }
 

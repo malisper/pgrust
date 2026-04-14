@@ -7,7 +7,6 @@ pub const XLOG_BLOCK_IMAGE_HEADER: usize = 5;
 pub const XLOG_RECORD_DATA_HEADER_SHORT: usize = 2;
 pub const XLOG_RECORD_DATA_HEADER_LONG: usize = 5;
 pub const CRC_OFFSET: usize = 20;
-pub const WAL_RECORD_LEN: usize = XLOG_RECORD_HEADER + XLOG_BLOCK_HEADER + PAGE_SIZE;
 pub const XLOG_PAGE_MAGIC: u16 = 0xD118;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_LONG_HEADER: u16 = 0x0002;
@@ -55,6 +54,7 @@ impl DecodedBkpBlock {
 #[derive(Debug, Clone)]
 pub struct DecodedXLogRecord {
     pub start_lsn: u64,
+    /// PostgreSQL-style end pointer: the next byte after this WAL record.
     pub end_lsn: u64,
     pub total_len: u32,
     pub xid: u32,
