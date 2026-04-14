@@ -201,30 +201,91 @@ fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError
 }
 
 fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, ParseError> {
-    let tokens = sql.split_whitespace().collect::<Vec<_>>();
-    if tokens.len() < 4 {
+    let prefix = "create domain ";
+    let Some(rest) = sql.get(prefix.len()..) else {
         return Err(ParseError::UnexpectedToken {
             expected: "CREATE DOMAIN name [AS] type",
             actual: sql.into(),
         });
+    };
+    let rest = rest.trim_start();
+    let domain_name_end = rest
+        .find(char::is_whitespace)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "domain base type",
+            actual: sql.into(),
+        })?;
+    let domain_name = &rest[..domain_name_end];
+    let mut type_sql = rest[domain_name_end..].trim_start();
+    if type_sql.get(..2).is_some_and(|s| s.eq_ignore_ascii_case("as"))
+        && type_sql
+            .get(2..3)
+            .is_none_or(|s| s.chars().all(char::is_whitespace))
+    {
+        type_sql = type_sql[2..].trim_start();
     }
-    let domain_name = tokens[2];
-    let type_index = if tokens[3].eq_ignore_ascii_case("as") { 4 } else { 3 };
-    if type_index >= tokens.len() {
+    if type_sql.is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "domain base type",
             actual: sql.into(),
         });
     }
-    if type_index + 1 != tokens.len() {
+    let normalized_type_sql = normalize_domain_type_sql(type_sql);
+    if normalized_type_sql
+        .split_whitespace()
+        .any(|tok| matches!(
+            tok.to_ascii_lowercase().as_str(),
+            "constraint"
+                | "default"
+                | "check"
+                | "not"
+                | "null"
+                | "collate"
+                | "references"
+                | "unique"
+                | "primary"
+                | "generated"
+                | "deferrable"
+                | "no"
+        ))
+    {
         return Err(ParseError::FeatureNotSupported(
             "CREATE DOMAIN constraints/defaults are not supported yet".into(),
         ));
     }
     Ok(CreateDomainStatement {
         domain_name: domain_name.to_string(),
-        ty: parse_type_name(tokens[type_index])?,
+        ty: parse_type_name(&normalized_type_sql)?,
     })
+}
+
+fn normalize_domain_type_sql(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let bytes = sql.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            out.push('[');
+            i += 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b']' {
+                out.push(']');
+                i += 1;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 fn build_drop_domain_statement(sql: &str) -> Result<DropDomainStatement, ParseError> {
@@ -1901,7 +1962,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
 fn raw_type_output_name(ty: &RawTypeName) -> &str {
     match ty {
         RawTypeName::Builtin(sql_type) => sql_type_output_name(*sql_type),
-        RawTypeName::Named { name } => name.as_str(),
+        RawTypeName::Named { name, .. } => name.as_str(),
         RawTypeName::Record => "record",
     }
 }
@@ -2075,6 +2136,10 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                     RawTypeName::Builtin(inner_ty) => {
                         RawTypeName::Builtin(SqlType::array_of(inner_ty))
                     }
+                    RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
+                        name,
+                        array_bounds: array_bounds.saturating_add(1),
+                    },
                     other => other,
                 };
             }
@@ -2266,6 +2331,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         }
         Rule::named_type_name => RawTypeName::Named {
             name: build_identifier(pair.into_inner().next().expect("named_type_name inner")),
+            array_bounds: 0,
         },
         _ => unreachable!("unexpected type rule {:?}", pair.as_rule()),
     }

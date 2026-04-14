@@ -937,7 +937,7 @@ impl SqlType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawTypeName {
     Builtin(SqlType),
-    Named { name: String },
+    Named { name: String, array_bounds: usize },
     Record,
 }
 
