@@ -2,6 +2,7 @@ use super::functions::*;
 use super::infer::*;
 use super::*;
 use crate::include::catalog::ANYOID;
+use crate::include::nodes::primnodes::OpExprKind;
 
 mod json;
 mod ops;
@@ -108,7 +109,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_arithmetic_expr(
                     "+",
-                    Expr::Add,
+                    OpExprKind::Add,
                     left,
                     right,
                     scope,
@@ -144,7 +145,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_arithmetic_expr(
                     "-",
-                    Expr::Sub,
+                    OpExprKind::Sub,
                     left,
                     right,
                     scope,
@@ -157,7 +158,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::BitAnd(left, right) => bind_bitwise_expr(
             "&",
-            Expr::BitAnd,
+            OpExprKind::BitAnd,
             left,
             right,
             scope,
@@ -168,7 +169,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         )?,
         SqlExpr::BitOr(left, right) => bind_bitwise_expr(
             "|",
-            Expr::BitOr,
+            OpExprKind::BitOr,
             left,
             right,
             scope,
@@ -192,7 +193,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_bitwise_expr(
                     "#",
-                    Expr::BitXor,
+                    OpExprKind::BitXor,
                     left,
                     right,
                     scope,
@@ -218,7 +219,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_shift_expr(
                     "<<",
-                    Expr::Shl,
+                    OpExprKind::Shl,
                     left,
                     right,
                     scope,
@@ -244,7 +245,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_shift_expr(
                     ">>",
-                    Expr::Shr,
+                    OpExprKind::Shr,
                     left,
                     right,
                     scope,
@@ -270,7 +271,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_arithmetic_expr(
                     "*",
-                    Expr::Mul,
+                    OpExprKind::Mul,
                     left,
                     right,
                     scope,
@@ -296,7 +297,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_arithmetic_expr(
                     "/",
-                    Expr::Div,
+                    OpExprKind::Div,
                     left,
                     right,
                     scope,
@@ -309,7 +310,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         }
         SqlExpr::Mod(left, right) => bind_arithmetic_expr(
             "%",
-            Expr::Mod,
+            OpExprKind::Mod,
             left,
             right,
             scope,
@@ -431,7 +432,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_comparison_expr(
                     "=",
-                    Expr::Eq,
+                    OpExprKind::Eq,
                     left,
                     right,
                     scope,
@@ -457,7 +458,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_comparison_expr(
                     "<>",
-                    Expr::NotEq,
+                    OpExprKind::NotEq,
                     left,
                     right,
                     scope,
@@ -483,7 +484,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_comparison_expr(
                     "<",
-                    Expr::Lt,
+                    OpExprKind::Lt,
                     left,
                     right,
                     scope,
@@ -509,7 +510,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_comparison_expr(
                     "<=",
-                    Expr::LtEq,
+                    OpExprKind::LtEq,
                     left,
                     right,
                     scope,
@@ -535,7 +536,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_comparison_expr(
                     ">",
-                    Expr::Gt,
+                    OpExprKind::Gt,
                     left,
                     right,
                     scope,
@@ -561,7 +562,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             } else {
                 bind_comparison_expr(
                     ">=",
-                    Expr::GtEq,
+                    OpExprKind::GtEq,
                     left,
                     right,
                     scope,

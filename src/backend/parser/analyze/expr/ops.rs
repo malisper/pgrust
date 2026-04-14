@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn bind_arithmetic_expr(
     op: &'static str,
-    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    make: crate::include::nodes::primnodes::OpExprKind,
     left: &SqlExpr,
     right: &SqlExpr,
     scope: &BoundScope,
@@ -28,12 +28,12 @@ pub(super) fn bind_arithmetic_expr(
         raw_right_type,
         common,
     );
-    Ok(make(Box::new(left), Box::new(right)))
+    Ok(Expr::op_auto(make, vec![left, right]))
 }
 
 pub(super) fn bind_comparison_expr(
     op: &'static str,
-    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    make: crate::include::nodes::primnodes::OpExprKind,
     left: &SqlExpr,
     right: &SqlExpr,
     scope: &BoundScope,
@@ -101,7 +101,7 @@ pub(super) fn bind_comparison_expr(
         }
         (left, right)
     };
-    Ok(make(Box::new(left), Box::new(right)))
+    Ok(Expr::op_auto(make, vec![left, right]))
 }
 
 fn supports_comparison_operator(
@@ -168,7 +168,7 @@ fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
 
 pub(super) fn bind_shift_expr(
     op: &'static str,
-    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    make: crate::include::nodes::primnodes::OpExprKind,
     left: &SqlExpr,
     right: &SqlExpr,
     scope: &BoundScope,
@@ -203,7 +203,7 @@ pub(super) fn bind_shift_expr(
             right_type,
             SqlType::new(SqlTypeKind::Int4),
         );
-        return Ok(make(Box::new(left), Box::new(right)));
+        return Ok(Expr::op_auto(make, vec![left, right]));
     }
     if !is_integer_family(left_type) || !is_integer_family(right_type) {
         return Err(ParseError::UndefinedOperator {
@@ -220,12 +220,12 @@ pub(super) fn bind_shift_expr(
         right_type,
         SqlType::new(SqlTypeKind::Int4),
     );
-    Ok(make(Box::new(left), Box::new(right)))
+    Ok(Expr::op_auto(make, vec![left, right]))
 }
 
 pub(super) fn bind_bitwise_expr(
     op: &'static str,
-    make: fn(Box<Expr>, Box<Expr>) -> Expr,
+    make: crate::include::nodes::primnodes::OpExprKind,
     left: &SqlExpr,
     right: &SqlExpr,
     scope: &BoundScope,
@@ -258,7 +258,7 @@ pub(super) fn bind_bitwise_expr(
             right_type,
             common,
         );
-        return Ok(make(Box::new(left), Box::new(right)));
+        return Ok(Expr::op_auto(make, vec![left, right]));
     }
     if !is_integer_family(left_type) || !is_integer_family(right_type) {
         return Err(ParseError::UndefinedOperator {
@@ -278,7 +278,7 @@ pub(super) fn bind_bitwise_expr(
         right_type,
         common,
     );
-    Ok(make(Box::new(left), Box::new(right)))
+    Ok(Expr::op_auto(make, vec![left, right]))
 }
 
 pub(super) fn bind_concat_expr(
@@ -352,26 +352,30 @@ pub(super) fn bind_overloaded_binary_expr(
     match op {
         "@@" => {
             if left_type.kind == SqlTypeKind::Jsonb && right_type.kind == SqlTypeKind::JsonPath {
-                return Ok(Expr::JsonbPathMatch(
-                    Box::new(coerce_bound_expr(
-                        left_bound,
-                        raw_left_type,
-                        SqlType::new(SqlTypeKind::Jsonb),
-                    )),
-                    Box::new(coerce_bound_expr(
-                        right_bound,
-                        raw_right_type,
-                        SqlType::new(SqlTypeKind::JsonPath),
-                    )),
+                return Ok(Expr::op_auto(
+                    crate::include::nodes::primnodes::OpExprKind::JsonbPathMatch,
+                    vec![
+                        coerce_bound_expr(
+                            left_bound,
+                            raw_left_type,
+                            SqlType::new(SqlTypeKind::Jsonb),
+                        ),
+                        coerce_bound_expr(
+                            right_bound,
+                            raw_right_type,
+                            SqlType::new(SqlTypeKind::JsonPath),
+                        ),
+                    ],
                 ));
             }
             if matches!(left_type.kind, SqlTypeKind::TsVector)
                 && matches!(right_type.kind, SqlTypeKind::TsQuery)
             {
-                return Ok(Expr::FuncCall {
-                    func_oid: 0,
-                    func: BuiltinScalarFunction::TsMatch,
-                    args: vec![
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsMatch,
+                    Some(SqlType::new(SqlTypeKind::Bool)),
+                    false,
+                    vec![
                         coerce_bound_expr(
                             left_bound,
                             raw_left_type,
@@ -383,16 +387,16 @@ pub(super) fn bind_overloaded_binary_expr(
                             SqlType::new(SqlTypeKind::TsQuery),
                         ),
                     ],
-                    func_variadic: false,
-                });
+                ));
             }
             if matches!(left_type.kind, SqlTypeKind::TsQuery)
                 && matches!(right_type.kind, SqlTypeKind::TsVector)
             {
-                return Ok(Expr::FuncCall {
-                    func_oid: 0,
-                    func: BuiltinScalarFunction::TsMatch,
-                    args: vec![
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsMatch,
+                    Some(SqlType::new(SqlTypeKind::Bool)),
+                    false,
+                    vec![
                         coerce_bound_expr(
                             left_bound,
                             raw_left_type,
@@ -404,8 +408,7 @@ pub(super) fn bind_overloaded_binary_expr(
                             SqlType::new(SqlTypeKind::TsVector),
                         ),
                     ],
-                    func_variadic: false,
-                });
+                ));
             }
         }
         "&&" => {
@@ -429,18 +432,19 @@ pub(super) fn bind_overloaded_binary_expr(
                 } else {
                     coerce_bound_expr(right_bound, raw_right_type, right_type)
                 };
-                return Ok(Expr::ArrayOverlap(
-                    Box::new(left_expr),
-                    Box::new(right_expr),
+                return Ok(Expr::op_auto(
+                    crate::include::nodes::primnodes::OpExprKind::ArrayOverlap,
+                    vec![left_expr, right_expr],
                 ));
             }
             if matches!(left_type.kind, SqlTypeKind::TsQuery)
                 && matches!(right_type.kind, SqlTypeKind::TsQuery)
             {
-                return Ok(Expr::FuncCall {
-                    func_oid: 0,
-                    func: BuiltinScalarFunction::TsQueryAnd,
-                    args: vec![
+                return Ok(Expr::builtin_func(
+                    BuiltinScalarFunction::TsQueryAnd,
+                    Some(SqlType::new(SqlTypeKind::TsQuery)),
+                    false,
+                    vec![
                         coerce_bound_expr(
                             left_bound,
                             raw_left_type,
@@ -452,8 +456,7 @@ pub(super) fn bind_overloaded_binary_expr(
                             SqlType::new(SqlTypeKind::TsQuery),
                         ),
                     ],
-                    func_variadic: false,
-                });
+                ));
             }
         }
         _ => {}
@@ -480,16 +483,16 @@ pub(super) fn bind_prefix_operator_expr(
     let bound =
         bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     match op {
-        "!!" if matches!(raw_type.kind, SqlTypeKind::TsQuery) => Ok(Expr::FuncCall {
-            func_oid: 0,
-            func: BuiltinScalarFunction::TsQueryNot,
-            args: vec![coerce_bound_expr(
+        "!!" if matches!(raw_type.kind, SqlTypeKind::TsQuery) => Ok(Expr::builtin_func(
+            BuiltinScalarFunction::TsQueryNot,
+            Some(SqlType::new(SqlTypeKind::TsQuery)),
+            false,
+            vec![coerce_bound_expr(
                 bound,
                 raw_type,
                 SqlType::new(SqlTypeKind::TsQuery),
             )],
-            func_variadic: false,
-        }),
+        )),
         _ => Err(ParseError::UnexpectedToken {
             expected: "supported prefix operator",
             actual: op.into(),
@@ -510,7 +513,10 @@ pub(crate) fn bind_concat_operands(
         && right_type.kind == SqlTypeKind::Jsonb
         && !right_type.is_array
     {
-        return Ok(Expr::Concat(Box::new(left_bound), Box::new(right_bound)));
+        return Ok(Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Concat,
+            vec![left_bound, right_bound],
+        ));
     }
 
     if left_type.is_array || right_type.is_array {
@@ -525,7 +531,10 @@ pub(crate) fn bind_concat_operands(
         } else {
             coerce_bound_expr(right_bound, right_type, element_type)
         };
-        return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
+        return Ok(Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Concat,
+            vec![left_expr, right_expr],
+        ));
     }
 
     if is_bit_string_type(left_type) && is_bit_string_type(right_type) {
@@ -539,36 +548,39 @@ pub(crate) fn bind_concat_operands(
     if matches!(left_type.kind, SqlTypeKind::TsVector)
         && matches!(right_type.kind, SqlTypeKind::TsVector)
     {
-        return Ok(Expr::FuncCall {
-            func_oid: 0,
-            func: BuiltinScalarFunction::TsVectorConcat,
-            args: vec![
+        return Ok(Expr::builtin_func(
+            BuiltinScalarFunction::TsVectorConcat,
+            Some(SqlType::new(SqlTypeKind::TsVector)),
+            false,
+            vec![
                 coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::TsVector)),
                 coerce_bound_expr(right_bound, right_type, SqlType::new(SqlTypeKind::TsVector)),
             ],
-            func_variadic: false,
-        });
+        ));
     }
 
     if matches!(left_type.kind, SqlTypeKind::TsQuery)
         && matches!(right_type.kind, SqlTypeKind::TsQuery)
     {
-        return Ok(Expr::FuncCall {
-            func_oid: 0,
-            func: BuiltinScalarFunction::TsQueryOr,
-            args: vec![
+        return Ok(Expr::builtin_func(
+            BuiltinScalarFunction::TsQueryOr,
+            Some(SqlType::new(SqlTypeKind::TsQuery)),
+            false,
+            vec![
                 coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::TsQuery)),
                 coerce_bound_expr(right_bound, right_type, SqlType::new(SqlTypeKind::TsQuery)),
             ],
-            func_variadic: false,
-        });
+        ));
     }
 
     if should_use_text_concat(left_sql, left_type, right_sql, right_type) {
         let text_type = SqlType::new(SqlTypeKind::Text);
         let left_expr = coerce_bound_expr(left_bound, left_type, text_type);
         let right_expr = coerce_bound_expr(right_bound, right_type, text_type);
-        return Ok(Expr::Concat(Box::new(left_expr), Box::new(right_expr)));
+        return Ok(Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Concat,
+            vec![left_expr, right_expr],
+        ));
     }
 
     Err(ParseError::UndefinedOperator {
