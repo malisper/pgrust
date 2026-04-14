@@ -747,6 +747,15 @@ impl Session {
                 )
             }
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::CommentOnRole(_)
+            | Statement::CreateRole(_)
+            | Statement::AlterRole(_)
+            | Statement::DropRole(_)
+            | Statement::SetSessionAuthorization(_)
+            | Statement::ResetSessionAuthorization(_)
+            | Statement::ReassignOwned(_) => Err(ExecError::Parse(
+                ParseError::FeatureNotSupported("role management".into()),
+            )),
             Statement::Unsupported(ref unsupported_stmt) => {
                 Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                     "{}: {}",

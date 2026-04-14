@@ -611,6 +611,17 @@ fn parse_alter_table_drop_column_statement() {
     );
 }
 
+fn parse_drop_role_statement() {
+    let stmt = parse_statement("drop role if exists regress_alter_table_user1").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropRole(DropRoleStatement {
+            if_exists: true,
+            role_names: vec!["regress_alter_table_user1".into()],
+        })
+    );
+}
+
 #[test]
 fn parse_alter_table_alter_column_type_statement() {
     let stmt = parse_statement(
@@ -632,13 +643,130 @@ fn parse_alter_table_alter_column_type_statement() {
 }
 
 #[test]
-fn parse_unsupported_role_statement_into_placeholder() {
-    let stmt = parse_statement("drop role if exists regress_alter_table_user1").unwrap();
+fn parse_create_role_statement_with_options() {
+    let stmt = parse_statement(
+        "create role regress_role_admin createdb createrole replication bypassrls",
+    )
+    .unwrap();
     assert_eq!(
         stmt,
-        Statement::Unsupported(UnsupportedStatement {
-            sql: "drop role if exists regress_alter_table_user1".into(),
-            feature: "DROP ROLE",
+        Statement::CreateRole(CreateRoleStatement {
+            role_name: "regress_role_admin".into(),
+            is_user: false,
+            options: vec![
+                RoleOption::CreateDb(true),
+                RoleOption::CreateRole(true),
+                RoleOption::Replication(true),
+                RoleOption::BypassRls(true),
+            ],
+        })
+    );
+}
+
+#[test]
+fn parse_create_user_statement() {
+    let stmt = parse_statement("create user regress_login login").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRole(CreateRoleStatement {
+            role_name: "regress_login".into(),
+            is_user: true,
+            options: vec![RoleOption::Login(true)],
+        })
+    );
+}
+
+#[test]
+fn parse_create_role_membership_options() {
+    let stmt = parse_statement(
+        "create role regress_inroles role regress_createdb, regress_login admin regress_role_super in role regress_createrole",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateRole(CreateRoleStatement {
+            role_name: "regress_inroles".into(),
+            is_user: false,
+            options: vec![
+                RoleOption::Role(vec!["regress_createdb".into(), "regress_login".into()]),
+                RoleOption::Admin(vec!["regress_role_super".into()]),
+                RoleOption::InRole(vec!["regress_createrole".into()]),
+            ],
+        })
+    );
+}
+
+#[test]
+fn parse_alter_role_rename_statement() {
+    let stmt = parse_statement("alter role regress_hasprivs rename to regress_tenant").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterRole(AlterRoleStatement {
+            role_name: "regress_hasprivs".into(),
+            action: AlterRoleAction::Rename {
+                new_name: "regress_tenant".into(),
+            },
+        })
+    );
+}
+
+#[test]
+fn parse_alter_role_option_statement() {
+    let stmt =
+        parse_statement("alter role regress_tenant noinherit nologin connection limit 7").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterRole(AlterRoleStatement {
+            role_name: "regress_tenant".into(),
+            action: AlterRoleAction::Options(vec![
+                RoleOption::Inherit(false),
+                RoleOption::Login(false),
+                RoleOption::ConnectionLimit(7),
+            ]),
+        })
+    );
+}
+
+#[test]
+fn parse_set_session_authorization_statement() {
+    let stmt = parse_statement("set session authorization regress_tenant").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::SetSessionAuthorization(SetSessionAuthorizationStatement {
+            role_name: "regress_tenant".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_reset_session_authorization_statement() {
+    let stmt = parse_statement("reset session authorization").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::ResetSessionAuthorization(ResetSessionAuthorizationStatement)
+    );
+}
+
+#[test]
+fn parse_comment_on_role_statement() {
+    let stmt = parse_statement("comment on role regress_hasprivs is 'some comment'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnRole(CommentOnRoleStatement {
+            role_name: "regress_hasprivs".into(),
+            comment: Some("some comment".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_reassign_owned_statement() {
+    let stmt = parse_statement("reassign owned by regress_tenant, regress_tenant2 to regress_createrole").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::ReassignOwned(ReassignOwnedStatement {
+            old_roles: vec!["regress_tenant".into(), "regress_tenant2".into()],
+            new_role: "regress_createrole".into(),
         })
     );
 }
