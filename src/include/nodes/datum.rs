@@ -1,5 +1,5 @@
-use crate::include::nodes::tsearch::{TsQuery, TsVector};
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
+use crate::include::nodes::tsearch::{TsQuery, TsVector};
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -96,10 +96,7 @@ impl ArrayValue {
         }
     }
 
-    pub fn from_nested_values(
-        values: Vec<Value>,
-        lower_bounds: Vec<i32>,
-    ) -> Result<Self, String> {
+    pub fn from_nested_values(values: Vec<Value>, lower_bounds: Vec<i32>) -> Result<Self, String> {
         let mut lengths = Vec::new();
         let mut elements = Vec::new();
         flatten_nested_values(values, 0, &mut lengths, &mut elements)?;

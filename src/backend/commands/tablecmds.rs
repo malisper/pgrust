@@ -16,10 +16,10 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::parser::{
-    AnalyzeStatement, BoundDeleteStatement, BoundIndexRelation, BoundInsertSource,
-    BoundAssignmentTarget, BoundInsertStatement, BoundModifyRowSource, BoundUpdateStatement,
-    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError,
-    Statement, TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
+    AnalyzeStatement, BoundAssignmentTarget, BoundDeleteStatement, BoundIndexRelation,
+    BoundInsertSource, BoundInsertStatement, BoundModifyRowSource, BoundUpdateStatement, Catalog,
+    CatalogLookup, DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
+    TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -34,8 +34,8 @@ use crate::backend::executor::{
 };
 use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
 use crate::include::access::detoast::is_ondisk_toast_pointer;
-use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::htup::{HeapTuple, TupleValue};
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::execnodes::*;
 
@@ -180,13 +180,15 @@ fn slot_toast_context(
     toast: Option<ToastRelationRef>,
     ctx: &ExecutorContext,
 ) -> Option<crate::include::nodes::execnodes::ToastFetchContext> {
-    toast.map(|relation| crate::include::nodes::execnodes::ToastFetchContext {
-        relation,
-        pool: ctx.pool.clone(),
-        txns: ctx.txns.clone(),
-        snapshot: ctx.snapshot.clone(),
-        client_id: ctx.client_id,
-    })
+    toast.map(
+        |relation| crate::include::nodes::execnodes::ToastFetchContext {
+            relation,
+            pool: ctx.pool.clone(),
+            txns: ctx.txns.clone(),
+            snapshot: ctx.snapshot.clone(),
+            client_id: ctx.client_id,
+        },
+    )
 }
 
 fn toast_tuple_for_write(
@@ -528,7 +530,9 @@ pub fn execute_truncate_table(
                 }));
             }
             None => {
-                return Err(ExecError::Parse(ParseError::UnknownTable(table_name.clone())));
+                return Err(ExecError::Parse(ParseError::UnknownTable(
+                    table_name.clone(),
+                )));
             }
         };
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
@@ -573,7 +577,14 @@ pub fn execute_insert(
                     eval_insert_defaults(&stmt.column_defaults, stmt.desc.columns.len(), ctx)?;
                 for (target, expr) in stmt.target_columns.iter().zip(row.iter()) {
                     let value = eval_expr(expr, &mut slot, ctx)?;
-                    apply_assignment_target(&stmt.desc, &mut values, target, value, &mut slot, ctx)?;
+                    apply_assignment_target(
+                        &stmt.desc,
+                        &mut values,
+                        target,
+                        value,
+                        &mut slot,
+                        ctx,
+                    )?;
                 }
                 Ok(values)
             })
@@ -604,18 +615,17 @@ pub fn execute_insert(
         }
     };
 
-    let inserted =
-        execute_insert_values(
-            stmt.rel,
-            stmt.toast,
-            stmt.toast_index.as_ref(),
-            &stmt.desc,
-            &stmt.indexes,
-            &values,
-            ctx,
-            xid,
-            cid,
-        )?;
+    let inserted = execute_insert_values(
+        stmt.rel,
+        stmt.toast,
+        stmt.toast_index.as_ref(),
+        &stmt.desc,
+        &stmt.indexes,
+        &values,
+        ctx,
+        xid,
+        cid,
+    )?;
     Ok(StatementResult::AffectedRows(inserted))
 }
 
@@ -788,12 +798,7 @@ fn assignment_replacement_items(replacement: Value) -> Result<Vec<Value>, ExecEr
     }
 }
 
-fn extend_assignment_items(
-    lower_bound: &mut i32,
-    items: &mut Vec<Value>,
-    start: i32,
-    end: i32,
-) {
+fn extend_assignment_items(lower_bound: &mut i32, items: &mut Vec<Value>, start: i32, end: i32) {
     if items.is_empty() {
         *lower_bound = start;
     }
@@ -816,7 +821,9 @@ fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<V
         .iter()
         .filter_map(|item| match item {
             Value::PgArray(array) => Some(Some(array.clone())),
-            Value::Array(values) => Some(ArrayValue::from_nested_values(values.clone(), vec![1]).ok()),
+            Value::Array(values) => {
+                Some(ArrayValue::from_nested_values(values.clone(), vec![1]).ok())
+            }
             Value::Null => Some(None),
             _ => None,
         })
@@ -853,8 +860,7 @@ fn build_assignment_array_value(lower_bound: i32, items: Vec<Value>) -> Result<V
     }];
     dimensions.extend(template.dimensions);
     Ok(Value::PgArray(ArrayValue::from_dimensions(
-        dimensions,
-        elements,
+        dimensions, elements,
     )))
 }
 
@@ -864,7 +870,9 @@ fn assignment_subscript_index(value: Option<&Value>) -> Result<Option<i32>, Exec
         Some(Value::Null) => Ok(None),
         Some(Value::Int16(v)) => Ok(Some(*v as i32)),
         Some(Value::Int32(v)) => Ok(Some(*v)),
-        Some(Value::Int64(v)) => i32::try_from(*v).map(Some).map_err(|_| ExecError::Int4OutOfRange),
+        Some(Value::Int64(v)) => i32::try_from(*v)
+            .map(Some)
+            .map_err(|_| ExecError::Int4OutOfRange),
         Some(other) => Err(ExecError::TypeMismatch {
             op: "array assignment",
             left: other.clone(),
@@ -885,7 +893,8 @@ pub fn execute_insert_values(
     cid: CommandId,
 ) -> Result<usize, ExecError> {
     for values in rows {
-        let (tuple, _toasted) = toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
+        let (tuple, _toasted) =
+            toast_tuple_for_write(desc, values, toast, toast_index, ctx, xid, cid)?;
         let heap_tid = heap_insert_mvcc_with_cid(&*ctx.pool, ctx.client_id, rel, xid, cid, &tuple)?;
         maintain_indexes_for_row(rel, desc, indexes, values, heap_tid, ctx)?;
     }
@@ -959,9 +968,13 @@ pub fn execute_update_with_waiter(
         .as_ref()
         .map(|p| compile_predicate_with_decoder(p, &decoder));
     let target_rows = match &stmt.row_source {
-        BoundModifyRowSource::Heap => {
-            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.toast, stmt.predicate.as_ref(), ctx)?
-        }
+        BoundModifyRowSource::Heap => collect_matching_rows_heap(
+            stmt.rel,
+            &stmt.desc,
+            stmt.toast,
+            stmt.predicate.as_ref(),
+            ctx,
+        )?,
         BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
             stmt.rel,
             &stmt.desc,
@@ -1104,12 +1117,16 @@ pub fn execute_delete_with_waiter(
         .as_ref()
         .map(|p| compile_predicate_with_decoder(p, &decoder));
     let targets = match &stmt.row_source {
-        BoundModifyRowSource::Heap => {
-            collect_matching_rows_heap(stmt.rel, &stmt.desc, stmt.toast, stmt.predicate.as_ref(), ctx)?
-                .into_iter()
-                .map(|(tid, _)| tid)
-                .collect::<Vec<_>>()
-        }
+        BoundModifyRowSource::Heap => collect_matching_rows_heap(
+            stmt.rel,
+            &stmt.desc,
+            stmt.toast,
+            stmt.predicate.as_ref(),
+            ctx,
+        )?
+        .into_iter()
+        .map(|(tid, _)| tid)
+        .collect::<Vec<_>>(),
         BoundModifyRowSource::Index { index, keys } => collect_matching_rows_index(
             stmt.rel,
             &stmt.desc,
@@ -1130,7 +1147,12 @@ pub fn execute_delete_with_waiter(
         let mut current_tid = *tid;
         loop {
             let old_tuple = if stmt.toast.is_some() {
-                Some(heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, current_tid)?)
+                Some(heap_fetch(
+                    &*ctx.pool,
+                    ctx.client_id,
+                    stmt.rel,
+                    current_tid,
+                )?)
             } else {
                 None
             };

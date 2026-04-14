@@ -67,31 +67,11 @@ pub fn pg_statistic_desc() -> RelationDesc {
                 SqlType::array_of(SqlType::new(SqlTypeKind::Float4)),
                 true,
             ),
-            column_desc(
-                "stavalues1",
-                SqlType::new(SqlTypeKind::AnyArray),
-                true,
-            ),
-            column_desc(
-                "stavalues2",
-                SqlType::new(SqlTypeKind::AnyArray),
-                true,
-            ),
-            column_desc(
-                "stavalues3",
-                SqlType::new(SqlTypeKind::AnyArray),
-                true,
-            ),
-            column_desc(
-                "stavalues4",
-                SqlType::new(SqlTypeKind::AnyArray),
-                true,
-            ),
-            column_desc(
-                "stavalues5",
-                SqlType::new(SqlTypeKind::AnyArray),
-                true,
-            ),
+            column_desc("stavalues1", SqlType::new(SqlTypeKind::AnyArray), true),
+            column_desc("stavalues2", SqlType::new(SqlTypeKind::AnyArray), true),
+            column_desc("stavalues3", SqlType::new(SqlTypeKind::AnyArray), true),
+            column_desc("stavalues4", SqlType::new(SqlTypeKind::AnyArray), true),
+            column_desc("stavalues5", SqlType::new(SqlTypeKind::AnyArray), true),
         ],
     }
 }

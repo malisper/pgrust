@@ -25,7 +25,9 @@ pub(super) fn lookup_heap_relation_for_ddl(
             name: name.to_string(),
             expected: "table",
         })),
-        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(name.to_string()))),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
     }
 }
 
@@ -95,7 +97,10 @@ pub(super) fn reject_relation_with_dependent_views(
     }
     Err(ExecError::Parse(ParseError::UnexpectedToken {
         expected: operation,
-        actual: format!("cannot {operation}; view depends on it: {}", dependent_views.join(", ")),
+        actual: format!(
+            "cannot {operation}; view depends on it: {}",
+            dependent_views.join(", ")
+        ),
     }))
 }
 

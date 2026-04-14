@@ -856,15 +856,24 @@ impl Session {
         }
 
         let (column_name, value) = match name.as_str() {
-            "datestyle" => ("DateStyle".to_string(), format_datestyle(&self.datetime_config)),
-            "timezone" => ("TimeZone".to_string(), self.datetime_config.time_zone.clone()),
+            "datestyle" => (
+                "DateStyle".to_string(),
+                format_datestyle(&self.datetime_config),
+            ),
+            "timezone" => (
+                "TimeZone".to_string(),
+                self.datetime_config.time_zone.clone(),
+            ),
             _ => (
                 stmt.name.clone(),
-                self.gucs.get(&name).cloned().unwrap_or_else(|| match name.as_str() {
-                    "datestyle" => default_datestyle().to_string(),
-                    "timezone" => default_timezone().to_string(),
-                    _ => "default".to_string(),
-                }),
+                self.gucs
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| match name.as_str() {
+                        "datestyle" => default_datestyle().to_string(),
+                        "timezone" => default_timezone().to_string(),
+                        _ => "default".to_string(),
+                    }),
             ),
         };
 
@@ -986,9 +995,12 @@ impl Session {
             let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
             })?;
-            let toast_index = entry
-                .toast
-                .and_then(|toast| catalog.index_relations_for_heap(toast.relation_oid).into_iter().next());
+            let toast_index = entry.toast.and_then(|toast| {
+                catalog
+                    .index_relations_for_heap(toast.relation_oid)
+                    .into_iter()
+                    .next()
+            });
             (
                 entry.rel,
                 entry.toast,

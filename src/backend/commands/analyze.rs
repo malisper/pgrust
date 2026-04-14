@@ -1,22 +1,22 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::backend::executor::value_io::decode_value_with_toast;
 use crate::backend::executor::{
-    ExecutorContext, ExecError, Value, format_array_value_text, render_datetime_value_text,
+    ExecError, ExecutorContext, Value, format_array_value_text, render_datetime_value_text,
     render_internal_char_text, render_tsquery_text, render_tsvector_text,
 };
-use crate::backend::executor::value_io::decode_value_with_toast;
+use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError};
+use crate::backend::storage::page::bufpage::ItemIdFlags;
+use crate::backend::storage::page::bufpage::{
+    page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
+};
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
-use crate::backend::storage::page::bufpage::ItemIdFlags;
 use crate::include::access::htup::HeapTuple;
 use crate::include::catalog::PgStatisticRow;
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::execnodes::ToastFetchContext;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
-use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError};
-use crate::backend::storage::page::bufpage::{
-    page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
-};
 
 const DEFAULT_STATISTICS_TARGET: i16 = 100;
 const STATISTIC_KIND_MCV: i16 = 1;
@@ -206,10 +206,10 @@ fn sample_relation(
     let sample_rows_target = target_sample_rows(stats_target);
     let sample_block_target = target_sample_blocks(nblocks, sample_rows_target, 32);
 
-    let mut rng = AnalyzeRng::new(
-        (relation.relation_oid as u64) << 32 | (ctx.next_command_id as u64),
-    );
-    let sampled_blocks = BlockSampler::new(nblocks, sample_block_target, &mut rng).collect::<BTreeSet<_>>();
+    let mut rng =
+        AnalyzeRng::new((relation.relation_oid as u64) << 32 | (ctx.next_command_id as u64));
+    let sampled_blocks =
+        BlockSampler::new(nblocks, sample_block_target, &mut rng).collect::<BTreeSet<_>>();
     let sampled_block_count = sampled_blocks.len();
     let mut reservoir = ReservoirSampler::new(sample_rows_target);
     let mut visible_rows_on_sampled_blocks = 0usize;
@@ -232,15 +232,17 @@ fn sample_relation(
             .lock_buffer_shared(buffer_id)
             .map_err(crate::backend::access::heap::heapam::HeapError::Buffer)?;
         let page = &*guard;
-        let max_offset =
-            page_get_max_offset_number(page).map_err(crate::include::access::htup::TupleError::from)?;
+        let max_offset = page_get_max_offset_number(page)
+            .map_err(crate::include::access::htup::TupleError::from)?;
         for off in 1..=max_offset {
             let item_id = page_get_item_id_unchecked(page, off);
             if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
                 continue;
             }
             let tuple_bytes = page_get_item_unchecked(page, off);
-            let visible = if let Some(visible) = ctx.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes) {
+            let visible = if let Some(visible) =
+                ctx.snapshot.tuple_bytes_try_visible_from_hints(tuple_bytes)
+            {
                 visible
             } else {
                 let txns = ctx.txns.read();
@@ -287,13 +289,7 @@ fn sample_relation(
         (visible_rows_on_sampled_blocks as f64 / sampled_block_count as f64) * nblocks as f64
     };
     let rows = reservoir.into_inner();
-    let statistics = build_statistics_rows(
-        relation,
-        selected_columns,
-        &rows,
-        reltuples,
-        catalog,
-    )?;
+    let statistics = build_statistics_rows(relation, selected_columns, &rows, reltuples, catalog)?;
 
     Ok(AnalyzeRelationStats {
         relation_oid: relation.relation_oid,
@@ -342,7 +338,8 @@ fn build_statistics_rows(
             rendered_values.push((row.physical_ordinal, rendered));
         }
         let distinct_seen = freq.len();
-        let stadistinct = estimate_distinct(distinct_seen, nonnull_rows.len(), reltuples, stanullfrac);
+        let stadistinct =
+            estimate_distinct(distinct_seen, nonnull_rows.len(), reltuples, stanullfrac);
 
         let type_oid = catalog
             .type_oid_for_sql_type(column.sql_type)
@@ -364,13 +361,7 @@ fn build_statistics_rows(
         let mut stavalues: [Option<ArrayValue>; 5] = Default::default();
 
         let mut ranked = freq.into_iter().collect::<Vec<_>>();
-        ranked.sort_by(|left, right| {
-            right
-                .1
-                .0
-                .cmp(&left.1.0)
-                .then_with(|| left.0.cmp(&right.0))
-        });
+        ranked.sort_by(|left, right| right.1.0.cmp(&left.1.0).then_with(|| left.0.cmp(&right.0)));
 
         let mcv = ranked
             .iter()
@@ -388,19 +379,24 @@ fn build_statistics_rows(
             ));
             stavalues[0] = Some(
                 ArrayValue::from_1d(
-                mcv.iter()
-                    .map(|(_, (_, value))| value.to_owned_value())
-                    .collect(),
+                    mcv.iter()
+                        .map(|(_, (_, value))| value.to_owned_value())
+                        .collect(),
                 )
                 .with_element_type_oid(type_oid),
             );
         }
 
         if lt_op != 0 {
-            let mcv_values = mcv.iter().map(|(value, _)| value.clone()).collect::<HashSet<_>>();
+            let mcv_values = mcv
+                .iter()
+                .map(|(value, _)| value.clone())
+                .collect::<HashSet<_>>();
             let mut histogram_values = ranked
                 .iter()
-                .map(|(value, (_, representative))| (value.clone(), representative.to_owned_value()))
+                .map(|(value, (_, representative))| {
+                    (value.clone(), representative.to_owned_value())
+                })
                 .filter(|(value, _)| !mcv_values.contains(value))
                 .collect::<Vec<_>>();
             histogram_values.sort_by(|left, right| left.0.cmp(&right.0));
@@ -410,11 +406,11 @@ fn build_statistics_rows(
                 staop[1] = lt_op;
                 stavalues[1] = Some(
                     ArrayValue::from_1d(
-                    histogram_values
-                        .into_iter()
-                        .step_by((distinct_seen.max(2) / target.max(2)).max(1))
-                        .map(|(_, value)| value)
-                        .collect(),
+                        histogram_values
+                            .into_iter()
+                            .step_by((distinct_seen.max(2) / target.max(2)).max(1))
+                            .map(|(_, value)| value)
+                            .collect(),
                     )
                     .with_element_type_oid(type_oid),
                 );
@@ -443,7 +439,12 @@ fn build_statistics_rows(
     Ok(out)
 }
 
-fn estimate_distinct(distinct_seen: usize, nonnull_rows: usize, reltuples: f64, stanullfrac: f64) -> f64 {
+fn estimate_distinct(
+    distinct_seen: usize,
+    nonnull_rows: usize,
+    reltuples: f64,
+    stanullfrac: f64,
+) -> f64 {
     if nonnull_rows == 0 {
         return 0.0;
     }
@@ -503,8 +504,12 @@ fn value_stats_text(value: &Value) -> String {
         Value::Numeric(v) => v.render(),
         Value::Date(_) => render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}")),
         Value::Time(_) => render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}")),
-        Value::TimeTz(_) => render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}")),
-        Value::Timestamp(_) => render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}")),
+        Value::TimeTz(_) => {
+            render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}"))
+        }
+        Value::Timestamp(_) => {
+            render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}"))
+        }
         Value::TimestampTz(_) => {
             render_datetime_value_text(value).unwrap_or_else(|| format!("{value:?}"))
         }

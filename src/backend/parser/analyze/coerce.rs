@@ -112,15 +112,15 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
 pub(super) fn is_numeric_family(ty: SqlType) -> bool {
     !ty.is_array
         && matches!(
-        ty.kind,
-        SqlTypeKind::Int2
-            | SqlTypeKind::Int4
-            | SqlTypeKind::Int8
-            | SqlTypeKind::Oid
-            | SqlTypeKind::Float4
-            | SqlTypeKind::Float8
-            | SqlTypeKind::Numeric
-    )
+            ty.kind,
+            SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::Oid
+                | SqlTypeKind::Float4
+                | SqlTypeKind::Float8
+                | SqlTypeKind::Numeric
+        )
 }
 
 pub(super) fn is_integer_family(ty: SqlType) -> bool {

@@ -164,15 +164,12 @@ pub(crate) fn jsonb_from_value(value: &Value) -> Result<JsonbValue, ExecError> {
         Value::Int16(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
         Value::Int32(v) => JsonbValue::Numeric(NumericValue::from_i64(*v as i64)),
         Value::Int64(v) => JsonbValue::Numeric(NumericValue::from_i64(*v)),
-        Value::Float64(v) => JsonbValue::Numeric(
-            {
-                let numeric =
-                    crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
-                        .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?;
-                validate_jsonb_numeric_value(&numeric)?;
-                numeric
-            },
-        ),
+        Value::Float64(v) => JsonbValue::Numeric({
+            let numeric = crate::backend::executor::exec_expr::parse_numeric_text(&v.to_string())
+                .ok_or_else(|| ExecError::InvalidNumericInput(v.to_string()))?;
+            validate_jsonb_numeric_value(&numeric)?;
+            numeric
+        }),
         Value::Numeric(v) => {
             validate_jsonb_numeric_value(v)?;
             JsonbValue::Numeric(v.clone())
@@ -461,7 +458,9 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(items) => Ok(format_array_text(items)),
-        Value::PgArray(array) => Ok(crate::backend::executor::value_io::format_array_value_text(array)),
+        Value::PgArray(array) => Ok(crate::backend::executor::value_io::format_array_value_text(
+            array,
+        )),
     }
 }
 
@@ -953,9 +952,7 @@ fn validate_jsonb_numeric_value(value: &NumericValue) -> Result<(), ExecError> {
 
 fn jsonb_numeric_text_overflows(text: &str) -> Result<bool, ExecError> {
     let trimmed = text.trim();
-    let unsigned = trimmed
-        .strip_prefix(['+', '-'])
-        .unwrap_or(trimmed);
+    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
     let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
         Some(index) => {
             let exponent = unsigned[index + 1..]

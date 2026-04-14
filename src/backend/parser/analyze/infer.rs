@@ -227,26 +227,24 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             ctes,
         )
         .unwrap_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
-        SqlExpr::ScalarSubquery(select) => {
-            build_plan_with_outer(
-                select,
-                catalog,
-                outer_scopes,
-                grouped_outer.cloned(),
-                ctes,
-                &[],
-            )
-                .ok()
-                .and_then(|plan| {
-                    let cols = plan.columns();
-                    if cols.len() == 1 {
-                        Some(cols[0].sql_type)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(SqlType::new(SqlTypeKind::Text))
-        }
+        SqlExpr::ScalarSubquery(select) => build_plan_with_outer(
+            select,
+            catalog,
+            outer_scopes,
+            grouped_outer.cloned(),
+            ctes,
+            &[],
+        )
+        .ok()
+        .and_then(|plan| {
+            let cols = plan.columns();
+            if cols.len() == 1 {
+                Some(cols[0].sql_type)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
         SqlExpr::Exists(_) | SqlExpr::InSubquery { .. } | SqlExpr::QuantifiedSubquery { .. } => {
             SqlType::new(SqlTypeKind::Bool)
         }
@@ -403,14 +401,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::ArrayToString) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::ArrayFill) => function_arg_values(args).next().map_or(
                     SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                    |arg| SqlType::array_of(infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    ).element_type()),
+                    |arg| {
+                        SqlType::array_of(
+                            infer_sql_expr_type_with_ctes(
+                                arg,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            )
+                            .element_type(),
+                        )
+                    },
                 ),
                 Some(
                     BuiltinScalarFunction::ArrayRemove
@@ -418,14 +421,16 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     | BuiltinScalarFunction::ArraySort,
                 ) => function_arg_values(args).next().map_or(
                     SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
-                    |arg| infer_sql_expr_type_with_ctes(
-                        arg,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    ),
+                    |arg| {
+                        infer_sql_expr_type_with_ctes(
+                            arg,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    },
                 ),
                 Some(BuiltinScalarFunction::Substring | BuiltinScalarFunction::Overlay) => {
                     function_arg_values(args).next().map_or(
@@ -700,8 +705,9 @@ pub(super) fn infer_common_scalar_expr_type_with_ctes(
         if matches!(expr, SqlExpr::Const(Value::Null)) {
             continue;
         }
-        let ty = infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
-            .element_type();
+        let ty =
+            infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+                .element_type();
         common = Some(match common {
             None => ty,
             Some(current) => resolve_common_scalar_type(current, ty).ok_or_else(|| {

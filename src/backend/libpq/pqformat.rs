@@ -4,9 +4,8 @@ use std::str::FromStr;
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::{
-    ExecError, QueryColumn, Value, geometry_input_error_message, render_geometry_text,
-    render_datetime_value_text,
-    render_internal_char_text,
+    ExecError, QueryColumn, Value, geometry_input_error_message, render_datetime_value_text,
+    render_geometry_text, render_internal_char_text,
 };
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::TupleError;

@@ -1040,13 +1040,7 @@ fn psql_describe_constraints_query(
                 crate::include::catalog::CONSTRAINT_NOTNULL => Some("NOT NULL".to_string()),
                 crate::include::catalog::CONSTRAINT_PRIMARY
                 | crate::include::catalog::CONSTRAINT_UNIQUE => {
-                    index_backed_constraint_def(
-                        db,
-                        session.client_id,
-                        txn_ctx,
-                        &relation,
-                        &row,
-                    )
+                    index_backed_constraint_def(db, session.client_id, txn_ctx, &relation, &row)
                 }
                 _ => None,
             }?;
@@ -1079,13 +1073,20 @@ fn index_backed_constraint_def(
     relation: &crate::backend::utils::cache::relcache::RelCacheEntry,
     row: &crate::include::catalog::PgConstraintRow,
 ) -> Option<String> {
-    let index = db.describe_relation_by_oid(client_id, txn_ctx, row.conindid)?.index?;
+    let index = db
+        .describe_relation_by_oid(client_id, txn_ctx, row.conindid)?
+        .index?;
     let columns = index
         .indkey
         .iter()
         .map(|attnum| {
             (*attnum > 0)
-                .then(|| relation.desc.columns.get((*attnum as usize).saturating_sub(1)))
+                .then(|| {
+                    relation
+                        .desc
+                        .columns
+                        .get((*attnum as usize).saturating_sub(1))
+                })
                 .flatten()
                 .map(|column| column.name.clone())
         })
@@ -1213,13 +1214,18 @@ fn handle_copy_done(
         })
         .collect::<Vec<_>>();
     let copy_sql = if let Some(columns) = &copy.columns {
-        format!("copy {} ({}) from stdin", copy.table_name, columns.join(", "))
+        format!(
+            "copy {} ({}) from stdin",
+            copy.table_name,
+            columns.join(", ")
+        )
     } else {
         format!("copy {} from stdin", copy.table_name)
     };
-    if let Err(e) = state
-        .session
-        .copy_from_rows_into(db, &copy.table_name, copy.columns.as_deref(), &rows)
+    if let Err(e) =
+        state
+            .session
+            .copy_from_rows_into(db, &copy.table_name, copy.columns.as_deref(), &rows)
     {
         send_exec_error(stream, &copy_sql, &e)?;
         send_ready_for_query(stream, state.session.ready_status())?;
@@ -1734,8 +1740,11 @@ mod tests {
     fn psql_describe_constraint_query_returns_primary_key_and_unique_rows() {
         let db = Database::open(temp_dir("describe_constraints_keys"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (id int4 primary key, code int4 unique)")
-            .unwrap();
+        db.execute(
+            1,
+            "create table widgets (id int4 primary key, code int4 unique)",
+        )
+        .unwrap();
         let entry = session
             .catalog_lookup(&db)
             .lookup_any_relation("widgets")

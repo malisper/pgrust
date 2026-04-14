@@ -42,7 +42,9 @@ impl Database {
                 .iter()
                 .find(|row| row.sql_type == bound_column.sql_type)
                 .map(|row| row.oid)
-                .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(column.name.clone())))?;
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(column.name.clone()))
+                })?;
             let opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
                 self,
                 client_id,
@@ -120,18 +122,18 @@ impl Database {
             .txns
             .read()
             .snapshot_for_command(xid, cid)
-            .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "index build snapshot",
-                actual: "snapshot creation failed".into(),
-            }))?;
-        let index_meta =
-            index_entry
-                .index_meta
-                .clone()
-                .ok_or_else(|| ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "index metadata",
-                    actual: "missing index metadata".into(),
-                }))?;
+            .map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index build snapshot",
+                    actual: "snapshot creation failed".into(),
+                })
+            })?;
+        let index_meta = index_entry.index_meta.clone().ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index metadata",
+                actual: "missing index metadata".into(),
+            })
+        })?;
         let build_ctx = crate::include::access::amapi::IndexBuildContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -224,10 +226,12 @@ impl Database {
             .txns
             .read()
             .snapshot_for_command(xid, cid)
-            .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "constraint name lookup snapshot",
-                actual: "snapshot creation failed".into(),
-            }))?;
+            .map_err(|_| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "constraint name lookup snapshot",
+                    actual: "snapshot creation failed".into(),
+                })
+            })?;
         let catalog = self.catalog.read();
         let txns = self.txns.read();
         let existing = crate::backend::catalog::loader::load_visible_class_rows(
@@ -332,8 +336,8 @@ impl Database {
                 actual: "unsupported CREATE INDEX feature".into(),
             }));
         }
-        let (access_method_oid, access_method_handler, build_options) =
-            self.resolve_simple_btree_build_options(
+        let (access_method_oid, access_method_handler, build_options) = self
+            .resolve_simple_btree_build_options(
                 client_id,
                 Some((xid, cid)),
                 &entry,

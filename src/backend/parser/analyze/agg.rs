@@ -125,9 +125,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::BinaryOperator { left, right, .. } => {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
-        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => {
-            args.iter().any(|arg| expr_references_input_scope(&arg.value))
-        }
+        SqlExpr::AggCall { args, .. } | SqlExpr::FuncCall { args, .. } => args
+            .iter()
+            .any(|arg| expr_references_input_scope(&arg.value)),
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
             expr_references_input_scope(expr)
         }
@@ -135,8 +135,14 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::ArraySubscript { array, subscripts } => {
             expr_references_input_scope(array)
                 || subscripts.iter().any(|subscript| {
-                    subscript.lower.as_deref().is_some_and(expr_references_input_scope)
-                        || subscript.upper.as_deref().is_some_and(expr_references_input_scope)
+                    subscript
+                        .lower
+                        .as_deref()
+                        .is_some_and(expr_references_input_scope)
+                        || subscript
+                            .upper
+                            .as_deref()
+                            .is_some_and(expr_references_input_scope)
                 })
         }
         SqlExpr::ScalarSubquery(_)

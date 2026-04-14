@@ -652,11 +652,7 @@ fn heap_fetch_visible_impl(
     drop(guard);
     drop(pin);
 
-    if visible {
-        Ok(Some(tuple))
-    } else {
-        Ok(None)
-    }
+    if visible { Ok(Some(tuple)) } else { Ok(None) }
 }
 
 pub fn heap_delete(

@@ -114,7 +114,11 @@ syntax, and an index scan plan node.
 
 ## Planner / optimizer
 
-There is no cost-based optimizer. The planner always produces:
+There is no cost-based optimizer, and the logical planner only supports
+`SELECT` queries today. `UPDATE` and `DELETE` execution exist, but they do not
+go through the same planner path as `SELECT`.
+
+For `SELECT`, the planner always produces:
 - sequential scan for table access
 - nested loop for joins
 - in-memory sort for `ORDER BY`

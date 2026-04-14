@@ -10,8 +10,8 @@ use crate::include::catalog::{
     PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    PgTablespaceRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 

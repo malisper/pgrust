@@ -5,11 +5,11 @@ use super::expr_casts::{
     cast_numeric_value, cast_text_value, cast_value, parse_text_array_literal_with_options,
     render_internal_char_text,
 };
+use super::expr_datetime::render_datetime_value_text;
 use super::expr_geometry::{
     decode_path_bytes, decode_polygon_bytes, encode_path_bytes, encode_polygon_bytes,
     render_geometry_text,
 };
-use super::expr_datetime::render_datetime_value_text;
 use super::node_types::*;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
@@ -20,11 +20,11 @@ use crate::pgrust::compact_string::CompactString;
 
 mod array;
 
+pub use array::format_array_value_text;
 pub(crate) use array::{
     decode_anyarray_bytes, decode_array_bytes, encode_anyarray_bytes, encode_array_bytes,
     format_array_text,
 };
-pub use array::format_array_value_text;
 
 pub(crate) fn tuple_from_values(
     desc: &RelationDesc,
@@ -38,8 +38,7 @@ pub(crate) fn encode_tuple_values(
     desc: &RelationDesc,
     values: &[Value],
 ) -> Result<Vec<TupleValue>, ExecError> {
-    desc
-        .columns
+    desc.columns
         .iter()
         .zip(values.iter())
         .map(|(column, value)| encode_value(column, value))
@@ -155,10 +154,16 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             value.as_text().unwrap().as_bytes().to_vec(),
         )),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
-        (ScalarType::Array(_), Value::Array(items)) if column.sql_type.kind == SqlTypeKind::AnyArray => {
-            Ok(TupleValue::Bytes(encode_anyarray_bytes(&ArrayValue::from_1d(items))?))
+        (ScalarType::Array(_), Value::Array(items))
+            if column.sql_type.kind == SqlTypeKind::AnyArray =>
+        {
+            Ok(TupleValue::Bytes(encode_anyarray_bytes(
+                &ArrayValue::from_1d(items),
+            )?))
         }
-        (ScalarType::Array(_), Value::PgArray(array)) if column.sql_type.kind == SqlTypeKind::AnyArray => {
+        (ScalarType::Array(_), Value::PgArray(array))
+            if column.sql_type.kind == SqlTypeKind::AnyArray =>
+        {
             Ok(TupleValue::Bytes(encode_anyarray_bytes(&array)?))
         }
         (ScalarType::Array(_), Value::Array(items)) => Ok(TupleValue::Bytes(encode_array_bytes(

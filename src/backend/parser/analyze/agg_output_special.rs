@@ -158,14 +158,8 @@ pub(super) fn bind_grouped_quantified_array(
     agg_list: &[(AggFunc, Vec<SqlFunctionArg>, bool, bool)],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
-    let raw_left_type = infer_sql_expr_type_with_ctes(
-        left,
-        input_scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        &[],
-    );
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, input_scope, catalog, outer_scopes, grouped_outer, &[]);
     let raw_array_type = infer_sql_expr_type_with_ctes(
         array,
         input_scope,

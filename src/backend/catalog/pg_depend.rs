@@ -138,15 +138,20 @@ pub fn view_rewrite_depend_rows(
         refobjsubid: 0,
         deptype: DEPENDENCY_INTERNAL,
     }];
-    rows.extend(referenced_relation_oids.iter().copied().map(|relation_oid| PgDependRow {
-        classid: PG_REWRITE_RELATION_OID,
-        objid: rewrite_oid,
-        objsubid: 0,
-        refclassid: PG_CLASS_RELATION_OID,
-        refobjid: relation_oid,
-        refobjsubid: 0,
-        deptype: DEPENDENCY_NORMAL,
-    }));
+    rows.extend(
+        referenced_relation_oids
+            .iter()
+            .copied()
+            .map(|relation_oid| PgDependRow {
+                classid: PG_REWRITE_RELATION_OID,
+                objid: rewrite_oid,
+                objsubid: 0,
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: relation_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
     sort_pg_depend_rows(&mut rows);
     rows
 }

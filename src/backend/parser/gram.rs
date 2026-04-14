@@ -891,13 +891,7 @@ fn build_join_clause(
     let mut natural = false;
 
     for part in pair.into_inner() {
-        consume_join_part(
-            part,
-            &mut kind,
-            &mut right,
-            &mut constraint,
-            &mut natural,
-        )?;
+        consume_join_part(part, &mut kind, &mut right, &mut constraint, &mut natural)?;
     }
 
     if natural {
@@ -1027,7 +1021,9 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Rule::create_table_column_form => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::create_table_element => elements.push(build_create_table_element(inner)?),
+                        Rule::create_table_element => {
+                            elements.push(build_create_table_element(inner)?)
+                        }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
                         _ => {}
                     }
@@ -1106,7 +1102,9 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
         Rule::column_def => Ok(CreateTableElement::Column(build_column_def(inner)?)),
-        Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(inner)?)),
+        Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(
+            inner,
+        )?)),
         _ => Err(ParseError::UnexpectedToken {
             expected: "column definition or table constraint",
             actual: inner.as_str().to_string(),
@@ -1768,7 +1766,12 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         }
         Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
         Rule::array_type_alias => {
-            let base = match pair.as_str().trim_start_matches('_').to_ascii_lowercase().as_str() {
+            let base = match pair
+                .as_str()
+                .trim_start_matches('_')
+                .to_ascii_lowercase()
+                .as_str()
+            {
                 "int2" | "smallint" => SqlType::new(SqlTypeKind::Int2),
                 "int4" | "int" | "integer" => SqlType::new(SqlTypeKind::Int4),
                 "int8" | "bigint" => SqlType::new(SqlTypeKind::Int8),
@@ -1984,7 +1987,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::subscript_suffix => {
                         let subscript = build_array_subscript(suffix)?;
                         expr = match expr {
-                            SqlExpr::ArraySubscript { array, mut subscripts } => {
+                            SqlExpr::ArraySubscript {
+                                array,
+                                mut subscripts,
+                            } => {
                                 subscripts.push(subscript);
                                 SqlExpr::ArraySubscript { array, subscripts }
                             }
@@ -2101,10 +2107,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             _ => {}
                         }
                     }
-                    let low = bounds
-                        .first()
-                        .cloned()
-                        .ok_or(ParseError::UnexpectedEof)?;
+                    let low = bounds.first().cloned().ok_or(ParseError::UnexpectedEof)?;
                     let high = bounds.get(1).cloned().ok_or(ParseError::UnexpectedEof)?;
                     let between = SqlExpr::And(
                         Box::new(SqlExpr::GtEq(Box::new(left.clone()), Box::new(low))),

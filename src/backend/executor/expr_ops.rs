@@ -665,16 +665,16 @@ pub(crate) fn order_values(
             ">=" => l.as_text().unwrap() >= r.as_text().unwrap(),
             _ => unreachable!(),
         })),
-        (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => Ok(
-            Value::Bool(compare_ord(
+        (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => {
+            Ok(Value::Bool(compare_ord(
                 compare_array_values(
                     &normalize_array_value(l).unwrap(),
                     &normalize_array_value(r).unwrap(),
                 ),
                 Ordering::Equal,
                 op,
-            )),
-        ),
+            )))
+        }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
 }

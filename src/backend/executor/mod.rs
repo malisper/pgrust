@@ -46,9 +46,8 @@ pub(crate) use expr_bit::render_bit_text;
 pub(crate) use expr_casts::cast_value;
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
-pub use expr_datetime::render_datetime_value_text;
 pub use expr_casts::render_internal_char_text;
-pub use value_io::format_array_value_text;
+pub use expr_datetime::render_datetime_value_text;
 pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
 pub use startup::executor_start;
@@ -59,6 +58,7 @@ pub(crate) use tsearch::{
     parse_tsvector_text, render_tsquery_text, render_tsvector_text, tsquery_and,
     tsquery_input_error, tsquery_not, tsquery_or, tsvector_input_error,
 };
+pub use value_io::format_array_value_text;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{
@@ -75,8 +75,8 @@ use crate::include::access::htup::TupleError;
 use crate::pgrust::database::TransactionWaiter;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
-use expr_ops::parse_numeric_text;
 pub(crate) use expr_ops::compare_order_values;
+use expr_ops::parse_numeric_text;
 
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,

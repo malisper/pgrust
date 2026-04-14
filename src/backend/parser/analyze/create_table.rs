@@ -95,7 +95,10 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
         if !seen_keys.insert(key) {
             return Err(ParseError::UnexpectedToken {
                 expected: "distinct PRIMARY KEY/UNIQUE definitions",
-                actual: format!("duplicate key definition on ({})", action.columns.join(", ")),
+                actual: format!(
+                    "duplicate key definition on ({})",
+                    action.columns.join(", ")
+                ),
             });
         }
     }
@@ -103,7 +106,12 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
     let primary_columns = constraint_actions
         .iter()
         .filter(|action| action.primary)
-        .flat_map(|action| action.columns.iter().map(|column| column.to_ascii_lowercase()))
+        .flat_map(|action| {
+            action
+                .columns
+                .iter()
+                .map(|column| column.to_ascii_lowercase())
+        })
         .collect::<BTreeSet<_>>();
 
     let relation_desc = RelationDesc {
@@ -113,7 +121,8 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
                 if column.ty.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
-                let nullable = column.nullable && !primary_columns.contains(&column.name.to_ascii_lowercase());
+                let nullable =
+                    column.nullable && !primary_columns.contains(&column.name.to_ascii_lowercase());
                 let mut desc = column_desc(column.name.clone(), column.ty, nullable);
                 desc.default_expr = column.default_expr.clone();
                 desc.missing_default_value = column

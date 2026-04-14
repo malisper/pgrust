@@ -4,8 +4,8 @@
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
-use super::value_io::{decode_anyarray_bytes, decode_array_bytes};
 use super::value_io::missing_column_value;
+use super::value_io::{decode_anyarray_bytes, decode_array_bytes};
 use crate::backend::executor::{decode_tsquery_bytes, decode_tsvector_bytes};
 use crate::include::access::htup::HEAP_NATTS_MASK;
 use crate::include::access::htup::{AttributeDesc, HEAP_HASNULL, SIZEOF_HEAP_TUPLE_HEADER};
@@ -278,19 +278,19 @@ impl CompiledTupleDecoder {
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
                             ])),
-                            ScalarType::Date => Value::Date(
-                                crate::include::nodes::datetime::DateADT(i32::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3],
-                                ])),
-                            ),
+                            ScalarType::Date => {
+                                Value::Date(crate::include::nodes::datetime::DateADT(
+                                    i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+                                ))
+                            }
                             ScalarType::Time => Value::Time(
                                 crate::include::nodes::datetime::TimeADT(i64::from_le_bytes([
                                     bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                     bytes[6], bytes[7],
                                 ])),
                             ),
-                            ScalarType::TimeTz => Value::TimeTz(
-                                crate::include::nodes::datetime::TimeTzADT {
+                            ScalarType::TimeTz => {
+                                Value::TimeTz(crate::include::nodes::datetime::TimeTzADT {
                                     time: crate::include::nodes::datetime::TimeADT(
                                         i64::from_le_bytes([
                                             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
@@ -300,20 +300,24 @@ impl CompiledTupleDecoder {
                                     offset_seconds: i32::from_le_bytes([
                                         bytes[8], bytes[9], bytes[10], bytes[11],
                                     ]),
-                                },
-                            ),
-                            ScalarType::Timestamp => Value::Timestamp(
-                                crate::include::nodes::datetime::TimestampADT(i64::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                                    bytes[6], bytes[7],
-                                ])),
-                            ),
-                            ScalarType::TimestampTz => Value::TimestampTz(
-                                crate::include::nodes::datetime::TimestampTzADT(i64::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                                    bytes[6], bytes[7],
-                                ])),
-                            ),
+                                })
+                            }
+                            ScalarType::Timestamp => {
+                                Value::Timestamp(crate::include::nodes::datetime::TimestampADT(
+                                    i64::from_le_bytes([
+                                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                        bytes[6], bytes[7],
+                                    ]),
+                                ))
+                            }
+                            ScalarType::TimestampTz => {
+                                Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
+                                    i64::from_le_bytes([
+                                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                        bytes[6], bytes[7],
+                                    ]),
+                                ))
+                            }
                             ScalarType::BitString => {
                                 values.push(Value::Null);
                                 continue;
@@ -498,13 +502,15 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Array(elem_ty) => {
                                 let _ = elem_ty;
-                                values.push(if sql_type.kind
-                                    == crate::backend::parser::SqlTypeKind::AnyArray
-                                {
-                                    decode_anyarray_bytes(bytes_slice)?
-                                } else {
-                                    decode_array_bytes(sql_type.element_type(), bytes_slice)?
-                                });
+                                values.push(
+                                    if sql_type.kind
+                                        == crate::backend::parser::SqlTypeKind::AnyArray
+                                    {
+                                        decode_anyarray_bytes(bytes_slice)?
+                                    } else {
+                                        decode_array_bytes(sql_type.element_type(), bytes_slice)?
+                                    },
+                                );
                             }
                             _ => values.push(Value::Null),
                         }
@@ -583,13 +589,15 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Array(elem_ty) => {
                                 let _ = elem_ty;
-                                values.push(if sql_type.kind
-                                    == crate::backend::parser::SqlTypeKind::AnyArray
-                                {
-                                    decode_anyarray_bytes(bytes)?
-                                } else {
-                                    decode_array_bytes(sql_type.element_type(), bytes)?
-                                });
+                                values.push(
+                                    if sql_type.kind
+                                        == crate::backend::parser::SqlTypeKind::AnyArray
+                                    {
+                                        decode_anyarray_bytes(bytes)?
+                                    } else {
+                                        decode_array_bytes(sql_type.element_type(), bytes)?
+                                    },
+                                );
                             }
                             _ => values.push(Value::Null),
                         }

@@ -179,7 +179,11 @@ impl Database {
                 client_id,
                 waiter: Some(self.txn_waiter.clone()),
             };
-            match self.catalog.write().drop_view_by_oid_mvcc(relation_oid, &ctx) {
+            match self
+                .catalog
+                .write()
+                .drop_view_by_oid_mvcc(relation_oid, &ctx)
+            {
                 Ok((_entry, effect)) => {
                     catalog_effects.push(effect);
                     dropped += 1;
