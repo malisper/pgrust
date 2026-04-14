@@ -7,8 +7,7 @@ use crate::include::catalog::{
     INT4_TYPE_OID, INT8_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
     LSEG_TYPE_OID, MONEY_TYPE_OID, NUMERIC_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
     PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
-    RECORD_TYPE_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TSQUERY_TYPE_OID, VARBIT_TYPE_OID,
+    RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TSQUERY_TYPE_OID, VARBIT_TYPE_OID,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction};
 use std::sync::OnceLock;
@@ -4255,14 +4254,8 @@ fn record_out_proc_row(
     pronargs: i16,
     out_args: &[(&str, u32)],
 ) -> PgProcRow {
-    let mut row = set_returning_proc_row(
-        oid,
-        proname,
-        RECORD_TYPE_OID,
-        proargtypes,
-        prosrc,
-        pronargs,
-    );
+    let mut row =
+        set_returning_proc_row(oid, proname, RECORD_TYPE_OID, proargtypes, prosrc, pronargs);
     row.proallargtypes = Some(
         parse_proc_argtype_oids(proargtypes)
             .unwrap_or_default()
@@ -4348,7 +4341,9 @@ mod tests {
     fn bootstrap_record_returning_rows_expose_out_metadata() {
         let row = bootstrap_pg_proc_rows()
             .into_iter()
-            .find(|row| row.proname == "json_each" && row.proargtypes == oid_argtypes(&[JSON_TYPE_OID]))
+            .find(|row| {
+                row.proname == "json_each" && row.proargtypes == oid_argtypes(&[JSON_TYPE_OID])
+            })
             .expect("json_each row");
         assert_eq!(row.prorettype, RECORD_TYPE_OID);
         assert_eq!(

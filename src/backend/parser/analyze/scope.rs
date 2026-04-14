@@ -248,17 +248,13 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         .enumerate()
         .filter(|(_, column)| !column.hidden && column.output_name.eq_ignore_ascii_case(name));
     let Some(first) = matches.next() else {
-        let mut relation_matches = scope
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, column)| {
-                !column.hidden
-                    && column
+        let mut relation_matches = scope.columns.iter().enumerate().filter(|(_, column)| {
+            !column.hidden
+                && column
                     .relation_names
                     .iter()
                     .any(|relation| relation.eq_ignore_ascii_case(name))
-            });
+        });
         let Some((index, _)) = relation_matches.next() else {
             return Err(ParseError::UnknownColumn(name.to_string()));
         };

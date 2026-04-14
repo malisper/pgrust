@@ -32,7 +32,16 @@ pub(super) fn bind_arithmetic_expr(
             grouped_outer,
             ctes,
         )?;
-        return bind_money_arithmetic_expr(op, make, left, raw_left_type, left_type, right, raw_right_type, right_type);
+        return bind_money_arithmetic_expr(
+            op,
+            make,
+            left,
+            raw_left_type,
+            left_type,
+            right,
+            raw_right_type,
+            right_type,
+        );
     }
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(

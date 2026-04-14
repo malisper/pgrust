@@ -159,7 +159,7 @@ fn projection_keeps_hidden_order_pathkeys() {
 }
 
 #[test]
-fn join_input_rewrite_maps_whole_composite_expr_to_join_alias_slot() {
+fn join_input_rewrite_keeps_composite_expr_semantic_until_late_rewrite() {
     let merged = Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)));
     let right = Path::Projection {
         plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
@@ -174,11 +174,11 @@ fn join_input_rewrite_maps_whole_composite_expr_to_join_alias_slot() {
     let rewritten =
         super::rewrite_semantic_expr_for_join_inputs(None, merged, &left, &right, &join_layout);
 
-    assert_eq!(rewritten, var(30, 1));
+    assert_eq!(rewritten, Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2))));
 }
 
 #[test]
-fn projection_rewrite_does_not_chase_plain_var_through_subquery_boundary() {
+fn projection_rewrite_maps_semantic_var_to_current_projection_slot() {
     let inner = Path::Projection {
         plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
         slot_id: 1_000_100,
@@ -194,7 +194,7 @@ fn projection_rewrite_does_not_chase_plain_var_through_subquery_boundary() {
 
     let rewritten = super::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
 
-    assert_eq!(rewritten, var(1, 1));
+    assert_eq!(rewritten, var(4, 1));
 }
 
 #[test]

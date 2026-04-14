@@ -21,8 +21,8 @@ use crate::backend::optimizer::planner;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::include::catalog::{
     PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
-    bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
-    proc_oid_for_builtin_aggregate_function, RECORD_TYPE_OID,
+    RECORD_TYPE_OID, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    builtin_type_rows, proc_oid_for_builtin_aggregate_function,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{

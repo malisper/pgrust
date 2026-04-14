@@ -132,19 +132,13 @@ fn build_scanjoin_target(
     sort_input_target: &PathTarget,
     final_target: &PathTarget,
 ) -> PathTarget {
-    let mut exprs = if has_grouping(parse) {
+    let exprs = if has_grouping(parse) {
         group_input_target.exprs.clone()
     } else if !parse.sort_clause.is_empty() {
         sort_input_target.exprs.clone()
     } else {
         final_target.exprs.clone()
     };
-    if let Some(where_qual) = parse.where_qual.as_ref() {
-        collect_supporting_inputs(where_qual, &mut exprs);
-    }
-    if let Some(jointree) = parse.jointree.as_ref() {
-        collect_jointree_supporting_inputs(jointree, &mut exprs);
-    }
     PathTarget::new(exprs)
 }
 

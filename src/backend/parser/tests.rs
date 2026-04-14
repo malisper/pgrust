@@ -2,7 +2,9 @@ use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
-use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgRewriteRow, PgTypeRow, PUBLIC_NAMESPACE_OID, sort_pg_rewrite_rows};
+use crate::include::catalog::{
+    BOOTSTRAP_SUPERUSER_OID, PUBLIC_NAMESPACE_OID, PgRewriteRow, PgTypeRow, sort_pg_rewrite_rows,
+};
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, JoinTreeNode, RangeTblEntryKind, RawTypeName,
 };
@@ -2262,7 +2264,10 @@ fn parse_create_drop_and_comment_on_domain_statements() {
         panic!("expected create domain");
     };
     assert_eq!(create.domain_name, "dom_int");
-    assert_eq!(create.ty, RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)));
+    assert_eq!(
+        create.ty,
+        RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))
+    );
 
     let Statement::DropDomain(drop_stmt) =
         parse_statement("drop domain if exists dom_int cascade").unwrap()
@@ -2291,10 +2296,9 @@ fn parse_create_domain_preserves_array_base_type() {
     };
     assert_eq!(
         create.ty,
-        RawTypeName::Builtin(SqlType::array_of(SqlType::array_of(SqlType::with_char_len(
-            SqlTypeKind::Varchar,
-            4,
-        ))))
+        RawTypeName::Builtin(SqlType::array_of(SqlType::array_of(
+            SqlType::with_char_len(SqlTypeKind::Varchar, 4,)
+        )))
     );
 }
 
@@ -2318,7 +2322,10 @@ fn lower_create_table_resolves_named_domain_types() {
         }],
     };
     let lowered = lower_create_table(&ct, &catalog).unwrap();
-    assert_eq!(lowered.relation_desc.columns[0].sql_type, SqlType::new(SqlTypeKind::Int4));
+    assert_eq!(
+        lowered.relation_desc.columns[0].sql_type,
+        SqlType::new(SqlTypeKind::Int4)
+    );
 }
 
 #[test]
