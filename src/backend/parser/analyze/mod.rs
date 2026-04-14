@@ -4,14 +4,12 @@ mod agg_output_special;
 mod coerce;
 mod create_table;
 mod expr;
-mod from_ir;
 mod functions;
 mod geometry;
 mod infer;
 mod modify;
 mod paths;
 mod scope;
-mod select_ir;
 mod system_views;
 mod views;
 
@@ -32,12 +30,14 @@ use super::parsenodes::*;
 pub use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
+pub(crate) use crate::include::nodes::plannodes::{
+    BoundFromPlan, BoundSelectPlan, DeferredSelectPlan,
+};
 use agg::*;
 use agg_output::*;
 use coerce::*;
 pub use create_table::*;
 use expr::*;
-pub(crate) use from_ir::BoundFromPlan;
 use functions::*;
 use geometry::*;
 use infer::*;
@@ -50,7 +50,6 @@ pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
 pub use scope::BoundRelation;
 use scope::*;
-pub(crate) use select_ir::BoundSelectPlan;
 use system_views::*;
 use views::*;
 

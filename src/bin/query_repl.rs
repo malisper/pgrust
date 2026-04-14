@@ -679,7 +679,7 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                execute_insert(bound, &mut ctx, xid, 0)
+                execute_insert(bound, &relcache, &mut ctx, xid, 0)
             };
             match result {
                 Ok(result) => {
@@ -706,7 +706,7 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                execute_update_with_waiter(bound, &mut ctx, xid, 0, None)
+                execute_update_with_waiter(bound, &relcache, &mut ctx, xid, 0, None)
             };
             match result {
                 Ok(result) => {
@@ -733,7 +733,7 @@ fn run_statement(
                     outer_rows: Vec::new(),
                     timed: false,
                 };
-                execute_delete_with_waiter(bound, &mut ctx, xid, None)
+                execute_delete_with_waiter(bound, &relcache, &mut ctx, xid, None)
             };
             match result {
                 Ok(result) => {

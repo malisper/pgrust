@@ -18,7 +18,7 @@ pub struct BoundInsertStatement {
 pub enum BoundInsertSource {
     Values(Vec<Vec<Expr>>),
     DefaultValues(Vec<Expr>),
-    Select(Box<Plan>),
+    Select(Box<DeferredSelectPlan>),
 }
 
 /// A pre-bound insert plan that can be executed repeatedly with different
@@ -233,7 +233,8 @@ pub fn bind_insert(
             BoundInsertSource::DefaultValues(column_defaults.clone()),
         ),
         InsertSource::Select(select) => {
-            let plan = build_plan_with_outer(select, catalog, &[], None, &local_ctes, &[])?;
+            let (plan, _) =
+                bind_select_query_with_outer(select, catalog, &[], None, &local_ctes, &[])?;
             let actual = plan.columns().len();
             let target_columns = if let Some(columns) = &stmt.columns {
                 columns
@@ -260,7 +261,10 @@ pub fn bind_insert(
                     actual,
                 });
             }
-            (target_columns, BoundInsertSource::Select(Box::new(plan)))
+            (
+                target_columns,
+                BoundInsertSource::Select(Box::new(DeferredSelectPlan::Bound(Box::new(plan)))),
+            )
         }
     };
     let (target_columns, source) = source;

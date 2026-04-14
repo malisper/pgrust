@@ -588,7 +588,7 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_insert(bound, &mut ctx, xid, cid)
+                execute_insert(bound, &catalog, &mut ctx, xid, cid)
             }
             Statement::Update(ref update_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -613,6 +613,7 @@ impl Session {
                 };
                 execute_update_with_waiter(
                     bound,
+                    &catalog,
                     &mut ctx,
                     xid,
                     cid,
@@ -640,7 +641,13 @@ impl Session {
                     timed: false,
                     outer_rows: Vec::new(),
                 };
-                execute_delete_with_waiter(bound, &mut ctx, xid, Some((&db.txns, &db.txn_waiter)))
+                execute_delete_with_waiter(
+                    bound,
+                    &catalog,
+                    &mut ctx,
+                    xid,
+                    Some((&db.txns, &db.txn_waiter)),
+                )
             }
             Statement::CreateTable(ref create_stmt) => {
                 let search_path = self.configured_search_path();

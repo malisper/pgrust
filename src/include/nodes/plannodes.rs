@@ -526,18 +526,18 @@ pub enum Expr {
     JsonbExistsAll(Box<Expr>, Box<Expr>),
     JsonbPathExists(Box<Expr>, Box<Expr>),
     JsonbPathMatch(Box<Expr>, Box<Expr>),
-    ScalarSubquery(Box<Plan>),
-    ExistsSubquery(Box<Plan>),
+    ScalarSubquery(Box<DeferredSelectPlan>),
+    ExistsSubquery(Box<DeferredSelectPlan>),
     Coalesce(Box<Expr>, Box<Expr>),
     AnySubquery {
         left: Box<Expr>,
         op: SubqueryComparisonOp,
-        subquery: Box<Plan>,
+        subquery: Box<DeferredSelectPlan>,
     },
     AllSubquery {
         left: Box<Expr>,
         op: SubqueryComparisonOp,
-        subquery: Box<Plan>,
+        subquery: Box<DeferredSelectPlan>,
     },
     AnyArray {
         left: Box<Expr>,
@@ -697,6 +697,74 @@ pub enum Plan {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeferredSelectPlan {
+    Bound(Box<BoundSelectPlan>),
+    Planned(Box<Plan>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundSelectPlan {
+    From(BoundFromPlan),
+    Filter {
+        input: Box<BoundSelectPlan>,
+        predicate: Expr,
+    },
+    OrderBy {
+        input: Box<BoundSelectPlan>,
+        items: Vec<OrderByEntry>,
+    },
+    Limit {
+        input: Box<BoundSelectPlan>,
+        limit: Option<usize>,
+        offset: usize,
+    },
+    Aggregate {
+        input: Box<BoundSelectPlan>,
+        group_by: Vec<Expr>,
+        accumulators: Vec<AggAccum>,
+        having: Option<Expr>,
+        output_columns: Vec<QueryColumn>,
+    },
+    Projection {
+        input: Box<BoundSelectPlan>,
+        targets: Vec<TargetEntry>,
+    },
+    ProjectSet {
+        input: Box<BoundSelectPlan>,
+        targets: Vec<ProjectSetTarget>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundFromPlan {
+    Result,
+    SeqScan {
+        rel: RelFileLocator,
+        relation_oid: u32,
+        toast: Option<ToastRelationRef>,
+        desc: RelationDesc,
+    },
+    Values {
+        rows: Vec<Vec<Expr>>,
+        output_columns: Vec<QueryColumn>,
+    },
+    FunctionScan {
+        call: SetReturningCall,
+    },
+    NestedLoopJoin {
+        left: Box<BoundFromPlan>,
+        right: Box<BoundFromPlan>,
+        kind: JoinType,
+        on: Expr,
+    },
+    Projection {
+        input: Box<BoundFromPlan>,
+        targets: Vec<TargetEntry>,
+    },
+    Subquery(Box<BoundSelectPlan>),
+}
+
 impl Plan {
     pub fn plan_info(&self) -> PlanEstimate {
         match self {
@@ -787,5 +855,77 @@ impl Plan {
 
     pub fn column_names(&self) -> Vec<String> {
         self.columns().into_iter().map(|c| c.name).collect()
+    }
+}
+
+impl DeferredSelectPlan {
+    pub fn columns(&self) -> Vec<QueryColumn> {
+        match self {
+            Self::Bound(plan) => plan.columns(),
+            Self::Planned(plan) => plan.columns(),
+        }
+    }
+}
+
+impl BoundSelectPlan {
+    pub fn columns(&self) -> Vec<QueryColumn> {
+        match self {
+            Self::From(plan) => plan.columns(),
+            Self::Filter { input, .. }
+            | Self::OrderBy { input, .. }
+            | Self::Limit { input, .. } => input.columns(),
+            Self::Aggregate { output_columns, .. } => output_columns.clone(),
+            Self::Projection { targets, .. } => targets
+                .iter()
+                .map(|target| QueryColumn {
+                    name: target.name.clone(),
+                    sql_type: target.sql_type,
+                })
+                .collect(),
+            Self::ProjectSet { targets, .. } => targets
+                .iter()
+                .map(|target| match target {
+                    ProjectSetTarget::Scalar(entry) => QueryColumn {
+                        name: entry.name.clone(),
+                        sql_type: entry.sql_type,
+                    },
+                    ProjectSetTarget::Set { name, sql_type, .. } => QueryColumn {
+                        name: name.clone(),
+                        sql_type: *sql_type,
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+impl BoundFromPlan {
+    pub fn columns(&self) -> Vec<QueryColumn> {
+        match self {
+            Self::Result => Vec::new(),
+            Self::SeqScan { desc, .. } => desc
+                .columns
+                .iter()
+                .map(|column| QueryColumn {
+                    name: column.name.clone(),
+                    sql_type: column.sql_type,
+                })
+                .collect(),
+            Self::Values { output_columns, .. } => output_columns.clone(),
+            Self::FunctionScan { call } => call.output_columns().to_vec(),
+            Self::NestedLoopJoin { left, right, .. } => {
+                let mut columns = left.columns();
+                columns.extend(right.columns());
+                columns
+            }
+            Self::Projection { targets, .. } => targets
+                .iter()
+                .map(|target| QueryColumn {
+                    name: target.name.clone(),
+                    sql_type: target.sql_type,
+                })
+                .collect(),
+            Self::Subquery(plan) => plan.columns(),
+        }
     }
 }

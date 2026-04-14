@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use crate::RelFileLocator;
 use crate::backend::executor::{Expr, Plan};
 use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
+use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, DeferredSelectPlan};
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
@@ -98,11 +99,11 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
             collect_rels_from_expr(right, rels);
         }
         Expr::ScalarSubquery(plan) | Expr::ExistsSubquery(plan) => {
-            collect_rels_from_plan(plan, rels);
+            collect_rels_from_deferred_select_plan(plan, rels);
         }
         Expr::AnySubquery { left, subquery, .. } | Expr::AllSubquery { left, subquery, .. } => {
             collect_rels_from_expr(left, rels);
-            collect_rels_from_plan(subquery, rels);
+            collect_rels_from_deferred_select_plan(subquery, rels);
         }
         Expr::AnyArray { left, right, .. } | Expr::AllArray { left, right, .. } => {
             collect_rels_from_expr(left, rels);
@@ -117,6 +118,135 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
                 if let Some(upper) = &subscript.upper {
                     collect_rels_from_expr(upper, rels);
                 }
+            }
+        }
+    }
+}
+
+fn collect_rels_from_deferred_select_plan(
+    plan: &DeferredSelectPlan,
+    rels: &mut BTreeSet<RelFileLocator>,
+) {
+    match plan {
+        DeferredSelectPlan::Bound(plan) => collect_rels_from_bound_select_plan(plan, rels),
+        DeferredSelectPlan::Planned(plan) => collect_rels_from_plan(plan, rels),
+    }
+}
+
+fn collect_rels_from_bound_select_plan(
+    plan: &BoundSelectPlan,
+    rels: &mut BTreeSet<RelFileLocator>,
+) {
+    match plan {
+        BoundSelectPlan::From(plan) => collect_rels_from_bound_from_plan(plan, rels),
+        BoundSelectPlan::Filter { input, predicate } => {
+            collect_rels_from_bound_select_plan(input, rels);
+            collect_rels_from_expr(predicate, rels);
+        }
+        BoundSelectPlan::OrderBy { input, items } => {
+            collect_rels_from_bound_select_plan(input, rels);
+            for item in items {
+                collect_rels_from_expr(&item.expr, rels);
+            }
+        }
+        BoundSelectPlan::Limit { input, .. } => collect_rels_from_bound_select_plan(input, rels),
+        BoundSelectPlan::Aggregate {
+            input,
+            group_by,
+            accumulators,
+            having,
+            ..
+        } => {
+            collect_rels_from_bound_select_plan(input, rels);
+            for expr in group_by {
+                collect_rels_from_expr(expr, rels);
+            }
+            for accum in accumulators {
+                for arg in &accum.args {
+                    collect_rels_from_expr(arg, rels);
+                }
+            }
+            if let Some(expr) = having {
+                collect_rels_from_expr(expr, rels);
+            }
+        }
+        BoundSelectPlan::Projection { input, targets } => {
+            collect_rels_from_bound_select_plan(input, rels);
+            for target in targets {
+                collect_rels_from_expr(&target.expr, rels);
+            }
+        }
+        BoundSelectPlan::ProjectSet { input, targets } => {
+            collect_rels_from_bound_select_plan(input, rels);
+            for target in targets {
+                match target {
+                    crate::include::nodes::plannodes::ProjectSetTarget::Scalar(entry) => {
+                        collect_rels_from_expr(&entry.expr, rels);
+                    }
+                    crate::include::nodes::plannodes::ProjectSetTarget::Set { call, .. } => {
+                        collect_rels_from_set_returning_call(call, rels);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_rels_from_bound_from_plan(plan: &BoundFromPlan, rels: &mut BTreeSet<RelFileLocator>) {
+    match plan {
+        BoundFromPlan::Result => {}
+        BoundFromPlan::SeqScan { rel, .. } => {
+            rels.insert(*rel);
+        }
+        BoundFromPlan::Values { rows, .. } => {
+            for row in rows {
+                for expr in row {
+                    collect_rels_from_expr(expr, rels);
+                }
+            }
+        }
+        BoundFromPlan::FunctionScan { call } => collect_rels_from_set_returning_call(call, rels),
+        BoundFromPlan::NestedLoopJoin {
+            left, right, on, ..
+        } => {
+            collect_rels_from_bound_from_plan(left, rels);
+            collect_rels_from_bound_from_plan(right, rels);
+            collect_rels_from_expr(on, rels);
+        }
+        BoundFromPlan::Projection { input, targets } => {
+            collect_rels_from_bound_from_plan(input, rels);
+            for target in targets {
+                collect_rels_from_expr(&target.expr, rels);
+            }
+        }
+        BoundFromPlan::Subquery(plan) => collect_rels_from_bound_select_plan(plan, rels),
+    }
+}
+
+fn collect_rels_from_set_returning_call(
+    call: &crate::include::nodes::plannodes::SetReturningCall,
+    rels: &mut BTreeSet<RelFileLocator>,
+) {
+    match call {
+        crate::include::nodes::plannodes::SetReturningCall::GenerateSeries {
+            start,
+            stop,
+            step,
+            ..
+        } => {
+            collect_rels_from_expr(start, rels);
+            collect_rels_from_expr(stop, rels);
+            collect_rels_from_expr(step, rels);
+        }
+        crate::include::nodes::plannodes::SetReturningCall::Unnest { args, .. }
+        | crate::include::nodes::plannodes::SetReturningCall::JsonTableFunction { args, .. }
+        | crate::include::nodes::plannodes::SetReturningCall::RegexTableFunction { args, .. }
+        | crate::include::nodes::plannodes::SetReturningCall::TextSearchTableFunction {
+            args,
+            ..
+        } => {
+            for arg in args {
+                collect_rels_from_expr(arg, rels);
             }
         }
     }

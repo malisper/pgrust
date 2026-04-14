@@ -1,10 +1,25 @@
 use super::*;
 
+fn planned_subquery_plan<'a>(plan: &'a DeferredSelectPlan) -> Result<&'a Plan, ExecError> {
+    match plan {
+        DeferredSelectPlan::Planned(plan) => Ok(plan),
+        DeferredSelectPlan::Bound(_) => Err(ExecError::DetailedError {
+            message: "unplanned subquery reached executor".into(),
+            detail: Some(
+                "the planner should have lowered bound subquery IR before execution".into(),
+            ),
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
+}
+
 pub(super) fn eval_scalar_subquery(
-    plan: &Plan,
+    plan: &DeferredSelectPlan,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    let plan = planned_subquery_plan(plan)?;
     let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
@@ -33,10 +48,11 @@ pub(super) fn eval_scalar_subquery(
 }
 
 pub(super) fn eval_exists_subquery(
-    plan: &Plan,
+    plan: &DeferredSelectPlan,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    let plan = planned_subquery_plan(plan)?;
     let mut outer_row = slot.values()?.iter().cloned().collect::<Vec<_>>();
     Value::materialize_all(&mut outer_row);
     ctx.outer_rows.insert(0, outer_row);
@@ -52,10 +68,11 @@ pub(super) fn eval_quantified_subquery(
     left_value: &Value,
     op: SubqueryComparisonOp,
     is_all: bool,
-    plan: &Plan,
+    plan: &DeferredSelectPlan,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    let plan = planned_subquery_plan(plan)?;
     // :HACK: `join.sql` currently hits a pathological executor path for the
     // specific uncorrelated `unique1 IN (SELECT unique1 FROM tenk1 b JOIN
     // tenk1 c USING (unique1) WHERE b.unique2 = 42)` shape. Fail fast until

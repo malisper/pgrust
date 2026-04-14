@@ -48,7 +48,7 @@ pub(super) fn bind_grouped_scalar_subquery(
 ) -> Result<Expr, ParseError> {
     let plan =
         build_grouped_subquery_plan(select, group_by_exprs, input_scope, catalog, outer_scopes)?;
-    ensure_single_column_subquery(&plan)?;
+    ensure_single_column_subquery(plan.columns().len())?;
     Ok(Expr::ScalarSubquery(Box::new(plan)))
 }
 
@@ -82,7 +82,7 @@ pub(super) fn bind_grouped_in_subquery(
 ) -> Result<Expr, ParseError> {
     let subquery_plan =
         build_grouped_subquery_plan(subquery, group_by_exprs, input_scope, catalog, outer_scopes)?;
-    ensure_single_column_subquery(&subquery_plan)?;
+    ensure_single_column_subquery(subquery_plan.columns().len())?;
     let any = Expr::AnySubquery {
         left: Box::new(bind_agg_output_expr(
             expr,
@@ -119,7 +119,7 @@ pub(super) fn bind_grouped_quantified_subquery(
 ) -> Result<Expr, ParseError> {
     let subquery_plan =
         build_grouped_subquery_plan(subquery, group_by_exprs, input_scope, catalog, outer_scopes)?;
-    ensure_single_column_subquery(&subquery_plan)?;
+    ensure_single_column_subquery(subquery_plan.columns().len())?;
     let left = Box::new(bind_agg_output_expr(
         left,
         group_by_exprs,
@@ -425,11 +425,11 @@ fn build_grouped_subquery_plan(
     input_scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
-) -> Result<Plan, ParseError> {
+) -> Result<DeferredSelectPlan, ParseError> {
     let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
     child_outer.push(input_scope.clone());
     child_outer.extend_from_slice(outer_scopes);
-    build_plan_with_outer(
+    let (plan, _) = bind_select_query_with_outer(
         select,
         catalog,
         &child_outer,
@@ -439,5 +439,6 @@ fn build_grouped_subquery_plan(
         }),
         &[],
         &[],
-    )
+    )?;
+    Ok(DeferredSelectPlan::Bound(Box::new(plan)))
 }

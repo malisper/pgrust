@@ -227,7 +227,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             ctes,
         )
         .unwrap_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
-        SqlExpr::ScalarSubquery(select) => build_plan_with_outer(
+        SqlExpr::ScalarSubquery(select) => bind_select_query_with_outer(
             select,
             catalog,
             outer_scopes,
@@ -236,7 +236,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             &[],
         )
         .ok()
-        .and_then(|plan| {
+        .and_then(|(plan, _)| {
             let cols = plan.columns();
             if cols.len() == 1 {
                 Some(cols[0].sql_type)

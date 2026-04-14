@@ -15,11 +15,13 @@ use crate::backend::access::heap::heaptoast::{
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
+use crate::backend::optimizer::{finalize_deferred_select_plan, finalize_expr_subqueries};
 use crate::backend::parser::{
-    AnalyzeStatement, BoundAssignmentTarget, BoundDeleteStatement, BoundIndexRelation,
-    BoundInsertSource, BoundInsertStatement, BoundModifyRowSource, BoundUpdateStatement, Catalog,
-    CatalogLookup, DropTableStatement, ExplainStatement, MaintenanceTarget, ParseError, Statement,
-    TruncateTableStatement, VacuumStatement, bind_create_table, build_plan,
+    AnalyzeStatement, BoundArraySubscript, BoundAssignment, BoundAssignmentTarget,
+    BoundDeleteStatement, BoundIndexRelation, BoundInsertSource, BoundInsertStatement,
+    BoundModifyRowSource, BoundUpdateStatement, Catalog, CatalogLookup, DropTableStatement,
+    ExplainStatement, MaintenanceTarget, ParseError, Statement, TruncateTableStatement,
+    VacuumStatement, bind_create_table, build_plan,
 };
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -30,7 +32,8 @@ use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_e
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, executor_start,
+    DeferredSelectPlan, ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
+    executor_start,
 };
 use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
 use crate::include::access::detoast::is_ondisk_toast_pointer;
@@ -38,6 +41,79 @@ use crate::include::access::htup::{HeapTuple, TupleValue};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 use crate::include::nodes::execnodes::*;
+
+fn finalize_bound_insert(
+    mut stmt: BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+) -> BoundInsertStatement {
+    stmt.column_defaults = stmt
+        .column_defaults
+        .into_iter()
+        .map(|expr| finalize_expr_subqueries(expr, catalog))
+        .collect();
+    stmt.source = match stmt.source {
+        BoundInsertSource::Values(rows) => BoundInsertSource::Values(
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| finalize_expr_subqueries(expr, catalog))
+                        .collect()
+                })
+                .collect(),
+        ),
+        BoundInsertSource::DefaultValues(defaults) => BoundInsertSource::DefaultValues(
+            defaults
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog))
+                .collect(),
+        ),
+        BoundInsertSource::Select(plan) => {
+            BoundInsertSource::Select(Box::new(finalize_deferred_select_plan(*plan, catalog)))
+        }
+    };
+    stmt
+}
+
+fn finalize_bound_update(
+    mut stmt: BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
+) -> BoundUpdateStatement {
+    stmt.assignments = stmt
+        .assignments
+        .into_iter()
+        .map(|assignment| BoundAssignment {
+            column_index: assignment.column_index,
+            expr: finalize_expr_subqueries(assignment.expr, catalog),
+            subscripts: assignment
+                .subscripts
+                .into_iter()
+                .map(|subscript| BoundArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| finalize_expr_subqueries(expr, catalog)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| finalize_expr_subqueries(expr, catalog)),
+                })
+                .collect(),
+        })
+        .collect();
+    stmt.predicate = stmt
+        .predicate
+        .map(|expr| finalize_expr_subqueries(expr, catalog));
+    stmt
+}
+
+fn finalize_bound_delete(
+    mut stmt: BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
+) -> BoundDeleteStatement {
+    stmt.predicate = stmt
+        .predicate
+        .map(|expr| finalize_expr_subqueries(expr, catalog));
+    stmt
+}
 
 pub(crate) fn execute_explain(
     stmt: ExplainStatement,
@@ -552,10 +628,13 @@ pub fn execute_truncate_table(
 
 pub fn execute_insert(
     stmt: BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
+    let stmt = finalize_bound_insert(stmt, catalog);
+
     fn eval_insert_defaults(
         defaults: &[crate::backend::executor::Expr],
         width: usize,
@@ -600,6 +679,16 @@ pub fn execute_insert(
             vec![values]
         }
         BoundInsertSource::Select(plan) => {
+            let DeferredSelectPlan::Planned(plan) = plan.as_ref() else {
+                return Err(ExecError::DetailedError {
+                    message: "unplanned INSERT ... SELECT reached executor".into(),
+                    detail: Some(
+                        "the planner should have lowered the insert source before execution".into(),
+                    ),
+                    hint: None,
+                    sqlstate: "XX000",
+                });
+            };
             let mut state = executor_start((**plan).clone());
             let mut rows = Vec::new();
             while let Some(slot) = state.exec_proc_node(ctx)? {
@@ -944,20 +1033,23 @@ pub fn execute_prepared_insert_row(
 
 pub(crate) fn execute_update(
     stmt: BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
-    execute_update_with_waiter(stmt, ctx, xid, cid, None)
+    execute_update_with_waiter(stmt, catalog, ctx, xid, cid, None)
 }
 
 pub fn execute_update_with_waiter(
     stmt: BoundUpdateStatement,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
+    let stmt = finalize_bound_update(stmt, catalog);
     let mut affected_rows = 0;
 
     let desc = Rc::new(stmt.desc.clone());
@@ -1097,18 +1189,21 @@ pub fn execute_update_with_waiter(
 
 pub(crate) fn execute_delete(
     stmt: BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
 ) -> Result<StatementResult, ExecError> {
-    execute_delete_with_waiter(stmt, ctx, xid, None)
+    execute_delete_with_waiter(stmt, catalog, ctx, xid, None)
 }
 
 pub fn execute_delete_with_waiter(
     stmt: BoundDeleteStatement,
+    catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
 ) -> Result<StatementResult, ExecError> {
+    let stmt = finalize_bound_delete(stmt, catalog);
     let desc = Rc::new(stmt.desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));

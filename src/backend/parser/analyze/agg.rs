@@ -384,8 +384,8 @@ pub(super) fn sql_expr_name(expr: &SqlExpr) -> String {
     }
 }
 
-pub(super) fn ensure_single_column_subquery(plan: &Plan) -> Result<(), ParseError> {
-    if plan.columns().len() == 1 {
+pub(super) fn ensure_single_column_subquery(width: usize) -> Result<(), ParseError> {
+    if width == 1 {
         Ok(())
     } else {
         Err(ParseError::SubqueryMustReturnOneColumn)
