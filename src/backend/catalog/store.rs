@@ -25,6 +25,14 @@ use crate::backend::catalog::persistence::{
     append_catalog_entry_rows, delete_catalog_rows_subset_mvcc, insert_catalog_rows_subset_mvcc,
     sync_catalog_rows_subset,
 };
+use crate::backend::catalog::role_memberships::{
+    NewRoleMembership, grant_membership as grant_role_membership_row,
+    revoke_role_membership_option as update_role_membership_row,
+};
+use crate::backend::catalog::roles::{
+    RoleAttributes, alter_role_attributes as alter_role_row, create_role as create_role_row,
+    drop_roles as drop_role_rows, rename_role as rename_role_row,
+};
 use crate::backend::catalog::pg_depend::view_rewrite_depend_rows;
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
@@ -43,8 +51,9 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgDependRow,
-    PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow, bootstrap_catalog_kinds,
+    BOOTSTRAP_SUPERUSER_OID, BootstrapCatalogKind, PG_CLASS_RELATION_OID, PgAuthIdRow,
+    PgAuthMembersRow, PgDependRow, PgDescriptionRow, PgNamespaceRow, PgRewriteRow, PgStatisticRow,
+    bootstrap_catalog_kinds,
 };
 use crate::include::nodes::datum::Value;
 
@@ -506,6 +515,95 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgNamespace]);
         effect_record_oid(&mut effect.namespace_oids, namespace_oid);
         Ok(effect)
+    }
+
+    pub fn create_role(
+        &mut self,
+        role_name: &str,
+        attrs: &RoleAttributes,
+    ) -> Result<PgAuthIdRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let row = create_role_row(&mut catalog.authids, &mut catalog.next_oid, role_name, attrs)?;
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthId])?;
+        Ok(row)
+    }
+
+    pub fn rename_role(
+        &mut self,
+        role_name: &str,
+        new_name: &str,
+    ) -> Result<PgAuthIdRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let row = rename_role_row(&mut catalog.authids, role_name, new_name)?;
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthId])?;
+        Ok(row)
+    }
+
+    pub fn alter_role_attributes(
+        &mut self,
+        role_name: &str,
+        attrs: &RoleAttributes,
+    ) -> Result<PgAuthIdRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let row = alter_role_row(&mut catalog.authids, role_name, attrs)?;
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthId])?;
+        Ok(row)
+    }
+
+    pub fn drop_role(&mut self, role_name: &str) -> Result<PgAuthIdRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let removed = drop_role_rows(&mut catalog.authids, &[role_name.to_string()])?;
+        let removed_row = removed
+            .into_iter()
+            .next()
+            .ok_or_else(|| CatalogError::UnknownTable(role_name.to_string()))?;
+        catalog.auth_members.retain(|row| {
+            row.roleid != removed_row.oid
+                && row.member != removed_row.oid
+                && row.grantor != removed_row.oid
+        });
+        self.persist_catalog_kinds(
+            &catalog,
+            &[BootstrapCatalogKind::PgAuthId, BootstrapCatalogKind::PgAuthMembers],
+        )?;
+        Ok(removed_row)
+    }
+
+    pub fn grant_role_membership(
+        &mut self,
+        membership: &NewRoleMembership,
+    ) -> Result<PgAuthMembersRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let row = grant_role_membership_row(
+            &mut catalog.auth_members,
+            &mut catalog.next_oid,
+            membership,
+        )?;
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthMembers])?;
+        Ok(row)
+    }
+
+    pub fn update_role_membership_options(
+        &mut self,
+        roleid: u32,
+        member: u32,
+        grantor: u32,
+        admin_option: bool,
+        inherit_option: bool,
+        set_option: bool,
+    ) -> Result<PgAuthMembersRow, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control()?;
+        let row = update_role_membership_row(
+            &mut catalog.auth_members,
+            roleid,
+            member,
+            grantor,
+            admin_option,
+            inherit_option,
+            set_option,
+        )?;
+        self.persist_catalog_kinds(&catalog, &[BootstrapCatalogKind::PgAuthMembers])?;
+        Ok(row)
     }
 
     pub fn drop_namespace_mvcc(
@@ -1766,6 +1864,101 @@ mod tests {
                 .iter()
                 .any(|row| row.lanname == "sql" && row.lanpltrusted)
         );
+    }
+
+    #[test]
+    fn catalog_store_persists_created_role_rows() {
+        let base = temp_dir("create_role_rows");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let created = store
+            .create_role(
+                "app_user",
+                &crate::backend::catalog::roles::RoleAttributes {
+                    rolcanlogin: true,
+                    ..crate::backend::catalog::roles::RoleAttributes::default()
+                },
+            )
+            .unwrap();
+        let reopened = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
+        assert!(rows
+            .authids
+            .iter()
+            .any(|row| row.oid == created.oid && row.rolname == "app_user" && row.rolcanlogin));
+    }
+
+    #[test]
+    fn catalog_store_renames_and_drops_role_rows() {
+        let base = temp_dir("rename_drop_role_rows");
+        let mut store = CatalogStore::load(&base).unwrap();
+        store
+            .create_role(
+                "app_user",
+                &crate::backend::catalog::roles::RoleAttributes::default(),
+            )
+            .unwrap();
+        let renamed = store.rename_role("app_user", "app_owner").unwrap();
+        assert_eq!(renamed.rolname, "app_owner");
+        let dropped = store.drop_role("app_owner").unwrap();
+        assert_eq!(dropped.rolname, "app_owner");
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
+        assert!(!rows
+            .authids
+            .iter()
+            .any(|row| row.rolname == "app_user" || row.rolname == "app_owner"));
+    }
+
+    #[test]
+    fn catalog_store_persists_role_memberships_and_option_updates() {
+        let base = temp_dir("auth_membership_mutations");
+        let mut store = CatalogStore::load(&base).unwrap();
+        let parent = store
+            .create_role(
+                "parent_role",
+                &crate::backend::catalog::roles::RoleAttributes::default(),
+            )
+            .unwrap();
+        let member = store
+            .create_role(
+                "member_role",
+                &crate::backend::catalog::roles::RoleAttributes::default(),
+            )
+            .unwrap();
+        let created = store
+            .grant_role_membership(&crate::backend::catalog::role_memberships::NewRoleMembership {
+                roleid: parent.oid,
+                member: member.oid,
+                grantor: BOOTSTRAP_SUPERUSER_OID,
+                admin_option: false,
+                inherit_option: true,
+                set_option: true,
+            })
+            .unwrap();
+        let updated = store
+            .update_role_membership_options(
+                parent.oid,
+                member.oid,
+                BOOTSTRAP_SUPERUSER_OID,
+                true,
+                false,
+                false,
+            )
+            .unwrap();
+        assert_eq!(created.oid, updated.oid);
+        assert!(updated.admin_option);
+
+        let reopened = CatalogStore::load(&base).unwrap();
+        let rows = load_physical_catalog_rows(reopened.base_dir()).unwrap();
+        assert!(rows.auth_members.iter().any(|row| {
+            row.oid == created.oid
+                && row.roleid == parent.oid
+                && row.member == member.oid
+                && row.admin_option
+                && !row.inherit_option
+                && !row.set_option
+        }));
     }
 
     #[test]
