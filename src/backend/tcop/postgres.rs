@@ -779,9 +779,9 @@ fn execute_psql_describe_query(
     {
         return psql_describe_columns_query(db, session, sql);
     }
-    if lower.contains("conrelid::pg_catalog.regclass as ontable")
-        && lower.contains("from pg_catalog.pg_constraint")
-        && lower.contains("pg_catalog.pg_get_constraintdef")
+    if lower.contains("from pg_catalog.pg_constraint")
+        && lower.contains("pg_get_constraintdef")
+        && lower.contains("conrelid")
     {
         return psql_describe_constraints_query(db, session, sql);
     }
@@ -1025,6 +1025,18 @@ fn psql_describe_constraints_query(
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let oid = extract_constraint_relid(sql)?;
+    let lower = sql.to_ascii_lowercase();
+    let contype_filter = if lower.contains("contype = 'f'") {
+        Some(crate::include::catalog::CONSTRAINT_FOREIGN)
+    } else if lower.contains("contype = 'p'") {
+        Some(crate::include::catalog::CONSTRAINT_PRIMARY)
+    } else if lower.contains("contype = 'u'") {
+        Some(crate::include::catalog::CONSTRAINT_UNIQUE)
+    } else if lower.contains("contype = 'n'") {
+        Some(crate::include::catalog::CONSTRAINT_NOTNULL)
+    } else {
+        None
+    };
     let txn_ctx = session.catalog_txn_ctx();
     let relation = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
     let relname = db
@@ -1038,6 +1050,7 @@ fn psql_describe_constraints_query(
     let rows = db
         .constraint_rows_for_relation(session.client_id, txn_ctx, oid)
         .into_iter()
+        .filter(|row| contype_filter.is_none_or(|contype| row.contype == contype))
         .filter_map(|row| {
             let condef = match row.contype {
                 crate::include::catalog::CONSTRAINT_NOTNULL => Some("NOT NULL".to_string()),
@@ -1130,9 +1143,17 @@ fn extract_constraint_relid(sql: &str) -> Option<u32> {
         sql,
         &[
             "where c.conrelid = '",
+            "where r.conrelid = '",
             "and c.conrelid = '",
+            "and r.conrelid = '",
             "where conrelid = '",
             "and conrelid = '",
+            "where c.confrelid = '",
+            "where r.confrelid = '",
+            "and c.confrelid = '",
+            "and r.confrelid = '",
+            "where confrelid = '",
+            "and confrelid = '",
         ],
     )
 }
@@ -1845,6 +1866,26 @@ mod tests {
                 Value::Text("NOT NULL".into()),
             ]]
         );
+    }
+
+    #[test]
+    fn psql_describe_constraint_query_matches_r_alias_shape() {
+        let db = Database::open(temp_dir("describe_constraints_r_alias"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table widgets (id int4 not null)").unwrap();
+        let entry = session.catalog_lookup(&db).lookup_any_relation("widgets").unwrap();
+
+        let sql = format!(
+            "SELECT true as sametable, conname, \
+                 pg_catalog.pg_get_constraintdef(r.oid, true) as condef, \
+                 conrelid::pg_catalog.regclass AS ontable \
+             FROM pg_catalog.pg_constraint r \
+             WHERE r.conrelid = '{}' AND r.contype = 'f' \
+             ORDER BY conname",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]

@@ -3109,6 +3109,12 @@ fn choose_join_plan(left: Path, right: Path, kind: JoinType, on: Expr) -> Path {
     if !matches!(kind, JoinType::Inner | JoinType::Cross) {
         return original;
     }
+    // :HACK: Restoring the original output order after swapping cross-join
+    // inputs can mis-map repeated subquery shapes until slot identity is split
+    // cleanly from semantic Var identity. Preserve source order for CROSS JOINs.
+    if matches!(kind, JoinType::Cross) {
+        return original;
+    }
 
     let left_columns = left.columns();
     let right_columns = right.columns();

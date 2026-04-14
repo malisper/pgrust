@@ -1,6 +1,7 @@
 use super::ExecError;
 use super::expr_ops::parse_numeric_text;
 use crate::include::nodes::datum::NumericValue;
+use num_traits::Signed;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SignKind {
@@ -264,13 +265,7 @@ impl<'a> FormatParser<'a> {
                     return Ok(spec);
                 }
                 '"' => tokens.push(Token::Literal(self.parse_quoted_literal())),
-                '\\' => {
-                    if self.idx < self.chars.len() {
-                        let lit = self.chars[self.idx];
-                        self.idx += 1;
-                        tokens.push(Token::Literal(lit.to_string()));
-                    }
-                }
+                '\\' => tokens.push(Token::Literal("\\".into())),
                 other => tokens.push(Token::Literal(other.to_string())),
             }
         }
@@ -662,6 +657,59 @@ fn split_rendered_decimal(rendered: &str) -> (bool, String, String) {
     (negative, int_part, frac_part)
 }
 
+fn scientific_parts(rendered: &str) -> (bool, String, i32) {
+    let (negative, int_part, frac_part) = split_rendered_decimal(rendered);
+    let int_trimmed = int_part.trim_start_matches('0');
+    if !int_trimmed.is_empty() {
+        let exponent = (int_trimmed.len() as i32).saturating_sub(1);
+        let mut digits = String::with_capacity(int_trimmed.len() + frac_part.len());
+        digits.push_str(int_trimmed);
+        digits.push_str(&frac_part);
+        return (negative, digits, exponent);
+    }
+    let leading_zeros = frac_part.chars().take_while(|ch| *ch == '0').count();
+    let sig = frac_part[leading_zeros..].to_string();
+    if sig.is_empty() {
+        return (negative, "0".into(), 0);
+    }
+    (negative, sig, -((leading_zeros as i32) + 1))
+}
+
+fn round_scientific_digits(mut digits: String, precision: usize) -> (String, bool) {
+    let needed = precision.saturating_add(1);
+    while digits.len() <= needed {
+        digits.push('0');
+    }
+    let carry_digit = digits.as_bytes().get(precision).copied().unwrap_or(b'0');
+    let mut rounded = digits[..precision].bytes().collect::<Vec<_>>();
+    if carry_digit >= b'5' {
+        let mut carry = true;
+        for digit in rounded.iter_mut().rev() {
+            if *digit == b'9' {
+                *digit = b'0';
+            } else {
+                *digit += 1;
+                carry = false;
+                break;
+            }
+        }
+        if carry {
+            rounded.insert(0, b'1');
+        }
+    }
+    let carried = rounded.len() > precision;
+    if carried {
+        rounded.truncate(precision);
+    }
+    while rounded.len() < precision {
+        rounded.push(b'0');
+    }
+    (
+        String::from_utf8(rounded).unwrap_or_else(|_| "0".into()),
+        carried,
+    )
+}
+
 fn overflow_pattern(spec: &FormatSpec, negative: bool) -> String {
     let mut rendered = spec
         .tokens
@@ -784,7 +832,6 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     if int_part.chars().filter(|ch| ch.is_ascii_digit()).count() > int_slots {
         return overflow_pattern(spec, negative);
     }
-
     let mut rendered = spec
         .tokens
         .iter()
@@ -820,6 +867,18 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             }
             _ => {}
         }
+    }
+
+    if decimal_idx.is_some()
+        && int_part.chars().all(|ch| ch == '0')
+        && !rendered[..int_end]
+            .iter()
+            .any(|cell| cell.chars().any(|ch| ch.is_ascii_digit()))
+        && let Some(zero_idx) = (0..int_end)
+            .rev()
+            .find(|idx| matches!(spec.tokens[*idx], Token::Digit9 | Token::Digit0))
+    {
+        rendered[zero_idx] = "0".into();
     }
 
     let mut seen_digit = false;
@@ -929,30 +988,20 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         }
     }
 
-    let mut out = rendered.concat();
     if !spec
         .tokens
         .iter()
         .any(|token| matches!(token, Token::Sign(_)))
         && !spec.angle_pr
+        && let Some(anchor_idx) = spec
+            .tokens
+            .iter()
+            .position(|token| matches!(token, Token::Digit9 | Token::Digit0 | Token::Decimal))
     {
-        out = if negative
-            && matches!(spec.tokens.first(), Some(Token::Literal(space)) if space == " ")
-        {
-            if let Some(digit_idx) = out.find(|ch: char| ch.is_ascii_digit()) {
-                let sign_idx = digit_idx.saturating_sub(1);
-                let mut chars = out.chars().collect::<Vec<_>>();
-                chars[sign_idx] = '-';
-                chars.into_iter().collect()
-            } else {
-                format!("-{out}")
-            }
-        } else if negative {
-            format!("-{out}")
-        } else {
-            format!(" {out}")
-        };
+        let sign = if negative { "-" } else { " " };
+        rendered[anchor_idx] = format!("{sign}{}", rendered[anchor_idx]);
     }
+    let mut out = rendered.concat();
     if negative
         && spec
             .tokens
@@ -961,7 +1010,7 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     {
         out = format!("-{}", out.trim_start());
     }
-    if spec.ordinal && !negative {
+    if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') {
         let ordinal_value = int_part.parse::<i128>().unwrap_or(0);
         let suffix = if spec.ordinal_lower {
             ordinal_suffix(ordinal_value).to_ascii_lowercase()
@@ -993,6 +1042,9 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
             let mut rebuilt = out[..dot_idx + 1].to_string();
             rebuilt.extend(frac_chars);
             out = rebuilt;
+            if out.ends_with('.') && frac_pattern.is_empty() {
+                out.pop();
+            }
         }
     }
     out
@@ -1012,21 +1064,11 @@ fn format_scientific_numeric(value: &NumericValue, spec: &FormatSpec) -> Result<
                 .collect::<String>();
             let mut out = hashes;
             out.push_str("####");
-            if matches!(value, NumericValue::NegInf) {
-                out.insert(0, '-');
-            } else {
-                out.insert(0, ' ');
-            }
+            out.insert(0, ' ');
             return Ok(out);
         }
         NumericValue::Finite { .. } => {}
     }
-    let rendered = value.render();
-    let as_f64: f64 = rendered.parse().map_err(|_| ExecError::TypeMismatch {
-        op: "to_char",
-        left: crate::include::nodes::datum::Value::Numeric(value.clone()),
-        right: super::node_types::Value::Text("".into()),
-    })?;
     let frac_digits = spec
         .tokens
         .iter()
@@ -1034,27 +1076,52 @@ fn format_scientific_numeric(value: &NumericValue, spec: &FormatSpec) -> Result<
         .skip(1)
         .filter(|token| matches!(token, Token::Digit9 | Token::Digit0))
         .count();
-    let mut text = format!("{as_f64:.frac_digits$e}");
-    if let Some(idx) = text.rfind('e') {
-        let (mantissa, exponent) = text.split_at(idx);
-        let exponent_value: i32 = exponent[1..].parse().unwrap_or(0);
-        let sign = if exponent_value >= 0 { '+' } else { '-' };
-        text = format!("{mantissa}e{sign}{:02}", exponent_value.abs());
+    let precision = frac_digits.saturating_add(1);
+    let rendered = value.render();
+    let (negative, digits, mut exponent) = scientific_parts(&rendered);
+    let (rounded, carried) = round_scientific_digits(digits, precision);
+    if carried {
+        exponent = exponent.saturating_add(1);
     }
-    if as_f64 >= 0.0 {
-        text.insert(0, ' ');
-    }
+    let mut mantissa = rounded.chars();
+    let head = mantissa.next().unwrap_or('0');
+    let tail = mantissa.collect::<String>();
+    let exp_sign = if exponent >= 0 { '+' } else { '-' };
+    let exp_text = exponent.abs().to_string();
+    let exp_width = exp_text.len().max(2);
+    let mut text = if frac_digits == 0 {
+        format!("{head}e{exp_sign}{:0>width$}", exp_text, width = exp_width)
+    } else {
+        format!(
+            "{head}.{tail}e{exp_sign}{:0>width$}",
+            exp_text,
+            width = exp_width
+        )
+    };
+    text.insert(0, if negative { '-' } else { ' ' });
     Ok(text)
 }
 
 fn format_roman_numeric(value: &NumericValue, fill_mode: bool, lower: bool) -> String {
     match value {
-        NumericValue::Finite { coeff, scale } if *scale == 0 => {
-            if let Some(integer) = coeff.to_string().parse::<i128>().ok() {
-                format_roman(integer, fill_mode, lower)
-            } else {
-                "#".repeat(15)
+        NumericValue::Finite { coeff, scale, .. } => {
+            if coeff.is_negative() {
+                return "#".repeat(15);
             }
+            let text = coeff.abs().to_string();
+            let split = text.len().saturating_sub(*scale as usize);
+            let integer_text = if *scale == 0 {
+                text
+            } else if split == 0 {
+                "0".into()
+            } else {
+                text[..split].to_string()
+            };
+            integer_text
+                .parse::<i128>()
+                .ok()
+                .map(|integer| format_roman(integer, fill_mode, lower))
+                .unwrap_or_else(|| "#".repeat(15))
         }
         _ => "#".repeat(15),
     }
@@ -1291,6 +1358,39 @@ mod tests {
         assert_eq!(
             to_char_numeric(&NumericValue::PosInf, "9.999EEEE").unwrap(),
             " #.#######"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("4.31"), "FMRN").unwrap(),
+            "IV"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("1.2345e2345"), "9.999EEEE").unwrap(),
+            " 1.235e+2345"
+        );
+    }
+
+    #[test]
+    fn formats_numeric_fill_mode_and_literal_cases() {
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("0"), "FM9999999999999999.999999999999999")
+                .unwrap(),
+            "0."
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("100"), "FM999.").unwrap(),
+            "100"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("100"), "foo999").unwrap(),
+            "foo 100"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("100"), "f\\oo999").unwrap(),
+            "f\\oo 100"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("100"), "f\"ool\"999").unwrap(),
+            "fool 100"
         );
     }
 
