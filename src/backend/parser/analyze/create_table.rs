@@ -118,17 +118,26 @@ pub fn lower_create_table(stmt: &CreateTableStatement) -> Result<LoweredCreateTa
         columns: columns
             .iter()
             .map(|column| {
-                if column.ty.kind == SqlTypeKind::AnyArray {
+                let sql_type = match &column.ty {
+                    crate::backend::parser::RawTypeName::Builtin(sql_type) => *sql_type,
+                    crate::backend::parser::RawTypeName::Record => {
+                        return Err(ParseError::UnsupportedType("record".into()));
+                    }
+                    crate::backend::parser::RawTypeName::Named { name } => {
+                        return Err(ParseError::UnsupportedType(name.clone()));
+                    }
+                };
+                if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
                 let nullable =
                     column.nullable && !primary_columns.contains(&column.name.to_ascii_lowercase());
-                let mut desc = column_desc(column.name.clone(), column.ty, nullable);
+                let mut desc = column_desc(column.name.clone(), sql_type, nullable);
                 desc.default_expr = column.default_expr.clone();
                 desc.missing_default_value = column
                     .default_expr
                     .as_deref()
-                    .and_then(|sql| super::derive_literal_default_value(sql, column.ty).ok());
+                    .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());
                 Ok(desc)
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -170,7 +179,7 @@ fn validate_constraint_columns(
 mod tests {
     use super::*;
     use crate::backend::parser::{
-        ColumnDef, CreateTableElement, OnCommitAction, SqlType, TablePersistence,
+        ColumnDef, CreateTableElement, OnCommitAction, RawTypeName, SqlType, TablePersistence,
     };
 
     #[test]
@@ -182,7 +191,7 @@ mod tests {
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![CreateTableElement::Column(ColumnDef {
                 name: "a".into(),
-                ty: SqlType::new(SqlTypeKind::AnyArray),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
                 default_expr: None,
                 nullable: true,
                 primary_key: false,

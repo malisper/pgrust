@@ -308,7 +308,9 @@ impl Database {
                             crate::backend::parser::CreateTableElement::Column(
                                 crate::backend::parser::ColumnDef {
                                     name: column.name.clone(),
-                                    ty: column.sql_type,
+                                    ty: crate::backend::parser::RawTypeName::Builtin(
+                                        column.sql_type,
+                                    ),
                                     nullable: true,
                                     default_expr: None,
                                     primary_key: false,

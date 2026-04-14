@@ -427,7 +427,10 @@ pub(crate) fn pg_proc_row_from_values(values: Vec<Value>) -> Result<PgProcRow, C
         pronargdefaults: expect_int16(&values[17])?,
         prorettype: expect_oid(&values[18])?,
         proargtypes: expect_text(&values[19])?,
-        prosrc: expect_text(&values[20])?,
+        proallargtypes: nullable_oid_array(&values[20])?,
+        proargmodes: nullable_char_array(&values[21])?,
+        proargnames: nullable_text_array(&values[22])?,
+        prosrc: expect_text(&values[23])?,
     })
 }
 
@@ -896,6 +899,28 @@ fn pg_proc_row_values(row: PgProcRow) -> Vec<Value> {
         Value::Int16(row.pronargdefaults),
         Value::Int32(row.prorettype as i32),
         Value::Text(row.proargtypes.into()),
+        nullable_array_value(row.proallargtypes.map(|oids| {
+            ArrayValue::from_1d(oids.into_iter().map(|oid| Value::Int32(oid as i32)).collect())
+                .with_element_type_oid(crate::include::catalog::OID_TYPE_OID)
+        })),
+        nullable_array_value(row.proargmodes.map(|modes| {
+            ArrayValue::from_1d(
+                modes
+                    .into_iter()
+                    .map(Value::InternalChar)
+                    .collect::<Vec<_>>(),
+            )
+            .with_element_type_oid(crate::include::catalog::INTERNAL_CHAR_TYPE_OID)
+        })),
+        nullable_array_value(row.proargnames.map(|names| {
+            ArrayValue::from_1d(
+                names
+                    .into_iter()
+                    .map(|name| Value::Text(name.into()))
+                    .collect::<Vec<_>>(),
+            )
+            .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
+        })),
         Value::Text(row.prosrc.into()),
     ]
 }
@@ -1231,6 +1256,52 @@ fn expect_nullable_array(value: &Value) -> Result<Option<ArrayValue>, CatalogErr
 
 fn nullable_array_value(value: Option<ArrayValue>) -> Value {
     value.map(Value::PgArray).unwrap_or(Value::Null)
+}
+
+fn nullable_oid_array(value: &Value) -> Result<Option<Vec<u32>>, CatalogError> {
+    let Some(array) = expect_nullable_array(value)? else {
+        return Ok(None);
+    };
+    array
+        .elements
+        .into_iter()
+        .map(|value| match value {
+            Value::Int32(v) if v >= 0 => Ok(v as u32),
+            _ => Err(CatalogError::Corrupt("expected oid array value")),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn nullable_char_array(value: &Value) -> Result<Option<Vec<u8>>, CatalogError> {
+    let Some(array) = expect_nullable_array(value)? else {
+        return Ok(None);
+    };
+    array
+        .elements
+        .into_iter()
+        .map(|value| match value {
+            Value::InternalChar(v) => Ok(v),
+            Value::Text(text) if text.len() == 1 => Ok(text.as_bytes()[0]),
+            _ => Err(CatalogError::Corrupt("expected char array value")),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn nullable_text_array(value: &Value) -> Result<Option<Vec<String>>, CatalogError> {
+    let Some(array) = expect_nullable_array(value)? else {
+        return Ok(None);
+    };
+    array
+        .elements
+        .into_iter()
+        .map(|value| match value {
+            Value::Text(text) => Ok(text.to_string()),
+            _ => Err(CatalogError::Corrupt("expected text array value")),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError> {

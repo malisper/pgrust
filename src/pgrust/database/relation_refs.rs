@@ -552,7 +552,7 @@ fn collect_direct_relation_oids_from_sql_expr(
                 collect_direct_relation_oids_from_sql_expr(escape, catalog, visible_ctes, rels);
             }
         }
-        SqlExpr::ArrayLiteral(elements) => {
+        SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
             for element in elements {
                 collect_direct_relation_oids_from_sql_expr(element, catalog, visible_ctes, rels);
             }

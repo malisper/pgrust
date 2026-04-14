@@ -437,9 +437,32 @@ pub enum FromItem {
     Alias {
         source: Box<FromItem>,
         alias: String,
-        column_aliases: Vec<String>,
+        column_aliases: AliasColumnSpec,
         preserve_source_names: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasColumnSpec {
+    None,
+    Names(Vec<String>),
+    Definitions(Vec<AliasColumnDef>),
+}
+
+impl AliasColumnSpec {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::None => true,
+            Self::Names(names) => names.is_empty(),
+            Self::Definitions(defs) => defs.is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasColumnDef {
+    pub name: String,
+    pub ty: RawTypeName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -641,7 +664,7 @@ pub struct VacuumStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnDef {
     pub name: String,
-    pub ty: SqlType,
+    pub ty: RawTypeName,
     pub default_expr: Option<String>,
     pub nullable: bool,
     pub primary_key: bool,
@@ -663,6 +686,8 @@ pub enum TableConstraint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlTypeKind {
     AnyArray,
+    Record,
+    Composite,
     Int2,
     Int2Vector,
     Int4,
@@ -735,6 +760,8 @@ pub struct SqlType {
     pub kind: SqlTypeKind,
     pub typmod: i32,
     pub is_array: bool,
+    pub type_oid: u32,
+    pub typrelid: u32,
 }
 
 impl SqlType {
@@ -746,6 +773,8 @@ impl SqlType {
             kind,
             typmod: Self::NO_TYPEMOD,
             is_array: false,
+            type_oid: 0,
+            typrelid: 0,
         }
     }
 
@@ -754,6 +783,8 @@ impl SqlType {
             kind,
             typmod: Self::VARHDRSZ + len,
             is_array: false,
+            type_oid: 0,
+            typrelid: 0,
         }
     }
 
@@ -762,6 +793,8 @@ impl SqlType {
             kind,
             typmod: Self::VARHDRSZ + len,
             is_array: false,
+            type_oid: 0,
+            typrelid: 0,
         }
     }
 
@@ -770,6 +803,8 @@ impl SqlType {
             kind: SqlTypeKind::Numeric,
             typmod: Self::VARHDRSZ + ((precision << 16) | (scale & 0xffff)),
             is_array: false,
+            type_oid: 0,
+            typrelid: 0,
         }
     }
 
@@ -778,7 +813,23 @@ impl SqlType {
             kind,
             typmod: precision,
             is_array: false,
+            type_oid: 0,
+            typrelid: 0,
         }
+    }
+
+    pub const fn with_identity(mut self, type_oid: u32, typrelid: u32) -> Self {
+        self.type_oid = type_oid;
+        self.typrelid = typrelid;
+        self
+    }
+
+    pub const fn record(type_oid: u32) -> Self {
+        Self::new(SqlTypeKind::Record).with_identity(type_oid, 0)
+    }
+
+    pub const fn named_composite(type_oid: u32, typrelid: u32) -> Self {
+        Self::new(SqlTypeKind::Composite).with_identity(type_oid, typrelid)
     }
 
     pub const fn array_of(mut elem: SqlType) -> Self {
@@ -791,6 +842,8 @@ impl SqlType {
             kind: self.kind,
             typmod: self.typmod,
             is_array: false,
+            type_oid: self.type_oid,
+            typrelid: self.typrelid,
         }
     }
 
@@ -833,6 +886,38 @@ impl SqlType {
             }
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawTypeName {
+    Builtin(SqlType),
+    Named { name: String },
+    Record,
+}
+
+impl RawTypeName {
+    pub fn builtin(kind: SqlTypeKind) -> Self {
+        Self::Builtin(SqlType::new(kind))
+    }
+
+    pub fn as_builtin(&self) -> Option<SqlType> {
+        match self {
+            Self::Builtin(ty) => Some(*ty),
+            Self::Named { .. } | Self::Record => None,
+        }
+    }
+}
+
+impl PartialEq<SqlType> for RawTypeName {
+    fn eq(&self, other: &SqlType) -> bool {
+        self.as_builtin().is_some_and(|ty| ty == *other)
+    }
+}
+
+impl PartialEq<RawTypeName> for SqlType {
+    fn eq(&self, other: &RawTypeName) -> bool {
+        other == self
     }
 }
 
@@ -924,7 +1009,7 @@ pub enum SqlExpr {
         op: String,
         expr: Box<SqlExpr>,
     },
-    Cast(Box<SqlExpr>, SqlType),
+    Cast(Box<SqlExpr>, RawTypeName),
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     NotEq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),
@@ -953,6 +1038,7 @@ pub enum SqlExpr {
     IsDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     IsNotDistinctFrom(Box<SqlExpr>, Box<SqlExpr>),
     ArrayLiteral(Vec<SqlExpr>),
+    Row(Vec<SqlExpr>),
     ArrayOverlap(Box<SqlExpr>, Box<SqlExpr>),
     JsonbContains(Box<SqlExpr>, Box<SqlExpr>),
     JsonbContained(Box<SqlExpr>, Box<SqlExpr>),

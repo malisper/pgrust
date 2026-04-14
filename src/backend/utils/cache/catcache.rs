@@ -216,7 +216,7 @@ impl CatCache {
                     typalign: crate::include::access::htup::AttributeAlign::Double,
                     typstorage: crate::include::access::htup::AttributeStorage::Extended,
                     typrelid: entry.relation_oid,
-                    sql_type: SqlType::new(SqlTypeKind::Text),
+                    sql_type: SqlType::named_composite(entry.row_type_oid, entry.relation_oid),
                 };
                 cache
                     .types_by_name
@@ -673,9 +673,16 @@ fn catalog_object_name(name: &str) -> &str {
 }
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {
+    if !sql_type.is_array && sql_type.type_oid != 0 {
+        return sql_type.type_oid;
+    }
     match (sql_type.kind, sql_type.is_array) {
         (SqlTypeKind::AnyArray, false) => ANYARRAYOID,
         (SqlTypeKind::AnyArray, true) => unreachable!("anyarray arrays are unsupported"),
+        (SqlTypeKind::Record, false) => sql_type.type_oid,
+        (SqlTypeKind::Record, true) => unreachable!("record arrays are unsupported"),
+        (SqlTypeKind::Composite, false) => sql_type.type_oid,
+        (SqlTypeKind::Composite, true) => unreachable!("composite arrays are unsupported"),
         (SqlTypeKind::Bool, false) => BOOL_TYPE_OID,
         (SqlTypeKind::Bool, true) => BOOL_ARRAY_TYPE_OID,
         (SqlTypeKind::Bit, false) => BIT_TYPE_OID,

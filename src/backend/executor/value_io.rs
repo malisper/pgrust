@@ -147,10 +147,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::TsQuery, Value::TsQuery(query)) => Ok(TupleValue::Bytes(
             crate::backend::executor::encode_tsquery_bytes(&query),
         )),
-        (ScalarType::Text, Value::InternalChar(v)) => {
+        (ScalarType::Text | ScalarType::Record, Value::InternalChar(v)) => {
             Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
         }
-        (ScalarType::Text, value) => Ok(TupleValue::Bytes(
+        (ScalarType::Text | ScalarType::Record, value) => Ok(TupleValue::Bytes(
             value.as_text().unwrap().as_bytes().to_vec(),
         )),
         (ScalarType::Bool, Value::Bool(v)) => Ok(TupleValue::Bytes(vec![u8::from(v)])),
@@ -660,7 +660,7 @@ pub(crate) fn decode_value_with_toast(
                 crate::backend::executor::decode_tsquery_bytes(bytes)?,
             ))
         }
-        ScalarType::Text => {
+        ScalarType::Text | ScalarType::Record => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
                 return Err(ExecError::UnsupportedStorageType {
                     column: column.name.clone(),
