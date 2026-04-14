@@ -3,13 +3,24 @@ use super::infer::*;
 use super::*;
 use crate::include::catalog::ANYOID;
 
+mod json;
 mod ops;
+mod subquery;
 mod targets;
 
+use self::json::{
+    bind_json_binary_expr, bind_jsonb_contained_expr, bind_jsonb_contains_expr,
+    bind_jsonb_exists_all_expr, bind_jsonb_exists_any_expr, bind_jsonb_exists_expr,
+    bind_jsonb_path_binary_expr, bind_maybe_jsonb_delete,
+};
 pub(crate) use self::ops::bind_concat_operands;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
     bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
+};
+use self::subquery::{
+    bind_exists_subquery_expr, bind_in_subquery_expr, bind_quantified_array_expr,
+    bind_quantified_subquery_expr, bind_scalar_subquery_expr,
 };
 pub(crate) use self::targets::{
     BoundSelectTargets, bind_select_targets, select_targets_contain_set_returning_call,
@@ -28,59 +39,6 @@ pub(crate) fn bind_expr_with_outer(
     grouped_outer: Option<&GroupedOuterScope>,
 ) -> Result<Expr, ParseError> {
     bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
-}
-
-fn bind_maybe_jsonb_delete(
-    left: &SqlExpr,
-    right: &SqlExpr,
-    scope: &BoundScope,
-    catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
-) -> Option<Result<Expr, ParseError>> {
-    let right_is_string_literal = matches!(
-        right,
-        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
-    );
-    let left_type =
-        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
-    if left_type != SqlType::new(SqlTypeKind::Jsonb) {
-        return None;
-    }
-    let raw_right_type =
-        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let right_type = if right_is_string_literal {
-        SqlType::new(SqlTypeKind::Text)
-    } else if raw_right_type.is_array {
-        SqlType::array_of(SqlType::new(SqlTypeKind::Text))
-    } else if is_integer_family(raw_right_type) {
-        SqlType::new(SqlTypeKind::Int4)
-    } else {
-        return None;
-    };
-    Some(
-        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)
-            .and_then(|left_bound| {
-                bind_expr_with_outer_and_ctes(
-                    right,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )
-                .map(|right_bound| Expr::FuncCall {
-                    func_oid: 0,
-                    func: BuiltinScalarFunction::JsonbDelete,
-                    args: vec![
-                        coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::Jsonb)),
-                        coerce_bound_expr(right_bound, raw_right_type, right_type),
-                    ],
-                    func_variadic: false,
-                })
-            }),
-    )
 }
 
 pub(crate) fn bind_expr_with_outer_and_ctes(
@@ -962,10 +920,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 } else {
                     coerce_bound_expr(right_bound, raw_right_type, right_type)
                 };
-                Expr::ArrayOverlap(
-                    Box::new(left_expr),
-                    Box::new(right_expr),
-                )
+                Expr::ArrayOverlap(Box::new(left_expr), Box::new(right_expr))
             }
         }
         SqlExpr::AggCall { .. } => {
@@ -975,451 +930,170 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             });
         }
         SqlExpr::ScalarSubquery(select) => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            let plan = build_plan_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
-            ensure_single_column_subquery(&plan)?;
-            Expr::ScalarSubquery(Box::new(plan))
+            bind_scalar_subquery_expr(select, scope, catalog, outer_scopes, ctes)?
         }
         SqlExpr::Exists(select) => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            Expr::ExistsSubquery(Box::new(build_plan_with_outer(
-                select,
-                catalog,
-                &child_outer,
-                None,
-                ctes,
-                &[],
-            )?))
+            bind_exists_subquery_expr(select, scope, catalog, outer_scopes, ctes)?
         }
         SqlExpr::InSubquery {
             expr,
             subquery,
             negated,
-        } => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan =
-                build_plan_with_outer(subquery, catalog, &child_outer, None, ctes, &[])?;
-            ensure_single_column_subquery(&subquery_plan)?;
-            let any_expr = Expr::AnySubquery {
-                left: Box::new(bind_expr_with_outer_and_ctes(
-                    expr,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?),
-                op: SubqueryComparisonOp::Eq,
-                subquery: Box::new(subquery_plan),
-            };
-            if *negated {
-                Expr::Not(Box::new(any_expr))
-            } else {
-                any_expr
-            }
-        }
+        } => bind_in_subquery_expr(
+            expr,
+            subquery,
+            *negated,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::QuantifiedSubquery {
             left,
             op,
             is_all,
             subquery,
-        } => {
-            let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
-            child_outer.push(scope.clone());
-            child_outer.extend_from_slice(outer_scopes);
-            let subquery_plan =
-                build_plan_with_outer(subquery, catalog, &child_outer, None, ctes, &[])?;
-            ensure_single_column_subquery(&subquery_plan)?;
-            if *is_all {
-                Expr::AllSubquery {
-                    left: Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                    op: *op,
-                    subquery: Box::new(subquery_plan),
-                }
-            } else {
-                Expr::AnySubquery {
-                    left: Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                    op: *op,
-                    subquery: Box::new(subquery_plan),
-                }
-            }
-        }
+        } => bind_quantified_subquery_expr(
+            left,
+            *op,
+            *is_all,
+            subquery,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::QuantifiedArray {
             left,
             op,
             is_all,
             array,
-        } => {
-            let raw_left_type = infer_sql_expr_type_with_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            let raw_array_type = infer_sql_expr_type_with_ctes(
-                array,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            let left_type =
-                coerce_unknown_string_literal_type(left, raw_left_type, raw_array_type.element_type());
-            let target_array_type = if matches!(op, SubqueryComparisonOp::Match)
-                && matches!(left_type.kind, SqlTypeKind::TsVector)
-                && matches!(
-                    &**array,
-                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
-                ) {
-                SqlType::array_of(SqlType::new(SqlTypeKind::TsQuery))
-            } else if raw_array_type.is_array {
-                coerce_unknown_string_literal_type(array, raw_array_type, raw_left_type)
-            } else {
-                SqlType::array_of(left_type.element_type())
-            };
-            let bound_array = bind_expr_with_outer_and_ctes(
-                array,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?;
-            if *is_all {
-                Expr::AllArray {
-                    left: Box::new(coerce_bound_expr(
-                        bind_expr_with_outer_and_ctes(
-                            left,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )?,
-                        raw_left_type,
-                        left_type,
-                    )),
-                    op: *op,
-                    right: Box::new(coerce_bound_expr(
-                        bound_array,
-                        raw_array_type,
-                        target_array_type,
-                    )),
-                }
-            } else {
-                Expr::AnyArray {
-                    left: Box::new(coerce_bound_expr(
-                        bind_expr_with_outer_and_ctes(
-                            left,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )?,
-                        raw_left_type,
-                        left_type,
-                    )),
-                    op: *op,
-                    right: Box::new(coerce_bound_expr(
-                        bound_array,
-                        raw_array_type,
-                        target_array_type,
-                    )),
-                }
-            }
-        }
+        } => bind_quantified_array_expr(
+            left,
+            *op,
+            *is_all,
+            array,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::Random => Expr::Random,
-        SqlExpr::JsonGet(left, right) => Expr::JsonGet(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::JsonGetText(left, right) => Expr::JsonGetText(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::JsonPath(left, right) => Expr::JsonPath(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::JsonPathText(left, right) => Expr::JsonPathText(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::JsonbContains(left, right) => {
-            if let Some(result) = bind_maybe_geometry_comparison(
-                "@>",
-                left,
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            ) {
-                result?
-            } else {
-                Expr::JsonbContains(
-                    Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                    Box::new(bind_expr_with_outer_and_ctes(
-                        right,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                )
-            }
-        }
-        SqlExpr::JsonbContained(left, right) => {
-            if let Some(result) = bind_maybe_geometry_comparison(
-                "<@",
-                left,
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            ) {
-                result?
-            } else {
-                Expr::JsonbContained(
-                    Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                    Box::new(bind_expr_with_outer_and_ctes(
-                        right,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                )
-            }
-        }
-        SqlExpr::JsonbExists(left, right) => Expr::JsonbExists(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::JsonbExistsAny(left, right) => {
-            let left_type =
-                infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
-            let right_type = infer_sql_expr_type_with_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            if is_geometry_type(left_type) || is_geometry_type(right_type) {
-                bind_geometry_binary_expr(
-                    GeometryBinaryOp::IsVertical,
-                    left,
-                    right,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?
-            } else {
-                Expr::JsonbExistsAny(
-                    Box::new(bind_expr_with_outer_and_ctes(
-                        left,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                    Box::new(bind_expr_with_outer_and_ctes(
-                        right,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )?),
-                )
-            }
-        }
-        SqlExpr::JsonbExistsAll(left, right) => Expr::JsonbExistsAll(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::JsonbPathExists(left, right) => Expr::JsonbPathExists(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::JsonbPathMatch(left, right) => Expr::JsonbPathMatch(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
+        SqlExpr::JsonGet(left, right) => bind_json_binary_expr(
+            Expr::JsonGet,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonGetText(left, right) => bind_json_binary_expr(
+            Expr::JsonGetText,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonPath(left, right) => bind_json_binary_expr(
+            Expr::JsonPath,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonPathText(left, right) => bind_json_binary_expr(
+            Expr::JsonPathText,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonbContains(left, right) => bind_jsonb_contains_expr(
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonbContained(left, right) => bind_jsonb_contained_expr(
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonbExists(left, right) => bind_jsonb_exists_expr(
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonbExistsAny(left, right) => bind_jsonb_exists_any_expr(
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonbExistsAll(left, right) => bind_jsonb_exists_all_expr(
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonbPathExists(left, right) => bind_jsonb_path_binary_expr(
+            Expr::JsonbPathExists,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
+        SqlExpr::JsonbPathMatch(left, right) => bind_jsonb_path_binary_expr(
+            Expr::JsonbPathMatch,
+            left,
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?,
         SqlExpr::FuncCall {
             name,
             args,
             func_variadic,
         } => {
             if name.eq_ignore_ascii_case("coalesce") {
-                return bind_coalesce_call(
-                    args,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
+                return bind_coalesce_call(args, scope, catalog, outer_scopes, grouped_outer, ctes);
             }
             if let Some(target_type) = resolve_function_cast_type(catalog, name) {
                 if args.iter().any(|arg| arg.name.is_some()) {
@@ -3724,12 +3398,14 @@ fn bind_scalar_function_call(
                 func_variadic,
             })
         }
-        BuiltinScalarFunction::ArrayNdims | BuiltinScalarFunction::ArrayDims => Ok(Expr::FuncCall {
-            func_oid,
-            func,
-            args: vec![bound_args[0].clone()],
-            func_variadic,
-        }),
+        BuiltinScalarFunction::ArrayNdims | BuiltinScalarFunction::ArrayDims => {
+            Ok(Expr::FuncCall {
+                func_oid,
+                func,
+                args: vec![bound_args[0].clone()],
+                func_variadic,
+            })
+        }
         BuiltinScalarFunction::ArrayLower => {
             let dim_type = infer_sql_expr_type_with_ctes(
                 &args[1],
@@ -3744,7 +3420,11 @@ fn bind_scalar_function_call(
                 func,
                 args: vec![
                     bound_args[0].clone(),
-                    coerce_bound_expr(bound_args[1].clone(), dim_type, SqlType::new(SqlTypeKind::Int4)),
+                    coerce_bound_expr(
+                        bound_args[1].clone(),
+                        dim_type,
+                        SqlType::new(SqlTypeKind::Int4),
+                    ),
                 ],
                 func_variadic,
             })
