@@ -129,10 +129,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("ALTER INDEX")
     } else if lowered.starts_with("alter view ") {
         Some("ALTER VIEW")
-    } else if lowered.starts_with("create user ") {
-        Some("CREATE USER")
-    } else if lowered.starts_with("drop role ") {
-        Some("DROP ROLE")
     } else if lowered.starts_with("set role ") || lowered == "reset role" {
         Some("ROLE management")
     } else if lowered.starts_with("drop index ") {
@@ -342,8 +338,16 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
+        Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
+            build_set_session_authorization(inner)?,
+        )),
+        Rule::reset_session_authorization_stmt => Ok(Statement::ResetSessionAuthorization(
+            build_reset_session_authorization(inner)?,
+        )),
         Rule::set_stmt => Ok(Statement::Set(build_set(inner)?)),
         Rule::reset_stmt => Ok(Statement::Reset(build_reset(inner)?)),
+        Rule::create_role_stmt => Ok(Statement::CreateRole(build_create_role(inner)?)),
+        Rule::alter_role_stmt => Ok(Statement::AlterRole(build_alter_role(inner)?)),
         Rule::create_index_stmt => Ok(Statement::CreateIndex(build_create_index(inner)?)),
         Rule::alter_table_add_column_stmt => Ok(Statement::AlterTableAddColumn(
             build_alter_table_add_column(inner)?,
@@ -358,13 +362,16 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Ok(Statement::AlterTableRename(build_alter_table_rename(inner)?))
         }
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::comment_on_role_stmt => Ok(Statement::CommentOnRole(build_comment_on_role(inner)?)),
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
+        Rule::drop_role_stmt => Ok(Statement::DropRole(build_drop_role(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
+        Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
         Rule::insert_stmt => Ok(Statement::Insert(build_insert(inner)?)),
@@ -552,6 +559,23 @@ fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
     Ok(ShowStatement { name })
 }
 
+fn build_set_session_authorization(
+    pair: Pair<'_, Rule>,
+) -> Result<SetSessionAuthorizationStatement, ParseError> {
+    let role_name = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(SetSessionAuthorizationStatement { role_name })
+}
+
+fn build_reset_session_authorization(
+    _pair: Pair<'_, Rule>,
+) -> Result<ResetSessionAuthorizationStatement, ParseError> {
+    Ok(ResetSessionAuthorizationStatement)
+}
+
 fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
     let mut name = None;
     for part in pair.into_inner() {
@@ -560,6 +584,190 @@ fn build_reset(pair: Pair<'_, Rule>) -> Result<ResetStatement, ParseError> {
         }
     }
     Ok(ResetStatement { name })
+}
+
+fn build_create_role(pair: Pair<'_, Rule>) -> Result<CreateRoleStatement, ParseError> {
+    let is_user = pair.as_str().to_ascii_lowercase().starts_with("create user ");
+    let mut role_name = None;
+    let mut options = Vec::new();
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if role_name.is_none() => role_name = Some(build_identifier(part)),
+            Rule::role_option => options.push(build_role_option(part)?),
+            _ => {}
+        }
+    }
+
+    Ok(CreateRoleStatement {
+        role_name: role_name.ok_or(ParseError::UnexpectedEof)?,
+        is_user,
+        options,
+    })
+}
+
+fn build_alter_role(pair: Pair<'_, Rule>) -> Result<AlterRoleStatement, ParseError> {
+    let mut role_name = None;
+    let mut rename_to = None;
+    let mut options = Vec::new();
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if role_name.is_none() => role_name = Some(build_identifier(part)),
+            Rule::alter_role_rename_clause => {
+                rename_to = Some(build_alter_role_rename(part)?);
+            }
+            Rule::alter_role_option => options.push(build_role_option(part)?),
+            _ => {}
+        }
+    }
+
+    let action = if let Some(new_name) = rename_to {
+        AlterRoleAction::Rename { new_name }
+    } else {
+        AlterRoleAction::Options(options)
+    };
+
+    Ok(AlterRoleStatement {
+        role_name: role_name.ok_or(ParseError::UnexpectedEof)?,
+        action,
+    })
+}
+
+fn build_alter_role_rename(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)
+}
+
+fn build_role_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::alter_role_option => {
+            let nested = inner.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+            build_role_option_from_rule(nested)
+        }
+        _ => build_role_option_from_rule(inner),
+    }
+}
+
+fn build_role_option_from_rule(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {
+    match pair.as_rule() {
+        Rule::role_attr_option => build_role_attr_option(pair),
+        Rule::role_connection_limit_option => {
+            let limit = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::signed_integer)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(RoleOption::ConnectionLimit(parse_i32(limit)?))
+        }
+        Rule::role_password_option => {
+            let mut value = None;
+            for part in pair.into_inner() {
+                match part.as_rule() {
+                    Rule::quoted_string_literal
+                    | Rule::string_literal
+                    | Rule::unicode_string_literal
+                    | Rule::escape_string_literal
+                    | Rule::dollar_string_literal => {
+                        value = Some(Some(decode_string_literal_pair(part)?))
+                    }
+                    Rule::kw_null => value = Some(None),
+                    _ => {}
+                }
+            }
+            Ok(RoleOption::Password(value.ok_or(ParseError::UnexpectedEof)?))
+        }
+        Rule::role_encrypted_password_option => {
+            let value = pair
+                .into_inner()
+                .find(|part| {
+                    matches!(
+                        part.as_rule(),
+                        Rule::quoted_string_literal
+                            | Rule::string_literal
+                            | Rule::unicode_string_literal
+                            | Rule::escape_string_literal
+                            | Rule::dollar_string_literal
+                    )
+                })
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(RoleOption::EncryptedPassword(decode_string_literal_pair(
+                value,
+            )?))
+        }
+        Rule::role_membership_option => build_role_membership_option(pair),
+        Rule::role_sysid_option => {
+            let value = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(RoleOption::Sysid(parse_i32(value)?))
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "role option",
+            actual: pair.as_str().to_string(),
+        }),
+    }
+}
+
+fn build_role_attr_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {
+    let attr = pair.as_str().to_ascii_lowercase();
+    Ok(match attr.as_str() {
+        "superuser" => RoleOption::Superuser(true),
+        "nosuperuser" => RoleOption::Superuser(false),
+        "createdb" => RoleOption::CreateDb(true),
+        "nocreatedb" => RoleOption::CreateDb(false),
+        "createrole" => RoleOption::CreateRole(true),
+        "nocreaterole" => RoleOption::CreateRole(false),
+        "inherit" => RoleOption::Inherit(true),
+        "noinherit" => RoleOption::Inherit(false),
+        "login" => RoleOption::Login(true),
+        "nologin" => RoleOption::Login(false),
+        "replication" => RoleOption::Replication(true),
+        "noreplication" => RoleOption::Replication(false),
+        "bypassrls" => RoleOption::BypassRls(true),
+        "nobypassrls" => RoleOption::BypassRls(false),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "role attribute option",
+                actual: attr,
+            });
+        }
+    })
+}
+
+fn build_role_membership_option(pair: Pair<'_, Rule>) -> Result<RoleOption, ParseError> {
+    let lowered = pair.as_str().to_ascii_lowercase();
+    let option_name = if lowered.starts_with("in role ") {
+        "in role"
+    } else if lowered.starts_with("role ") {
+        "role"
+    } else if lowered.starts_with("admin ") {
+        "admin"
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "role membership option",
+            actual: pair.as_str().to_string(),
+        });
+    };
+    let mut roles = Vec::new();
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident_list => roles.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => roles.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+
+    Ok(match option_name {
+        "role" => RoleOption::Role(roles),
+        "admin" => RoleOption::Admin(roles),
+        "in role" => RoleOption::InRole(roles),
+        _ => unreachable!(),
+    })
 }
 
 fn build_set_value_list(pair: Pair<'_, Rule>) -> String {
@@ -1400,6 +1608,29 @@ fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatemen
     })
 }
 
+fn build_comment_on_role(pair: Pair<'_, Rule>) -> Result<CommentOnRoleStatement, ParseError> {
+    let mut role_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => role_name = Some(build_identifier(part)),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnRoleStatement {
+        role_name: role_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
 fn build_reloption(pair: Pair<'_, Rule>) -> Result<RelOption, ParseError> {
     let mut name = None;
     let mut value = None;
@@ -1514,6 +1745,26 @@ fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseErr
     })
 }
 
+fn build_drop_role(pair: Pair<'_, Rule>) -> Result<DropRoleStatement, ParseError> {
+    let mut if_exists = false;
+    let mut role_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => role_names.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => role_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if role_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropRoleStatement {
+        if_exists,
+        role_names,
+    })
+}
+
 fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError> {
     let mut if_exists = false;
     let mut view_names = Vec::new();
@@ -1533,6 +1784,27 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
     Ok(DropViewStatement {
         if_exists,
         view_names,
+    })
+}
+
+fn build_reassign_owned(pair: Pair<'_, Rule>) -> Result<ReassignOwnedStatement, ParseError> {
+    let mut old_roles = Vec::new();
+    let mut new_role = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident_list if old_roles.is_empty() => {
+                old_roles.extend(part.into_inner().map(build_identifier));
+            }
+            Rule::identifier if new_role.is_none() && !old_roles.is_empty() => {
+                new_role = Some(build_identifier(part));
+            }
+            Rule::identifier => old_roles.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(ReassignOwnedStatement {
+        old_roles,
+        new_role: new_role.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -2160,6 +2432,12 @@ fn build_type_len(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
 }
 
 fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
+    pair.as_str()
+        .parse::<i32>()
+        .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
+}
+
+fn parse_i32(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
     pair.as_str()
         .parse::<i32>()
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))

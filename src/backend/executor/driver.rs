@@ -137,6 +137,15 @@ fn execute_statement_with_source(
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
         })),
+        Statement::CommentOnRole(_)
+        | Statement::CreateRole(_)
+        | Statement::AlterRole(_)
+        | Statement::DropRole(_)
+        | Statement::SetSessionAuthorization(_)
+        | Statement::ResetSessionAuthorization(_)
+        | Statement::ReassignOwned(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "role management".into(),
+        ))),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
