@@ -2683,8 +2683,21 @@ fn copy_from_rows_parses_array_literals() {
                 rows,
                 vec![vec![
                     Value::Int32(1),
-                    Value::Array(vec![Value::Text("a".into()), Value::Text("b".into())]),
-                    Value::Array(vec![Value::Int32(1), Value::Null, Value::Int32(3)]),
+                    Value::PgArray(
+                        crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Text("a".into()),
+                            Value::Text("b".into()),
+                        ])
+                        .with_element_type_oid(crate::include::catalog::VARCHAR_TYPE_OID),
+                    ),
+                    Value::PgArray(
+                        crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                            Value::Int32(1),
+                            Value::Null,
+                            Value::Int32(3),
+                        ])
+                        .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+                    ),
                 ]]
             );
         }
@@ -2725,18 +2738,28 @@ fn copy_from_rows_parses_quoted_array_text_and_empty_arrays() {
                 vec![
                     vec![
                         Value::Int32(1),
-                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                            Value::Text("a,b".into()),
-                            Value::Text("c\"d".into()),
-                        ])),
-                        Value::PgArray(crate::include::nodes::datum::ArrayValue::empty()),
+                        Value::PgArray(
+                            crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                                Value::Text("a,b".into()),
+                                Value::Text("c\"d".into()),
+                            ])
+                            .with_element_type_oid(crate::include::catalog::VARCHAR_TYPE_OID),
+                        ),
+                        Value::PgArray(
+                            crate::include::nodes::datum::ArrayValue::empty()
+                                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+                        ),
                     ],
                     vec![
                         Value::Int32(2),
-                        Value::PgArray(crate::include::nodes::datum::ArrayValue::empty()),
-                        Value::PgArray(crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                            Value::Null,
-                        ])),
+                        Value::PgArray(
+                            crate::include::nodes::datum::ArrayValue::empty()
+                                .with_element_type_oid(crate::include::catalog::VARCHAR_TYPE_OID),
+                        ),
+                        Value::PgArray(
+                            crate::include::nodes::datum::ArrayValue::from_1d(vec![Value::Null])
+                                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+                        ),
                     ],
                 ]
             );

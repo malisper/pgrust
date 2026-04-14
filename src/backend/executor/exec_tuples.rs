@@ -610,3 +610,70 @@ impl CompiledTupleDecoder {
             .unwrap_or(Value::Null)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::catalog::column_desc;
+    use crate::backend::executor::value_io::tuple_from_values;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
+
+    #[test]
+    fn compiled_tuple_decoder_roundtrips_anyarray_flat_payload() {
+        let desc = RelationDesc {
+            columns: vec![column_desc("v", SqlType::new(SqlTypeKind::AnyArray), true)],
+        };
+        let value = Value::PgArray(
+            ArrayValue::from_1d(vec![
+                Value::Text("a".into()),
+                Value::Null,
+                Value::Text("bee".into()),
+            ])
+            .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID),
+        );
+
+        let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
+        let raw = tuple.serialize();
+        let decoder = CompiledTupleDecoder::compile(&desc, &desc.attribute_descs());
+        let mut values = Vec::new();
+        let mut byte_offset = 0;
+        decoder
+            .decode_range(&raw, &mut values, 0, 1, &mut byte_offset)
+            .unwrap();
+
+        assert_eq!(values, vec![value]);
+    }
+
+    #[test]
+    fn compiled_tuple_decoder_preserves_zero_length_array_shape() {
+        let desc = RelationDesc {
+            columns: vec![column_desc(
+                "v",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Int4)),
+                true,
+            )],
+        };
+        let value = Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![ArrayDimension {
+                    lower_bound: 5,
+                    length: 0,
+                }],
+                Vec::new(),
+            )
+            .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+        );
+
+        let tuple = tuple_from_values(&desc, std::slice::from_ref(&value)).unwrap();
+        let raw = tuple.serialize();
+        let decoder = CompiledTupleDecoder::compile(&desc, &desc.attribute_descs());
+        let mut values = Vec::new();
+        let mut byte_offset = 0;
+        decoder
+            .decode_range(&raw, &mut values, 0, 1, &mut byte_offset)
+            .unwrap();
+
+        assert_eq!(values, vec![value]);
+    }
+}
