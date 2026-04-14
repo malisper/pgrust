@@ -76,10 +76,14 @@ impl Database {
             | Statement::Set(_)
             | Statement::Reset(_)
             | Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::CreateRole(ref create_stmt) => {
+                self.execute_create_role_stmt(client_id, create_stmt)
+            }
+            Statement::AlterRole(ref alter_stmt) => {
+                self.execute_alter_role_stmt(client_id, alter_stmt)
+            }
+            Statement::DropRole(ref drop_stmt) => self.execute_drop_role_stmt(client_id, drop_stmt),
             Statement::CommentOnRole(_)
-            | Statement::CreateRole(_)
-            | Statement::AlterRole(_)
-            | Statement::DropRole(_)
             | Statement::SetSessionAuthorization(_)
             | Statement::ResetSessionAuthorization(_)
             | Statement::ReassignOwned(_) => Err(ExecError::Parse(
