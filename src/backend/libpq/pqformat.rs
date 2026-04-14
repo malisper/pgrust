@@ -246,6 +246,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Bytea => 1001,
             SqlTypeKind::Float4 => 1021,
             SqlTypeKind::Float8 => 1022,
+            SqlTypeKind::Money => 791,
             SqlTypeKind::Numeric => 1231,
             SqlTypeKind::Json => 199,
             SqlTypeKind::Jsonb => 3807,
@@ -296,6 +297,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Bytea => (17, -1, -1),
         SqlTypeKind::Float4 => (700, 4, -1),
         SqlTypeKind::Float8 => (701, 8, -1),
+        SqlTypeKind::Money => (790, 8, -1),
         SqlTypeKind::Numeric => (1700, -1, col.sql_type.typmod),
         SqlTypeKind::Json => (114, -1, -1),
         SqlTypeKind::Jsonb => (3802, -1, -1),
@@ -367,6 +369,11 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(written.as_bytes());
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
+            }
+            Value::Money(v) => {
+                let rendered = crate::backend::executor::money_format_text(*v);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Bytea(v) => {
                 let rendered = format_bytea_text(v, float_format.bytea_output);

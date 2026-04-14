@@ -46,6 +46,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Int16(_)) => SqlType::new(SqlTypeKind::Int2),
         SqlExpr::Const(Value::Int32(_)) => SqlType::new(SqlTypeKind::Int4),
         SqlExpr::Const(Value::Int64(_)) => SqlType::new(SqlTypeKind::Int8),
+        SqlExpr::Const(Value::Money(_)) => SqlType::new(SqlTypeKind::Money),
         SqlExpr::Const(Value::Date(_)) => SqlType::new(SqlTypeKind::Date),
         SqlExpr::Const(Value::Time(_)) => SqlType::new(SqlTypeKind::Time),
         SqlExpr::Const(Value::TimeTz(_)) => SqlType::new(SqlTypeKind::TimeTz),
@@ -303,6 +304,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 ) => SqlType::new(SqlTypeKind::TsQuery),
                 Some(BuiltinScalarFunction::TsVectorConcat) => SqlType::new(SqlTypeKind::TsVector),
                 Some(BuiltinScalarFunction::Random) => SqlType::new(SqlTypeKind::Float8),
+                Some(BuiltinScalarFunction::CashLarger | BuiltinScalarFunction::CashSmaller) => {
+                    SqlType::new(SqlTypeKind::Money)
+                }
+                Some(BuiltinScalarFunction::CashWords) => SqlType::new(SqlTypeKind::Text),
                 Some(BuiltinScalarFunction::ArrayNdims)
                 | Some(BuiltinScalarFunction::ArrayLower) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::ArrayDims) => SqlType::new(SqlTypeKind::Text),

@@ -133,6 +133,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::Polygon, Value::Polygon(poly)) => {
             Ok(TupleValue::Bytes(encode_polygon_bytes(&poly)))
         }
+        (ScalarType::Money, Value::Money(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Numeric, Value::Numeric(numeric)) => {
             Ok(TupleValue::Bytes(numeric.render().into_bytes()))
         }
@@ -241,6 +242,7 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
+        Value::Money(v) => cast_text_value(&crate::backend::executor::money_format_text(*v), target, false),
         Value::Date(v) => cast_value(Value::Date(*v), target),
         Value::Time(v) => cast_value(Value::Time(*v), target),
         Value::TimeTz(v) => cast_value(Value::TimeTz(*v), target),
@@ -368,6 +370,21 @@ pub(crate) fn decode_value_with_toast(
                 |_| ExecError::InvalidStorageValue {
                     column: column.name.clone(),
                     details: "int8 must be exactly 8 bytes".into(),
+                },
+            )?)))
+        }
+        ScalarType::Money => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::Money(i64::from_le_bytes(bytes.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "money must be exactly 8 bytes".into(),
                 },
             )?)))
         }

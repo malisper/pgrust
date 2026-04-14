@@ -106,6 +106,7 @@ fn encode_array_element_payload(
             Ok(oid.to_le_bytes().to_vec())
         }
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::Money(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Date(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::Time(v) => Ok(v.0.to_le_bytes().to_vec()),
         Value::TimeTz(v) => {
@@ -473,6 +474,7 @@ fn array_element_layout(
         | SqlTypeKind::Date
         | SqlTypeKind::Float4 => (4, AttributeAlign::Int),
         SqlTypeKind::Int8
+        | SqlTypeKind::Money
         | SqlTypeKind::Time
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
@@ -656,6 +658,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Int16(_) => Some(SqlType::new(SqlTypeKind::Int2)),
         Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
         Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
+        Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
         Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
         Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
         Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
@@ -728,6 +731,15 @@ fn decode_array_element_value(
                 });
             }
             Ok(Value::Int64(i64::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        SqlTypeKind::Money => {
+            if bytes.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: column.into(),
+                    details: "money array element must be 8 bytes".into(),
+                });
+            }
+            Ok(Value::Money(i64::from_le_bytes(bytes.try_into().unwrap())))
         }
         SqlTypeKind::Date => {
             if bytes.len() != 4 {
@@ -1001,6 +1013,7 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             Value::Int16(v) => out.push_str(&v.to_string()),
             Value::Int32(v) => out.push_str(&v.to_string()),
             Value::Int64(v) => out.push_str(&v.to_string()),
+            Value::Money(v) => out.push_str(&crate::backend::executor::money_format_text(*v)),
             Value::Float64(v) => out.push_str(&v.to_string()),
             Value::Numeric(v) => out.push_str(&v.render()),
             Value::Date(_)
