@@ -53,9 +53,16 @@ fn parse_statement_with_options_inner(
     let sql = strip_sql_comments_preserving_layout(&sql);
     validate_unicode_string_literals(&sql, options)?;
     let sql = normalize_position_syntax_preserving_layout(&sql);
-    SqlParser::parse(Rule::statement, &sql)
-        .map_err(|e| map_pest_error("statement", e))
-        .and_then(|mut pairs| build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?))
+    if let Some(stmt) = try_parse_unsupported_statement(&sql) {
+        if matches!(stmt, Statement::Unsupported(UnsupportedStatement { feature: "ROLE management", .. })) {
+            return Ok(stmt);
+        }
+    }
+    match SqlParser::parse(Rule::statement, &sql) {
+        Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
+        Err(err) => try_parse_unsupported_statement(&sql)
+            .ok_or_else(|| map_pest_error("statement", err)),
+    }
 }
 
 pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
@@ -110,6 +117,68 @@ where
         .expect("spawn parser thread")
         .join()
         .expect("parser thread panicked")
+}
+
+fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    let feature = if lowered.starts_with("alter table ") {
+        Some("ALTER TABLE form")
+    } else if lowered.starts_with("alter index ") {
+        Some("ALTER INDEX")
+    } else if lowered.starts_with("alter view ") {
+        Some("ALTER VIEW")
+    } else if lowered.starts_with("create user ") {
+        Some("CREATE USER")
+    } else if lowered.starts_with("drop role ") {
+        Some("DROP ROLE")
+    } else if lowered.starts_with("set role ") || lowered == "reset role" {
+        Some("ROLE management")
+    } else if lowered.starts_with("drop index ") {
+        Some("DROP INDEX")
+    } else if lowered.starts_with("drop table ") {
+        Some("DROP TABLE form")
+    } else if lowered.starts_with("drop domain ") {
+        Some("DROP DOMAIN")
+    } else if lowered.starts_with("drop rule ") {
+        Some("DROP RULE")
+    } else if lowered.starts_with("comment on column ") {
+        Some("COMMENT ON COLUMN")
+    } else if lowered.starts_with("comment on constraint ") {
+        Some("COMMENT ON CONSTRAINT")
+    } else if lowered.starts_with("comment on index ") {
+        Some("COMMENT ON INDEX")
+    } else if lowered.starts_with("create function ") {
+        Some("CREATE FUNCTION")
+    } else if lowered.starts_with("create domain ") {
+        Some("CREATE DOMAIN")
+    } else if lowered.starts_with("create rule ") {
+        Some("CREATE RULE")
+    } else if lowered.starts_with("copy ") && lowered.contains(" to ") {
+        Some("COPY TO")
+    } else if lowered.starts_with("create unique index ") {
+        Some("CREATE UNIQUE INDEX")
+    } else if lowered.starts_with("create index ") {
+        Some("CREATE INDEX form")
+    } else if lowered.starts_with("create view ") {
+        Some("CREATE VIEW form")
+    } else if lowered.starts_with("create temp table ") {
+        Some("CREATE TEMP TABLE form")
+    } else if lowered.starts_with("create table ") {
+        Some("CREATE TABLE form")
+    } else if lowered.starts_with("select ") || lowered.starts_with("with ") {
+        Some("SELECT form")
+    } else if lowered.starts_with("delete from ") {
+        Some("DELETE form")
+    } else {
+        None
+    }?;
+
+    Some(Statement::Unsupported(UnsupportedStatement {
+        sql: trimmed.into(),
+        feature,
+    }))
 }
 
 #[cfg(test)]
