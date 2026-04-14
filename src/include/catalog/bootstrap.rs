@@ -333,7 +333,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 28] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 29] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -446,6 +446,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 28] = [
         oid: PG_INDEX_RELATION_OID,
         name: "pg_index",
     },
+    BootstrapCatalogRelation {
+        oid: PG_STATISTIC_RELATION_OID,
+        name: "pg_statistic",
+    },
 ];
 
 #[cfg(test)]
@@ -491,6 +495,7 @@ mod tests {
             PG_DESCRIPTION_RELATION_OID
         );
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[27].oid, PG_INDEX_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[28].oid, PG_STATISTIC_RELATION_OID);
     }
 
     #[test]
@@ -530,6 +535,7 @@ mod tests {
                 "pg_depend",
                 "pg_description",
                 "pg_index",
+                "pg_statistic",
             ]
         );
     }

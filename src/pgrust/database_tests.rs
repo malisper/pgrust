@@ -249,12 +249,103 @@ fn int_value(value: &Value) -> i64 {
     }
 }
 
+fn float_value(value: &Value) -> f64 {
+    match value {
+        Value::Float64(value) => *value,
+        other => panic!("expected float value, got {:?}", other),
+    }
+}
+
 fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::RelFileLocator {
     crate::RelFileLocator {
         spc_oid: 0,
         db_oid: 1,
         rel_number: relfilenode_for(db, client_id, relname) as u32,
     }
+}
+
+#[test]
+fn analyze_populates_pg_statistic_and_pg_class_stats() {
+    let dir = temp_dir("analyze_populates_stats");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table analyze_t(a int4, b text)").unwrap();
+    session
+        .execute(
+            &db,
+            "insert into analyze_t values
+               (1, 'one'),
+               (1, 'one'),
+               (2, 'two'),
+               (null, null),
+               (3, 'three')",
+        )
+        .unwrap();
+
+    match session.execute(&db, "analyze analyze_t").unwrap() {
+        StatementResult::AffectedRows(count) => assert_eq!(count, 0),
+        other => panic!("expected affected rows, got {other:?}"),
+    }
+
+    let rel_stats = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples from pg_class where relname = 'analyze_t'",
+    );
+    assert_eq!(rel_stats.len(), 1);
+    assert!(int_value(&rel_stats[0][0]) >= 1);
+    assert!(float_value(&rel_stats[0][1]) >= 4.0);
+
+    let column_stats = query_rows(
+        &db,
+        1,
+        "select staattnum, stanullfrac, stawidth, stadistinct
+         from pg_statistic
+         where starelid = (select oid from pg_class where relname = 'analyze_t')
+         order by staattnum",
+    );
+    assert_eq!(column_stats.len(), 2);
+    assert_eq!(int_value(&column_stats[0][0]), 1);
+    assert_eq!(int_value(&column_stats[1][0]), 2);
+    assert!(float_value(&column_stats[0][1]) > 0.0);
+    assert!(int_value(&column_stats[0][2]) > 0);
+    assert!(float_value(&column_stats[0][3]).abs() > 0.0);
+}
+
+#[test]
+fn analyze_column_list_replaces_existing_pg_statistic_rows() {
+    let dir = temp_dir("analyze_column_list");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table analyze_cols(a int4, b int4, c text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into analyze_cols values
+               (1, 10, 'x'),
+               (2, 20, 'y'),
+               (3, 30, 'z')",
+        )
+        .unwrap();
+
+    session.execute(&db, "analyze analyze_cols").unwrap();
+    session.execute(&db, "analyze analyze_cols(a, c)").unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select staattnum
+         from pg_statistic
+         where starelid = (select oid from pg_class where relname = 'analyze_cols')
+         order by staattnum",
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(int_value(&rows[0][0]), 1);
+    assert_eq!(int_value(&rows[1][0]), 3);
 }
 
 fn read_relation_block(

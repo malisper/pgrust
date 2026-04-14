@@ -19,14 +19,15 @@ use crate::backend::catalog::store::{
 };
 use crate::backend::catalog::toasting::ToastCatalogChanges;
 use crate::backend::catalog::{CatalogError, CatalogStore};
+use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, ToastRelationRef, execute_readonly_statement,
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, CatalogLookup, CommentOnTableStatement, CreateIndexStatement,
-    CreateTableAsStatement, CreateTableStatement, OnCommitAction, ParseError, TablePersistence,
-    BoundIndexRelation, bind_delete, bind_insert, bind_update, build_plan,
+    AlterTableAddColumnStatement, AnalyzeStatement, CatalogLookup, CommentOnTableStatement,
+    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, OnCommitAction,
+    ParseError, TablePersistence, BoundIndexRelation, bind_delete, bind_insert, bind_update, build_plan,
     create_relation_desc, derive_literal_default_value, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
@@ -778,6 +779,104 @@ impl Database {
         guard.disarm();
         self.table_locks.unlock_table(relation.rel, client_id);
         result
+    }
+
+    pub(crate) fn execute_analyze_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        analyze_stmt: &AnalyzeStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let relation_names = analyze_stmt
+            .targets
+            .iter()
+            .map(|target| target.table_name.clone())
+            .collect::<Vec<_>>();
+        let rels = relation_names
+            .iter()
+            .map(|name| {
+                self.lazy_catalog_lookup(client_id, None, configured_search_path)
+                    .lookup_relation(name)
+                    .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(name.clone())))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for rel in &rels {
+            self.table_locks
+                .lock_table(rel.rel, TableLockMode::AccessExclusive, client_id);
+        }
+
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_analyze_stmt_in_transaction_with_search_path(
+            client_id,
+            analyze_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[]);
+        guard.disarm();
+        for rel in &rels {
+            self.table_locks.unlock_table(rel.rel, client_id);
+        }
+        result
+    }
+
+    pub(crate) fn execute_analyze_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        analyze_stmt: &AnalyzeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut ctx = ExecutorContext {
+            pool: Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            txn_waiter: Some(self.txn_waiter.clone()),
+            snapshot,
+            client_id,
+            next_command_id: cid,
+            timed: false,
+            outer_rows: Vec::new(),
+        };
+        let analyzed = collect_analyze_stats(&analyze_stmt.targets, &catalog, &mut ctx)?;
+        drop(ctx);
+
+        let write_ctx = CatalogWriteContext {
+            pool: Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+        };
+        let mut store = self.catalog.write();
+        for result in analyzed {
+            let effect = store
+                .set_relation_analyze_stats_mvcc(
+                    result.relation_oid,
+                    result.relpages,
+                    result.reltuples,
+                    &write_ctx,
+                )
+                .map_err(ExecError::from)?;
+            catalog_effects.push(effect);
+            let effect = store
+                .replace_relation_statistics_mvcc(
+                    result.relation_oid,
+                    result.statistics,
+                    &write_ctx,
+                )
+                .map_err(ExecError::from)?;
+            catalog_effects.push(effect);
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_comment_on_table_stmt_in_transaction_with_search_path(
@@ -1706,7 +1805,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
-            execute_analyze, execute_delete_with_waiter, execute_insert, execute_truncate_table,
+            execute_delete_with_waiter, execute_insert, execute_truncate_table,
             execute_update_with_waiter, execute_vacuum,
         };
         use crate::backend::executor::execute_readonly_statement;
@@ -1714,8 +1813,11 @@ impl Database {
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
             Statement::Analyze(ref analyze_stmt) => {
-                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                execute_analyze(analyze_stmt.clone(), &catalog)
+                self.execute_analyze_stmt_with_search_path(
+                    client_id,
+                    analyze_stmt,
+                    configured_search_path,
+                )
             }
             Statement::CreateIndex(ref create_stmt) => {
                 self.execute_create_index_stmt_with_search_path(

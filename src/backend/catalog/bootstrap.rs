@@ -55,12 +55,12 @@ mod tests {
             desc.columns
                 .iter()
                 .rev()
-                .nth(1)
+                .nth(3)
                 .map(|col| col.name.as_str()),
             Some("relkind")
         );
         assert_eq!(
-            desc.columns.iter().rev().nth(1).map(|col| col.sql_type),
+            desc.columns.iter().rev().nth(3).map(|col| col.sql_type),
             Some(SqlType::new(SqlTypeKind::InternalChar))
         );
     }

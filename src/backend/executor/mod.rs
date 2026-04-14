@@ -75,7 +75,8 @@ use crate::include::access::htup::TupleError;
 use crate::pgrust::database::TransactionWaiter;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 
-use expr_ops::{compare_order_values, parse_numeric_text};
+use expr_ops::parse_numeric_text;
+pub(crate) use expr_ops::compare_order_values;
 
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
