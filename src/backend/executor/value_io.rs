@@ -799,6 +799,18 @@ mod tests {
     }
 
     #[test]
+    fn concrete_array_decoder_ignores_varchar_typmod_in_header_check() {
+        let array = ArrayValue::from_1d(vec![Value::Text("ab".into())])
+            .with_element_type_oid(crate::include::catalog::VARCHAR_TYPE_OID);
+        let bytes =
+            encode_array_bytes(SqlType::with_char_len(SqlTypeKind::Varchar, 4), &array).unwrap();
+        let decoded =
+            decode_array_bytes(SqlType::with_char_len(SqlTypeKind::Varchar, 4), &bytes).unwrap();
+
+        assert_eq!(decoded, Value::PgArray(array));
+    }
+
+    #[test]
     fn flat_int4_array_payload_matches_postgres_style_layout() {
         let array = ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)]);
         let bytes = encode_array_bytes(SqlType::new(SqlTypeKind::Int4), &array).unwrap();

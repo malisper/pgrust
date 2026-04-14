@@ -572,6 +572,18 @@ fn parse_record_and_named_type_names() {
         parse_type_name("widget_row").unwrap(),
         RawTypeName::Named {
             name: "widget_row".into(),
+            array_bounds: 0,
+        }
+    );
+}
+
+#[test]
+fn parse_named_array_type_name() {
+    assert_eq!(
+        parse_type_name("vc4[]").unwrap(),
+        RawTypeName::Named {
+            name: "vc4".into(),
+            array_bounds: 1,
         }
     );
 }
@@ -2250,6 +2262,22 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     };
     assert_eq!(comment.domain_name, "dom_int");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_create_domain_preserves_array_base_type() {
+    let Statement::CreateDomain(create) =
+        parse_statement("create domain domainchar4arr varchar(4)[2][3]").unwrap()
+    else {
+        panic!("expected create domain");
+    };
+    assert_eq!(
+        create.ty,
+        RawTypeName::Builtin(SqlType::array_of(SqlType::array_of(SqlType::with_char_len(
+            SqlTypeKind::Varchar,
+            4,
+        ))))
+    );
 }
 
 #[test]
