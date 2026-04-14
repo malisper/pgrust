@@ -54,20 +54,22 @@ pub(super) fn bind_maybe_jsonb_delete(
             grouped_outer,
             ctes,
         )
-        .map(|(left_bound, right_bound)| Expr::FuncCall {
-            func_oid: 0,
-            func: BuiltinScalarFunction::JsonbDelete,
-            args: vec![
-                coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::Jsonb)),
-                coerce_bound_expr(right_bound, raw_right_type, right_type),
-            ],
-            func_variadic: false,
+        .map(|(left_bound, right_bound)| {
+            Expr::builtin_func(
+                BuiltinScalarFunction::JsonbDelete,
+                Some(SqlType::new(SqlTypeKind::Jsonb)),
+                false,
+                vec![
+                    coerce_bound_expr(left_bound, left_type, SqlType::new(SqlTypeKind::Jsonb)),
+                    coerce_bound_expr(right_bound, raw_right_type, right_type),
+                ],
+            )
         }),
     )
 }
 
 pub(super) fn bind_json_binary_expr(
-    constructor: fn(Box<Expr>, Box<Expr>) -> Expr,
+    op: crate::include::nodes::primnodes::OpExprKind,
     left: &SqlExpr,
     right: &SqlExpr,
     scope: &BoundScope,
@@ -85,7 +87,7 @@ pub(super) fn bind_json_binary_expr(
         grouped_outer,
         ctes,
     )?;
-    Ok(constructor(Box::new(left), Box::new(right)))
+    Ok(Expr::op_auto(op, vec![left, right]))
 }
 
 pub(super) fn bind_jsonb_contains_expr(
@@ -110,7 +112,7 @@ pub(super) fn bind_jsonb_contains_expr(
         result
     } else {
         bind_json_binary_expr(
-            Expr::JsonbContains,
+            crate::include::nodes::primnodes::OpExprKind::JsonbContains,
             left,
             right,
             scope,
@@ -144,7 +146,7 @@ pub(super) fn bind_jsonb_contained_expr(
         result
     } else {
         bind_json_binary_expr(
-            Expr::JsonbContained,
+            crate::include::nodes::primnodes::OpExprKind::JsonbContained,
             left,
             right,
             scope,
@@ -166,7 +168,7 @@ pub(super) fn bind_jsonb_exists_expr(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     bind_json_binary_expr(
-        Expr::JsonbExists,
+        crate::include::nodes::primnodes::OpExprKind::JsonbExists,
         left,
         right,
         scope,
@@ -203,7 +205,7 @@ pub(super) fn bind_jsonb_exists_any_expr(
         )
     } else {
         bind_json_binary_expr(
-            Expr::JsonbExistsAny,
+            crate::include::nodes::primnodes::OpExprKind::JsonbExistsAny,
             left,
             right,
             scope,
@@ -225,7 +227,7 @@ pub(super) fn bind_jsonb_exists_all_expr(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     bind_json_binary_expr(
-        Expr::JsonbExistsAll,
+        crate::include::nodes::primnodes::OpExprKind::JsonbExistsAll,
         left,
         right,
         scope,
@@ -237,7 +239,7 @@ pub(super) fn bind_jsonb_exists_all_expr(
 }
 
 pub(super) fn bind_jsonb_path_binary_expr(
-    constructor: fn(Box<Expr>, Box<Expr>) -> Expr,
+    op: crate::include::nodes::primnodes::OpExprKind,
     left: &SqlExpr,
     right: &SqlExpr,
     scope: &BoundScope,
@@ -247,7 +249,7 @@ pub(super) fn bind_jsonb_path_binary_expr(
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
     bind_json_binary_expr(
-        constructor,
+        op,
         left,
         right,
         scope,

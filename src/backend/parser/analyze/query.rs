@@ -377,16 +377,14 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             right: Box::new(shift_expr_rtindexes(*saop.right, offset)),
             ..*saop
         })),
-        other => {
-            let expr = other.into_legacy_shape();
-            let shifted = match expr {
+        other => match other {
         Expr::Var(mut var) => {
             if var.varlevelsup == 0 {
                 var.varno += offset;
             }
             Expr::Var(var)
         }
-        Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random => expr,
+        expr @ (Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random) => expr,
         Expr::Add(left, right) => Expr::Add(
             Box::new(shift_expr_rtindexes(*left, offset)),
             Box::new(shift_expr_rtindexes(*right, offset)),
@@ -600,11 +598,11 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
             Box::new(shift_expr_rtindexes(*left, offset)),
             Box::new(shift_expr_rtindexes(*right, offset)),
         ),
-        Expr::CurrentDate
+        expr @ (Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
-        | Expr::LocalTimestamp { .. } => expr,
+        | Expr::LocalTimestamp { .. }) => expr,
         Expr::FuncCall {
             func_oid,
             func,
@@ -619,12 +617,9 @@ fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .collect(),
             func_variadic,
         },
-                Expr::Op(_)
-                | Expr::Bool(_)
-                | Expr::Func(_)
-                | Expr::ScalarArrayOp(_) => unreachable!("semantic nodes normalized above"),
-            };
-            shifted.into_pg_semantic_shape()
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
+            unreachable!("semantic nodes normalized above")
+        }
         }
     }
 }
@@ -848,14 +843,12 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
             right: Box::new(rewrite_expr_columns(*saop.right, output_exprs)),
             ..*saop
         })),
-        other => {
-            let expr = other.into_legacy_shape();
-            let rewritten = match expr {
+        other => match other {
         Expr::Column(index) => output_exprs
             .get(index)
             .cloned()
             .unwrap_or(Expr::Column(index)),
-        Expr::OuterColumn { .. } | Expr::Var(_) | Expr::Const(_) | Expr::Random => expr,
+        expr @ (Expr::OuterColumn { .. } | Expr::Var(_) | Expr::Const(_) | Expr::Random) => expr,
         Expr::Add(left, right) => Expr::Add(
             Box::new(rewrite_expr_columns(*left, output_exprs)),
             Box::new(rewrite_expr_columns(*right, output_exprs)),
@@ -1091,16 +1084,14 @@ pub(super) fn rewrite_expr_columns(expr: Expr, output_exprs: &[Expr]) -> Expr {
                 .collect(),
             func_variadic,
         },
-        Expr::CurrentDate
+        expr @ (Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
-        | Expr::LocalTimestamp { .. } => expr,
-                Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
-                    unreachable!("legacy rewrite should not see PG-shaped Expr")
-                }
-            };
-            rewritten.into_pg_semantic_shape()
+        | Expr::LocalTimestamp { .. }) => expr,
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::ScalarArrayOp(_) => {
+            unreachable!("legacy rewrite should not see PG-shaped Expr")
+        }
         }
     }
 }

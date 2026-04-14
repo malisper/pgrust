@@ -107,7 +107,10 @@ pub(super) fn bind_grouped_in_subquery(
         subselect: Box::new(subquery),
     }));
     if negated {
-        Ok(Expr::Not(Box::new(any)))
+        Ok(Expr::bool_expr(
+            crate::include::nodes::primnodes::BoolExprType::Not,
+            vec![any],
+        ))
     } else {
         Ok(any)
     }
@@ -180,7 +183,7 @@ pub(super) fn bind_grouped_quantified_array(
     } else {
         SqlType::array_of(left_type.element_type())
     };
-    let left = Box::new(coerce_bound_expr(
+    let left = coerce_bound_expr(
         bind_agg_output_expr(
             left,
             group_by_exprs,
@@ -193,8 +196,8 @@ pub(super) fn bind_grouped_quantified_array(
         )?,
         raw_left_type,
         left_type,
-    ));
-    let right = Box::new(coerce_bound_expr(
+    );
+    let right = coerce_bound_expr(
         bind_agg_output_expr(
             array,
             group_by_exprs,
@@ -207,12 +210,8 @@ pub(super) fn bind_grouped_quantified_array(
         )?,
         raw_array_type,
         array_type,
-    ));
-    if is_all {
-        Ok(Expr::AllArray { left, op, right })
-    } else {
-        Ok(Expr::AnyArray { left, op, right })
-    }
+    );
+    Ok(Expr::scalar_array_op(op, !is_all, left, right))
 }
 
 pub(super) fn bind_grouped_func_call(
@@ -287,10 +286,11 @@ pub(super) fn bind_grouped_func_call(
                     actual: format!("{func:?}({})", sql_type_name(right_type)),
                 });
             }
-            Ok(Expr::FuncCall {
-                func_oid: 0,
+            Ok(Expr::builtin_func(
                 func,
-                args: vec![
+                Some(SqlType::new(SqlTypeKind::Text)),
+                false,
+                vec![
                     coerce_bound_expr(
                         bound_args[0].clone(),
                         left_type,
@@ -302,8 +302,7 @@ pub(super) fn bind_grouped_func_call(
                         SqlType::new(SqlTypeKind::Int4),
                     ),
                 ],
-                func_variadic: false,
-            })
+            ))
         }
         BuiltinScalarFunction::Lower => {
             let arg_type = infer_sql_expr_type(
@@ -313,23 +312,18 @@ pub(super) fn bind_grouped_func_call(
                 outer_scopes,
                 grouped_outer,
             );
-            Ok(Expr::FuncCall {
-                func_oid: 0,
+            Ok(Expr::builtin_func(
                 func,
-                args: vec![coerce_bound_expr(
+                Some(SqlType::new(SqlTypeKind::Text)),
+                false,
+                vec![coerce_bound_expr(
                     bound_args[0].clone(),
                     arg_type,
                     SqlType::new(SqlTypeKind::Text),
                 )],
-                func_variadic: false,
-            })
+            ))
         }
-        _ => Ok(Expr::FuncCall {
-            func_oid: 0,
-            func,
-            args: bound_args,
-            func_variadic: false,
-        }),
+        _ => Ok(Expr::builtin_func(func, None, false, bound_args)),
     }
 }
 
