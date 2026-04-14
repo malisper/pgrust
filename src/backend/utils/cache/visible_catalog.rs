@@ -4,9 +4,9 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{build_pg_stats_rows, build_pg_views_rows};
 use crate::include::catalog::{
-    PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_type_rows,
+    PgCastRow, PgClassRow, PgConstraintRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow,
+    PgTypeRow, bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    builtin_type_rows,
 };
 
 #[derive(Debug, Clone)]

@@ -2,6 +2,7 @@ use crate::RelFileLocator;
 use crate::backend::executor::{
     Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef,
 };
+use crate::backend::parser::analyze::{BoundFromPlan, BoundSelectPlan};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
@@ -237,115 +238,41 @@ pub enum PlannerPath {
 }
 
 impl PlannerPath {
-    pub fn from_plan(plan: Plan) -> Self {
+    pub fn from_bound_select_plan(plan: BoundSelectPlan) -> Self {
         match plan {
-            Plan::Result { plan_info } => Self::Result { plan_info },
-            Plan::SeqScan {
-                plan_info,
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            } => Self::SeqScan {
-                plan_info,
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            },
-            Plan::IndexScan {
-                plan_info,
-                rel,
-                index_rel,
-                am_oid,
-                toast,
-                desc,
-                index_meta,
-                keys,
-                direction,
-            } => Self::IndexScan {
-                plan_info,
-                rel,
-                index_rel,
-                am_oid,
-                toast,
-                desc,
-                index_meta,
-                keys,
-                direction,
-            },
-            Plan::Filter {
-                plan_info,
-                input,
-                predicate,
-            } => Self::Filter {
-                plan_info,
-                input: Box::new(Self::from_plan(*input)),
+            BoundSelectPlan::From(plan) => Self::from_bound_from_plan(plan),
+            BoundSelectPlan::Filter { input, predicate } => Self::Filter {
+                plan_info: PlanEstimate::default(),
+                input: Box::new(Self::from_bound_select_plan(*input)),
                 predicate: PlannerJoinExpr::from_input_expr(&predicate),
             },
-            Plan::NestedLoopJoin {
-                plan_info,
-                left,
-                right,
-                kind,
-                on,
-            } => {
-                let left = Self::from_plan(*left);
-                let right = Self::from_plan(*right);
-                let left_width = left.columns().len();
-                Self::NestedLoopJoin {
-                    plan_info,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    kind,
-                    on: PlannerJoinExpr::from_expr(&on, left_width),
-                }
-            }
-            Plan::Projection {
-                plan_info,
-                input,
-                targets,
-            } => Self::Projection {
-                plan_info,
-                input: Box::new(Self::from_plan(*input)),
-                targets: targets
-                    .into_iter()
-                    .map(PlannerTargetEntry::from_target_entry)
-                    .collect(),
-            },
-            Plan::OrderBy {
-                plan_info,
-                input,
-                items,
-            } => Self::OrderBy {
-                plan_info,
-                input: Box::new(Self::from_plan(*input)),
+            BoundSelectPlan::OrderBy { input, items } => Self::OrderBy {
+                plan_info: PlanEstimate::default(),
+                input: Box::new(Self::from_bound_select_plan(*input)),
                 items: items
                     .into_iter()
                     .map(PlannerOrderByEntry::from_order_by_entry)
                     .collect(),
             },
-            Plan::Limit {
-                plan_info,
+            BoundSelectPlan::Limit {
                 input,
                 limit,
                 offset,
             } => Self::Limit {
-                plan_info,
-                input: Box::new(Self::from_plan(*input)),
+                plan_info: PlanEstimate::default(),
+                input: Box::new(Self::from_bound_select_plan(*input)),
                 limit,
                 offset,
             },
-            Plan::Aggregate {
-                plan_info,
+            BoundSelectPlan::Aggregate {
                 input,
                 group_by,
                 accumulators,
                 having,
                 output_columns,
             } => Self::Aggregate {
-                plan_info,
-                input: Box::new(Self::from_plan(*input)),
+                plan_info: PlanEstimate::default(),
+                input: Box::new(Self::from_bound_select_plan(*input)),
                 group_by: group_by
                     .iter()
                     .map(PlannerJoinExpr::from_input_expr)
@@ -354,31 +281,83 @@ impl PlannerPath {
                 having: having.as_ref().map(PlannerJoinExpr::from_input_expr),
                 output_columns,
             },
-            Plan::Values {
-                plan_info,
+            BoundSelectPlan::Projection { input, targets } => Self::Projection {
+                plan_info: PlanEstimate::default(),
+                input: Box::new(Self::from_bound_select_plan(*input)),
+                targets: targets
+                    .into_iter()
+                    .map(PlannerTargetEntry::from_target_entry)
+                    .collect(),
+            },
+            BoundSelectPlan::ProjectSet { input, targets } => Self::ProjectSet {
+                plan_info: PlanEstimate::default(),
+                input: Box::new(Self::from_bound_select_plan(*input)),
+                targets: targets
+                    .into_iter()
+                    .map(PlannerProjectSetTarget::from_project_set_target)
+                    .collect(),
+            },
+        }
+    }
+
+    pub fn from_bound_from_plan(plan: BoundFromPlan) -> Self {
+        match plan {
+            BoundFromPlan::Result => Self::Result {
+                plan_info: PlanEstimate::default(),
+            },
+            BoundFromPlan::SeqScan {
+                rel,
+                relation_oid,
+                toast,
+                desc,
+            } => Self::SeqScan {
+                plan_info: PlanEstimate::default(),
+                rel,
+                relation_oid,
+                toast,
+                desc,
+            },
+            BoundFromPlan::Values {
                 rows,
                 output_columns,
             } => Self::Values {
-                plan_info,
+                plan_info: PlanEstimate::default(),
                 rows: rows
                     .iter()
                     .map(|row| row.iter().map(PlannerJoinExpr::from_input_expr).collect())
                     .collect(),
                 output_columns,
             },
-            Plan::FunctionScan { plan_info, call } => Self::FunctionScan { plan_info, call },
-            Plan::ProjectSet {
-                plan_info,
-                input,
-                targets,
-            } => Self::ProjectSet {
-                plan_info,
-                input: Box::new(Self::from_plan(*input)),
+            BoundFromPlan::FunctionScan { call } => Self::FunctionScan {
+                plan_info: PlanEstimate::default(),
+                call,
+            },
+            BoundFromPlan::NestedLoopJoin {
+                left,
+                right,
+                kind,
+                on,
+            } => {
+                let left = Self::from_bound_from_plan(*left);
+                let right = Self::from_bound_from_plan(*right);
+                let left_width = left.columns().len();
+                Self::NestedLoopJoin {
+                    plan_info: PlanEstimate::default(),
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    kind,
+                    on: PlannerJoinExpr::from_expr(&on, left_width),
+                }
+            }
+            BoundFromPlan::Projection { input, targets } => Self::Projection {
+                plan_info: PlanEstimate::default(),
+                input: Box::new(Self::from_bound_from_plan(*input)),
                 targets: targets
                     .into_iter()
-                    .map(PlannerProjectSetTarget::from_project_set_target)
+                    .map(PlannerTargetEntry::from_target_entry)
                     .collect(),
             },
+            BoundFromPlan::Subquery(plan) => Self::from_bound_select_plan(*plan),
         }
     }
 
@@ -505,7 +484,11 @@ impl PlannerPath {
                 plan_info,
                 rows: rows
                     .into_iter()
-                    .map(|row| row.into_iter().map(PlannerJoinExpr::into_input_expr).collect())
+                    .map(|row| {
+                        row.into_iter()
+                            .map(PlannerJoinExpr::into_input_expr)
+                            .collect()
+                    })
                     .collect(),
                 output_columns,
             },
@@ -553,9 +536,9 @@ impl PlannerPath {
                     sql_type: c.sql_type,
                 })
                 .collect(),
-            Self::Filter { input, .. } | Self::OrderBy { input, .. } | Self::Limit { input, .. } => {
-                input.columns()
-            }
+            Self::Filter { input, .. }
+            | Self::OrderBy { input, .. }
+            | Self::Limit { input, .. } => input.columns(),
             Self::Projection { targets, .. } => targets
                 .iter()
                 .map(|t| QueryColumn {
@@ -646,11 +629,9 @@ impl PlannerProjectSetTarget {
 
     fn into_project_set_target(self) -> crate::include::nodes::plannodes::ProjectSetTarget {
         match self {
-            Self::Scalar(entry) => {
-                crate::include::nodes::plannodes::ProjectSetTarget::Scalar(
-                    entry.into_target_entry(),
-                )
-            }
+            Self::Scalar(entry) => crate::include::nodes::plannodes::ProjectSetTarget::Scalar(
+                entry.into_target_entry(),
+            ),
             Self::Set {
                 name,
                 call,
@@ -871,14 +852,8 @@ impl PlannerJoinExpr {
                     .iter()
                     .map(|subscript| PlannerJoinArraySubscript {
                         is_slice: subscript.is_slice,
-                        lower: subscript
-                            .lower
-                            .as_ref()
-                            .map(Self::from_input_expr),
-                        upper: subscript
-                            .upper
-                            .as_ref()
-                            .map(Self::from_input_expr),
+                        lower: subscript.lower.as_ref().map(Self::from_input_expr),
+                        upper: subscript.upper.as_ref().map(Self::from_input_expr),
                     })
                     .collect(),
             },
@@ -1031,9 +1006,9 @@ impl PlannerJoinExpr {
             } => Self::Like {
                 expr: Box::new(Self::from_base_input_expr(expr, relation_oid)),
                 pattern: Box::new(Self::from_base_input_expr(pattern, relation_oid)),
-                escape: escape.as_ref().map(|inner| {
-                    Box::new(Self::from_base_input_expr(inner, relation_oid))
-                }),
+                escape: escape
+                    .as_ref()
+                    .map(|inner| Box::new(Self::from_base_input_expr(inner, relation_oid))),
                 case_insensitive: *case_insensitive,
                 negated: *negated,
             },
@@ -1045,9 +1020,9 @@ impl PlannerJoinExpr {
             } => Self::Similar {
                 expr: Box::new(Self::from_base_input_expr(expr, relation_oid)),
                 pattern: Box::new(Self::from_base_input_expr(pattern, relation_oid)),
-                escape: escape.as_ref().map(|inner| {
-                    Box::new(Self::from_base_input_expr(inner, relation_oid))
-                }),
+                escape: escape
+                    .as_ref()
+                    .map(|inner| Box::new(Self::from_base_input_expr(inner, relation_oid))),
                 negated: *negated,
             },
             Expr::And(left, right) => Self::And(
@@ -1693,7 +1668,10 @@ impl PlannerJoinExpr {
             } => Self::FuncCall {
                 func_oid: *func_oid,
                 func: *func,
-                args: args.iter().map(|arg| Self::from_expr(arg, left_width)).collect(),
+                args: args
+                    .iter()
+                    .map(|arg| Self::from_expr(arg, left_width))
+                    .collect(),
                 func_variadic: *func_variadic,
             },
             Expr::CurrentDate => Self::CurrentDate,
@@ -1767,7 +1745,9 @@ impl PlannerJoinExpr {
             Self::UnaryPlus(inner) => Expr::UnaryPlus(Box::new(inner.into_expr(left_width))),
             Self::Negate(inner) => Expr::Negate(Box::new(inner.into_expr(left_width))),
             Self::BitNot(inner) => Expr::BitNot(Box::new(inner.into_expr(left_width))),
-            Self::Cast(inner, sql_type) => Expr::Cast(Box::new(inner.into_expr(left_width)), sql_type),
+            Self::Cast(inner, sql_type) => {
+                Expr::Cast(Box::new(inner.into_expr(left_width)), sql_type)
+            }
             Self::Eq(left, right) => Expr::Eq(
                 Box::new(left.into_expr(left_width)),
                 Box::new(right.into_expr(left_width)),
@@ -1943,7 +1923,10 @@ impl PlannerJoinExpr {
             } => Expr::FuncCall {
                 func_oid,
                 func,
-                args: args.into_iter().map(|arg| arg.into_expr(left_width)).collect(),
+                args: args
+                    .into_iter()
+                    .map(|arg| arg.into_expr(left_width))
+                    .collect(),
                 func_variadic,
             },
             Self::CurrentDate => Expr::CurrentDate,
@@ -1957,7 +1940,10 @@ impl PlannerJoinExpr {
     pub fn swap_inputs(&self) -> Self {
         match self {
             Self::InputColumn(index) => Self::InputColumn(*index),
-            Self::BaseColumn { relation_oid, index } => Self::BaseColumn {
+            Self::BaseColumn {
+                relation_oid,
+                index,
+            } => Self::BaseColumn {
                 relation_oid: *relation_oid,
                 index: *index,
             },
@@ -1968,82 +1954,64 @@ impl PlannerJoinExpr {
                 index: *index,
             },
             Self::Const(value) => Self::Const(value.clone()),
-            Self::Add(left, right) => Self::Add(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Sub(left, right) => Self::Sub(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::BitAnd(left, right) => Self::BitAnd(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::BitOr(left, right) => Self::BitOr(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::BitXor(left, right) => Self::BitXor(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Shl(left, right) => Self::Shl(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Shr(left, right) => Self::Shr(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Mul(left, right) => Self::Mul(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Div(left, right) => Self::Div(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Mod(left, right) => Self::Mod(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Concat(left, right) => Self::Concat(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
+            Self::Add(left, right) => {
+                Self::Add(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Sub(left, right) => {
+                Self::Sub(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::BitAnd(left, right) => {
+                Self::BitAnd(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::BitOr(left, right) => {
+                Self::BitOr(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::BitXor(left, right) => {
+                Self::BitXor(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Shl(left, right) => {
+                Self::Shl(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Shr(left, right) => {
+                Self::Shr(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Mul(left, right) => {
+                Self::Mul(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Div(left, right) => {
+                Self::Div(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Mod(left, right) => {
+                Self::Mod(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Concat(left, right) => {
+                Self::Concat(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
             Self::UnaryPlus(inner) => Self::UnaryPlus(Box::new(inner.swap_inputs())),
             Self::Negate(inner) => Self::Negate(Box::new(inner.swap_inputs())),
             Self::BitNot(inner) => Self::BitNot(Box::new(inner.swap_inputs())),
             Self::Cast(inner, sql_type) => Self::Cast(Box::new(inner.swap_inputs()), *sql_type),
-            Self::Eq(left, right) => Self::Eq(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::NotEq(left, right) => Self::NotEq(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Lt(left, right) => Self::Lt(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::LtEq(left, right) => Self::LtEq(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Gt(left, right) => Self::Gt(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::GtEq(left, right) => Self::GtEq(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::RegexMatch(left, right) => Self::RegexMatch(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
+            Self::Eq(left, right) => {
+                Self::Eq(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::NotEq(left, right) => {
+                Self::NotEq(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Lt(left, right) => {
+                Self::Lt(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::LtEq(left, right) => {
+                Self::LtEq(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Gt(left, right) => {
+                Self::Gt(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::GtEq(left, right) => {
+                Self::GtEq(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::RegexMatch(left, right) => {
+                Self::RegexMatch(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
             Self::Like {
                 expr,
                 pattern,
@@ -2068,25 +2036,21 @@ impl PlannerJoinExpr {
                 escape: escape.as_ref().map(|inner| Box::new(inner.swap_inputs())),
                 negated: *negated,
             },
-            Self::And(left, right) => Self::And(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::Or(left, right) => Self::Or(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
+            Self::And(left, right) => {
+                Self::And(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::Or(left, right) => {
+                Self::Or(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
             Self::Not(inner) => Self::Not(Box::new(inner.swap_inputs())),
             Self::IsNull(inner) => Self::IsNull(Box::new(inner.swap_inputs())),
             Self::IsNotNull(inner) => Self::IsNotNull(Box::new(inner.swap_inputs())),
-            Self::IsDistinctFrom(left, right) => Self::IsDistinctFrom(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::IsNotDistinctFrom(left, right) => Self::IsNotDistinctFrom(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
+            Self::IsDistinctFrom(left, right) => {
+                Self::IsDistinctFrom(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::IsNotDistinctFrom(left, right) => {
+                Self::IsNotDistinctFrom(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
             Self::ArrayLiteral {
                 elements,
                 array_type,
@@ -2094,44 +2058,35 @@ impl PlannerJoinExpr {
                 elements: elements.iter().map(Self::swap_inputs).collect(),
                 array_type: *array_type,
             },
-            Self::ArrayOverlap(left, right) => Self::ArrayOverlap(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonbContains(left, right) => Self::JsonbContains(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonbContained(left, right) => Self::JsonbContained(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonbExists(left, right) => Self::JsonbExists(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonbExistsAny(left, right) => Self::JsonbExistsAny(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonbExistsAll(left, right) => Self::JsonbExistsAll(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonbPathExists(left, right) => Self::JsonbPathExists(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonbPathMatch(left, right) => Self::JsonbPathMatch(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
+            Self::ArrayOverlap(left, right) => {
+                Self::ArrayOverlap(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonbContains(left, right) => {
+                Self::JsonbContains(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonbContained(left, right) => {
+                Self::JsonbContained(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonbExists(left, right) => {
+                Self::JsonbExists(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonbExistsAny(left, right) => {
+                Self::JsonbExistsAny(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonbExistsAll(left, right) => {
+                Self::JsonbExistsAll(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonbPathExists(left, right) => {
+                Self::JsonbPathExists(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonbPathMatch(left, right) => {
+                Self::JsonbPathMatch(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
             Self::ScalarSubquery(plan) => Self::ScalarSubquery(plan.clone()),
             Self::ExistsSubquery(plan) => Self::ExistsSubquery(plan.clone()),
-            Self::Coalesce(left, right) => Self::Coalesce(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
+            Self::Coalesce(left, right) => {
+                Self::Coalesce(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
             Self::AnySubquery { left, op, subquery } => Self::AnySubquery {
                 left: Box::new(left.swap_inputs()),
                 op: *op,
@@ -2164,22 +2119,18 @@ impl PlannerJoinExpr {
                     .collect(),
             },
             Self::Random => Self::Random,
-            Self::JsonGet(left, right) => Self::JsonGet(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonGetText(left, right) => Self::JsonGetText(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonPath(left, right) => Self::JsonPath(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
-            Self::JsonPathText(left, right) => Self::JsonPathText(
-                Box::new(left.swap_inputs()),
-                Box::new(right.swap_inputs()),
-            ),
+            Self::JsonGet(left, right) => {
+                Self::JsonGet(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonGetText(left, right) => {
+                Self::JsonGetText(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonPath(left, right) => {
+                Self::JsonPath(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
+            Self::JsonPathText(left, right) => {
+                Self::JsonPathText(Box::new(left.swap_inputs()), Box::new(right.swap_inputs()))
+            }
             Self::FuncCall {
                 func_oid,
                 func,

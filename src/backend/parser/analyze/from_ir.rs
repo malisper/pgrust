@@ -1,13 +1,12 @@
 use super::select_ir::BoundSelectPlan;
+use crate::RelFileLocator;
 use crate::backend::executor::{
-    Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, SetReturningCall, TargetEntry,
-    ToastRelationRef,
+    Expr, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
 };
 use crate::include::nodes::plannodes::JoinType;
-use crate::RelFileLocator;
 
 #[derive(Debug, Clone)]
-pub(super) enum BoundFromPlan {
+pub(crate) enum BoundFromPlan {
     Result,
     SeqScan {
         rel: RelFileLocator,
@@ -36,56 +35,6 @@ pub(super) enum BoundFromPlan {
 }
 
 impl BoundFromPlan {
-    pub(super) fn into_plan(self) -> Plan {
-        match self {
-            Self::Result => Plan::Result {
-                plan_info: PlanEstimate::default(),
-            },
-            Self::SeqScan {
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            } => Plan::SeqScan {
-                plan_info: PlanEstimate::default(),
-                rel,
-                relation_oid,
-                toast,
-                desc,
-            },
-            Self::Values {
-                rows,
-                output_columns,
-            } => Plan::Values {
-                plan_info: PlanEstimate::default(),
-                rows,
-                output_columns,
-            },
-            Self::FunctionScan { call } => Plan::FunctionScan {
-                plan_info: PlanEstimate::default(),
-                call,
-            },
-            Self::NestedLoopJoin {
-                left,
-                right,
-                kind,
-                on,
-            } => Plan::NestedLoopJoin {
-                plan_info: PlanEstimate::default(),
-                left: Box::new(left.into_plan()),
-                right: Box::new(right.into_plan()),
-                kind,
-                on,
-            },
-            Self::Projection { input, targets } => Plan::Projection {
-                plan_info: PlanEstimate::default(),
-                input: Box::new(input.into_plan()),
-                targets,
-            },
-            Self::Subquery(plan) => plan.into_plan(),
-        }
-    }
-
     pub(super) fn columns(&self) -> Vec<QueryColumn> {
         match self {
             Self::Result => Vec::new(),

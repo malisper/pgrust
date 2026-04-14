@@ -5,16 +5,16 @@ mod pathnodes;
 
 use crate::RelFileLocator;
 use crate::backend::executor::{
-    Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef,
-    Value, compare_order_values,
+    Expr, Plan, PlanEstimate, QueryColumn, RelationDesc, ToastRelationRef, Value,
+    compare_order_values,
 };
+use crate::backend::parser::analyze::BoundSelectPlan;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::plannodes::JoinType;
 use pathnodes::{
-    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget,
-    PlannerTargetEntry,
+    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget, PlannerTargetEntry,
 };
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
@@ -64,8 +64,8 @@ struct AccessCandidate {
     plan: PlannerPath,
 }
 
-pub fn optimize_plan(plan: Plan, catalog: &dyn CatalogLookup) -> Plan {
-    optimize_path(PlannerPath::from_plan(plan), catalog).into_plan()
+pub(crate) fn optimize_bound_query(plan: BoundSelectPlan, catalog: &dyn CatalogLookup) -> Plan {
+    optimize_path(PlannerPath::from_bound_select_plan(plan), catalog).into_plan()
 }
 
 pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> PlannerPath {
@@ -181,7 +181,9 @@ pub(super) fn optimize_path(plan: PlannerPath, catalog: &dyn CatalogLookup) -> P
                     (requested / input_rows).clamp(0.0, 1.0)
                 };
                 let rows = limit
-                    .map(|limit| clamp_rows((input_rows - offset as f64).max(0.0).min(limit as f64)))
+                    .map(|limit| {
+                        clamp_rows((input_rows - offset as f64).max(0.0).min(limit as f64))
+                    })
                     .unwrap_or_else(|| clamp_rows((input_rows - offset as f64).max(0.0)));
                 let total = input_info.startup_cost.as_f64()
                     + (input_info.total_cost.as_f64() - input_info.startup_cost.as_f64())
@@ -389,11 +391,16 @@ fn try_optimize_access_subtree(
         other => return Err(other),
     };
 
-    let filter = filter.map(|expr| PlannerJoinExpr::from_base_input_expr(&expr.into_input_expr(), relation_oid));
+    let filter = filter
+        .map(|expr| PlannerJoinExpr::from_base_input_expr(&expr.into_input_expr(), relation_oid));
     let order_items = order_items.map(|items| {
-        items.into_iter()
+        items
+            .into_iter()
             .map(|item| PlannerOrderByEntry {
-                expr: PlannerJoinExpr::from_base_input_expr(&item.expr.into_input_expr(), relation_oid),
+                expr: PlannerJoinExpr::from_base_input_expr(
+                    &item.expr.into_input_expr(),
+                    relation_oid,
+                ),
                 descending: item.descending,
                 nulls_first: item.nulls_first,
             })
@@ -417,10 +424,19 @@ fn try_optimize_access_subtree(
             && !index.index_meta.indkey.is_empty()
             && index.index_meta.am_oid == BTREE_AM_OID
     }) {
-        let Some(spec) = build_index_path_spec(filter.as_ref(), order_items.as_deref(), index) else {
+        let Some(spec) = build_index_path_spec(filter.as_ref(), order_items.as_deref(), index)
+        else {
             continue;
         };
-        let candidate = estimate_index_candidate(rel, toast, desc.clone(), &stats, spec, order_items.clone(), catalog);
+        let candidate = estimate_index_candidate(
+            rel,
+            toast,
+            desc.clone(),
+            &stats,
+            spec,
+            order_items.clone(),
+            catalog,
+        );
         if candidate.total_cost < best.total_cost {
             best = candidate;
         }
@@ -428,7 +444,11 @@ fn try_optimize_access_subtree(
     Ok(best.plan)
 }
 
-fn relation_stats(catalog: &dyn CatalogLookup, relation_oid: u32, desc: &RelationDesc) -> RelationStats {
+fn relation_stats(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    desc: &RelationDesc,
+) -> RelationStats {
     let class_row = catalog.class_row_by_oid(relation_oid);
     let relpages = class_row
         .as_ref()
@@ -436,7 +456,13 @@ fn relation_stats(catalog: &dyn CatalogLookup, relation_oid: u32, desc: &Relatio
         .unwrap_or(DEFAULT_NUM_PAGES);
     let reltuples = class_row
         .as_ref()
-        .map(|row| if row.reltuples > 0.0 { row.reltuples } else { DEFAULT_NUM_ROWS })
+        .map(|row| {
+            if row.reltuples > 0.0 {
+                row.reltuples
+            } else {
+                DEFAULT_NUM_ROWS
+            }
+        })
         .unwrap_or(DEFAULT_NUM_ROWS);
     let stats = catalog
         .statistic_rows_for_relation(relation_oid)
@@ -491,7 +517,12 @@ fn estimate_seqscan_candidate(
     if let Some(items) = order_items {
         total_cost += estimate_sort_cost(current_rows, items.len());
         plan = PlannerPath::OrderBy {
-            plan_info: PlanEstimate::new(total_cost - estimate_sort_cost(current_rows, items.len()), total_cost, current_rows, width),
+            plan_info: PlanEstimate::new(
+                total_cost - estimate_sort_cost(current_rows, items.len()),
+                total_cost,
+                current_rows,
+                width,
+            ),
             input: Box::new(plan),
             items,
         };
@@ -562,7 +593,12 @@ fn estimate_index_candidate(
         let sort_cost = estimate_sort_cost(current_rows, items.len());
         total_cost += sort_cost;
         plan = PlannerPath::OrderBy {
-            plan_info: PlanEstimate::new(total_cost - sort_cost, total_cost, current_rows, stats.width),
+            plan_info: PlanEstimate::new(
+                total_cost - sort_cost,
+                total_cost,
+                current_rows,
+                stats.width,
+            ),
             input: Box::new(plan),
             items,
         };
@@ -608,8 +644,7 @@ fn estimate_nested_loop_join(
     let right_info = right.plan_info();
     let on_expr = on.clone().into_expr(left.columns().len());
     let join_sel = clause_selectivity(&on_expr, None, left_info.plan_rows.as_f64());
-    let rows =
-        clamp_rows(left_info.plan_rows.as_f64() * right_info.plan_rows.as_f64() * join_sel);
+    let rows = clamp_rows(left_info.plan_rows.as_f64() * right_info.plan_rows.as_f64() * join_sel);
     let total = left_info.total_cost.as_f64()
         + left_info.plan_rows.as_f64() * right_info.total_cost.as_f64()
         + left_info.plan_rows.as_f64()
@@ -673,7 +708,9 @@ fn build_index_path_spec(
     order_items: Option<&[PlannerOrderByEntry]>,
     index: &BoundIndexRelation,
 ) -> Option<IndexPathSpec> {
-    let conjuncts = filter.map(flatten_and_conjuncts_planner).unwrap_or_default();
+    let conjuncts = filter
+        .map(flatten_and_conjuncts_planner)
+        .unwrap_or_default();
     let parsed_quals = conjuncts
         .iter()
         .filter_map(indexable_qual)
@@ -725,7 +762,12 @@ fn build_index_path_spec(
     let used_exprs = parsed_quals
         .iter()
         .enumerate()
-        .filter_map(|(idx, qual)| used.get(idx).copied().unwrap_or(false).then_some(&qual.expr))
+        .filter_map(|(idx, qual)| {
+            used.get(idx)
+                .copied()
+                .unwrap_or(false)
+                .then_some(&qual.expr)
+        })
         .collect::<Vec<_>>();
     let residual = planner_and_exprs(
         conjuncts
@@ -750,27 +792,24 @@ fn build_index_path_spec(
 
 fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64) -> f64 {
     match expr {
-        Expr::And(left, right) => {
-            (clause_selectivity(left, stats, reltuples)
-                * clause_selectivity(right, stats, reltuples))
-            .clamp(0.0, 1.0)
-        }
+        Expr::And(left, right) => (clause_selectivity(left, stats, reltuples)
+            * clause_selectivity(right, stats, reltuples))
+        .clamp(0.0, 1.0),
         Expr::Or(left, right) => {
             let left = clause_selectivity(left, stats, reltuples);
             let right = clause_selectivity(right, stats, reltuples);
             (left + right - left * right).clamp(0.0, 1.0)
         }
-        Expr::IsNull(inner) => column_selectivity(inner, stats, |row, _| row.stanullfrac)
-            .unwrap_or(DEFAULT_EQ_SEL),
+        Expr::IsNull(inner) => {
+            column_selectivity(inner, stats, |row, _| row.stanullfrac).unwrap_or(DEFAULT_EQ_SEL)
+        }
         Expr::IsNotNull(inner) => column_selectivity(inner, stats, |row, _| 1.0 - row.stanullfrac)
             .unwrap_or(1.0 - DEFAULT_EQ_SEL),
         Expr::Eq(left, right) => eq_selectivity(left, right, stats, reltuples),
         Expr::NotEq(left, right) => 1.0 - eq_selectivity(left, right, stats, reltuples),
         Expr::Lt(left, right) => ineq_selectivity(left, right, stats, reltuples, Ordering::Less),
-        Expr::LtEq(left, right) => {
-            ineq_selectivity(left, right, stats, reltuples, Ordering::Less)
-                .max(eq_selectivity(left, right, stats, reltuples))
-        }
+        Expr::LtEq(left, right) => ineq_selectivity(left, right, stats, reltuples, Ordering::Less)
+            .max(eq_selectivity(left, right, stats, reltuples)),
         Expr::Gt(left, right) => ineq_selectivity(left, right, stats, reltuples, Ordering::Greater),
         Expr::GtEq(left, right) => {
             ineq_selectivity(left, right, stats, reltuples, Ordering::Greater)
@@ -787,18 +826,17 @@ fn base_clause_selectivity(
     reltuples: f64,
 ) -> f64 {
     match expr {
-        PlannerJoinExpr::And(left, right) => {
-            (base_clause_selectivity(left, stats, reltuples)
-                * base_clause_selectivity(right, stats, reltuples))
-            .clamp(0.0, 1.0)
-        }
+        PlannerJoinExpr::And(left, right) => (base_clause_selectivity(left, stats, reltuples)
+            * base_clause_selectivity(right, stats, reltuples))
+        .clamp(0.0, 1.0),
         PlannerJoinExpr::Or(left, right) => {
             let left = base_clause_selectivity(left, stats, reltuples);
             let right = base_clause_selectivity(right, stats, reltuples);
             (left + right - left * right).clamp(0.0, 1.0)
         }
         PlannerJoinExpr::IsNull(inner) => {
-            base_column_selectivity(inner, stats, |row, _| row.stanullfrac).unwrap_or(DEFAULT_EQ_SEL)
+            base_column_selectivity(inner, stats, |row, _| row.stanullfrac)
+                .unwrap_or(DEFAULT_EQ_SEL)
         }
         PlannerJoinExpr::IsNotNull(inner) => {
             base_column_selectivity(inner, stats, |row, _| 1.0 - row.stanullfrac)
@@ -993,14 +1031,12 @@ fn base_column_const_pair(
     right: &PlannerJoinExpr,
 ) -> Option<(usize, Value)> {
     match (left, right) {
-        (
-            PlannerJoinExpr::BaseColumn { index, .. },
-            PlannerJoinExpr::Const(value),
-        ) => Some((*index, value.clone())),
-        (
-            PlannerJoinExpr::Const(value),
-            PlannerJoinExpr::BaseColumn { index, .. },
-        ) => Some((*index, value.clone())),
+        (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
+            Some((*index, value.clone()))
+        }
+        (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
+            Some((*index, value.clone()))
+        }
         _ => None,
     }
 }
@@ -1018,14 +1054,12 @@ fn base_ordered_column_const_pair(
     right: &PlannerJoinExpr,
 ) -> Option<(usize, Value, bool)> {
     match (left, right) {
-        (
-            PlannerJoinExpr::BaseColumn { index, .. },
-            PlannerJoinExpr::Const(value),
-        ) => Some((*index, value.clone(), false)),
-        (
-            PlannerJoinExpr::Const(value),
-            PlannerJoinExpr::BaseColumn { index, .. },
-        ) => Some((*index, value.clone(), true)),
+        (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
+            Some((*index, value.clone(), false))
+        }
+        (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
+            Some((*index, value.clone(), true))
+        }
         _ => None,
     }
 }
@@ -1238,58 +1272,48 @@ fn indexable_qual(expr: &PlannerJoinExpr) -> Option<IndexableQual> {
 
     match expr {
         PlannerJoinExpr::Eq(left, right) => match (&**left, &**right) {
-            (
-                PlannerJoinExpr::BaseColumn { index, .. },
-                PlannerJoinExpr::Const(value),
-            ) => mk(*index, 3, value, expr),
-            (
-                PlannerJoinExpr::Const(value),
-                PlannerJoinExpr::BaseColumn { index, .. },
-            ) => mk(*index, 3, value, expr),
+            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
+                mk(*index, 3, value, expr)
+            }
+            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
+                mk(*index, 3, value, expr)
+            }
             _ => None,
         },
         PlannerJoinExpr::Lt(left, right) => match (&**left, &**right) {
-            (
-                PlannerJoinExpr::BaseColumn { index, .. },
-                PlannerJoinExpr::Const(value),
-            ) => mk(*index, 1, value, expr),
-            (
-                PlannerJoinExpr::Const(value),
-                PlannerJoinExpr::BaseColumn { index, .. },
-            ) => mk(*index, 5, value, expr),
+            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
+                mk(*index, 1, value, expr)
+            }
+            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
+                mk(*index, 5, value, expr)
+            }
             _ => None,
         },
         PlannerJoinExpr::LtEq(left, right) => match (&**left, &**right) {
-            (
-                PlannerJoinExpr::BaseColumn { index, .. },
-                PlannerJoinExpr::Const(value),
-            ) => mk(*index, 2, value, expr),
-            (
-                PlannerJoinExpr::Const(value),
-                PlannerJoinExpr::BaseColumn { index, .. },
-            ) => mk(*index, 4, value, expr),
+            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
+                mk(*index, 2, value, expr)
+            }
+            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
+                mk(*index, 4, value, expr)
+            }
             _ => None,
         },
         PlannerJoinExpr::Gt(left, right) => match (&**left, &**right) {
-            (
-                PlannerJoinExpr::BaseColumn { index, .. },
-                PlannerJoinExpr::Const(value),
-            ) => mk(*index, 5, value, expr),
-            (
-                PlannerJoinExpr::Const(value),
-                PlannerJoinExpr::BaseColumn { index, .. },
-            ) => mk(*index, 1, value, expr),
+            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
+                mk(*index, 5, value, expr)
+            }
+            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
+                mk(*index, 1, value, expr)
+            }
             _ => None,
         },
         PlannerJoinExpr::GtEq(left, right) => match (&**left, &**right) {
-            (
-                PlannerJoinExpr::BaseColumn { index, .. },
-                PlannerJoinExpr::Const(value),
-            ) => mk(*index, 4, value, expr),
-            (
-                PlannerJoinExpr::Const(value),
-                PlannerJoinExpr::BaseColumn { index, .. },
-            ) => mk(*index, 2, value, expr),
+            (PlannerJoinExpr::BaseColumn { index, .. }, PlannerJoinExpr::Const(value)) => {
+                mk(*index, 4, value, expr)
+            }
+            (PlannerJoinExpr::Const(value), PlannerJoinExpr::BaseColumn { index, .. }) => {
+                mk(*index, 2, value, expr)
+            }
             _ => None,
         },
         _ => None,
@@ -1313,11 +1337,9 @@ fn planner_and_exprs(mut exprs: Vec<PlannerJoinExpr>) -> Option<PlannerJoinExpr>
         return None;
     }
     let first = exprs.remove(0);
-    Some(
-        exprs
-            .into_iter()
-            .fold(first, |acc, expr| PlannerJoinExpr::And(Box::new(acc), Box::new(expr))),
-    )
+    Some(exprs.into_iter().fold(first, |acc, expr| {
+        PlannerJoinExpr::And(Box::new(acc), Box::new(expr))
+    }))
 }
 
 fn index_order_match(

@@ -10,8 +10,8 @@ mod geometry;
 mod infer;
 mod modify;
 mod paths;
-mod select_ir;
 mod scope;
+mod select_ir;
 mod system_views;
 mod views;
 
@@ -22,7 +22,7 @@ use crate::backend::executor::{
     ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, TargetEntry, ToastRelationRef,
     Value, cast_value,
 };
-use crate::backend::optimizer::optimize_plan;
+use crate::backend::optimizer::optimize_bound_query;
 use crate::include::catalog::{
     PgCastRow, PgClassRow, PgOperatorRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
     bootstrap_pg_cast_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_type_rows,
@@ -37,7 +37,7 @@ use agg_output::*;
 use coerce::*;
 pub use create_table::*;
 use expr::*;
-use from_ir::*;
+pub(crate) use from_ir::BoundFromPlan;
 use functions::*;
 use geometry::*;
 use infer::*;
@@ -48,9 +48,9 @@ pub use modify::{
 };
 pub use paths::BoundModifyRowSource;
 use paths::bind_order_by_items;
-use select_ir::*;
 pub use scope::BoundRelation;
 use scope::*;
+pub(crate) use select_ir::BoundSelectPlan;
 use system_views::*;
 use views::*;
 
@@ -673,7 +673,7 @@ fn build_values_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    Ok(optimize_plan(plan.into_plan(), catalog))
+    Ok(optimize_bound_query(plan, catalog))
 }
 
 fn bind_select_query_with_outer(
@@ -965,10 +965,13 @@ fn bind_select_query_with_outer(
             };
         }
 
-        Ok((BoundSelectPlan::Projection {
-            input: Box::new(plan),
-            targets,
-        }, scope))
+        Ok((
+            BoundSelectPlan::Projection {
+                input: Box::new(plan),
+                targets,
+            },
+            scope,
+        ))
     } else {
         let bound_targets = bind_select_targets(
             &stmt.targets,
@@ -1014,10 +1017,13 @@ fn bind_select_query_with_outer(
                 if is_identity {
                     Ok((plan, scope))
                 } else {
-                    Ok((BoundSelectPlan::Projection {
-                        input: Box::new(plan),
-                        targets,
-                    }, scope))
+                    Ok((
+                        BoundSelectPlan::Projection {
+                            input: Box::new(plan),
+                            targets,
+                        },
+                        scope,
+                    ))
                 }
             }
             BoundSelectTargets::WithProjectSet {
@@ -1076,5 +1082,5 @@ fn build_plan_with_outer(
         outer_ctes,
         expanded_views,
     )?;
-    Ok(optimize_plan(plan.into_plan(), catalog))
+    Ok(optimize_bound_query(plan, catalog))
 }
