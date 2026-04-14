@@ -1475,7 +1475,35 @@ fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptI
     }
 }
 
+fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+fn select_upper_input_paths(
+    root: &PlannerInfo,
+    input_rel: &RelOptInfo,
+    preserve_query_order: bool,
+) -> Vec<Path> {
+    let mut paths = Vec::new();
+    if preserve_query_order
+        && !root.query_pathkeys.is_empty()
+        && let Some(path) = input_rel.cheapest_path_satisfying(|path| {
+            let required_pathkeys = lower_pathkeys_for_path(root, path, &root.query_pathkeys);
+            pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
+        })
+    {
+        push_unique_path(&mut paths, path.clone());
+    }
+    if let Some(path) = input_rel.cheapest_total_path() {
+        push_unique_path(&mut paths, path.clone());
+    }
+    paths
+}
+
 fn make_filter_rel(
+    root: &PlannerInfo,
     input_rel: RelOptInfo,
     predicate: Expr,
     catalog: &dyn CatalogLookup,
@@ -1485,7 +1513,7 @@ fn make_filter_rel(
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in input_rel.pathlist {
+    for path in select_upper_input_paths(root, &input_rel, true) {
         rel.add_path(optimize_path(
             Path::Filter {
                 plan_info: PlanEstimate::default(),
@@ -1512,7 +1540,7 @@ fn make_aggregate_rel(
         RelOptKind::UpperRel,
         root.final_target.clone(),
     );
-    for path in input_rel.pathlist {
+    for path in select_upper_input_paths(root, &input_rel, false) {
         let input_layout = path.output_vars();
         let group_by = root
             .parse
@@ -1551,6 +1579,7 @@ fn make_aggregate_rel(
 }
 
 fn make_project_set_rel(
+    root: &PlannerInfo,
     input_rel: RelOptInfo,
     targets: &[ProjectSetTarget],
     catalog: &dyn CatalogLookup,
@@ -1560,7 +1589,7 @@ fn make_project_set_rel(
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in input_rel.pathlist {
+    for path in select_upper_input_paths(root, &input_rel, true) {
         let layout = path.output_vars();
         rel.add_path(optimize_path(
             Path::ProjectSet {
@@ -1585,7 +1614,7 @@ fn make_ordered_rel(root: &PlannerInfo, input_rel: RelOptInfo, catalog: &dyn Cat
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in input_rel.pathlist {
+    for path in select_upper_input_paths(root, &input_rel, true) {
         let required_pathkeys = lower_pathkeys_for_path(root, &path, &root.query_pathkeys);
         if pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
             rel.add_path(path);
@@ -1604,6 +1633,7 @@ fn make_ordered_rel(root: &PlannerInfo, input_rel: RelOptInfo, catalog: &dyn Cat
 }
 
 fn make_limit_rel(
+    root: &PlannerInfo,
     input_rel: RelOptInfo,
     limit: Option<usize>,
     offset: usize,
@@ -1614,7 +1644,7 @@ fn make_limit_rel(
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in input_rel.pathlist {
+    for path in select_upper_input_paths(root, &input_rel, true) {
         rel.add_path(optimize_path(
             Path::Limit {
                 plan_info: PlanEstimate::default(),
@@ -1640,7 +1670,7 @@ fn make_projection_rel(
         RelOptKind::UpperRel,
         PathTarget::from_target_list(targets),
     );
-    for path in input_rel.pathlist {
+    for path in select_upper_input_paths(root, &input_rel, true) {
         let lowered_targets = lower_targets_for_path(root, &path, targets);
         if allow_identity_elision && projection_is_identity(&path, &lowered_targets) {
             rel.add_path(path);
@@ -1666,7 +1696,7 @@ fn grouping_planner(
 ) -> RelOptInfo {
     let mut current_rel = scanjoin_rel;
     if let Some(predicate) = residual_where_qual(root) {
-        current_rel = make_filter_rel(current_rel, predicate, catalog);
+        current_rel = make_filter_rel(root, current_rel, predicate, catalog);
     }
 
     let has_grouping = has_grouping(root);
@@ -1674,7 +1704,7 @@ fn grouping_planner(
     if has_grouping {
         current_rel = make_aggregate_rel(root, current_rel, catalog);
     } else if let Some(project_set) = root.parse.project_set.clone() {
-        current_rel = make_project_set_rel(current_rel, &project_set, catalog);
+        current_rel = make_project_set_rel(root, current_rel, &project_set, catalog);
         current_rel = make_projection_rel(
             root,
             current_rel,
@@ -1691,6 +1721,7 @@ fn grouping_planner(
 
     if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
         current_rel = make_limit_rel(
+            root,
             current_rel,
             root.parse.limit_count,
             root.parse.limit_offset,
@@ -2494,6 +2525,9 @@ pub(crate) fn finalize_plan_subqueries(
 }
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
+    if plan.plan_info() != PlanEstimate::default() {
+        return plan;
+    }
     match try_optimize_access_subtree(plan, catalog) {
         Ok(plan) => plan,
         Err(plan) => match plan {
