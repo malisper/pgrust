@@ -444,6 +444,9 @@ fn collect_direct_relation_oids_from_from_item(
                 collect_direct_relation_oids_from_sql_expr(&arg.value, catalog, visible_ctes, rels);
             }
         }
+        FromItem::Lateral(source) => {
+            collect_direct_relation_oids_from_from_item(source, catalog, visible_ctes, rels);
+        }
         FromItem::DerivedTable(select) => {
             collect_direct_relation_oids_from_select(select, catalog, visible_ctes, rels);
         }

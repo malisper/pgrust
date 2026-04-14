@@ -179,6 +179,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             return SqlType::new(SqlTypeKind::VarBit);
         }
         match peer_type.element_type().kind {
+            SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
@@ -231,6 +232,11 @@ pub(super) fn resolve_common_scalar_type(left: SqlType, right: SqlType) -> Optio
         return Some(left);
     }
     if is_text_like_type(left) && is_text_like_type(right) {
+        return Some(SqlType::new(SqlTypeKind::Text));
+    }
+    if (matches!(left.kind, SqlTypeKind::InternalChar) && is_text_like_type(right))
+        || (matches!(right.kind, SqlTypeKind::InternalChar) && is_text_like_type(left))
+    {
         return Some(SqlType::new(SqlTypeKind::Text));
     }
     if is_bit_string_type(left) && is_bit_string_type(right) {

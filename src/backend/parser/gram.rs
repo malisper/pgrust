@@ -743,6 +743,21 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::from_item | Rule::from_primary | Rule::parenthesized_from_item => {
             build_from_item(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
         }
+        Rule::lateral_from_item => {
+            let source = pair
+                .into_inner()
+                .find(|part| {
+                    matches!(
+                        part.as_rule(),
+                        Rule::values_from_item
+                            | Rule::srf_from_item
+                            | Rule::derived_from_item
+                            | Rule::parenthesized_from_item
+                    )
+                })
+                .ok_or(ParseError::UnexpectedEof)?;
+            Ok(FromItem::Lateral(Box::new(build_from_item(source)?)))
+        }
         Rule::from_list_item => {
             let mut source = None;
             let mut alias = None;
@@ -808,6 +823,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::table_from_item
+                    | Rule::lateral_from_item
                     | Rule::values_from_item
                     | Rule::parenthesized_table_from_item
                     | Rule::srf_from_item
@@ -1536,19 +1552,26 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     let mut items = Vec::new();
     for (index, item_pair) in std::iter::once(first).chain(inner).enumerate() {
         let mut preview_inner = item_pair.clone().into_inner();
-        if let Some(first_part) = preview_inner.next()
-            && first_part.as_rule() == Rule::qualified_star
-        {
-            let relation = first_part
-                .as_str()
-                .strip_suffix(".*")
-                .ok_or(ParseError::UnexpectedEof)?
-                .to_string();
-            items.push(SelectItem {
-                output_name: "*".into(),
-                expr: SqlExpr::Column(format!("{relation}.*")),
-            });
-            continue;
+        if let Some(first_part) = preview_inner.next() {
+            if first_part.as_rule() == Rule::star {
+                items.push(SelectItem {
+                    output_name: "*".into(),
+                    expr: SqlExpr::Column("*".into()),
+                });
+                continue;
+            }
+            if first_part.as_rule() == Rule::qualified_star {
+                let relation = first_part
+                    .as_str()
+                    .strip_suffix(".*")
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .to_string();
+                items.push(SelectItem {
+                    output_name: "*".into(),
+                    expr: SqlExpr::Column(format!("{relation}.*")),
+                });
+                continue;
+            }
         }
 
         let mut item_inner = item_pair.into_inner();
@@ -1764,6 +1787,11 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
             }
             ty
         }
+        Rule::qualified_type_name => {
+            let mut inner = pair.into_inner();
+            inner.next().expect("qualified_type_name schema");
+            build_type(inner.next().expect("qualified_type_name base"))
+        }
         Rule::base_type_name => build_type(pair.into_inner().next().expect("base_type_name inner")),
         Rule::array_type_alias => {
             let base = match pair
@@ -1842,6 +1870,7 @@ fn build_type(pair: Pair<'_, Rule>) -> SqlType {
         Rule::kw_jsonpath => SqlType::new(SqlTypeKind::JsonPath),
         Rule::kw_tsvector => SqlType::new(SqlTypeKind::TsVector),
         Rule::kw_tsquery => SqlType::new(SqlTypeKind::TsQuery),
+        Rule::kw_regclass => SqlType::new(SqlTypeKind::Oid),
         Rule::kw_regconfig => SqlType::new(SqlTypeKind::RegConfig),
         Rule::kw_regdictionary => SqlType::new(SqlTypeKind::RegDictionary),
         Rule::kw_bool | Rule::kw_boolean => SqlType::new(SqlTypeKind::Bool),

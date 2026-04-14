@@ -499,11 +499,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::NumericInc)
                 | Some(BuiltinScalarFunction::Factorial) => SqlType::new(SqlTypeKind::Numeric),
                 Some(
-                    BuiltinScalarFunction::Sqrt
-                    | BuiltinScalarFunction::Cbrt
-                    | BuiltinScalarFunction::Power
-                    | BuiltinScalarFunction::Exp
-                    | BuiltinScalarFunction::Ln
+                    BuiltinScalarFunction::Cbrt
                     | BuiltinScalarFunction::Sinh
                     | BuiltinScalarFunction::Cosh
                     | BuiltinScalarFunction::Tanh
@@ -523,6 +519,68 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     | BuiltinScalarFunction::Gamma
                     | BuiltinScalarFunction::Lgamma,
                 ) => SqlType::new(SqlTypeKind::Float8),
+                Some(
+                    BuiltinScalarFunction::Sqrt
+                    | BuiltinScalarFunction::Exp
+                    | BuiltinScalarFunction::Ln,
+                ) => args.first().map_or(SqlType::new(SqlTypeKind::Float8), |arg| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    match ty.element_type().kind {
+                        SqlTypeKind::Float4 | SqlTypeKind::Float8 => {
+                            SqlType::new(SqlTypeKind::Float8)
+                        }
+                        _ if is_numeric_family(ty) => SqlType::new(SqlTypeKind::Numeric),
+                        _ => SqlType::new(SqlTypeKind::Float8),
+                    }
+                }),
+                Some(BuiltinScalarFunction::Power) => {
+                    let left = args.first().map(|arg| {
+                        infer_sql_expr_type_with_ctes(
+                            &arg.value,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    });
+                    let right = args.get(1).map(|arg| {
+                        infer_sql_expr_type_with_ctes(
+                            &arg.value,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    });
+                    match (left, right) {
+                        (Some(left), Some(right))
+                            if matches!(
+                                left.element_type().kind,
+                                SqlTypeKind::Float4 | SqlTypeKind::Float8
+                            ) || matches!(
+                                right.element_type().kind,
+                                SqlTypeKind::Float4 | SqlTypeKind::Float8
+                            ) =>
+                        {
+                            SqlType::new(SqlTypeKind::Float8)
+                        }
+                        (Some(left), Some(right))
+                            if is_numeric_family(left) && is_numeric_family(right) =>
+                        {
+                            SqlType::new(SqlTypeKind::Numeric)
+                        }
+                        _ => SqlType::new(SqlTypeKind::Float8),
+                    }
+                }
                 Some(BuiltinScalarFunction::Log | BuiltinScalarFunction::Log10) => {
                     if args.len() == 2 {
                         function_arg_values(args).next().map_or(

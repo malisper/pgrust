@@ -245,9 +245,25 @@ pub(super) fn resolve_column(scope: &BoundScope, name: &str) -> Result<usize, Pa
         .iter()
         .enumerate()
         .filter(|(_, column)| column.output_name.eq_ignore_ascii_case(name));
-    let first = matches
-        .next()
-        .ok_or_else(|| ParseError::UnknownColumn(name.to_string()))?;
+    let Some(first) = matches.next() else {
+        let mut relation_matches = scope
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| {
+                column
+                    .relation_names
+                    .iter()
+                    .any(|relation| relation.eq_ignore_ascii_case(name))
+            });
+        let Some((index, _)) = relation_matches.next() else {
+            return Err(ParseError::UnknownColumn(name.to_string()));
+        };
+        if relation_matches.next().is_some() || scope.columns.len() != 1 {
+            return Err(ParseError::UnknownColumn(name.to_string()));
+        }
+        return Ok(index);
+    };
     if matches.next().is_some() {
         return Err(ParseError::AmbiguousColumn(name.to_string()));
     }
@@ -298,6 +314,14 @@ pub(super) fn resolve_column_with_outer(
     }
 
     Err(ParseError::UnknownColumn(name.to_string()))
+}
+
+fn from_item_is_lateral(item: &FromItem) -> bool {
+    match item {
+        FromItem::Lateral(_) => true,
+        FromItem::Alias { source, .. } => from_item_is_lateral(source),
+        _ => false,
+    }
 }
 
 fn scopes_match(left: &BoundScope, right: &BoundScope) -> bool {
@@ -769,6 +793,29 @@ pub(super) fn bind_from_item_with_ctes(
             let desc = synthetic_desc_from_analyzed_from(&bound);
             Ok((bound, scope_for_relation(None, &desc)))
         }
+        FromItem::Lateral(source) => match source.as_ref() {
+            FromItem::DerivedTable(select) => {
+                let (plan, _) = analyze_select_query_with_outer(
+                    select,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer.cloned(),
+                    ctes,
+                    expanded_views,
+                )?;
+                let bound = AnalyzedFrom::subquery(plan);
+                let desc = synthetic_desc_from_analyzed_from(&bound);
+                Ok((bound, scope_for_relation(None, &desc)))
+            }
+            other => bind_from_item_with_ctes(
+                other,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                expanded_views,
+            ),
+        },
         FromItem::Join {
             left,
             right,
@@ -783,10 +830,14 @@ pub(super) fn bind_from_item_with_ctes(
                 ctes,
                 expanded_views,
             )?;
+            let mut right_outer_scopes = outer_scopes.to_vec();
+            if from_item_is_lateral(right) {
+                right_outer_scopes.insert(0, left_scope.clone());
+            }
             let (right_plan, right_scope) = bind_from_item_with_ctes(
                 right,
                 catalog,
-                outer_scopes,
+                &right_outer_scopes,
                 grouped_outer,
                 ctes,
                 expanded_views,

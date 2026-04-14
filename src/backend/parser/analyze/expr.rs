@@ -2849,44 +2849,49 @@ fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            let operand_type = coerce_unknown_string_literal_type(
+            let initial_operand_type = coerce_unknown_string_literal_type(
                 &args[0],
                 raw_operand_type,
                 SqlType::new(SqlTypeKind::Numeric),
             );
-            let low_type = coerce_unknown_string_literal_type(&args[1], raw_low_type, operand_type);
-            let high_type =
-                coerce_unknown_string_literal_type(&args[2], raw_high_type, operand_type);
-            if !is_numeric_family(operand_type)
-                || !is_numeric_family(low_type)
-                || !is_numeric_family(high_type)
+            let initial_low_type =
+                coerce_unknown_string_literal_type(&args[1], raw_low_type, initial_operand_type);
+            let initial_high_type =
+                coerce_unknown_string_literal_type(&args[2], raw_high_type, initial_operand_type);
+            if !is_numeric_family(initial_operand_type)
+                || !is_numeric_family(initial_low_type)
+                || !is_numeric_family(initial_high_type)
                 || !is_integer_family(count_type)
             {
                 return Err(ParseError::UnexpectedToken {
                     expected: "width_bucket(numeric, numeric, numeric, int4)",
                     actual: format!(
                         "{func:?}({}, {}, {}, {})",
-                        sql_type_name(operand_type),
-                        sql_type_name(low_type),
-                        sql_type_name(high_type),
+                        sql_type_name(initial_operand_type),
+                        sql_type_name(initial_low_type),
+                        sql_type_name(initial_high_type),
                         sql_type_name(count_type)
                     ),
                 });
             }
             let target = if matches!(
-                operand_type.element_type().kind,
+                initial_operand_type.element_type().kind,
                 SqlTypeKind::Float4 | SqlTypeKind::Float8
             ) || matches!(
-                low_type.element_type().kind,
+                initial_low_type.element_type().kind,
                 SqlTypeKind::Float4 | SqlTypeKind::Float8
             ) || matches!(
-                high_type.element_type().kind,
+                initial_high_type.element_type().kind,
                 SqlTypeKind::Float4 | SqlTypeKind::Float8
             ) {
                 SqlType::new(SqlTypeKind::Float8)
             } else {
                 SqlType::new(SqlTypeKind::Numeric)
             };
+            let operand_type =
+                coerce_unknown_string_literal_type(&args[0], raw_operand_type, target);
+            let low_type = coerce_unknown_string_literal_type(&args[1], raw_low_type, target);
+            let high_type = coerce_unknown_string_literal_type(&args[2], raw_high_type, target);
             Ok(build_func(
                 func_variadic,
                 vec![
@@ -3026,10 +3031,7 @@ fn bind_scalar_function_call(
         | BuiltinScalarFunction::Ceiling
         | BuiltinScalarFunction::Floor
         | BuiltinScalarFunction::Sign
-        | BuiltinScalarFunction::Sqrt
         | BuiltinScalarFunction::Cbrt
-        | BuiltinScalarFunction::Exp
-        | BuiltinScalarFunction::Ln
         | BuiltinScalarFunction::Sinh
         | BuiltinScalarFunction::Cosh
         | BuiltinScalarFunction::Tanh
@@ -3075,6 +3077,41 @@ fn bind_scalar_function_call(
                 )],
             ))
         }
+        BuiltinScalarFunction::Sqrt
+        | BuiltinScalarFunction::Exp
+        | BuiltinScalarFunction::Ln => {
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let arg_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_arg_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            if !is_numeric_family(arg_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric argument",
+                    actual: format!("{func:?}({})", sql_type_name(arg_type)),
+                });
+            }
+            let target = if matches!(
+                arg_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) {
+                SqlType::new(SqlTypeKind::Float8)
+            } else {
+                SqlType::new(SqlTypeKind::Numeric)
+            };
+            Ok(build_func(
+                func_variadic,
+                vec![coerce_bound_expr(bound_args[0].clone(), arg_type, target)],
+            ))
+        }
         BuiltinScalarFunction::BitcastIntegerToFloat4 => {
             let arg_type = infer_sql_expr_type_with_ctes(
                 &args[0],
@@ -3109,7 +3146,7 @@ fn bind_scalar_function_call(
             }
             Ok(build_func(func_variadic, vec![bound_args[0].clone()]))
         }
-        BuiltinScalarFunction::Power | BuiltinScalarFunction::Atan2d => {
+        BuiltinScalarFunction::Atan2d => {
             let raw_left_type = infer_sql_expr_type_with_ctes(
                 &args[0],
                 scope,
@@ -3159,6 +3196,62 @@ fn bind_scalar_function_call(
                         right_type,
                         SqlType::new(SqlTypeKind::Float8),
                     ),
+                ],
+            ))
+        }
+        BuiltinScalarFunction::Power => {
+            let raw_left_type = infer_sql_expr_type_with_ctes(
+                &args[0],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let raw_right_type = infer_sql_expr_type_with_ctes(
+                &args[1],
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+            let left_type = coerce_unknown_string_literal_type(
+                &args[0],
+                raw_left_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            let right_type = coerce_unknown_string_literal_type(
+                &args[1],
+                raw_right_type,
+                SqlType::new(SqlTypeKind::Numeric),
+            );
+            if !is_numeric_family(left_type) || !is_numeric_family(right_type) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "numeric arguments",
+                    actual: format!(
+                        "{func:?}({}, {})",
+                        sql_type_name(left_type),
+                        sql_type_name(right_type)
+                    ),
+                });
+            }
+            let target = if matches!(
+                left_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) || matches!(
+                right_type.element_type().kind,
+                SqlTypeKind::Float4 | SqlTypeKind::Float8
+            ) {
+                SqlType::new(SqlTypeKind::Float8)
+            } else {
+                SqlType::new(SqlTypeKind::Numeric)
+            };
+            Ok(build_func(
+                func_variadic,
+                vec![
+                    coerce_bound_expr(bound_args[0].clone(), left_type, target),
+                    coerce_bound_expr(bound_args[1].clone(), right_type, target),
                 ],
             ))
         }

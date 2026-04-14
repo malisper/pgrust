@@ -320,7 +320,7 @@ pub enum Value {
 
 #[derive(Debug, Clone)]
 pub enum NumericValue {
-    Finite { coeff: BigInt, scale: u32 },
+    Finite { coeff: BigInt, scale: u32, dscale: u32 },
     PosInf,
     NegInf,
     NaN,
@@ -331,6 +331,7 @@ impl NumericValue {
         Self::Finite {
             coeff: BigInt::zero(),
             scale: 0,
+            dscale: 0,
         }
     }
 
@@ -338,6 +339,26 @@ impl NumericValue {
         Self::Finite {
             coeff: BigInt::from(value),
             scale: 0,
+            dscale: 0,
+        }
+    }
+
+    pub fn finite(coeff: BigInt, scale: u32) -> Self {
+        Self::Finite {
+            coeff,
+            scale,
+            dscale: scale,
+        }
+    }
+
+    pub fn with_dscale(self, dscale: u32) -> Self {
+        match self {
+            Self::Finite { coeff, scale, .. } => Self::Finite {
+                coeff,
+                scale,
+                dscale,
+            },
+            other => other,
         }
     }
 
@@ -348,9 +369,14 @@ impl NumericValue {
             Self::Finite {
                 mut coeff,
                 mut scale,
+                dscale,
             } => {
                 if coeff.is_zero() {
-                    return Self::Finite { coeff, scale };
+                    return Self::Finite {
+                        coeff,
+                        scale,
+                        dscale,
+                    };
                 }
                 let ten = BigInt::from(10u8);
                 while scale > 0 {
@@ -361,7 +387,11 @@ impl NumericValue {
                     coeff = q;
                     scale -= 1;
                 }
-                Self::Finite { coeff, scale }
+                Self::Finite {
+                    coeff,
+                    scale,
+                    dscale,
+                }
             }
         }
     }
@@ -392,9 +422,10 @@ impl NumericValue {
             Self::PosInf => Self::NegInf,
             Self::NegInf => Self::PosInf,
             Self::NaN => Self::NaN,
-            Self::Finite { coeff, scale } => Self::Finite {
+            Self::Finite { coeff, scale, dscale } => Self::Finite {
                 coeff: -coeff.clone(),
                 scale: *scale,
+                dscale: *dscale,
             },
         }
     }
@@ -403,9 +434,10 @@ impl NumericValue {
         match self {
             Self::PosInf | Self::NegInf => Self::PosInf,
             Self::NaN => Self::NaN,
-            Self::Finite { coeff, scale } => Self::Finite {
+            Self::Finite { coeff, scale, dscale } => Self::Finite {
                 coeff: coeff.abs(),
                 scale: *scale,
+                dscale: *dscale,
             },
         }
     }
@@ -415,15 +447,22 @@ impl NumericValue {
             Self::PosInf => "Infinity".to_string(),
             Self::NegInf => "-Infinity".to_string(),
             Self::NaN => "NaN".to_string(),
-            Self::Finite { coeff, scale } => {
+            Self::Finite { coeff, scale, dscale } => {
                 let negative = coeff.is_negative();
                 let digits = coeff.abs().to_str_radix(10);
                 if *scale == 0 {
-                    if negative {
+                    let mut out = if negative {
                         format!("-{digits}")
                     } else {
                         digits
+                    };
+                    if *dscale > 0 {
+                        out.push('.');
+                        for _ in 0..*dscale {
+                            out.push('0');
+                        }
                     }
+                    out
                 } else {
                     let scale = *scale as usize;
                     let mut out = String::new();
@@ -443,6 +482,11 @@ impl NumericValue {
                         out.push('.');
                         out.push_str(&digits[split..]);
                     }
+                    if (*dscale as usize) > scale {
+                        for _ in 0..((*dscale as usize) - scale) {
+                            out.push('0');
+                        }
+                    }
                     out
                 }
             }
@@ -459,10 +503,12 @@ impl PartialEq for NumericValue {
                 Self::Finite {
                     coeff: left_coeff,
                     scale: left_scale,
+                    ..
                 },
                 Self::Finite {
                     coeff: right_coeff,
                     scale: right_scale,
+                    ..
                 },
             ) => left_coeff == right_coeff && left_scale == right_scale,
             _ => false,
@@ -484,7 +530,7 @@ impl Hash for NumericValue {
             Self::NegInf => {
                 2u8.hash(state);
             }
-            Self::Finite { coeff, scale } => {
+            Self::Finite { coeff, scale, .. } => {
                 3u8.hash(state);
                 coeff.hash(state);
                 scale.hash(state);
@@ -548,13 +594,7 @@ fn parse_numeric_literal(text: &str) -> Option<NumericValue> {
     if negative {
         coeff = -coeff;
     }
-    Some(
-        NumericValue::Finite {
-            coeff,
-            scale: scale as u32,
-        }
-        .normalize(),
-    )
+    Some(NumericValue::finite(coeff, scale as u32).normalize())
 }
 
 impl Value {
