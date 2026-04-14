@@ -34,8 +34,8 @@ pub(crate) mod tuple_decoder {
     pub(crate) use super::exec_tuples::*;
 }
 
-pub use crate::include::nodes::datum::*;
 pub use crate::include::executor::execdesc::*;
+pub use crate::include::nodes::datum::*;
 pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
 pub(crate) use agg::{AccumState, AggGroup};

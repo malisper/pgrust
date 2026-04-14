@@ -1,9 +1,9 @@
 use crate::RelFileLocator;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
-use crate::include::executor::execdesc::CommandType;
-use crate::include::nodes::parsenodes::Query;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::parsenodes::Query;
 pub use crate::include::nodes::pathnodes::{
     PlannerJoinArraySubscript, PlannerJoinExpr, PlannerOrderByEntry, PlannerProjectSetTarget,
     PlannerTargetEntry,
@@ -142,6 +142,13 @@ pub enum Plan {
     },
 }
 
+// :HACK: Transitional wrapper while pgrust still lets subqueries move around as
+// either semantic Query trees or executable Plan trees. PostgreSQL does not use
+// a single enum like this: expression subqueries stay as semantic SubLink/Query
+// until planning, then become SubPlan references into PlannedStmt.subplans.
+// PostgreSQL also identifies functions and aggregates in semantic nodes by OID
+// (for example FuncExpr.funcid and Aggref.aggfnoid), not by pgrust-specific
+// builtin enums such as BuiltinScalarFunction or AggFunc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeferredSelectPlan {
     Bound(Box<Query>),

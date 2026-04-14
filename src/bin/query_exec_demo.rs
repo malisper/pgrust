@@ -151,18 +151,8 @@ fn main() -> Result<(), ExecError> {
             ),
         }),
         targets: vec![
-            TargetEntry::new(
-                "name",
-                Expr::Column(1),
-                SqlType::new(SqlTypeKind::Text),
-                1,
-            ),
-            TargetEntry::new(
-                "note",
-                Expr::Column(2),
-                SqlType::new(SqlTypeKind::Text),
-                2,
-            ),
+            TargetEntry::new("name", Expr::Column(1), SqlType::new(SqlTypeKind::Text), 1),
+            TargetEntry::new("note", Expr::Column(2), SqlType::new(SqlTypeKind::Text), 2),
         ],
     };
 

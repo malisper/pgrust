@@ -4,21 +4,20 @@ use std::collections::HashMap;
 mod pathnodes;
 
 use crate::RelFileLocator;
+use crate::backend::executor::{Value, compare_order_values};
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::include::catalog::{BTREE_AM_OID, PgStatisticRow};
-use crate::include::nodes::datum::ArrayValue;
 use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::parsenodes::Query;
 use crate::include::nodes::pathnodes::{
-    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget,
-    PlannerTargetEntry,
+    PlannerJoinExpr, PlannerOrderByEntry, PlannerPath, PlannerProjectSetTarget, PlannerTargetEntry,
 };
 use crate::include::nodes::plannodes::{DeferredSelectPlan, Plan, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ExprArraySubscript, JoinType, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, ToastRelationRef,
 };
-use crate::backend::executor::{Value, compare_order_values};
 use pathnodes::next_synthetic_slot_id;
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
@@ -72,10 +71,7 @@ fn create_plan(path: PlannerPath) -> Plan {
     path.into_plan()
 }
 
-pub(crate) fn standard_planner(
-    query: Query,
-    catalog: &dyn CatalogLookup,
-) -> PlannedStmt {
+pub(crate) fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
     PlannedStmt {
         command_type: CommandType::Select,
         plan_tree: finalize_plan_subqueries(
@@ -102,9 +98,10 @@ pub(crate) fn finalize_deferred_select_plan(
 }
 
 pub(crate) fn finalize_expr_subqueries(expr: Expr, catalog: &dyn CatalogLookup) -> Expr {
+    let expr = expr.into_legacy_shape();
     match expr {
-        Expr::Var(_) |
-        Expr::Column(_)
+        Expr::Var(_)
+        | Expr::Column(_)
         | Expr::OuterColumn { .. }
         | Expr::Const(_)
         | Expr::Random
@@ -276,6 +273,9 @@ pub(crate) fn finalize_expr_subqueries(expr: Expr, catalog: &dyn CatalogLookup) 
                 .collect(),
             func_variadic,
         },
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+            unreachable!("subquery finalization should run on legacy Expr form")
+        }
     }
 }
 
@@ -839,7 +839,15 @@ fn try_optimize_access_subtree(
                 toast,
                 desc,
                 ..
-            } => (source_id, rel, relation_oid, toast, desc, Some(predicate), None),
+            } => (
+                source_id,
+                rel,
+                relation_oid,
+                toast,
+                desc,
+                Some(predicate),
+                None,
+            ),
             other => {
                 return Err(PlannerPath::Filter {
                     plan_info: PlanEstimate::default(),

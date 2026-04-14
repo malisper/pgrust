@@ -8,6 +8,9 @@ use crate::include::nodes::plannodes::{BoundFromPlan, BoundSelectPlan, DeferredS
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
+        Expr::Op(_) | Expr::Bool(_) | Expr::Func(_) | Expr::SubLink(_) | Expr::ScalarArrayOp(_) => {
+            collect_rels_from_expr(&expr.clone().into_legacy_shape(), rels)
+        }
         Expr::Var(_)
         | Expr::Column(_)
         | Expr::OuterColumn { .. }
@@ -149,7 +152,9 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
                     }
                 }
             }
-            RangeTblEntryKind::Function { call } => collect_rels_from_set_returning_call(call, rels),
+            RangeTblEntryKind::Function { call } => {
+                collect_rels_from_set_returning_call(call, rels)
+            }
             RangeTblEntryKind::Subquery { query } => collect_rels_from_query(query, rels),
         }
     }
@@ -188,7 +193,9 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
 fn collect_rels_from_jointree(jointree: &JoinTreeNode, rels: &mut BTreeSet<RelFileLocator>) {
     match jointree {
         JoinTreeNode::RangeTblRef(_) => {}
-        JoinTreeNode::JoinExpr { left, right, quals, .. } => {
+        JoinTreeNode::JoinExpr {
+            left, right, quals, ..
+        } => {
             collect_rels_from_jointree(left, rels);
             collect_rels_from_jointree(right, rels);
             collect_rels_from_expr(quals, rels);

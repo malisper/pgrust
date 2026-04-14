@@ -128,8 +128,10 @@ pub(crate) fn execute_explain(
     };
 
     let plan_start = std::time::Instant::now();
-    let query_desc =
-        create_query_desc(crate::backend::parser::pg_plan_query(&select, catalog)?, None);
+    let query_desc = create_query_desc(
+        crate::backend::parser::pg_plan_query(&select, catalog)?,
+        None,
+    );
     let mut lines = Vec::new();
     if stmt.analyze {
         ctx.pool.reset_usage_stats();
