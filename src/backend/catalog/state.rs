@@ -19,6 +19,10 @@ use crate::include::catalog::{
 const DEFAULT_SPC_OID: u32 = 0;
 const DEFAULT_DB_OID: u32 = 1;
 
+fn dropped_column_name(attnum: usize) -> String {
+    format!("........pg.dropped.{attnum}........")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogIndexMeta {
     pub indrelid: u32,
@@ -552,6 +556,58 @@ impl Catalog {
         let mut new_entry = old_entry.clone();
         new_entry.desc.columns.push(column);
         allocate_relation_object_oids(&mut new_entry.desc, &mut self.next_oid);
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
+    }
+
+    pub fn alter_table_drop_column(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let column_index = old_entry
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(index, column)| {
+                (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+            })
+            .ok_or_else(|| CatalogError::UnknownColumn(column_name.to_string()))?;
+
+        let mut new_entry = old_entry.clone();
+        let attnum = column_index + 1;
+        let column = &mut new_entry.desc.columns[column_index];
+        column.name = dropped_column_name(attnum);
+        column.storage.name = column.name.clone();
+        column.storage.nullable = true;
+        column.dropped = true;
+        column.attstattarget = -1;
+        column.not_null_constraint_oid = None;
+        column.attrdef_oid = None;
+        column.default_expr = None;
+        column.missing_default_value = None;
+
         let entry = self
             .tables
             .get_mut(&name)

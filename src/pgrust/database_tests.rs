@@ -1542,6 +1542,65 @@ fn alter_table_add_column_rejects_unsupported_forms() {
 }
 
 #[test]
+fn alter_table_drop_column_hides_column_and_retargets_inserts() {
+    let base = temp_dir("alter_table_drop_column");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (a int4 not null, b int4, c int4 not null, d int4)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 2, 3, 4)")
+        .unwrap();
+    db.execute(1, "alter table items drop a").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from items order by b"),
+        vec![vec![Value::Int32(2), Value::Int32(3), Value::Int32(4)]]
+    );
+
+    match db.execute(1, "select a from items") {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "a" => {}
+        other => panic!("expected dropped column lookup to fail, got {other:?}"),
+    }
+
+    match db.execute(1, "insert into items values (10, 11, 12, 13)") {
+        Err(ExecError::Parse(ParseError::InvalidInsertTargetCount { expected, actual }))
+            if expected == 3 && actual == 4 => {}
+        other => panic!("expected visible-column insert width check, got {other:?}"),
+    }
+
+    db.execute(1, "insert into items values (11, 12, 13)").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from items order by b"),
+        vec![
+            vec![Value::Int32(2), Value::Int32(3), Value::Int32(4)],
+            vec![Value::Int32(11), Value::Int32(12), Value::Int32(13)],
+        ]
+    );
+}
+
+#[test]
+fn alter_table_drop_column_persists_hidden_metadata() {
+    let base = temp_dir("alter_table_drop_column_reopen");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (a int4 not null, b int4)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 2)").unwrap();
+    db.execute(1, "alter table items drop a").unwrap();
+    drop(db);
+
+    let reopened = Database::open(&base, 16).unwrap();
+    let relcache = reopened.catalog.read().relcache().unwrap();
+    let entry = relcache.get_by_name("items").unwrap();
+    assert!(entry.desc.columns[0].dropped);
+    assert_eq!(entry.desc.columns[0].name, "........pg.dropped.1........");
+    assert_eq!(
+        query_rows(&reopened, 1, "select * from items"),
+        vec![vec![Value::Int32(2)]]
+    );
+}
+
+#[test]
 fn alter_table_rename_updates_name_and_rolls_back() {
     let base = temp_dir("alter_table_rename_txn");
     let db = Database::open(&base, 16).unwrap();

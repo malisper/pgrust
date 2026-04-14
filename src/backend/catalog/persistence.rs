@@ -294,7 +294,7 @@ fn catalog_row_identity_matches(
         | BootstrapCatalogKind::PgAttrdef => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgAttribute => {
             catalog_value_eq(left.first(), right.first())
-                && catalog_value_eq(left.get(3), right.get(3))
+                && catalog_value_eq(left.get(4), right.get(4))
         }
         BootstrapCatalogKind::PgConstraint => catalog_value_eq(left.first(), right.first()),
         BootstrapCatalogKind::PgDepend => {

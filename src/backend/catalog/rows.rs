@@ -246,6 +246,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                     attlen: column.storage.attlen,
                     attnum: idx.saturating_add(1) as i16,
                     attnotnull: !column.storage.nullable,
+                    attisdropped: column.dropped,
                     atttypmod: column.sql_type.typmod,
                     attalign: column.storage.attalign,
                     attstorage: column.storage.attstorage,

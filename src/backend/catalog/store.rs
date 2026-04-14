@@ -104,7 +104,7 @@ impl CatalogStore {
 
         let (mut catalog, control) = if control_path.exists() {
             let control = load_control_file(&control_path)?;
-            let mut catalog = load_catalog_from_physical(&base_dir)?;
+            let mut catalog = load_catalog_from_visible_physical_startup(&base_dir)?;
             insert_missing_bootstrap_relations(&mut catalog);
             insert_bootstrap_system_indexes(&mut catalog);
             catalog.next_oid = catalog.next_oid.max(control.next_oid);
@@ -826,6 +826,46 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_table_drop_column_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut catalog = self.catalog_snapshot_with_control_for_snapshot(ctx)?;
+        let (name, old_entry, new_entry) =
+            catalog.alter_table_drop_column(relation_oid, column_name)?;
+
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgAttribute,
+            BootstrapCatalogKind::PgConstraint,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        if old_entry
+            .desc
+            .columns
+            .iter()
+            .any(|column| column.attrdef_oid.is_some())
+            || new_entry
+                .desc
+                .columns
+                .iter()
+                .any(|column| column.attrdef_oid.is_some())
+        {
+            kinds.push(BootstrapCatalogKind::PgAttrdef);
+        }
+        let old_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &old_entry);
+        let new_rows = physical_catalog_rows_for_catalog_entry(&catalog, &name, &new_entry);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, 1, &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, 1, &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
     pub fn rename_relation_mvcc(
         &mut self,
         relation_oid: u32,
@@ -1154,6 +1194,19 @@ impl CatalogStore {
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }
+}
+
+fn load_catalog_from_visible_physical_startup(base_dir: &Path) -> Result<Catalog, CatalogError> {
+    let txns = TransactionManager::new_durable(base_dir.to_path_buf())
+        .map_err(|e| CatalogError::Io(format!("transaction status load failed: {e:?}")))?;
+    let snapshot = txns
+        .snapshot(INVALID_TRANSACTION_ID)
+        .map_err(|e| CatalogError::Io(format!("startup catalog snapshot failed: {e:?}")))?;
+    let pool = BufferPool::new(
+        SmgrStorageBackend::new(MdStorageManager::new(base_dir)),
+        64,
+    );
+    load_catalog_from_visible_physical(base_dir, &pool, &txns, &snapshot, 0)
 }
 
 fn sync_physical_catalogs(base_dir: &Path, catalog: &Catalog) -> Result<(), CatalogError> {

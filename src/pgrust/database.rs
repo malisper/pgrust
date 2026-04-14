@@ -32,10 +32,11 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
-    CommentOnTableStatement, CreateIndexStatement, CreateTableAsStatement, CreateTableStatement,
-    CreateViewStatement, DropViewStatement, OnCommitAction, ParseError, TablePersistence,
-    bind_delete, bind_insert, bind_update, create_relation_desc, lower_create_table,
+    AlterTableAddColumnStatement, AlterTableDropColumnStatement, AlterTableRenameStatement,
+    AnalyzeStatement, CatalogLookup, CommentOnTableStatement, CreateIndexStatement,
+    CreateTableAsStatement, CreateTableStatement, CreateViewStatement, DropViewStatement,
+    OnCommitAction, ParseError, TablePersistence, bind_delete, bind_insert, bind_update,
+    create_relation_desc, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations, unlock_relations,
