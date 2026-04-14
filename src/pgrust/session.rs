@@ -1129,156 +1129,156 @@ impl Session {
             false
         };
 
-        let (xid, cid) = {
-            let txn = self.active_txn.as_mut().unwrap();
-            let xid = txn.xid;
-            let cid = txn.next_command_id;
-            txn.next_command_id = txn.next_command_id.saturating_add(1);
-            (xid, cid)
-        };
+        let result = (|| -> Result<usize, ExecError> {
+            let (xid, cid) = {
+                let txn = self.active_txn.as_mut().unwrap();
+                let xid = txn.xid;
+                let cid = txn.next_command_id;
+                txn.next_command_id = txn.next_command_id.saturating_add(1);
+                (xid, cid)
+            };
 
-        let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let (rel, toast, toast_index, desc, indexes) = {
-            let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
-                ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
-            })?;
-            let toast_index = entry.toast.and_then(|toast| {
-                catalog
-                    .index_relations_for_heap(toast.relation_oid)
-                    .into_iter()
-                    .next()
-            });
-            (
-                entry.rel,
-                entry.toast,
-                toast_index,
-                entry.desc.clone(),
-                catalog.index_relations_for_heap(entry.relation_oid),
-            )
-        };
-        let target_indexes = if let Some(columns) = target_columns {
-            let mut indexes = Vec::with_capacity(columns.len());
-            for name in columns {
-                let Some(index) = desc.columns.iter().position(|column| column.name == *name)
-                else {
-                    return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
-                };
-                indexes.push(index);
-            }
-            indexes
-        } else {
-            (0..desc.columns.len()).collect()
-        };
-
-        self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
-
-        let parsed_rows = rows
-            .iter()
-            .map(|row| {
-                if row.len() != target_indexes.len() {
-                    return Err(ExecError::Parse(ParseError::InvalidInsertTargetCount {
-                        expected: target_indexes.len(),
-                        actual: row.len(),
-                    }));
+            let catalog = self.catalog_lookup_for_command(db, xid, cid);
+            let (rel, toast, toast_index, desc, indexes) = {
+                let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
+                })?;
+                let toast_index = entry.toast.and_then(|toast| {
+                    catalog
+                        .index_relations_for_heap(toast.relation_oid)
+                        .into_iter()
+                        .next()
+                });
+                (
+                    entry.rel,
+                    entry.toast,
+                    toast_index,
+                    entry.desc.clone(),
+                    catalog.index_relations_for_heap(entry.relation_oid),
+                )
+            };
+            let target_indexes = if let Some(columns) = target_columns {
+                let mut indexes = Vec::with_capacity(columns.len());
+                for name in columns {
+                    let Some(index) = desc.columns.iter().position(|column| column.name == *name)
+                    else {
+                        return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+                    };
+                    indexes.push(index);
                 }
+                indexes
+            } else {
+                (0..desc.columns.len()).collect()
+            };
 
-                let mut values = vec![Value::Null; desc.columns.len()];
-                for (raw, target_index) in row.iter().zip(target_indexes.iter().copied()) {
-                    let column = &desc.columns[target_index];
-                    let value = if raw == "\\N" {
-                        Value::Null
-                    } else {
-                        match column.ty {
-                            ScalarType::Int16 => {
-                                raw.parse::<i16>().map(Value::Int16).map_err(|_| {
-                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                })?
-                            }
-                            ScalarType::Int32 => {
-                                raw.parse::<i32>().map(Value::Int32).map_err(|_| {
-                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                })?
-                            }
-                            ScalarType::Int64 => {
-                                raw.parse::<i64>().map(Value::Int64).map_err(|_| {
-                                    ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
-                                })?
-                            }
-                            ScalarType::Date
-                            | ScalarType::Time
-                            | ScalarType::TimeTz
-                            | ScalarType::Timestamp
-                            | ScalarType::TimestampTz
-                            | ScalarType::Point
-                            | ScalarType::Lseg
-                            | ScalarType::Path
-                            | ScalarType::Line
-                            | ScalarType::Box
-                            | ScalarType::Polygon
-                            | ScalarType::Circle
-                            | ScalarType::TsVector
-                            | ScalarType::TsQuery => {
-                                cast_value(Value::Text(raw.clone().into()), column.sql_type)?
-                            }
-                            ScalarType::BitString => {
-                                cast_value(Value::Text(raw.clone().into()), column.sql_type)?
-                            }
-                            ScalarType::Float32 | ScalarType::Float64 => raw
-                                .parse::<f64>()
-                                .map(Value::Float64)
-                                .map_err(|_| ExecError::TypeMismatch {
-                                    op: "copy assignment",
-                                    left: Value::Null,
-                                    right: Value::Text(raw.clone().into()),
-                                })?,
-                            ScalarType::Numeric => Value::Numeric(raw.as_str().into()),
-                            ScalarType::Json => Value::Json(raw.clone().into()),
-                            ScalarType::Jsonb => Value::Jsonb(
-                                crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
-                            ),
-                            ScalarType::JsonPath => Value::JsonPath(
-                                canonicalize_jsonpath(raw)
-                                    .map_err(|_| ExecError::InvalidStorageValue {
-                                        column: "<copy>".into(),
-                                        details: format!(
-                                            "invalid input syntax for type jsonpath: \"{raw}\""
-                                        ),
+            self.lock_table_if_needed(db, rel, TableLockMode::RowExclusive)?;
+
+            let parsed_rows = rows
+                .iter()
+                .map(|row| {
+                    if row.len() != target_indexes.len() {
+                        return Err(ExecError::Parse(ParseError::InvalidInsertTargetCount {
+                            expected: target_indexes.len(),
+                            actual: row.len(),
+                        }));
+                    }
+
+                    let mut values = vec![Value::Null; desc.columns.len()];
+                    for (raw, target_index) in row.iter().zip(target_indexes.iter().copied()) {
+                        let column = &desc.columns[target_index];
+                        let value = if raw == "\\N" {
+                            Value::Null
+                        } else {
+                            match column.ty {
+                                ScalarType::Int16 => {
+                                    raw.parse::<i16>().map(Value::Int16).map_err(|_| {
+                                        ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
                                     })?
-                                    .into(),
-                            ),
-                            ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
-                            ScalarType::Text => Value::Text(raw.clone().into()),
-                            ScalarType::Record => {
-                                return Err(ExecError::UnsupportedStorageType {
-                                    column: column.name.clone(),
-                                    ty: column.ty.clone(),
-                                    attlen: column.storage.attlen,
-                                });
-                            }
-                            ScalarType::Bool => match raw.as_str() {
-                                "t" | "true" | "1" => Value::Bool(true),
-                                "f" | "false" | "0" => Value::Bool(false),
-                                _ => {
-                                    return Err(ExecError::TypeMismatch {
+                                }
+                                ScalarType::Int32 => {
+                                    raw.parse::<i32>().map(Value::Int32).map_err(|_| {
+                                        ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                    })?
+                                }
+                                ScalarType::Int64 => {
+                                    raw.parse::<i64>().map(Value::Int64).map_err(|_| {
+                                        ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
+                                    })?
+                                }
+                                ScalarType::Date
+                                | ScalarType::Time
+                                | ScalarType::TimeTz
+                                | ScalarType::Timestamp
+                                | ScalarType::TimestampTz
+                                | ScalarType::Point
+                                | ScalarType::Lseg
+                                | ScalarType::Path
+                                | ScalarType::Line
+                                | ScalarType::Box
+                                | ScalarType::Polygon
+                                | ScalarType::Circle
+                                | ScalarType::TsVector
+                                | ScalarType::TsQuery => {
+                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                }
+                                ScalarType::BitString => {
+                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                }
+                                ScalarType::Float32 | ScalarType::Float64 => raw
+                                    .parse::<f64>()
+                                    .map(Value::Float64)
+                                    .map_err(|_| ExecError::TypeMismatch {
                                         op: "copy assignment",
                                         left: Value::Null,
                                         right: Value::Text(raw.clone().into()),
+                                    })?,
+                                ScalarType::Numeric => Value::Numeric(raw.as_str().into()),
+                                ScalarType::Json => Value::Json(raw.clone().into()),
+                                ScalarType::Jsonb => Value::Jsonb(
+                                    crate::backend::executor::jsonb::parse_jsonb_text(raw)?,
+                                ),
+                                ScalarType::JsonPath => Value::JsonPath(
+                                    canonicalize_jsonpath(raw)
+                                        .map_err(|_| ExecError::InvalidStorageValue {
+                                            column: "<copy>".into(),
+                                            details: format!(
+                                                "invalid input syntax for type jsonpath: \"{raw}\""
+                                            ),
+                                        })?
+                                        .into(),
+                                ),
+                                ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
+                                ScalarType::Text => Value::Text(raw.clone().into()),
+                                ScalarType::Record => {
+                                    return Err(ExecError::UnsupportedStorageType {
+                                        column: column.name.clone(),
+                                        ty: column.ty.clone(),
+                                        attlen: column.storage.attlen,
                                     });
                                 }
-                            },
-                            ScalarType::Array(_) => {
-                                parse_text_array_literal(raw, column.sql_type.element_type())?
+                                ScalarType::Bool => match raw.as_str() {
+                                    "t" | "true" | "1" => Value::Bool(true),
+                                    "f" | "false" | "0" => Value::Bool(false),
+                                    _ => {
+                                        return Err(ExecError::TypeMismatch {
+                                            op: "copy assignment",
+                                            left: Value::Null,
+                                            right: Value::Text(raw.clone().into()),
+                                        });
+                                    }
+                                },
+                                ScalarType::Array(_) => {
+                                    parse_text_array_literal(raw, column.sql_type.element_type())?
+                                }
                             }
-                        }
-                    };
-                    values[target_index] = value;
-                }
+                        };
+                        values[target_index] = value;
+                    }
 
-                Ok(values)
-            })
-            .collect::<Result<Vec<_>, ExecError>>();
-
-        let result = parsed_rows.and_then(|parsed_rows| {
+                    Ok(values)
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?;
+ 
             let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
             let interrupts = self.interrupts();
             let mut ctx = ExecutorContext {
@@ -1304,7 +1304,7 @@ impl Session {
                 xid,
                 cid,
             )
-        });
+        })();
 
         let final_result = if started_txn {
             let txn = self.active_txn.take().unwrap();

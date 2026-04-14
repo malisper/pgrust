@@ -4502,6 +4502,36 @@ fn copy_from_rows_into_column_subset_leaves_other_columns_null() {
 }
 
 #[test]
+fn copy_from_rows_into_failed_implicit_transaction_cleans_session_state() {
+    let base = temp_dir("copy_from_rows_cleanup");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create table items (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(1, "alter table items drop a").unwrap();
+
+    match session.copy_from_rows_into(&db, "items", Some(&["a".into()]), &[vec!["10".into()]]) {
+        Err(ExecError::Parse(ParseError::UnknownColumn(name))) if name == "a" => {}
+        other => panic!("expected dropped-column COPY target failure, got {:?}", other),
+    }
+
+    assert!(!session.in_transaction());
+    assert!(!session.transaction_failed());
+
+    session
+        .execute(&db, "create table after_copy_failure (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into after_copy_failure values (1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select * from after_copy_failure"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn concurrent_selects_on_shared_data() {
     let base = temp_dir("concurrent_selects");
     let db = Database::open(&base, 32).unwrap();
