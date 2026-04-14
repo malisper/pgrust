@@ -1,7 +1,13 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+mod bestpath;
+mod joininfo;
 mod pathnodes;
+mod root;
+#[cfg(test)]
+mod tests;
+mod upperrels;
 
 use crate::RelFileLocator;
 use crate::backend::executor::{Value, compare_order_values};
@@ -11,6 +17,7 @@ use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo,
+    SpecialJoinInfo, UpperRelKind,
 };
 use crate::include::nodes::plannodes::{Plan, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -104,23 +111,19 @@ fn has_grouping(root: &PlannerInfo) -> bool {
 }
 
 fn relids_union(left: &[usize], right: &[usize]) -> Vec<usize> {
-    let mut relids = left.to_vec();
-    relids.extend(right.iter().copied());
-    relids.sort_unstable();
-    relids.dedup();
-    relids
+    joininfo::relids_union(left, right)
 }
 
 fn relids_subset(required: &[usize], available: &[usize]) -> bool {
-    required.iter().all(|relid| available.contains(relid))
+    joininfo::relids_subset(required, available)
 }
 
 fn relids_overlap(left: &[usize], right: &[usize]) -> bool {
-    left.iter().any(|relid| right.contains(relid))
+    joininfo::relids_overlap(left, right)
 }
 
 fn relids_disjoint(left: &[usize], right: &[usize]) -> bool {
-    !relids_overlap(left, right)
+    joininfo::relids_disjoint(left, right)
 }
 
 fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
@@ -134,104 +137,7 @@ fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
 }
 
 fn expr_relids(expr: &Expr) -> Vec<usize> {
-    fn collect(expr: &Expr, relids: &mut Vec<usize>) {
-        match expr {
-            Expr::Var(var) if var.varlevelsup == 0 => relids.push(var.varno),
-            Expr::Aggref(aggref) => {
-                for arg in &aggref.args {
-                    collect(arg, relids);
-                }
-            }
-            Expr::Op(op) => {
-                for arg in &op.args {
-                    collect(arg, relids);
-                }
-            }
-            Expr::Bool(bool_expr) => {
-                for arg in &bool_expr.args {
-                    collect(arg, relids);
-                }
-            }
-            Expr::Func(func) => {
-                for arg in &func.args {
-                    collect(arg, relids);
-                }
-            }
-            Expr::SubLink(sublink) => {
-                if let Some(testexpr) = &sublink.testexpr {
-                    collect(testexpr, relids);
-                }
-            }
-            Expr::SubPlan(subplan) => {
-                if let Some(testexpr) = &subplan.testexpr {
-                    collect(testexpr, relids);
-                }
-            }
-            Expr::ScalarArrayOp(saop) => {
-                collect(&saop.left, relids);
-                collect(&saop.right, relids);
-            }
-            Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
-                collect(inner, relids)
-            }
-            Expr::Like {
-                expr,
-                pattern,
-                escape,
-                ..
-            }
-            | Expr::Similar {
-                expr,
-                pattern,
-                escape,
-                ..
-            } => {
-                collect(expr, relids);
-                collect(pattern, relids);
-                if let Some(escape) = escape {
-                    collect(escape, relids);
-                }
-            }
-            Expr::IsDistinctFrom(left, right)
-            | Expr::IsNotDistinctFrom(left, right)
-            | Expr::Coalesce(left, right) => {
-                collect(left, relids);
-                collect(right, relids);
-            }
-            Expr::ArrayLiteral { elements, .. } => {
-                for element in elements {
-                    collect(element, relids);
-                }
-            }
-            Expr::ArraySubscript { array, subscripts } => {
-                collect(array, relids);
-                for subscript in subscripts {
-                    if let Some(lower) = &subscript.lower {
-                        collect(lower, relids);
-                    }
-                    if let Some(upper) = &subscript.upper {
-                        collect(upper, relids);
-                    }
-                }
-            }
-            Expr::Column(_)
-            | Expr::OuterColumn { .. }
-            | Expr::Const(_)
-            | Expr::Random
-            | Expr::CurrentDate
-            | Expr::CurrentTime { .. }
-            | Expr::CurrentTimestamp { .. }
-            | Expr::LocalTime { .. }
-            | Expr::LocalTimestamp { .. } => {}
-            Expr::Var(_) => {}
-        }
-    }
-
-    let mut relids = Vec::new();
-    collect(expr, &mut relids);
-    relids.sort_unstable();
-    relids.dedup();
-    relids
+    joininfo::expr_relids(expr)
 }
 
 #[derive(Debug, Clone)]
@@ -273,41 +179,6 @@ fn exact_join_rtindex_for_relids(node: &JoinTreeNode, target_relids: &[usize]) -
     }
 }
 
-fn exact_inner_join_spec_from_node(
-    node: &JoinTreeNode,
-    left_relids: &[usize],
-    right_relids: &[usize],
-) -> Option<(JoinType, usize)> {
-    match node {
-        JoinTreeNode::RangeTblRef(_) => None,
-        JoinTreeNode::JoinExpr {
-            left,
-            right,
-            kind,
-            rtindex,
-            ..
-        } => {
-            let left_match = exact_inner_join_spec_from_node(left, left_relids, right_relids);
-            let right_match = exact_inner_join_spec_from_node(right, left_relids, right_relids);
-            let left_side = jointree_relids(left);
-            let right_side = jointree_relids(right);
-            let current_relids = relids_union(&left_side, &right_side);
-            let target_relids = relids_union(left_relids, right_relids);
-            if matches!(kind, JoinType::Inner | JoinType::Cross)
-                && current_relids == target_relids
-                && ((relids_subset(left_relids, &left_side)
-                    && relids_subset(right_relids, &right_side))
-                    || (relids_subset(left_relids, &right_side)
-                        && relids_subset(right_relids, &left_side)))
-            {
-                Some((*kind, *rtindex))
-            } else {
-                left_match.or(right_match)
-            }
-        }
-    }
-}
-
 fn jointree_relids(node: &JoinTreeNode) -> Vec<usize> {
     match node {
         JoinTreeNode::RangeTblRef(rtindex) => vec![*rtindex],
@@ -321,138 +192,15 @@ fn jointree_relids(node: &JoinTreeNode) -> Vec<usize> {
     }
 }
 
+fn exact_join_rtindex(root: &PlannerInfo, relids: &[usize]) -> Option<usize> {
+    root.parse
+        .jointree
+        .as_ref()
+        .and_then(|jointree| exact_join_rtindex_for_relids(jointree, relids))
+}
+
 fn expand_join_rte_vars(root: &PlannerInfo, expr: Expr) -> Expr {
-    match expr {
-        Expr::Var(var) if var.varlevelsup == 0 => {
-            let Some(rte) = root.parse.rtable.get(var.varno.saturating_sub(1)) else {
-                return Expr::Var(var);
-            };
-            let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
-                return Expr::Var(var);
-            };
-            joinaliasvars
-                .get(var.varattno.saturating_sub(1))
-                .cloned()
-                .map(|expr| expand_join_rte_vars(root, expr))
-                .unwrap_or(Expr::Var(var))
-        }
-        Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
-            args: aggref
-                .args
-                .into_iter()
-                .map(|arg| expand_join_rte_vars(root, arg))
-                .collect(),
-            ..*aggref
-        })),
-        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
-            args: op
-                .args
-                .into_iter()
-                .map(|arg| expand_join_rte_vars(root, arg))
-                .collect(),
-            ..*op
-        })),
-        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-            args: bool_expr
-                .args
-                .into_iter()
-                .map(|arg| expand_join_rte_vars(root, arg))
-                .collect(),
-            ..*bool_expr
-        })),
-        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
-            args: func
-                .args
-                .into_iter()
-                .map(|arg| expand_join_rte_vars(root, arg))
-                .collect(),
-            ..*func
-        })),
-        Expr::SubLink(sublink) => {
-            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink
-                    .testexpr
-                    .map(|expr| Box::new(expand_join_rte_vars(root, *expr))),
-                ..*sublink
-            }))
-        }
-        Expr::SubPlan(subplan) => {
-            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-                testexpr: subplan
-                    .testexpr
-                    .map(|expr| Box::new(expand_join_rte_vars(root, *expr))),
-                ..*subplan
-            }))
-        }
-        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
-            crate::include::nodes::primnodes::ScalarArrayOpExpr {
-                left: Box::new(expand_join_rte_vars(root, *saop.left)),
-                right: Box::new(expand_join_rte_vars(root, *saop.right)),
-                ..*saop
-            },
-        )),
-        Expr::Cast(inner, ty) => Expr::Cast(Box::new(expand_join_rte_vars(root, *inner)), ty),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(expand_join_rte_vars(root, *expr)),
-            pattern: Box::new(expand_join_rte_vars(root, *pattern)),
-            escape: escape.map(|expr| Box::new(expand_join_rte_vars(root, *expr))),
-            case_insensitive,
-            negated,
-        },
-        Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            negated,
-        } => Expr::Similar {
-            expr: Box::new(expand_join_rte_vars(root, *expr)),
-            pattern: Box::new(expand_join_rte_vars(root, *pattern)),
-            escape: escape.map(|expr| Box::new(expand_join_rte_vars(root, *expr))),
-            negated,
-        },
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(expand_join_rte_vars(root, *inner))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(expand_join_rte_vars(root, *inner))),
-        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(expand_join_rte_vars(root, *left)),
-            Box::new(expand_join_rte_vars(root, *right)),
-        ),
-        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(expand_join_rte_vars(root, *left)),
-            Box::new(expand_join_rte_vars(root, *right)),
-        ),
-        Expr::ArrayLiteral {
-            elements,
-            array_type,
-        } => Expr::ArrayLiteral {
-            elements: elements
-                .into_iter()
-                .map(|element| expand_join_rte_vars(root, element))
-                .collect(),
-            array_type,
-        },
-        Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(expand_join_rte_vars(root, *left)),
-            Box::new(expand_join_rte_vars(root, *right)),
-        ),
-        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(expand_join_rte_vars(root, *array)),
-            subscripts: subscripts
-                .into_iter()
-                .map(|subscript| ExprArraySubscript {
-                    is_slice: subscript.is_slice,
-                    lower: subscript.lower.map(|expr| expand_join_rte_vars(root, expr)),
-                    upper: subscript.upper.map(|expr| expand_join_rte_vars(root, expr)),
-                })
-                .collect(),
-        },
-        other => other,
-    }
+    joininfo::expand_join_rte_vars(root, expr)
 }
 
 fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
@@ -468,7 +216,7 @@ fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
             walk(root, left, clauses);
             walk(root, right, clauses);
             if matches!(kind, JoinType::Inner | JoinType::Cross) {
-                clauses.push(RestrictInfo::new(expand_join_rte_vars(root, quals.clone())));
+                clauses.push(joininfo::make_restrict_info(expand_join_rte_vars(root, quals.clone())));
             }
         }
     }
@@ -484,7 +232,7 @@ fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
                     .into_iter()
                     .map(|clause| expand_join_rte_vars(root, clause))
                     .filter(|clause| expr_relids(clause).len() > 1)
-                    .map(RestrictInfo::new),
+                    .map(joininfo::make_restrict_info),
             );
         }
     }
@@ -518,7 +266,7 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
         return;
     };
     for clause in flatten_and_conjuncts(where_qual) {
-        let restrict = RestrictInfo::new(expand_join_rte_vars(root, clause));
+        let restrict = joininfo::make_restrict_info(expand_join_rte_vars(root, clause));
         if !is_pushable_base_clause(root, &restrict.required_relids) {
             continue;
         }
@@ -715,6 +463,13 @@ fn lower_pathkeys_for_path(root: &PlannerInfo, path: &Path, pathkeys: &[PathKey]
             })
             .collect(),
     }
+}
+
+fn lower_pathkeys_for_rel(root: &PlannerInfo, rel: &RelOptInfo, pathkeys: &[PathKey]) -> Vec<PathKey> {
+    rel.pathlist
+        .first()
+        .map(|path| lower_pathkeys_for_path(root, path, pathkeys))
+        .unwrap_or_else(|| pathkeys.to_vec())
 }
 
 fn projection_is_identity(path: &Path, targets: &[TargetEntry]) -> bool {
@@ -1086,8 +841,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             let mut subroot = PlannerInfo::new(*query);
             let scanjoin_rel = query_planner(&mut subroot, catalog);
             let final_rel = grouping_planner(&mut subroot, scanjoin_rel, catalog);
-            let mut path = final_rel
-                .cheapest_total_path()
+            let required_pathkeys =
+                lower_pathkeys_for_rel(&subroot, &final_rel, &subroot.query_pathkeys);
+            let mut path = bestpath::choose_final_path(&final_rel, &required_pathkeys)
                 .cloned()
                 .unwrap_or(Path::Result {
                     plan_info: PlanEstimate::default(),
@@ -1107,6 +863,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         }
         RangeTblEntryKind::Join { .. } => unreachable!("join RTEs are not base relations"),
     }
+    bestpath::set_cheapest(rel);
 }
 
 fn set_base_rel_pathlists(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
@@ -1209,6 +966,7 @@ fn normalize_join_output_rel(
     for path in input_rel.pathlist {
         rel.add_path(maybe_project_join_alias(rtindex, path, root, catalog));
     }
+    bestpath::set_cheapest(&mut rel);
     rel
 }
 
@@ -1251,8 +1009,7 @@ fn join_reltarget(
             }
         }
     }
-    if let Some(jointree) = root.parse.jointree.as_ref()
-        && let Some(rtindex) = exact_join_rtindex_for_relids(jointree, relids)
+    if let Some(rtindex) = exact_join_rtindex(root, relids)
         && let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1))
     {
         if matches!(rte.kind, RangeTblEntryKind::Join { .. }) {
@@ -1264,24 +1021,8 @@ fn join_reltarget(
     PathTarget::new(exprs)
 }
 
-fn exact_inner_join_spec(
-    root: &PlannerInfo,
-    left_relids: &[usize],
-    right_relids: &[usize],
-) -> Option<JoinBuildSpec> {
-    root.parse
-        .jointree
-        .as_ref()
-        .and_then(|jointree| exact_inner_join_spec_from_node(jointree, left_relids, right_relids))
-        .map(|(kind, rtindex)| JoinBuildSpec {
-            kind,
-            rtindex: Some(rtindex),
-            explicit_qual: None,
-        })
-}
-
 fn join_spec_for_special_join(
-    sjinfo: &crate::include::nodes::pathnodes::SpecialJoinInfo,
+    sjinfo: &SpecialJoinInfo,
     reversed: bool,
 ) -> JoinBuildSpec {
     JoinBuildSpec {
@@ -1295,57 +1036,129 @@ fn join_spec_for_special_join(
     }
 }
 
+fn special_join_relids(sjinfo: &SpecialJoinInfo) -> Vec<usize> {
+    relids_union(&sjinfo.syn_lefthand, &sjinfo.syn_righthand)
+}
+
+fn rel_contains_special_join(relids: &[usize], sjinfo: &SpecialJoinInfo) -> bool {
+    relids_subset(&sjinfo.min_lefthand, relids) && relids_subset(&sjinfo.min_righthand, relids)
+}
+
+fn rel_matches_special_join(
+    sjinfo: &SpecialJoinInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+) -> Option<bool> {
+    if relids_subset(&sjinfo.min_lefthand, left_relids)
+        && relids_subset(&sjinfo.min_righthand, right_relids)
+    {
+        Some(false)
+    } else if relids_subset(&sjinfo.min_lefthand, right_relids)
+        && relids_subset(&sjinfo.min_righthand, left_relids)
+    {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn relids_match_ojrelid(root: &PlannerInfo, relids: &[usize], ojrelid: usize) -> bool {
+    root.join_info_list.iter().any(|sjinfo| {
+        sjinfo.ojrelid == Some(ojrelid) && special_join_relids(sjinfo) == relids
+    })
+}
+
+fn input_crosses_rhs_boundary(input_relids: &[usize], sjinfo: &SpecialJoinInfo) -> bool {
+    relids_overlap(input_relids, &sjinfo.min_righthand)
+        && !relids_subset(input_relids, &sjinfo.min_righthand)
+}
+
+fn input_can_commute_past_special_join(
+    root: &PlannerInfo,
+    input_relids: &[usize],
+    sjinfo: &SpecialJoinInfo,
+) -> bool {
+    if !input_crosses_rhs_boundary(input_relids, sjinfo) {
+        return true;
+    }
+    sjinfo
+        .commute_below_l
+        .iter()
+        .chain(sjinfo.commute_below_r.iter())
+        .any(|ojrelid| relids_match_ojrelid(root, input_relids, *ojrelid))
+}
+
+fn violates_full_join_barrier(
+    root: &PlannerInfo,
+    sjinfo: &SpecialJoinInfo,
+    left_relids: &[usize],
+    right_relids: &[usize],
+    joinrelids: &[usize],
+) -> bool {
+    if sjinfo.jointype != JoinType::Full {
+        return false;
+    }
+    let full_relids = special_join_relids(sjinfo);
+    relids_overlap(&full_relids, joinrelids)
+        && full_relids != joinrelids
+        && full_relids != left_relids
+        && full_relids != right_relids
+        && (relids_overlap(&full_relids, left_relids) || relids_overlap(&full_relids, right_relids))
+        && !rel_contains_special_join(left_relids, sjinfo)
+        && !rel_contains_special_join(right_relids, sjinfo)
+        && !input_can_commute_past_special_join(root, left_relids, sjinfo)
+        && !input_can_commute_past_special_join(root, right_relids, sjinfo)
+}
+
 fn join_is_legal(
     root: &PlannerInfo,
     left_rel: &RelOptInfo,
     right_rel: &RelOptInfo,
 ) -> Option<JoinBuildSpec> {
     let joinrelids = relids_union(&left_rel.relids, &right_rel.relids);
-    let exact_spec = exact_inner_join_spec(root, &left_rel.relids, &right_rel.relids);
-    let mut matched_sj: Option<(&crate::include::nodes::pathnodes::SpecialJoinInfo, bool)> = None;
+    let mut matched_sj: Option<(&SpecialJoinInfo, bool)> = None;
     let mut must_be_leftjoin = false;
 
     for sjinfo in &root.join_info_list {
+        if violates_full_join_barrier(
+            root,
+            sjinfo,
+            &left_rel.relids,
+            &right_rel.relids,
+            &joinrelids,
+        ) {
+            return None;
+        }
         if !relids_overlap(&sjinfo.min_righthand, &joinrelids) {
             continue;
         }
         if relids_subset(&joinrelids, &sjinfo.min_righthand) {
             continue;
         }
-        if relids_subset(&sjinfo.min_lefthand, &left_rel.relids)
-            && relids_subset(&sjinfo.min_righthand, &left_rel.relids)
-        {
+        if rel_contains_special_join(&left_rel.relids, sjinfo) {
             continue;
         }
-        if relids_subset(&sjinfo.min_lefthand, &right_rel.relids)
-            && relids_subset(&sjinfo.min_righthand, &right_rel.relids)
-        {
+        if rel_contains_special_join(&right_rel.relids, sjinfo) {
             continue;
         }
 
-        if relids_subset(&sjinfo.min_lefthand, &left_rel.relids)
-            && relids_subset(&sjinfo.min_righthand, &right_rel.relids)
-        {
+        if let Some(reversed) = rel_matches_special_join(sjinfo, &left_rel.relids, &right_rel.relids) {
             if matched_sj.is_some() {
                 return None;
             }
-            matched_sj = Some((sjinfo, false));
-            continue;
-        }
-        if relids_subset(&sjinfo.min_lefthand, &right_rel.relids)
-            && relids_subset(&sjinfo.min_righthand, &left_rel.relids)
-        {
-            if matched_sj.is_some() {
-                return None;
-            }
-            matched_sj = Some((sjinfo, true));
+            matched_sj = Some((sjinfo, reversed));
             continue;
         }
 
         if relids_overlap(&left_rel.relids, &sjinfo.min_righthand)
             && relids_overlap(&right_rel.relids, &sjinfo.min_righthand)
         {
-            continue;
+            if input_can_commute_past_special_join(root, &left_rel.relids, sjinfo)
+                && input_can_commute_past_special_join(root, &right_rel.relids, sjinfo)
+            {
+                continue;
+            }
+            return None;
         }
         if sjinfo.jointype != JoinType::Left || relids_overlap(&joinrelids, &sjinfo.min_lefthand) {
             return None;
@@ -1364,11 +1177,11 @@ fn join_is_legal(
         return Some(join_spec_for_special_join(sjinfo, reversed));
     }
 
-    Some(exact_spec.unwrap_or(JoinBuildSpec {
+    Some(JoinBuildSpec {
         kind: JoinType::Inner,
         rtindex: None,
         explicit_qual: None,
-    }))
+    })
 }
 
 fn make_join_rel(
@@ -1402,6 +1215,11 @@ fn make_join_rel(
         }
     };
     let mut candidate_paths = Vec::new();
+    let output_rtindex = if has_grouping(root) {
+        None
+    } else {
+        spec.rtindex.or_else(|| exact_join_rtindex(root, &relids))
+    };
     for left_path in &left_rel.pathlist {
         for right_path in &right_rel.pathlist {
             let path = choose_join_plan(
@@ -1410,7 +1228,7 @@ fn make_join_rel(
                 spec.kind,
                 join_qual.clone(),
             );
-            let path = match spec.rtindex {
+            let path = match output_rtindex {
                 Some(rtindex) => maybe_project_join_alias(rtindex, path, root, catalog),
                 None => path,
             };
@@ -1421,16 +1239,13 @@ fn make_join_rel(
         .join_rel_list
         .get_mut(join_rel_index)
         .expect("join rel just inserted or found");
-    if !join_rel
-        .joininfo
-        .iter()
-        .any(|info| info.clause == join_qual)
-    {
-        join_rel.joininfo.push(RestrictInfo::new(join_qual.clone()));
+    if !join_rel.joininfo.iter().any(|info| info.clause == join_qual) {
+        join_rel.joininfo.push(joininfo::make_restrict_info(join_qual.clone()));
     }
     for path in candidate_paths {
         join_rel.add_path(path);
     }
+    bestpath::set_cheapest(join_rel);
     Some(join_rel.clone())
 }
 
@@ -1470,6 +1285,7 @@ fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptIn
             },
             catalog,
         ));
+        bestpath::set_cheapest(&mut rel);
         return rel;
     }
     if query_relids.len() == 1 {
@@ -1489,41 +1305,51 @@ fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptIn
 
 fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
     let rel = make_one_rel(root, catalog);
+    if has_grouping(root) {
+        return rel;
+    }
     match top_join_rtindex(root) {
         Some(rtindex) => normalize_join_output_rel(root, rel, rtindex, catalog),
         None => rel,
     }
 }
 
-fn push_unique_path(paths: &mut Vec<Path>, path: Path) {
-    if !paths.contains(&path) {
-        paths.push(path);
-    }
-}
-
-fn select_upper_input_paths(
+fn make_pathtarget_projection_rel(
     root: &PlannerInfo,
-    input_rel: &RelOptInfo,
-    preserve_query_order: bool,
-) -> Vec<Path> {
-    let mut paths = Vec::new();
-    if preserve_query_order
-        && !root.query_pathkeys.is_empty()
-        && let Some(path) = input_rel.cheapest_path_satisfying(|path| {
-            let required_pathkeys = lower_pathkeys_for_path(root, path, &root.query_pathkeys);
-            pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
-        })
-    {
-        push_unique_path(&mut paths, path.clone());
+    input_rel: RelOptInfo,
+    reltarget: &PathTarget,
+    catalog: &dyn CatalogLookup,
+    allow_identity_elision: bool,
+) -> RelOptInfo {
+    let targets = root::build_projection_targets_for_pathtarget(reltarget);
+    let slot_id = next_synthetic_slot_id();
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        reltarget.clone(),
+    );
+    for path in input_rel.pathlist {
+        let lowered_targets = lower_targets_for_path(root, &path, &targets);
+        if allow_identity_elision && projection_is_identity(&path, &lowered_targets) {
+            rel.add_path(path);
+            continue;
+        }
+        rel.add_path(optimize_path(
+            Path::Projection {
+                plan_info: PlanEstimate::default(),
+                slot_id,
+                input: Box::new(path),
+                targets: lowered_targets,
+            },
+            catalog,
+        ));
     }
-    if let Some(path) = input_rel.cheapest_total_path() {
-        push_unique_path(&mut paths, path.clone());
-    }
-    paths
+    bestpath::set_cheapest(&mut rel);
+    rel
 }
 
 fn make_filter_rel(
-    root: &PlannerInfo,
+    _root: &PlannerInfo,
     input_rel: RelOptInfo,
     predicate: Expr,
     catalog: &dyn CatalogLookup,
@@ -1533,7 +1359,7 @@ fn make_filter_rel(
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in select_upper_input_paths(root, &input_rel, true) {
+    for path in input_rel.pathlist {
         rel.add_path(optimize_path(
             Path::Filter {
                 plan_info: PlanEstimate::default(),
@@ -1547,33 +1373,56 @@ fn make_filter_rel(
             catalog,
         ));
     }
+    bestpath::set_cheapest(&mut rel);
     rel
 }
 
 fn make_aggregate_rel(
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     input_rel: RelOptInfo,
     catalog: &dyn CatalogLookup,
 ) -> RelOptInfo {
+    let upper_rel_index = upperrels::ensure_upper_rel_index(
+        root,
+        UpperRelKind::GroupAgg,
+        &input_rel.relids,
+        root.grouped_target.clone(),
+    );
+    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
+        return root.upper_rels[upper_rel_index].rel.clone();
+    }
+    let slot_id = next_synthetic_slot_id();
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
-        root.final_target.clone(),
+        root.grouped_target.clone(),
     );
-    for path in select_upper_input_paths(root, &input_rel, false) {
-        let input_layout = path.output_vars();
+    for path in input_rel.pathlist {
         let group_by = root
             .parse
             .group_by
             .iter()
             .cloned()
-            .map(|expr| rewrite_semantic_expr_for_path(expr, &path, &input_layout))
+            .map(|expr| expand_join_rte_vars(root, expr))
             .collect::<Vec<_>>();
-        let slot_id = next_synthetic_slot_id();
-        let agg_output_layout = aggregate_output_vars(slot_id, &group_by, &root.parse.accumulators);
+        let accumulators = root
+            .parse
+            .accumulators
+            .iter()
+            .cloned()
+            .map(|mut accum| {
+                accum.args = accum
+                    .args
+                    .into_iter()
+                    .map(|arg| expand_join_rte_vars(root, arg))
+                    .collect();
+                accum
+            })
+            .collect::<Vec<_>>();
+        let agg_output_layout = aggregate_output_vars(slot_id, &group_by, &accumulators);
         let having = root.parse.having_qual.clone().map(|expr| {
             lower_agg_output_expr(
-                rewrite_semantic_expr_for_path(expr, &path, &input_layout),
+                expand_join_rte_vars(root, expr),
                 &group_by,
                 &agg_output_layout,
             )
@@ -1584,33 +1433,48 @@ fn make_aggregate_rel(
                 slot_id,
                 input: Box::new(path),
                 group_by: group_by.clone(),
-                accumulators: root.parse.accumulators.clone(),
+                accumulators: accumulators.clone(),
                 having,
-                output_columns: build_aggregate_output_columns(&group_by, &root.parse.accumulators),
+                output_columns: build_aggregate_output_columns(
+                    &group_by,
+                    &accumulators,
+                ),
             },
             catalog,
         ));
     }
+    bestpath::set_cheapest(&mut rel);
+    root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
 }
 
 fn make_project_set_rel(
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     input_rel: RelOptInfo,
     targets: &[ProjectSetTarget],
     catalog: &dyn CatalogLookup,
 ) -> RelOptInfo {
+    let upper_rel_index = upperrels::ensure_upper_rel_index(
+        root,
+        UpperRelKind::ProjectSet,
+        &input_rel.relids,
+        input_rel.reltarget.clone(),
+    );
+    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
+        return root.upper_rels[upper_rel_index].rel.clone();
+    }
+    let slot_id = next_synthetic_slot_id();
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in select_upper_input_paths(root, &input_rel, true) {
+    for path in input_rel.pathlist {
         let layout = path.output_vars();
         rel.add_path(optimize_path(
             Path::ProjectSet {
                 plan_info: PlanEstimate::default(),
-                slot_id: next_synthetic_slot_id(),
+                slot_id,
                 input: Box::new(path),
                 targets: targets
                     .iter()
@@ -1621,39 +1485,55 @@ fn make_project_set_rel(
             catalog,
         ));
     }
+    bestpath::set_cheapest(&mut rel);
+    root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
 }
 
-fn make_ordered_rel(
-    root: &PlannerInfo,
-    input_rel: RelOptInfo,
-    catalog: &dyn CatalogLookup,
-) -> RelOptInfo {
+fn make_ordered_rel(root: &mut PlannerInfo, input_rel: RelOptInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
+    let upper_rel_index = upperrels::ensure_upper_rel_index(
+        root,
+        UpperRelKind::Ordered,
+        &input_rel.relids,
+        input_rel.reltarget.clone(),
+    );
+    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
+        return root.upper_rels[upper_rel_index].rel.clone();
+    }
+    let required_pathkeys = lower_pathkeys_for_rel(root, &input_rel, &root.query_pathkeys);
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in select_upper_input_paths(root, &input_rel, true) {
-        let required_pathkeys = lower_pathkeys_for_path(root, &path, &root.query_pathkeys);
-        if pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
-            rel.add_path(path);
-            continue;
-        }
-        rel.add_path(optimize_path(
-            Path::OrderBy {
-                plan_info: PlanEstimate::default(),
-                items: pathkeys_to_order_items(&required_pathkeys),
-                input: Box::new(path),
-            },
-            catalog,
-        ));
+    if let Some(path) = bestpath::get_cheapest_path_for_pathkeys(
+        &input_rel,
+        &required_pathkeys,
+        bestpath::CostSelector::Total,
+    ) {
+        rel.add_path(path.clone());
     }
+    if let Some(path) = input_rel.cheapest_total_path() {
+        if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
+            rel.add_path(optimize_path(
+                Path::OrderBy {
+                    plan_info: PlanEstimate::default(),
+                    items: pathkeys_to_order_items(&required_pathkeys),
+                    input: Box::new(path.clone()),
+                },
+                catalog,
+            ));
+        } else if rel.pathlist.is_empty() {
+            rel.add_path(path.clone());
+        }
+    }
+    bestpath::set_cheapest(&mut rel);
+    root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
 }
 
 fn make_limit_rel(
-    root: &PlannerInfo,
+    _root: &PlannerInfo,
     input_rel: RelOptInfo,
     limit: Option<usize>,
     offset: usize,
@@ -1664,7 +1544,7 @@ fn make_limit_rel(
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
-    for path in select_upper_input_paths(root, &input_rel, true) {
+    for path in input_rel.pathlist {
         rel.add_path(optimize_path(
             Path::Limit {
                 plan_info: PlanEstimate::default(),
@@ -1675,22 +1555,34 @@ fn make_limit_rel(
             catalog,
         ));
     }
+    bestpath::set_cheapest(&mut rel);
     rel
 }
 
 fn make_projection_rel(
-    root: &PlannerInfo,
+    root: &mut PlannerInfo,
     input_rel: RelOptInfo,
     targets: &[TargetEntry],
     catalog: &dyn CatalogLookup,
     allow_identity_elision: bool,
 ) -> RelOptInfo {
+    let reltarget = PathTarget::from_target_list(targets);
+    let upper_rel_index = upperrels::ensure_upper_rel_index(
+        root,
+        UpperRelKind::Final,
+        &input_rel.relids,
+        reltarget.clone(),
+    );
+    if !root.upper_rels[upper_rel_index].rel.pathlist.is_empty() {
+        return root.upper_rels[upper_rel_index].rel.clone();
+    }
+    let slot_id = next_synthetic_slot_id();
     let mut rel = RelOptInfo::new(
         input_rel.relids.clone(),
         RelOptKind::UpperRel,
-        PathTarget::from_target_list(targets),
+        reltarget,
     );
-    for path in select_upper_input_paths(root, &input_rel, true) {
+    for path in input_rel.pathlist {
         let lowered_targets = lower_targets_for_path(root, &path, targets);
         if allow_identity_elision && projection_is_identity(&path, &lowered_targets) {
             rel.add_path(path);
@@ -1699,13 +1591,15 @@ fn make_projection_rel(
         rel.add_path(optimize_path(
             Path::Projection {
                 plan_info: PlanEstimate::default(),
-                slot_id: next_synthetic_slot_id(),
+                slot_id,
                 input: Box::new(path),
                 targets: lowered_targets,
             },
             catalog,
         ));
     }
+    bestpath::set_cheapest(&mut rel);
+    root.upper_rels[upper_rel_index].rel = rel.clone();
     rel
 }
 
@@ -1721,12 +1615,18 @@ fn grouping_planner(
 
     let has_grouping = has_grouping(root);
     let mut projection_done = false;
+    let final_targets = root.parse.target_list.clone();
     if has_grouping {
         current_rel = make_aggregate_rel(root, current_rel, catalog);
     } else if let Some(project_set) = root.parse.project_set.clone() {
         current_rel = make_project_set_rel(root, current_rel, &project_set, catalog);
-        current_rel =
-            make_projection_rel(root, current_rel, &root.parse.target_list, catalog, false);
+        current_rel = make_projection_rel(
+            root,
+            current_rel,
+            &final_targets,
+            catalog,
+            false,
+        );
         projection_done = true;
     }
 
@@ -1745,11 +1645,9 @@ fn grouping_planner(
     }
 
     if has_grouping {
-        current_rel =
-            make_projection_rel(root, current_rel, &root.parse.target_list, catalog, false);
+        current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, false);
     } else if !projection_done {
-        current_rel =
-            make_projection_rel(root, current_rel, &root.parse.target_list, catalog, true);
+        current_rel = make_projection_rel(root, current_rel, &final_targets, catalog, true);
     }
 
     root.final_rel = Some(current_rel.clone());
@@ -1762,8 +1660,8 @@ fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
-    let best_path = final_rel
-        .cheapest_total_path()
+    let required_pathkeys = lower_pathkeys_for_rel(&root, &final_rel, &root.query_pathkeys);
+    let best_path = bestpath::choose_final_path(&final_rel, &required_pathkeys)
         .cloned()
         .unwrap_or(Path::Result {
             plan_info: PlanEstimate::default(),
