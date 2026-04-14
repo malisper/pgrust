@@ -334,12 +334,11 @@ impl Database {
                 guard.disarm();
                 result
             }
-            Statement::DropDomain(ref drop_stmt) => self
-                .execute_drop_domain_stmt_with_search_path(
-                    client_id,
-                    drop_stmt,
-                    configured_search_path,
-                ),
+            Statement::DropDomain(ref drop_stmt) => self.execute_drop_domain_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::DropView(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);

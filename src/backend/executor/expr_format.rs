@@ -1031,8 +1031,7 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     {
         out = format!("-{}", out.trim_start());
     }
-    if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') && decimal_idx.is_none()
-    {
+    if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') && decimal_idx.is_none() {
         let ordinal_value = int_part.parse::<i128>().unwrap_or(0);
         let suffix = if spec.ordinal_lower {
             ordinal_suffix(ordinal_value).to_ascii_lowercase()
@@ -1439,14 +1438,20 @@ mod tests {
             "-34,338,492.215,397,047,000,000"
         );
         assert_eq!(
-            to_char_numeric(&NumericValue::from("0"), "9999999999999999.999999999999999PR")
-                .unwrap()
-                .trim(),
+            to_char_numeric(
+                &NumericValue::from("0"),
+                "9999999999999999.999999999999999PR"
+            )
+            .unwrap()
+            .trim(),
             ".000000000000000"
         );
         assert_eq!(
-            to_char_numeric(&NumericValue::from("74881"), "FM9999999999999999.999999999999999THPR")
-                .unwrap(),
+            to_char_numeric(
+                &NumericValue::from("74881"),
+                "FM9999999999999999.999999999999999THPR"
+            )
+            .unwrap(),
             "74881."
         );
         assert_eq!(

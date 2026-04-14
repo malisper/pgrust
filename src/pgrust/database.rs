@@ -32,13 +32,12 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::Statement;
 use crate::backend::parser::{
-    AlterTableAddColumnStatement, AlterTableDropColumnStatement,
-    AlterTableRenameColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
-    CommentOnDomainStatement, CommentOnTableStatement, CreateDomainStatement,
-    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, CreateViewStatement,
-    DropDomainStatement, DropViewStatement, OnCommitAction, ParseError, SqlType,
-    TablePersistence,
-    bind_delete, bind_insert, bind_update, create_relation_desc, lower_create_table,
+    AlterTableAddColumnStatement, AlterTableDropColumnStatement, AlterTableRenameColumnStatement,
+    AlterTableRenameStatement, AnalyzeStatement, CatalogLookup, CommentOnDomainStatement,
+    CommentOnTableStatement, CreateDomainStatement, CreateIndexStatement, CreateTableAsStatement,
+    CreateTableStatement, CreateViewStatement, DropDomainStatement, DropViewStatement,
+    OnCommitAction, ParseError, SqlType, TablePersistence, bind_delete, bind_insert, bind_update,
+    create_relation_desc, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,
@@ -325,7 +324,11 @@ impl Database {
                     }
                     _ => PUBLIC_NAMESPACE_OID,
                 };
-                Ok((name.to_ascii_lowercase(), object.to_ascii_lowercase(), namespace_oid))
+                Ok((
+                    name.to_ascii_lowercase(),
+                    object.to_ascii_lowercase(),
+                    namespace_oid,
+                ))
             }
             Some(_) => Err(ParseError::UnsupportedQualifiedName(name.to_string())),
             None => Ok((
@@ -343,7 +346,10 @@ impl Database {
         }
     }
 
-    pub(crate) fn domain_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {
+    pub(crate) fn domain_type_rows_for_search_path(
+        &self,
+        search_path: &[String],
+    ) -> Vec<PgTypeRow> {
         let domains = self.domains.read();
         let mut rows = domains
             .values()
