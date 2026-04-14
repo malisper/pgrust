@@ -879,7 +879,9 @@ fn lower_expr_to_plan_layout(expr: Expr, layout: &[Expr]) -> Expr {
             depth: var.varlevelsup - 1,
             index: var.varattno.saturating_sub(1),
         },
-        Expr::Var(var) => Expr::Column(var.varattno.saturating_sub(1)),
+        Expr::Var(var) => panic!(
+            "semantic Var {var:?} was not rewritten against path layout {layout:?} before create_plan"
+        ),
         Expr::Aggref(_) => {
             panic!("Aggref should be lowered to aggregate output vars before create_plan")
         }
