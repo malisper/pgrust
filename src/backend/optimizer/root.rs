@@ -1,6 +1,6 @@
-use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
-use crate::include::nodes::primnodes::{Aggref, Expr, TargetEntry};
+use crate::include::nodes::primnodes::{Aggref, Expr, ProjectSetTarget, SetReturningCall, TargetEntry, Var};
 
 use super::joininfo::build_special_join_info;
 use super::pathnodes::expr_sql_type;
@@ -164,6 +164,7 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
             if let Some(testexpr) = &sublink.testexpr {
                 collect_group_input_exprs(testexpr, group_by, exprs);
             }
+            collect_query_outer_refs(&sublink.subselect, 1, exprs);
         }
         Expr::SubPlan(subplan) => {
             if let Some(testexpr) = &subplan.testexpr {
@@ -261,6 +262,7 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
             if let Some(testexpr) = &sublink.testexpr {
                 collect_supporting_inputs(testexpr, exprs);
             }
+            collect_query_outer_refs(&sublink.subselect, 1, exprs);
         }
         Expr::SubPlan(subplan) => {
             if let Some(testexpr) = &subplan.testexpr {
@@ -321,5 +323,186 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr>) {
+    for target in &query.target_list {
+        collect_query_outer_refs_expr(&target.expr, levelsup, exprs);
+    }
+    if let Some(where_qual) = query.where_qual.as_ref() {
+        collect_query_outer_refs_expr(where_qual, levelsup, exprs);
+    }
+    for expr in &query.group_by {
+        collect_query_outer_refs_expr(expr, levelsup, exprs);
+    }
+    for accum in &query.accumulators {
+        for arg in &accum.args {
+            collect_query_outer_refs_expr(arg, levelsup, exprs);
+        }
+    }
+    if let Some(having) = query.having_qual.as_ref() {
+        collect_query_outer_refs_expr(having, levelsup, exprs);
+    }
+    for clause in &query.sort_clause {
+        collect_query_outer_refs_expr(&clause.expr, levelsup, exprs);
+    }
+    if let Some(project_set) = query.project_set.as_ref() {
+        for target in project_set {
+            collect_project_set_outer_refs(target, levelsup, exprs);
+        }
+    }
+    if let Some(jointree) = query.jointree.as_ref() {
+        collect_jointree_outer_refs(jointree, levelsup, exprs);
+    }
+    for rte in &query.rtable {
+        match &rte.kind {
+            RangeTblEntryKind::Values { rows, .. } => {
+                for row in rows {
+                    for expr in row {
+                        collect_query_outer_refs_expr(expr, levelsup, exprs);
+                    }
+                }
+            }
+            RangeTblEntryKind::Function { call } => collect_set_returning_call_outer_refs(call, levelsup, exprs),
+            RangeTblEntryKind::Subquery { query } => collect_query_outer_refs(query, levelsup + 1, exprs),
+            RangeTblEntryKind::Result | RangeTblEntryKind::Relation { .. } | RangeTblEntryKind::Join { .. } => {}
+        }
+    }
+}
+
+fn collect_jointree_outer_refs(node: &JoinTreeNode, levelsup: usize, exprs: &mut Vec<Expr>) {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => {}
+        JoinTreeNode::JoinExpr { left, right, quals, .. } => {
+            collect_jointree_outer_refs(left, levelsup, exprs);
+            collect_jointree_outer_refs(right, levelsup, exprs);
+            collect_query_outer_refs_expr(quals, levelsup, exprs);
+        }
+    }
+}
+
+fn collect_project_set_outer_refs(target: &ProjectSetTarget, levelsup: usize, exprs: &mut Vec<Expr>) {
+    match target {
+        ProjectSetTarget::Scalar(entry) => collect_query_outer_refs_expr(&entry.expr, levelsup, exprs),
+        ProjectSetTarget::Set { call, .. } => collect_set_returning_call_outer_refs(call, levelsup, exprs),
+    }
+}
+
+fn collect_set_returning_call_outer_refs(
+    call: &SetReturningCall,
+    levelsup: usize,
+    exprs: &mut Vec<Expr>,
+) {
+    match call {
+        SetReturningCall::GenerateSeries { start, stop, step, .. } => {
+            collect_query_outer_refs_expr(start, levelsup, exprs);
+            collect_query_outer_refs_expr(stop, levelsup, exprs);
+            collect_query_outer_refs_expr(step, levelsup, exprs);
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. } => {
+            for arg in args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
+    }
+}
+
+fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<Expr>) {
+    match expr {
+        Expr::Var(var) if var.varlevelsup == levelsup => push_expr(
+            exprs,
+            Expr::Var(Var {
+                varlevelsup: 0,
+                ..*var
+            }),
+        ),
+        Expr::Var(_) | Expr::OuterColumn { .. } | Expr::Column(_) | Expr::Const(_) | Expr::Random => {}
+        Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+        Expr::Aggref(aggref) => {
+            for arg in &aggref.args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_query_outer_refs_expr(testexpr, levelsup, exprs);
+            }
+            collect_query_outer_refs(&sublink.subselect, levelsup + 1, exprs);
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_query_outer_refs_expr(testexpr, levelsup, exprs);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_query_outer_refs_expr(&saop.left, levelsup, exprs);
+            collect_query_outer_refs_expr(&saop.right, levelsup, exprs);
+        }
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            collect_query_outer_refs_expr(inner, levelsup, exprs);
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_query_outer_refs_expr(expr, levelsup, exprs);
+            collect_query_outer_refs_expr(pattern, levelsup, exprs);
+            if let Some(escape) = escape.as_deref() {
+                collect_query_outer_refs_expr(escape, levelsup, exprs);
+            }
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_query_outer_refs_expr(left, levelsup, exprs);
+            collect_query_outer_refs_expr(right, levelsup, exprs);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_query_outer_refs_expr(element, levelsup, exprs);
+            }
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_query_outer_refs_expr(array, levelsup, exprs);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_query_outer_refs_expr(lower, levelsup, exprs);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_query_outer_refs_expr(upper, levelsup, exprs);
+                }
+            }
+        }
     }
 }

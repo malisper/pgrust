@@ -1215,11 +1215,7 @@ fn make_join_rel(
         }
     };
     let mut candidate_paths = Vec::new();
-    let output_rtindex = if has_grouping(root) {
-        None
-    } else {
-        spec.rtindex.or_else(|| exact_join_rtindex(root, &relids))
-    };
+    let output_rtindex = spec.rtindex.or_else(|| exact_join_rtindex(root, &relids));
     for left_path in &left_rel.pathlist {
         for right_path in &right_rel.pathlist {
             let path = choose_join_plan(
@@ -1304,14 +1300,14 @@ fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptIn
 }
 
 fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {
-    let rel = make_one_rel(root, catalog);
-    if has_grouping(root) {
-        return rel;
+    let mut rel = make_one_rel(root, catalog);
+    if let Some(rtindex) = top_join_rtindex(root) {
+        rel = normalize_join_output_rel(root, rel, rtindex, catalog);
     }
-    match top_join_rtindex(root) {
-        Some(rtindex) => normalize_join_output_rel(root, rel, rtindex, catalog),
-        None => rel,
+    if has_grouping(root) && rel.relids.len() > 1 && rel.reltarget != root.scanjoin_target {
+        rel = make_pathtarget_projection_rel(root, rel, &root.scanjoin_target, catalog, false);
     }
+    rel
 }
 
 fn make_pathtarget_projection_rel(
