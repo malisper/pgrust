@@ -1,14 +1,27 @@
 use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
 
-pub const XLOG_RECORD_HEADER: usize = 32;
-pub const XLOG_BLOCK_HEADER: usize = 32;
-pub const CRC_OFFSET: usize = 24;
+pub const XLOG_RECORD_HEADER: usize = 24;
+pub const XLOG_BLOCK_HEADER: usize = 4;
+pub const XLOG_BLOCK_IMAGE_HEADER: usize = 5;
+pub const XLOG_RECORD_DATA_HEADER_SHORT: usize = 2;
+pub const XLOG_RECORD_DATA_HEADER_LONG: usize = 5;
+pub const CRC_OFFSET: usize = 20;
 pub const WAL_RECORD_LEN: usize = XLOG_RECORD_HEADER + XLOG_BLOCK_HEADER + PAGE_SIZE;
 
-pub const BKPBLOCK_HAS_IMAGE: u8 = 1 << 0;
-pub const BKPBLOCK_HAS_DATA: u8 = 1 << 1;
-pub const BKPBLOCK_WILL_INIT: u8 = 1 << 2;
-pub const BKPBLOCK_STANDARD: u8 = 1 << 3;
+pub const XLR_MAX_BLOCK_ID: u8 = 32;
+pub const XLR_BLOCK_ID_DATA_SHORT: u8 = 255;
+pub const XLR_BLOCK_ID_DATA_LONG: u8 = 254;
+
+pub const BKPBLOCK_FORK_MASK: u8 = 0x0F;
+pub const BKPBLOCK_FLAG_MASK: u8 = 0xF0;
+pub const BKPBLOCK_HAS_IMAGE: u8 = 0x10;
+pub const BKPBLOCK_HAS_DATA: u8 = 0x20;
+pub const BKPBLOCK_WILL_INIT: u8 = 0x40;
+pub const BKPBLOCK_SAME_REL: u8 = 0x80;
+pub const BKPBLOCK_STANDARD: u8 = 1 << 0;
+
+pub const BKPIMAGE_HAS_HOLE: u8 = 0x01;
+pub const BKPIMAGE_APPLY: u8 = 0x02;
 
 #[derive(Debug, Clone)]
 pub struct DecodedBkpBlock {
@@ -33,6 +46,7 @@ impl DecodedBkpBlock {
 
 #[derive(Debug, Clone)]
 pub struct DecodedXLogRecord {
+    pub start_lsn: u64,
     pub end_lsn: u64,
     pub total_len: u32,
     pub xid: u32,
