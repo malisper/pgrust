@@ -16,10 +16,15 @@ impl Database {
         rename_stmt: &AlterTableRenameStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &rename_stmt.table_name)?;
-        self.table_locks
-            .lock_table(relation.rel, TableLockMode::AccessExclusive, client_id);
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
@@ -49,6 +54,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &rename_stmt.table_name)?;
         let new_table_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
@@ -68,6 +74,7 @@ impl Database {
                 cid,
                 client_id,
                 waiter: None,
+                interrupts,
             };
             let effect = self
                 .catalog

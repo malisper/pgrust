@@ -10,6 +10,7 @@ use pgrust::backend::access::transam::xact::{INVALID_TRANSACTION_ID, Transaction
 use pgrust::backend::catalog::catalog::column_desc;
 use pgrust::backend::storage::smgr::MdStorageManager;
 use pgrust::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
+use pgrust::backend::utils::misc::interrupts::InterruptState;
 use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
@@ -157,6 +158,7 @@ fn main() -> Result<(), ExecError> {
         pool: std::sync::Arc::clone(&pool),
         txns: txns.clone(),
         txn_waiter: None,
+        interrupts: Arc::new(InterruptState::new()),
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 11,
         next_command_id: 0,

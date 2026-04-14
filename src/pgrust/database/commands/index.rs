@@ -93,6 +93,7 @@ impl Database {
         maintenance_work_mem_kb: usize,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<crate::backend::catalog::CatalogEntry, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let mut catalog_guard = self.catalog.write();
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -101,6 +102,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts: Arc::clone(&interrupts),
         };
         let (index_entry, effect) = catalog_guard
             .create_index_for_relation_mvcc_with_options(
@@ -138,6 +140,7 @@ impl Database {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             client_id,
+            interrupts: Arc::clone(&interrupts),
             snapshot,
             heap_relation: relation.rel,
             heap_desc: relation.desc.clone(),
@@ -177,6 +180,7 @@ impl Database {
                 CatalogError::UniqueViolation(constraint) => {
                     ExecError::UniqueViolation { constraint }
                 }
+                CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                 _ => ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "index access method build",
                     actual: "index build failed".into(),
@@ -191,14 +195,16 @@ impl Database {
             cid: cid.saturating_add(1),
             client_id,
             waiter: None,
+            interrupts,
         };
         let ready_effect = catalog_guard
             .set_index_ready_valid_mvcc(index_entry.relation_oid, true, true, &readiness_ctx)
-            .map_err(|_| {
-                ExecError::Parse(ParseError::UnexpectedToken {
+            .map_err(|err| match err {
+                CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+                _ => ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "index catalog readiness update",
                     actual: "index readiness update failed".into(),
-                })
+                }),
             })?;
         drop(catalog_guard);
 

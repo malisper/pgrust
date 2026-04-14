@@ -209,5 +209,6 @@ pub fn exec_next<'a>(
     state: &'a mut super::PlanState,
     ctx: &mut ExecutorContext,
 ) -> Result<Option<&'a mut super::TupleSlot>, ExecError> {
+    ctx.check_for_interrupts()?;
     state.exec_proc_node(ctx)
 }

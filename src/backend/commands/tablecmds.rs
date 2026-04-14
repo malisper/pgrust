@@ -236,6 +236,7 @@ fn maintain_indexes_for_row(
                 txns: ctx.txns.clone(),
                 txn_waiter: ctx.txn_waiter.clone(),
                 client_id: ctx.client_id,
+                interrupts: ctx.interrupts.clone(),
                 snapshot: ctx.snapshot.clone(),
                 heap_relation: heap_rel,
                 heap_desc: heap_desc.clone(),
@@ -256,6 +257,9 @@ fn maintain_indexes_for_row(
         .map_err(|err| match err {
             crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
                 ExecError::UniqueViolation { constraint }
+            }
+            crate::backend::catalog::CatalogError::Interrupted(reason) => {
+                ExecError::Interrupted(reason)
             }
             other => ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "index insertion",
@@ -389,6 +393,7 @@ fn collect_matching_rows_heap(
     let mut rows = Vec::new();
 
     loop {
+        ctx.check_for_interrupts()?;
         let next: Result<Option<usize>, ExecError> =
             heap_scan_prepare_next_page(&*ctx.pool, ctx.client_id, &ctx.txns, &mut scan);
         let Some(buffer_id) = next? else {
@@ -404,6 +409,7 @@ fn collect_matching_rows_heap(
 
         let mut page_rows = Vec::new();
         while let Some((tid, tuple_bytes)) = heap_scan_page_next_tuple(page, &mut scan) {
+            ctx.check_for_interrupts()?;
             slot.kind = SlotKind::BufferHeapTuple {
                 desc: Rc::clone(&desc),
                 attr_descs: Rc::clone(&attr_descs),
@@ -421,6 +427,7 @@ fn collect_matching_rows_heap(
         drop(pin);
 
         for (tid, values) in page_rows {
+            ctx.check_for_interrupts()?;
             let mut slot = TupleSlot::virtual_row(values.clone());
             if let Some(q) = &qual {
                 if !q(&mut slot, ctx)? {
@@ -470,6 +477,7 @@ fn collect_matching_rows_index(
     let mut rows = Vec::new();
 
     loop {
+        ctx.check_for_interrupts()?;
         let has_tuple =
             indexam::index_getnext(&mut scan, index.index_meta.am_oid).map_err(|err| {
                 ExecError::Parse(ParseError::UnexpectedToken {
@@ -713,6 +721,7 @@ pub fn execute_insert(
                     let mut state = executor_start(planned.plan_tree.clone());
                     let mut rows = Vec::new();
                     while let Some(slot) = state.exec_proc_node(ctx)? {
+                        ctx.check_for_interrupts()?;
                         let row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                         let mut values = eval_insert_defaults(
                             &stmt.column_defaults,
@@ -1086,7 +1095,11 @@ pub fn execute_update_with_waiter(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
-    waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_update(stmt, catalog);
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
@@ -1120,6 +1133,7 @@ pub fn execute_update_with_waiter(
         };
 
         for (tid, original_values) in target_rows {
+            ctx.check_for_interrupts()?;
             let mut eval_slot = TupleSlot::virtual_row(original_values.clone());
             let mut values = original_values;
             for assignment in &stmt.assignments {
@@ -1140,6 +1154,7 @@ pub fn execute_update_with_waiter(
             let mut current_tid = tid;
             let mut current_values = values;
             loop {
+                ctx.check_for_interrupts()?;
                 let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, current_tid)?;
                 let (current_replacement, toasted) = toast_tuple_for_write(
                     &stmt.desc,
@@ -1245,7 +1260,11 @@ pub fn execute_delete_with_waiter(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
     xid: TransactionId,
-    waiter: Option<(&RwLock<TransactionManager>, &TransactionWaiter)>,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
 ) -> Result<StatementResult, ExecError> {
     let stmt = finalize_bound_delete(stmt, catalog);
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
@@ -1285,8 +1304,10 @@ pub fn execute_delete_with_waiter(
 
         let mut affected_rows = 0;
         for tid in &targets {
+            ctx.check_for_interrupts()?;
             let mut current_tid = *tid;
             loop {
+                ctx.check_for_interrupts()?;
                 let old_tuple = if stmt.toast.is_some() {
                     Some(heap_fetch(
                         &*ctx.pool,

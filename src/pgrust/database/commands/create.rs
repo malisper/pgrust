@@ -57,6 +57,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let (table_name, persistence) =
             self.normalize_create_table_stmt_with_search_path(create_stmt, configured_search_path)?;
         let lowered = lower_create_table(create_stmt)?;
@@ -71,6 +72,7 @@ impl Database {
                     cid,
                     client_id,
                     waiter: None,
+                    interrupts: Arc::clone(&interrupts),
                 };
                 let result =
                     catalog_guard.create_table_mvcc(table_name.clone(), desc.clone(), &ctx);
@@ -139,6 +141,7 @@ impl Database {
                                 cid: action_cid.saturating_add(2),
                                 client_id,
                                 waiter: None,
+                                interrupts: Arc::clone(&interrupts),
                             };
                             let constraint_effect = self
                                 .catalog
@@ -193,6 +196,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let view_name =
             self.normalize_create_view_stmt_with_search_path(create_stmt, configured_search_path)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -219,6 +223,7 @@ impl Database {
             cid,
             client_id,
             waiter: None,
+            interrupts,
         };
         let (_entry, effect) = self
             .catalog
@@ -246,6 +251,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
         let (table_name, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(create_stmt, configured_search_path)?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
@@ -258,6 +264,7 @@ impl Database {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            interrupts: Arc::clone(&interrupts),
             snapshot,
             client_id,
             next_command_id: cid,
@@ -327,6 +334,7 @@ impl Database {
                     cid,
                     client_id,
                     waiter: None,
+                    interrupts: Arc::clone(&interrupts),
                 };
                 let (created, effect) = catalog_guard
                     .create_table_mvcc(table_name.clone(), create_relation_desc(&stmt)?, &write_ctx)
@@ -361,6 +369,7 @@ impl Database {
             pool: Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            interrupts,
             snapshot,
             client_id,
             next_command_id: cid,

@@ -266,6 +266,88 @@ fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::
 }
 
 #[test]
+fn statement_timeout_interrupts_generate_series_query() {
+    let dir = temp_dir("statement_timeout_generate_series");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set statement_timeout = '5ms'")
+        .unwrap();
+
+    let err = session
+        .execute(&db, "select * from generate_series(1, 1000000000)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Interrupted(
+            crate::backend::utils::misc::interrupts::InterruptReason::StatementTimeout
+        )
+    ));
+}
+
+#[test]
+fn statement_timeout_interrupts_waiting_tuple_update() {
+    let dir = temp_dir("statement_timeout_waiting_update");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "create table t (id int)").unwrap();
+    holder.execute(&db, "insert into t values (1)").unwrap();
+
+    holder.execute(&db, "begin").unwrap();
+    holder.execute(&db, "update t set id = 2 where id = 1").unwrap();
+
+    waiter
+        .execute(&db, "set statement_timeout = '20ms'")
+        .unwrap();
+    let err = waiter
+        .execute(&db, "update t set id = 3 where id = 1")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Interrupted(
+            crate::backend::utils::misc::interrupts::InterruptReason::StatementTimeout
+        )
+    ));
+
+    holder.execute(&db, "rollback").unwrap();
+}
+
+#[test]
+fn statement_timeout_interrupts_unique_index_conflict_wait() {
+    let dir = temp_dir("statement_timeout_unique_wait");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder.execute(&db, "create table t (id int)").unwrap();
+    holder.execute(&db, "create unique index t_id_idx on t(id)").unwrap();
+
+    holder.execute(&db, "begin").unwrap();
+    holder.execute(&db, "insert into t values (1)").unwrap();
+
+    waiter
+        .execute(&db, "set statement_timeout = '20ms'")
+        .unwrap();
+    let err = waiter
+        .execute(&db, "insert into t values (1)")
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ExecError::Interrupted(
+                crate::backend::utils::misc::interrupts::InterruptReason::StatementTimeout
+            )
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    holder.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn analyze_populates_pg_statistic_and_pg_class_stats() {
     let dir = temp_dir("analyze_populates_stats");
     let db = Database::open(&dir, 128).unwrap();

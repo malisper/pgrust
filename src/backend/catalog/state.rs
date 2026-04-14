@@ -11,6 +11,7 @@ use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USE
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgConstraintRow, PgDependRow, PgRewriteRow,
     builtin_type_rows, sort_pg_rewrite_rows,
@@ -67,6 +68,7 @@ pub enum CatalogError {
     UnknownColumn(String),
     UnknownType(String),
     UniqueViolation(String),
+    Interrupted(InterruptReason),
 }
 
 #[derive(Debug, Clone, PartialEq)]

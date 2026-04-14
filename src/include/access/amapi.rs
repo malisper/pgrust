@@ -6,6 +6,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
@@ -24,6 +25,7 @@ pub struct IndexBuildContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: Arc<parking_lot::RwLock<TransactionManager>>,
     pub client_id: ClientId,
+    pub interrupts: Arc<InterruptState>,
     pub snapshot: Snapshot,
     pub heap_relation: RelFileLocator,
     pub heap_desc: RelationDesc,
@@ -40,6 +42,7 @@ pub struct IndexInsertContext {
     pub txns: Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<Arc<TransactionWaiter>>,
     pub client_id: ClientId,
+    pub interrupts: Arc<InterruptState>,
     pub snapshot: Snapshot,
     pub heap_relation: RelFileLocator,
     pub heap_desc: RelationDesc,

@@ -575,7 +575,8 @@ pub fn bind_create_table(
                 }
             }
             crate::backend::catalog::catalog::CatalogError::Io(_)
-            | crate::backend::catalog::catalog::CatalogError::Corrupt(_) => {
+            | crate::backend::catalog::catalog::CatalogError::Corrupt(_)
+            | crate::backend::catalog::catalog::CatalogError::Interrupted(_) => {
                 ParseError::UnexpectedToken {
                     expected: "valid catalog state",
                     actual: "catalog error".into(),

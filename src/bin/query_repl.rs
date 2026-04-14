@@ -14,6 +14,7 @@ use pgrust::backend::commands::tablecmds::{
 };
 use pgrust::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use pgrust::backend::utils::cache::relcache::RelCache;
+use pgrust::backend::utils::misc::interrupts::InterruptState;
 use pgrust::executor::{
     ExecError, ExecutorContext, RelationDesc, StatementResult, Value, execute_readonly_statement,
 };
@@ -445,6 +446,7 @@ fn run_statement(
     catalog_store: &mut CatalogStore,
 ) -> Result<StatementResult, ExecError> {
     let stmt = parse_statement(sql)?;
+    let interrupts = Arc::new(InterruptState::new());
     let relcache = catalog_store.relcache().map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
             expected: "physical relcache",
@@ -480,6 +482,7 @@ fn run_statement(
                     cid: 0,
                     client_id: 21,
                     waiter: None,
+                    interrupts: Arc::clone(&interrupts),
                 };
                 let relcache = catalog_store.relcache().map_err(|err| {
                     ExecError::Parse(ParseError::UnexpectedToken {
@@ -547,6 +550,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -561,6 +565,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -575,6 +580,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -589,6 +595,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -657,6 +664,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -671,6 +679,7 @@ fn run_statement(
                 pool: std::sync::Arc::clone(pool),
                 txns: txns.clone(),
                 txn_waiter: None,
+                interrupts: Arc::clone(&interrupts),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
                 next_command_id: 0,
@@ -688,6 +697,7 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
@@ -716,6 +726,7 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
@@ -744,6 +755,7 @@ fn run_statement(
                     pool: std::sync::Arc::clone(pool),
                     txns: txns.clone(),
                     txn_waiter: None,
+                    interrupts: Arc::clone(&interrupts),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
                     next_command_id: 0,
