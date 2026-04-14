@@ -265,6 +265,10 @@ impl<'a> FormatParser<'a> {
                     return Ok(spec);
                 }
                 '"' => tokens.push(Token::Literal(self.parse_quoted_literal())),
+                '\\' if self.idx < self.chars.len() && self.chars[self.idx] == '"' => {
+                    self.idx += 1;
+                    tokens.push(Token::Literal("\"".into()));
+                }
                 '\\' => tokens.push(Token::Literal("\\".into())),
                 other => tokens.push(Token::Literal(other.to_string())),
             }
@@ -373,6 +377,19 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         })
         .collect::<Vec<_>>();
 
+    let suppress_zero_integer = decimal_idx.is_some()
+        && abs_value == 0
+        && !spec.fill_mode
+        && !spec
+            .tokens
+            .iter()
+            .take(int_end)
+            .any(|token| matches!(token, Token::Digit0));
+    let int_digits = if suppress_zero_integer {
+        String::new()
+    } else {
+        int_digits
+    };
     let mut digit_chars = int_digits.chars().rev();
     for idx in (0..int_end).rev() {
         match spec.tokens[idx] {
@@ -468,43 +485,10 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         }
     }
 
-    for (idx, token) in spec.tokens.iter().enumerate() {
-        if idx == 0 && matches!(token, Token::Sign(SignKind::S)) {
-            if let Some(target_idx) = rendered
-                .iter()
-                .enumerate()
-                .find(|(_, cell)| cell.chars().any(|ch| ch.is_ascii_digit()))
-                .map(|(digit_idx, _)| digit_idx.saturating_sub(1))
-            {
-                rendered[target_idx] = sign_text(SignKind::S, negative).into();
-            }
-        }
-    }
+    move_s_sign_to_number(spec, &mut rendered, negative);
+    apply_implicit_sign(spec, &mut rendered, negative);
 
     let mut out = rendered.concat();
-    if !spec
-        .tokens
-        .iter()
-        .any(|token| matches!(token, Token::Sign(_)))
-        && !spec.angle_pr
-    {
-        out = if negative
-            && matches!(spec.tokens.first(), Some(Token::Literal(space)) if space == " ")
-        {
-            if let Some(digit_idx) = out.find(|ch: char| ch.is_ascii_digit()) {
-                let sign_idx = digit_idx.saturating_sub(1);
-                let mut chars = out.chars().collect::<Vec<_>>();
-                chars[sign_idx] = '-';
-                chars.into_iter().collect()
-            } else {
-                format!("-{out}")
-            }
-        } else if negative {
-            format!("-{out}")
-        } else {
-            format!(" {out}")
-        };
-    }
 
     if negative
         && spec
@@ -515,7 +499,7 @@ fn format_standard(value: i128, spec: &FormatSpec) -> String {
         out = format!("-{}", out.trim_start());
     }
 
-    if spec.ordinal && !negative {
+    if spec.ordinal && !negative && decimal_idx.is_none() {
         let suffix = if spec.ordinal_lower {
             ordinal_suffix(abs_value as i128).to_ascii_lowercase()
         } else {
@@ -752,13 +736,76 @@ fn special_value_fixed_text(value: &NumericValue) -> Option<(bool, &'static str)
     }
 }
 
+fn token_has_visible_number_text(token: &Token, cell: &str) -> bool {
+    match token {
+        Token::Digit9 | Token::Digit0 => !cell.is_empty() && cell != " ",
+        Token::Decimal => cell == ".",
+        Token::Group | Token::Literal(_) | Token::Sign(_) => false,
+    }
+}
+
+fn find_number_anchor(spec: &FormatSpec, rendered: &[String]) -> Option<usize> {
+    spec.tokens
+        .iter()
+        .zip(rendered.iter())
+        .position(|(token, cell)| token_has_visible_number_text(token, cell))
+}
+
+fn move_s_sign_to_number(spec: &FormatSpec, rendered: &mut [String], negative: bool) {
+    if !matches!(spec.tokens.first(), Some(Token::Sign(SignKind::S))) {
+        return;
+    }
+    let Some(anchor_idx) = find_number_anchor(spec, rendered) else {
+        return;
+    };
+    let target_idx = (0..anchor_idx)
+        .rev()
+        .find(|idx| rendered[*idx] == " ")
+        .unwrap_or(anchor_idx);
+    rendered[target_idx] = if negative { "-" } else { "+" }.into();
+}
+
+fn apply_implicit_sign(spec: &FormatSpec, rendered: &mut [String], negative: bool) {
+    if spec
+        .tokens
+        .iter()
+        .any(|token| matches!(token, Token::Sign(_)))
+        || spec.angle_pr
+    {
+        return;
+    }
+    let Some(anchor_idx) = find_number_anchor(spec, rendered).or_else(|| {
+        rendered
+            .iter()
+            .position(|cell| !cell.is_empty() && cell != " ")
+    }) else {
+        return;
+    };
+    let sign = if negative { "-" } else { " " };
+    if let Some(target_idx) = (0..anchor_idx).rev().find(|idx| rendered[*idx] == " ") {
+        rendered[target_idx] = sign.into();
+    } else {
+        rendered[anchor_idx] = format!("{sign}{}", rendered[anchor_idx]);
+    }
+}
+
 fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     if let Some((negative, text)) = special_value_fixed_text(value) {
-        let digit_slots = spec
+        let decimal_idx = spec
             .tokens
             .iter()
-            .filter(|token| matches!(token, Token::Digit9 | Token::Digit0))
-            .count();
+            .position(|token| matches!(token, Token::Decimal));
+        let int_end = decimal_idx.unwrap_or(spec.tokens.len());
+        let pre_digit_positions = spec
+            .tokens
+            .iter()
+            .take(int_end)
+            .enumerate()
+            .filter_map(|(idx, token)| {
+                matches!(token, Token::Digit9 | Token::Digit0).then_some(idx)
+            })
+            .collect::<Vec<_>>();
+        let digit_slots = pre_digit_positions.len();
         if digit_slots < text.len() {
             return overflow_pattern(spec, negative);
         }
@@ -777,32 +824,16 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
                 },
             })
             .collect::<Vec<_>>();
-        let char_positions = out
-            .iter()
-            .enumerate()
-            .filter(|(_, cell)| *cell == " ")
-            .map(|(idx, _)| idx)
-            .collect::<Vec<_>>();
-        if !char_positions.is_empty() {
-            for (ch, idx) in text.chars().zip(char_positions.iter().copied()) {
-                out[idx] = ch.to_string();
-            }
-            if text.chars().count() > char_positions.len() {
-                return overflow_pattern(spec, negative);
-            }
-        } else {
-            return overflow_pattern(spec, negative);
-        }
-        let mut out = out.concat();
-        if !spec
-            .tokens
-            .iter()
-            .any(|token| matches!(token, Token::Sign(_)))
-            && negative
-            && !spec.angle_pr
+        let start = digit_slots.saturating_sub(text.chars().count());
+        for (ch, idx) in text
+            .chars()
+            .zip(pre_digit_positions.iter().copied().skip(start))
         {
-            out = format!("-{out}");
+            out[idx] = ch.to_string();
         }
+        move_s_sign_to_number(spec, &mut out, negative);
+        apply_implicit_sign(spec, &mut out, negative);
+        let mut out = out.concat();
         if spec.fill_mode {
             out = out.trim().to_string();
         }
@@ -844,7 +875,20 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         })
         .collect::<Vec<_>>();
 
-    let mut digit_chars = int_part.chars().rev();
+    let suppress_zero_integer = decimal_idx.is_some()
+        && int_part.chars().all(|ch| ch == '0')
+        && !spec.fill_mode
+        && !spec
+            .tokens
+            .iter()
+            .take(int_end)
+            .any(|token| matches!(token, Token::Digit0));
+    let int_render = if suppress_zero_integer {
+        String::new()
+    } else {
+        int_part.clone()
+    };
+    let mut digit_chars = int_render.chars().rev();
     for idx in (0..int_end).rev() {
         match spec.tokens[idx] {
             Token::Digit9 => {
@@ -869,7 +913,8 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         }
     }
 
-    if decimal_idx.is_some()
+    if spec.fill_mode
+        && decimal_idx.is_some()
         && int_part.chars().all(|ch| ch == '0')
         && !rendered[..int_end]
             .iter()
@@ -975,32 +1020,8 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         }
     }
 
-    for (idx, token) in spec.tokens.iter().enumerate() {
-        if idx == 0 && matches!(token, Token::Sign(SignKind::S)) {
-            if let Some(target_idx) = rendered
-                .iter()
-                .enumerate()
-                .find(|(_, cell)| cell.chars().any(|ch| ch.is_ascii_digit()))
-                .map(|(digit_idx, _)| digit_idx.saturating_sub(1))
-            {
-                rendered[target_idx] = sign_text(SignKind::S, negative).into();
-            }
-        }
-    }
-
-    if !spec
-        .tokens
-        .iter()
-        .any(|token| matches!(token, Token::Sign(_)))
-        && !spec.angle_pr
-        && let Some(anchor_idx) = spec
-            .tokens
-            .iter()
-            .position(|token| matches!(token, Token::Digit9 | Token::Digit0 | Token::Decimal))
-    {
-        let sign = if negative { "-" } else { " " };
-        rendered[anchor_idx] = format!("{sign}{}", rendered[anchor_idx]);
-    }
+    move_s_sign_to_number(spec, &mut rendered, negative);
+    apply_implicit_sign(spec, &mut rendered, negative);
     let mut out = rendered.concat();
     if negative
         && spec
@@ -1010,7 +1031,8 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
     {
         out = format!("-{}", out.trim_start());
     }
-    if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') {
+    if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') && decimal_idx.is_none()
+    {
         let ordinal_value = int_part.parse::<i128>().unwrap_or(0);
         let suffix = if spec.ordinal_lower {
             ordinal_suffix(ordinal_value).to_ascii_lowercase()
@@ -1391,6 +1413,53 @@ mod tests {
         assert_eq!(
             to_char_numeric(&NumericValue::from("100"), "f\"ool\"999").unwrap(),
             "fool 100"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("100"), "f\\\"oo999").unwrap(),
+            "f\"oo 100"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("100"), "f\\\\\"oo999").unwrap(),
+            "f\\\"oo 100"
+        );
+    }
+
+    #[test]
+    fn formats_numeric_sign_and_decimal_masks_like_postgres() {
+        assert_eq!(
+            to_char_numeric(
+                &NumericValue::from("-34338492.215397047"),
+                "9G999G999G999G999G999D999G999G999G999G999"
+            )
+            .unwrap()
+            .trim_start(),
+            "-34,338,492.215,397,047,000,000"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("0"), "9999999999999999.999999999999999PR")
+                .unwrap()
+                .trim(),
+            ".000000000000000"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::from("74881"), "FM9999999999999999.999999999999999THPR")
+                .unwrap(),
+            "74881."
+        );
+        assert_eq!(
+            to_char_numeric(
+                &NumericValue::from("0"),
+                "SG9999999999999999.999999999999999th"
+            )
+            .unwrap()
+            .trim_start(),
+            "+                .000000000000000"
+        );
+        assert_eq!(
+            to_char_numeric(&NumericValue::NegInf, "MI9999999999.99")
+                .unwrap()
+                .trim_end(),
+            "-  Infinity"
         );
     }
 
