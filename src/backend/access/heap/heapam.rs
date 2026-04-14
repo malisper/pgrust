@@ -618,8 +618,41 @@ pub fn heap_fetch_visible(
     txns: &TransactionManager,
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
-    let tuple = heap_fetch(pool, client_id, rel, tid)?;
-    if snapshot.tuple_visible(txns, &tuple) {
+    heap_fetch_visible_impl(pool, client_id, rel, tid, |tuple| {
+        snapshot.tuple_visible(txns, tuple)
+    })
+}
+
+pub fn heap_fetch_visible_with_txns(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    tid: ItemPointerData,
+    txns: &RwLock<TransactionManager>,
+    snapshot: &Snapshot,
+) -> Result<Option<HeapTuple>, HeapError> {
+    heap_fetch_visible_impl(pool, client_id, rel, tid, |tuple| {
+        let txns_guard = txns.read();
+        snapshot.tuple_visible(&txns_guard, tuple)
+    })
+}
+
+fn heap_fetch_visible_impl(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    tid: ItemPointerData,
+    is_visible: impl FnOnce(&HeapTuple) -> bool,
+) -> Result<Option<HeapTuple>, HeapError> {
+    let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+    let buffer_id = pin.buffer_id();
+    let guard = pool.lock_buffer_shared(buffer_id)?;
+    let tuple = heap_page_get_tuple(&guard, tid.offset_number)?;
+    let visible = is_visible(&tuple);
+    drop(guard);
+    drop(pin);
+
+    if visible {
         Ok(Some(tuple))
     } else {
         Ok(None)
