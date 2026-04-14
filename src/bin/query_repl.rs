@@ -461,6 +461,12 @@ fn run_statement(
         | Statement::CopyFrom(_)
         | Statement::AlterTableSet(_)
         | Statement::AlterTableAddColumn(_) => Ok(StatementResult::AffectedRows(0)),
+        Statement::AlterTableRename(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            format!(
+                "ALTER TABLE RENAME in query_repl: {} -> {}",
+                stmt.table_name, stmt.new_table_name
+            ),
+        ))),
         Statement::Unsupported(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("{}: {}", stmt.feature, stmt.sql),
         ))),
