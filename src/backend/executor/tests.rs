@@ -5077,6 +5077,91 @@ fn cte_filtered_self_join_aliases_keep_distinct_columns() {
 }
 
 #[test]
+fn values_filtered_self_join_keeps_distinct_columns() {
+    let base = temp_dir("values_filtered_self_join");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, y from (values (0),(1),(2)) a(x), (values (0),(1),(2)) b(y) where y != 0 order by x, y",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(0), Value::Int32(1)],
+                    vec![Value::Int32(0), Value::Int32(2)],
+                    vec![Value::Int32(1), Value::Int32(1)],
+                    vec![Value::Int32(1), Value::Int32(2)],
+                    vec![Value::Int32(2), Value::Int32(1)],
+                    vec![Value::Int32(2), Value::Int32(2)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn from_functions_are_implicitly_lateral() {
+    let base = temp_dir("from_functions_implicitly_lateral");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from generate_series(1::numeric, 3::numeric) i, generate_series(i, 3::numeric) j order by 1, 2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("3".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("3".into())],
+                    vec![Value::Numeric("3".into()), Value::Numeric("3".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_values_can_reference_left_columns() {
+    let base = temp_dir("lateral_values_outer_columns");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select x, y from (values (1),(2)) a(x), lateral (values (x), (x + 1)) b(y) order by x, y",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int32(1)],
+                    vec![Value::Int32(1), Value::Int32(2)],
+                    vec![Value::Int32(2), Value::Int32(2)],
+                    vec![Value::Int32(2), Value::Int32(3)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn numeric_nan_division_by_zero_returns_nan() {
     let base = temp_dir("numeric_nan_division_by_zero");
     let txns = TransactionManager::new_durable(&base).unwrap();

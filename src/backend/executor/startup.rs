@@ -8,8 +8,177 @@ use crate::include::nodes::execnodes::{
     LimitState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
     ResultState, SeqScanState, ValuesState,
 };
+use crate::include::nodes::primnodes::{Expr, SetReturningCall};
 
 use std::rc::Rc;
+
+fn expr_uses_outer_columns(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup > 0,
+        Expr::OuterColumn { .. } => true,
+        Expr::Aggref(aggref) => aggref.args.iter().any(expr_uses_outer_columns),
+        Expr::Op(op) => op.args.iter().any(expr_uses_outer_columns),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_uses_outer_columns),
+        Expr::Func(func) => func.args.iter().any(expr_uses_outer_columns),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_outer_columns),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_uses_outer_columns),
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_outer_columns(&saop.left) || expr_uses_outer_columns(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_outer_columns(expr)
+                || expr_uses_outer_columns(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_uses_outer_columns)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_uses_outer_columns(left) || expr_uses_outer_columns(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_uses_outer_columns),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_outer_columns(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_uses_outer_columns)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_uses_outer_columns)
+                })
+        }
+        Expr::Column(_)
+        | Expr::Const(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => {
+            expr_uses_outer_columns(start)
+                || expr_uses_outer_columns(stop)
+                || expr_uses_outer_columns(step)
+        }
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. } => {
+            args.iter().any(expr_uses_outer_columns)
+        }
+    }
+}
+
+fn agg_accum_uses_outer_columns(accum: &crate::include::nodes::primnodes::AggAccum) -> bool {
+    accum.args.iter().any(expr_uses_outer_columns)
+}
+
+fn project_set_target_uses_outer_columns(
+    target: &crate::include::nodes::primnodes::ProjectSetTarget,
+) -> bool {
+    match target {
+        crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
+            expr_uses_outer_columns(&entry.expr)
+        }
+        crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
+            set_returning_call_uses_outer_columns(call)
+        }
+    }
+}
+
+fn plan_uses_outer_columns(plan: &Plan) -> bool {
+    match plan {
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => false,
+        Plan::Hash {
+            input, hash_keys, ..
+        } => plan_uses_outer_columns(input) || hash_keys.iter().any(expr_uses_outer_columns),
+        Plan::NestedLoopJoin {
+            left, right, on, ..
+        } => {
+            plan_uses_outer_columns(left)
+                || plan_uses_outer_columns(right)
+                || expr_uses_outer_columns(on)
+        }
+        Plan::HashJoin {
+            left,
+            right,
+            hash_clauses,
+            hash_keys,
+            join_qual,
+            ..
+        } => {
+            plan_uses_outer_columns(left)
+                || plan_uses_outer_columns(right)
+                || hash_clauses.iter().any(expr_uses_outer_columns)
+                || hash_keys.iter().any(expr_uses_outer_columns)
+                || join_qual.as_ref().is_some_and(expr_uses_outer_columns)
+        }
+        Plan::Filter {
+            input, predicate, ..
+        } => plan_uses_outer_columns(input) || expr_uses_outer_columns(predicate),
+        Plan::OrderBy { input, items, .. } => {
+            plan_uses_outer_columns(input)
+                || items.iter().any(|item| expr_uses_outer_columns(&item.expr))
+        }
+        Plan::Limit { input, .. } => plan_uses_outer_columns(input),
+        Plan::Projection { input, targets, .. } => {
+            plan_uses_outer_columns(input)
+                || targets.iter().any(|target| expr_uses_outer_columns(&target.expr))
+        }
+        Plan::Aggregate {
+            input,
+            group_by,
+            accumulators,
+            having,
+            ..
+        } => {
+            plan_uses_outer_columns(input)
+                || group_by.iter().any(expr_uses_outer_columns)
+                || accumulators.iter().any(agg_accum_uses_outer_columns)
+                || having.as_ref().is_some_and(expr_uses_outer_columns)
+        }
+        Plan::FunctionScan { call, .. } => set_returning_call_uses_outer_columns(call),
+        Plan::Values { rows, .. } => rows
+            .iter()
+            .flatten()
+            .any(expr_uses_outer_columns),
+        Plan::ProjectSet { input, targets, .. } => {
+            plan_uses_outer_columns(input)
+                || targets.iter().any(project_set_target_uses_outer_columns)
+        }
+    }
+}
 
 pub fn executor_start(plan: Plan) -> PlanState {
     match plan {
@@ -101,8 +270,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             kind,
             on,
         } => {
+            let right_plan = *right;
+            let right_uses_outer = plan_uses_outer_columns(&right_plan);
             let cross_right_outer =
                 matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
+                    && !right_uses_outer
                     && !matches!(
                         &*left,
                         Plan::NestedLoopJoin {
@@ -111,16 +283,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
                         }
                     );
             let left_width = left.column_names().len();
-            let right_width = right.column_names().len();
+            let right_width = right_plan.column_names().len();
             let combined_names: Vec<String> = left
                 .column_names()
                 .into_iter()
-                .chain(right.column_names())
+                .chain(right_plan.column_names())
                 .collect();
             let ncols = combined_names.len();
             Box::new(NestedLoopJoinState {
                 left: executor_start(*left),
-                right: executor_start(*right),
+                right: executor_start(right_plan.clone()),
+                right_plan: right_uses_outer.then_some(right_plan),
                 kind,
                 cross_right_outer,
                 on,

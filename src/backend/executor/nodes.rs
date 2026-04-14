@@ -450,6 +450,9 @@ impl PlanNode for NestedLoopJoinState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        if self.right_plan.is_some() {
+            return exec_lateral_join(self, ctx);
+        }
         if matches!(self.kind, JoinType::Cross) && self.cross_right_outer {
             return exec_cross_join(self, ctx);
         }
@@ -565,6 +568,83 @@ impl PlanNode for NestedLoopJoinState {
     fn explain_children(&self, indent: usize, analyze: bool, lines: &mut Vec<String>) {
         format_explain_lines(&*self.left, indent, analyze, lines);
         format_explain_lines(&*self.right, indent, analyze, lines);
+    }
+}
+
+fn exec_lateral_join<'a>(
+    state: &'a mut NestedLoopJoinState,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+    if matches!(state.kind, JoinType::Right | JoinType::Full) {
+        return Err(ExecError::DetailedError {
+            message: "unsupported lateral join type".into(),
+            detail: Some(
+                "outer-dependent right-hand joins are only implemented for INNER, CROSS, and LEFT joins".into(),
+            ),
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
+    loop {
+        ctx.check_for_interrupts()?;
+        if state.current_left.is_none() {
+            match state.left.exec_proc_node(ctx)? {
+                Some(slot) => {
+                    let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+                    Value::materialize_all(&mut values);
+                    state.current_left = Some(TupleSlot::virtual_row(values.clone()));
+                    state.current_left_matched = false;
+                    ctx.outer_rows.insert(0, values);
+                    state.right = super::executor_start(
+                        state
+                            .right_plan
+                            .as_ref()
+                            .expect("lateral right plan")
+                            .clone(),
+                    );
+                }
+                None => return Ok(None),
+            }
+        }
+
+        while let Some(slot) = state.right.exec_proc_node(ctx)? {
+            ctx.check_for_interrupts()?;
+            let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut values);
+            let left = state.current_left.as_ref().unwrap();
+            let mut combined_values: Vec<Value> = left.tts_values.clone();
+            combined_values.extend(values);
+            let nvalid = combined_values.len();
+            state.slot.tts_values = combined_values;
+            state.slot.tts_nvalid = nvalid;
+            state.slot.kind = SlotKind::Virtual;
+            state.slot.decode_offset = 0;
+
+            match eval_expr(&state.on, &mut state.slot, ctx)? {
+                Value::Bool(true) => {
+                    state.current_left_matched = true;
+                    return Ok(Some(&mut state.slot));
+                }
+                Value::Bool(false) | Value::Null => {}
+                other => return Err(ExecError::NonBoolQual(other)),
+            }
+        }
+
+        ctx.outer_rows.remove(0);
+        if !state.current_left_matched && matches!(state.kind, JoinType::Left) {
+            let left = state.current_left.as_ref().unwrap();
+            let mut combined_values: Vec<Value> = left.tts_values.clone();
+            combined_values.extend(std::iter::repeat_n(Value::Null, state.right_width));
+            state.slot.tts_values = combined_values;
+            state.slot.tts_nvalid = state.left_width + state.right_width;
+            state.slot.kind = SlotKind::Virtual;
+            state.slot.decode_offset = 0;
+            state.current_left = None;
+            return Ok(Some(&mut state.slot));
+        }
+
+        state.current_left = None;
     }
 }
 

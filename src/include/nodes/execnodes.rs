@@ -285,6 +285,7 @@ impl std::fmt::Debug for FilterState {
 pub struct NestedLoopJoinState {
     pub(crate) left: PlanState,
     pub(crate) right: PlanState,
+    pub(crate) right_plan: Option<Plan>,
     pub(crate) kind: JoinType,
     pub(crate) cross_right_outer: bool,
     pub(crate) on: Expr,

@@ -134,6 +134,17 @@ fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
             .get(relids[0])
             .and_then(Option::as_ref)
             .is_some()
+        && root
+            .parse
+            .rtable
+            .get(relids[0].saturating_sub(1))
+            .is_some_and(|rte| {
+                // :HACK: Non-relation base RTEs still leak semantic identity through
+                // pushed-down filters for repeated VALUES/subquery/function shapes.
+                // Keep those quals above the join until base-slot identity is carried
+                // separately from Var equality.
+                matches!(rte.kind, RangeTblEntryKind::Relation { .. })
+            })
 }
 
 fn expr_relids(expr: &Expr) -> Vec<usize> {
