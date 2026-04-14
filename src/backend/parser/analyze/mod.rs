@@ -274,7 +274,7 @@ fn toast_relation_from_cache(
 }
 
 #[derive(Default)]
-struct LiteralDefaultCatalog;
+pub(crate) struct LiteralDefaultCatalog;
 
 impl CatalogLookup for LiteralDefaultCatalog {
     fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
@@ -318,6 +318,22 @@ pub(crate) fn raw_type_name_hint(raw: &RawTypeName) -> SqlType {
         RawTypeName::Builtin(ty) => *ty,
         RawTypeName::Named { .. } => SqlType::new(SqlTypeKind::Composite),
         RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
+    }
+}
+
+pub(crate) fn resolve_raw_type_name(
+    raw: &RawTypeName,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    match raw {
+        RawTypeName::Builtin(ty) => Ok(*ty),
+        RawTypeName::Record => Ok(SqlType::record(RECORD_TYPE_OID)),
+        RawTypeName::Named { name } => catalog
+            .type_rows()
+            .into_iter()
+            .find(|row| row.typname.eq_ignore_ascii_case(name))
+            .map(|row| row.sql_type)
+            .ok_or_else(|| ParseError::UnsupportedType(name.clone())),
     }
 }
 
@@ -562,7 +578,7 @@ pub fn bind_create_table(
 ) -> Result<CatalogEntry, ParseError> {
     let (table_name, _) = normalize_create_table_name(stmt)?;
     catalog
-        .create_table(table_name, create_relation_desc(stmt)?)
+        .create_table(table_name, create_relation_desc(stmt, catalog)?)
         .map_err(|err| match err {
             crate::backend::catalog::catalog::CatalogError::TableAlreadyExists(name) => {
                 ParseError::TableAlreadyExists(name)

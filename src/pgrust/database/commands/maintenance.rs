@@ -1,6 +1,24 @@
 use super::super::*;
 
 impl Database {
+    pub(crate) fn execute_comment_on_domain_stmt_with_search_path(
+        &self,
+        _client_id: ClientId,
+        comment_stmt: &CommentOnDomainStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let (normalized, _, _) = self
+            .normalize_domain_name_for_create(&comment_stmt.domain_name, configured_search_path)?;
+        let mut domains = self.domains.write();
+        let Some(domain) = domains.get_mut(&normalized) else {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(
+                comment_stmt.domain_name.clone(),
+            )));
+        };
+        domain.comment = comment_stmt.comment.clone();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_comment_on_table_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -231,7 +249,8 @@ impl Database {
             relation.relation_oid,
             "ALTER TABLE on relation without dependent views",
         )?;
-        let column = validate_alter_table_add_column(&relation.desc, &alter_stmt.column)?;
+        let column =
+            validate_alter_table_add_column(&relation.desc, &alter_stmt.column, &catalog)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),

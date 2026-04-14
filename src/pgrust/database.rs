@@ -34,8 +34,10 @@ use crate::backend::parser::Statement;
 use crate::backend::parser::{
     AlterTableAddColumnStatement, AlterTableDropColumnStatement,
     AlterTableRenameColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
-    CommentOnTableStatement, CreateIndexStatement, CreateTableAsStatement, CreateTableStatement,
-    CreateViewStatement, DropViewStatement, OnCommitAction, ParseError, TablePersistence,
+    CommentOnDomainStatement, CommentOnTableStatement, CreateDomainStatement,
+    CreateIndexStatement, CreateTableAsStatement, CreateTableStatement, CreateViewStatement,
+    DropDomainStatement, DropViewStatement, OnCommitAction, ParseError, SqlType,
+    TablePersistence,
     bind_delete, bind_insert, bind_update, create_relation_desc, lower_create_table,
 };
 use crate::backend::storage::lmgr::{
@@ -59,7 +61,8 @@ use crate::backend::utils::cache::syscache::{
     SessionCatalogState, invalidate_session_catalog_state,
 };
 use crate::backend::utils::misc::interrupts::InterruptState;
-use crate::include::catalog::PgConstraintRow;
+use crate::include::access::htup::{AttributeAlign, AttributeStorage};
+use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgConstraintRow, PgTypeRow, PUBLIC_NAMESPACE_OID};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
@@ -104,6 +107,7 @@ pub struct Database {
     pub(crate) session_catalog_states: Arc<RwLock<HashMap<ClientId, SessionCatalogState>>>,
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) temp_relations: Arc<RwLock<HashMap<ClientId, TempNamespace>>>,
+    pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     _wal_bg_writer: Arc<WalBgWriter>,
 }
 
@@ -131,6 +135,15 @@ pub(crate) struct TempNamespace {
 pub(crate) struct CreatedTempRelation {
     entry: RelCacheEntry,
     toast: Option<ToastCatalogChanges>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DomainEntry {
+    pub oid: u32,
+    pub name: String,
+    pub namespace_oid: u32,
+    pub sql_type: SqlType,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +239,7 @@ impl Database {
             session_catalog_states: Arc::new(RwLock::new(HashMap::new())),
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             temp_relations: Arc::new(RwLock::new(HashMap::new())),
+            domains: Arc::new(RwLock::new(BTreeMap::new())),
             _wal_bg_writer: Arc::new(wal_bg_writer),
         })
     }
@@ -246,6 +260,67 @@ impl Database {
             .get(&client_id)
             .cloned()
             .unwrap_or_else(|| Arc::new(InterruptState::new()))
+    }
+
+    pub(crate) fn normalize_domain_name_for_create(
+        &self,
+        name: &str,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<(String, String, u32), ParseError> {
+        match name.split_once('.') {
+            Some((schema, object)) if !object.is_empty() => {
+                let namespace_oid = match schema.to_ascii_lowercase().as_str() {
+                    "public" => PUBLIC_NAMESPACE_OID,
+                    "pg_catalog" => {
+                        return Err(ParseError::UnsupportedQualifiedName(name.to_string()));
+                    }
+                    _ => PUBLIC_NAMESPACE_OID,
+                };
+                Ok((name.to_ascii_lowercase(), object.to_ascii_lowercase(), namespace_oid))
+            }
+            Some(_) => Err(ParseError::UnsupportedQualifiedName(name.to_string())),
+            None => Ok((
+                name.to_ascii_lowercase(),
+                name.to_ascii_lowercase(),
+                match self
+                    .effective_search_path(0, configured_search_path)
+                    .into_iter()
+                    .find(|schema| schema == "public")
+                {
+                    Some(_) => PUBLIC_NAMESPACE_OID,
+                    None => PUBLIC_NAMESPACE_OID,
+                },
+            )),
+        }
+    }
+
+    pub(crate) fn domain_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {
+        let domains = self.domains.read();
+        let mut rows = domains
+            .values()
+            .map(|domain| PgTypeRow {
+                oid: domain.oid,
+                typname: domain.name.clone(),
+                typnamespace: domain.namespace_oid,
+                typowner: BOOTSTRAP_SUPERUSER_OID,
+                typlen: if domain.sql_type.is_array { -1 } else { 0 },
+                typalign: AttributeAlign::Int,
+                typstorage: AttributeStorage::Extended,
+                typrelid: 0,
+                sql_type: domain.sql_type,
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| {
+            let schema_rank = search_path
+                .iter()
+                .position(|schema| {
+                    (schema == "public" && row.typnamespace == PUBLIC_NAMESPACE_OID)
+                        || (schema == "pg_catalog" && row.typnamespace == 11)
+                })
+                .unwrap_or(usize::MAX);
+            (schema_rank, row.typname.clone())
+        });
+        rows
     }
 
     pub(crate) fn clear_interrupt_state(&self, client_id: ClientId) {

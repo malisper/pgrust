@@ -137,7 +137,15 @@ fn execute_statement_with_source(
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
         })),
+        Statement::CommentOnDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON DOMAIN handled by database/session layer",
+            actual: "COMMENT ON DOMAIN".into(),
+        })),
         Statement::CreateIndex(stmt) => execute_create_index(stmt, catalog, ctx),
+        Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE DOMAIN handled by database/session layer",
+            actual: "CREATE DOMAIN".into(),
+        })),
         Statement::CreateTable(stmt) => execute_create_table(stmt, catalog),
         Statement::CreateTableAs(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "create table handled by database/session layer",
@@ -148,6 +156,10 @@ fn execute_statement_with_source(
             actual: "CREATE VIEW".into(),
         })),
         Statement::DropTable(stmt) => execute_drop_table(stmt, catalog, ctx),
+        Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP DOMAIN handled by database/session layer",
+            actual: "DROP DOMAIN".into(),
+        })),
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP VIEW handled by database/session layer",
             actual: "DROP VIEW".into(),
@@ -197,9 +209,17 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "COMMENT ON TABLE".into(),
         })),
+        Statement::CommentOnDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON DOMAIN".into(),
+        })),
         Statement::CreateIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE INDEX".into(),
+        })),
+        Statement::CreateDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE DOMAIN".into(),
         })),
         Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
@@ -209,6 +229,10 @@ pub fn execute_readonly_statement(
         Statement::DropView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP VIEW".into(),
+        })),
+        Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP DOMAIN".into(),
         })),
         other => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
